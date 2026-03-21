@@ -8,13 +8,18 @@ import { Conversation } from './chat/entities/conversation.entity';
   imports: [
     TypeOrmModule.forRoot({
       type: 'postgres',
-      host: 'localhost',
-      port: 5432,
-      username: 'postgres', // <--- CAMBIA ESTO
-      password: 'admin123',            // <--- CAMBIA ESTO
-      database: 'respond_clone',
-      entities: [Message, Conversation],
-      synchronize: true, // Esto crea las tablas automáticamente (solo para desarrollo)
+      // 1. URL DINÁMICA: Railway/Supabase nos darán el string completo de conexión
+      url: process.env.DATABASE_URL || 'postgres://postgres:admin123@localhost:5432/respond_clone',
+      
+      // 2. ENTIDADES: 'autoLoadEntities' busca automáticamente Message y Conversation
+      autoLoadEntities: true,
+      
+      // 3. SINCRONIZACIÓN: Útil en desarrollo/prototipos para crear tablas solas
+      synchronize: true, 
+      
+      // 4. CONFIGURACIÓN SSL: Crucial para bases de datos en la nube (como Supabase o Railway DB)
+      // rejectUnauthorized: false evita errores de certificado en conexiones seguras
+      ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
     }),
     ChatModule,
   ],
