@@ -7,7 +7,7 @@ import { ChatModule } from './chat/chat.module';
     TypeOrmModule.forRoot({
       type: 'postgres',
       // Priorizamos la URL de la nube, si no existe usamos la local
-      url: process.env.DATABASE_URL || 'postgres://postgres:admin123@localhost:5432/respond_clone',
+      url: process.env.DATABASE_URL,
       
       autoLoadEntities: true,
       synchronize: true, // Mantenlo en true para que cree las tablas en Supabase solo
