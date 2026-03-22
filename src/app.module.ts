@@ -14,13 +14,7 @@ import { ChatModule } from './chat/chat.module';
       
       // CONFIGURACIÓN DE CONEXIÓN ROBUSTA
       // Solo activamos SSL si existe DATABASE_URL (estamos en la nube)
-      ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
-      
-      extra: {
-        // Configuraciones adicionales para evitar que la conexión se quede "colgada"
-        ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : null,
-        connectTimeoutMS: 10000, // 10 segundos de espera máxima
-      },
+      ssl: false,
     }),
     ChatModule,
   ],
