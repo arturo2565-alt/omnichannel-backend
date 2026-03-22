@@ -2,7 +2,8 @@ import { WebSocketGateway, WebSocketServer, OnGatewayConnection, OnGatewayDiscon
 import { Server } from 'socket.io';
 
 @WebSocketGateway({
-  cors: { origin: '*' }, // Permitir que React se conecte
+  cors: { origin: '*', // Permite que cualquier sitio (como tu Vercel) se conecte
+          methods: ['GET', 'POST'], }, // Permitir que React se conecte
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
