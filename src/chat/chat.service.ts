@@ -25,13 +25,11 @@ export class ChatService {
   }
 
   async saveMessage(data: any) {
-    // 1. LÓGICA DE CONVERSACIÓN
     let conversation = await this.conversationRepository.findOne({
       where: { externalId: data.id || '123' }
     });
 
     if (!conversation) {
-      console.log('Abriendo nueva conversación para:', data.user);
       conversation = this.conversationRepository.create({
         externalId: data.id || '123',
         contactName: data.user || 'Cliente Desconocido',
@@ -42,7 +40,6 @@ export class ChatService {
     conversation.lastMessageAt = new Date(); 
     await this.conversationRepository.save(conversation); 
 
-    // 2. GUARDADO DEL MENSAJE
     const newMessage = this.messageRepository.create({
       content: data.message || 'Sin contenido',
       channelType: data.platform || 'test',
@@ -54,7 +51,6 @@ export class ChatService {
     
     const saved = await this.messageRepository.save(newMessage);
     
-    // 3. IA AUTOMÁTICA: Solo si el mensaje viene del cliente
     if (saved.direction === 'inbound') {
       this.generateAiSuggestion(saved);
     }
@@ -64,17 +60,16 @@ export class ChatService {
   }
 
   /**
-   * SUGERENCIA AUTOMÁTICA (Vía Sockets)
-   * Se dispara al recibir un mensaje.
+   * SUGERENCIA AUTOMÁTICA
    */
   async generateAiSuggestion(message: Message) {
     try {
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-3.5-turbo", 
+        model: "gpt-4o", 
         messages: [
           { 
             role: "system", 
-            content: "Eres un asistente de ventas experto y amable. Sugiere una respuesta MUY corta (máximo 2 frases) y profesional para este mensaje de cliente. No uses el nombre del cliente si no lo sabes con certeza." 
+            content: "Eres un asistente de ventas experto. Sugiere una respuesta MUY corta (máximo 2 frases) para este mensaje. Sé amable y profesional." 
           },
           { role: "user", content: message.content }
         ],
@@ -93,35 +88,44 @@ export class ChatService {
   }
 
   /**
-   * SUGERENCIA MANUAL (Vía Request)
-   * Útil para cuando el agente pulsa un botón de "Pedir ayuda a la IA".
+   * SUGERENCIA MANUAL CON HISTORIAL COMPLETO (Contexto)
    */
   async getManualAiSuggestion(conversationId: string) {
     try {
-      // 1. Buscamos el último mensaje de esa conversación para darle contexto a la IA
-      const lastMessage = await this.messageRepository.findOne({
-        where: { conversation: { id: conversationId } as any }, // Ajustado para buscar por relación
-        order: { createdAt: 'DESC' }
+      // 1. Obtenemos los últimos 10 mensajes
+      const history = await this.messageRepository.find({
+        where: { conversation: { id: conversationId } as any },
+        order: { createdAt: 'DESC' },
+        take: 10 
       });
 
-      if (!lastMessage) return "No hay mensajes para analizar.";
+      if (!history || history.length === 0) return "No hay historial para analizar.";
 
-      // 2. Le pedimos ayuda a GPT
+      // 2. Transformamos el historial al formato que entiende OpenAI
+      // .reverse() es vital para que vayan del más antiguo al más nuevo
+      const contextMessages = history.reverse().map(m => ({
+        role: (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: m.content
+      }));
+
+      // 3. Generamos la respuesta. 
+      // El uso de ...contextMessages "desenrolla" el array dentro de la lista de mensajes.
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+        model: "gpt-4o",
         messages: [
           { 
             role: "system", 
-            content: "Eres un asistente de ventas pro. Genera una respuesta breve, amable y vendedora basada en el último mensaje del cliente." 
+            content: "Eres un cerrador de ventas experto. Basado en el historial de chat, sugiere la mejor respuesta para cerrar la venta o resolver la duda del cliente de forma persuasiva y breve." 
           },
-          { role: "user", content: lastMessage.content }
+          ...contextMessages // <--- Esto inserta los 10 mensajes aquí uno tras otro
         ],
       });
 
       return completion.choices[0].message.content;
+
     } catch (error) {
-      console.error("Error OpenAI:", error);
-      return "Lo siento, no pude generar una sugerencia ahora.";
+      console.error("Error en sugerencia manual:", error);
+      return "No pude generar una sugerencia con contexto en este momento.";
     }
   }
 

@@ -1,7 +1,7 @@
 import { Controller, Get, Post, Body, Query, Param, HttpCode, HttpStatus } from '@nestjs/common';
 import { ChatService } from './chat.service';
 
-@Controller('webhook') // URL base: http://localhost:3000/webhook
+@Controller('webhook') 
 export class ChatController {
   constructor(private readonly chatService: ChatService) {}
 
