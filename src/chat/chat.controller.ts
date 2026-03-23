@@ -5,7 +5,7 @@ import { ChatService } from './chat.service';
 export class ChatController {
   constructor(private readonly chatService: ChatService) {}
 
-  // 1. Verificación de Meta O Carga de mensajes para el Frontend
+  // 1. Verificación de Meta O Carga de mensajes (Mantenemos por compatibilidad)
   @Get()
   async handleGet(
     @Query('hub.mode') mode: string,
@@ -14,18 +14,34 @@ export class ChatController {
   ) {
     const MY_VERIFY_TOKEN = 'mi_token_secreto_123';
 
-    // Verificación de Webhook de Facebook/Instagram
     if (mode === 'subscribe' && token === MY_VERIFY_TOKEN) {
       console.log('WEBHOOK_VERIFIED');
       return challenge;
     }
 
-    // Si no es Meta, es React pidiendo el historial
-    console.log('Frontend solicitando mensajes...');
+    console.log('Frontend solicitando todos los mensajes...');
     return await this.chatService.findAllMessages();
   }
 
-  // 2. Recepción de mensajes (Webhooks y envío desde Dashboard)
+  // --- NUEVAS RUTAS OPTIMIZADAS ---
+
+  // 2. Obtener solo la lista de conversaciones (Para el Sidebar)
+  @Get('conversations')
+  async getConversations() {
+    console.log('Cargando lista de conversaciones...');
+    return await this.chatService.findAllConversations();
+  }
+
+  // 3. Obtener mensajes de una conversación específica (Para el ChatView)
+  @Get('messages/:conversationId')
+  async getMessages(@Param('conversationId') conversationId: string) {
+    console.log(`Cargando mensajes para la conversación: ${conversationId}`);
+    return await this.chatService.findMessagesByConversation(conversationId);
+  }
+
+  // --- RECEPCIÓN Y IA ---
+
+  // 4. Recepción de mensajes (Webhooks y Dashboard)
   @Post()
   @HttpCode(HttpStatus.OK)
   async receiveMessage(@Body() body: any) {
@@ -33,7 +49,7 @@ export class ChatController {
     return { status: 'EVENT_RECEIVED', id: saved.id };
   }
 
-  // 3. NUEVO: Solicitar una sugerencia de IA manualmente para una conversación
+  // 5. Sugerencia manual de IA
   @Post('ai-suggest/:id')
   async getSuggestion(@Param('id') id: string) {
     console.log(`Solicitando sugerencia manual para conv: ${id}`);
