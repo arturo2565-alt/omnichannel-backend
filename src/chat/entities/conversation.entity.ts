@@ -20,4 +20,7 @@ export class Conversation {
 
   @UpdateDateColumn()
   lastMessageAt: Date;
+
+  @Column({ nullable: true })
+  lastMessage: string; // <--- Esta es la que lee el Sidebar
 }

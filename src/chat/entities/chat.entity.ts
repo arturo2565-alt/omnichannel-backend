@@ -30,4 +30,7 @@ export class Message {
 
   @Column({ nullable: true })
   conversationId: string;
+
+  @Column({ nullable: true })
+  lastMessage: string; // <--- Esta es la que lee el Sidebar
 }

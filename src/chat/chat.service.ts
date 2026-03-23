@@ -38,6 +38,7 @@ export class ChatService {
     }
 
     conversation.lastMessageAt = new Date(); 
+    conversation.lastMessage = data.message || '📷 Imagen'; // Si es imagen, ponemos un emoji
     await this.conversationRepository.save(conversation); 
 
     const newMessage = this.messageRepository.create({
