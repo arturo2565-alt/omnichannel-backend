@@ -40,6 +40,7 @@ export class ChatService {
         { resource_type: 'image', folder: 'omnichannel_chats' }, 
         (error, result) => {
           if (error) return reject(error);
+          if (!result) return reject(new Error("Cloudinary no retornó un resultado"))
           resolve(result.secure_url);
         }
       ).end(file.buffer);
