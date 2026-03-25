@@ -1,4 +1,16 @@
-import { Controller, Get, Post, Body, Query, Param, HttpCode, HttpStatus } from '@nestjs/common';
+import { 
+  Controller, 
+  Get, 
+  Post, 
+  Body, 
+  Query, 
+  Param, 
+  HttpCode, 
+  HttpStatus, 
+  UseInterceptors, 
+  UploadedFile 
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
 
 @Controller('webhook') 
@@ -23,25 +35,34 @@ export class ChatController {
     return await this.chatService.findAllMessages();
   }
 
-  // --- NUEVAS RUTAS OPTIMIZADAS ---
+  // --- RUTAS DE OPTIMIZACIÓN ---
 
-  // 2. Obtener solo la lista de conversaciones (Para el Sidebar)
   @Get('conversations')
   async getConversations() {
-    console.log('Cargando lista de conversaciones...');
     return await this.chatService.findAllConversations();
   }
 
-  // 3. Obtener mensajes de una conversación específica (Para el ChatView)
   @Get('messages/:conversationId')
   async getMessages(@Param('conversationId') conversationId: string) {
-    console.log(`Cargando mensajes para la conversación: ${conversationId}`);
     return await this.chatService.findMessagesByConversation(conversationId);
+  }
+
+  // --- MULTIMEDIA (NUEVO) ---
+
+  /**
+   * 2. Subida de archivos a Cloudinary
+   * El interceptor 'file' debe coincidir con el nombre del campo en el FormData del frontend.
+   */
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadFile(@UploadedFile() file: Express.Multer.File) {
+    console.log('Subiendo archivo a Cloudinary...');
+    const url = await this.chatService.uploadImage(file);
+    return { url };
   }
 
   // --- RECEPCIÓN Y IA ---
 
-  // 4. Recepción de mensajes (Webhooks y Dashboard)
   @Post()
   @HttpCode(HttpStatus.OK)
   async receiveMessage(@Body() body: any) {
@@ -49,10 +70,8 @@ export class ChatController {
     return { status: 'EVENT_RECEIVED', id: saved.id };
   }
 
-  // 5. Sugerencia manual de IA
   @Post('ai-suggest/:id')
   async getSuggestion(@Param('id') id: string) {
-    console.log(`Solicitando sugerencia manual para conv: ${id}`);
     const suggestion = await this.chatService.getManualAiSuggestion(id);
     return { suggestion };
   }

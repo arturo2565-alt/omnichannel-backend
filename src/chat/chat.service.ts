@@ -5,6 +5,7 @@ import { Message } from './entities/chat.entity';
 import { Conversation } from './entities/conversation.entity';
 import { ChatGateway } from './chat.gateway';
 import { OpenAI } from 'openai';
+import { v2 as cloudinary } from 'cloudinary';
 
 @Injectable()
 export class ChatService {
@@ -24,6 +25,27 @@ export class ChatService {
     });
   }
 
+  /**
+   * NUEVO: Sube una imagen a Cloudinary y retorna la URL segura.
+   */
+  async uploadImage(file: Express.Multer.File): Promise<string> {
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
+
+    return new Promise((resolve, reject) => {
+      cloudinary.uploader.upload_stream(
+        { resource_type: 'image', folder: 'omnichannel_chats' }, 
+        (error, result) => {
+          if (error) return reject(error);
+          resolve(result.secure_url);
+        }
+      ).end(file.buffer);
+    });
+  }
+
   async saveMessage(data: any) {
     let conversation = await this.conversationRepository.findOne({
       where: { externalId: data.id || '123' }
@@ -37,8 +59,12 @@ export class ChatService {
       conversation = await this.conversationRepository.save(conversation);
     }
 
+    // Identificamos si es una imagen para el texto de vista previa en el Sidebar
+    const isImageUrl = (url: string) => url?.match(/\.(jpeg|jpg|gif|png|webp)$/) != null || url?.includes('cloudinary');
+    
     conversation.lastMessageAt = new Date(); 
-    conversation.lastMessage = data.message || '📷 Imagen'; // Si es imagen, ponemos un emoji
+    conversation.lastMessage = isImageUrl(data.message) ? '📷 Imagen' : (data.message || 'Sin contenido');
+    
     await this.conversationRepository.save(conversation); 
 
     const newMessage = this.messageRepository.create({
@@ -52,7 +78,8 @@ export class ChatService {
     
     const saved = await this.messageRepository.save(newMessage);
     
-    if (saved.direction === 'inbound') {
+    // Solo generamos sugerencia si es texto (la IA no puede "leer" la imagen aún en este flujo)
+    if (saved.direction === 'inbound' && !isImageUrl(saved.content)) {
       this.generateAiSuggestion(saved);
     }
     
@@ -60,12 +87,8 @@ export class ChatService {
     return saved;
   }
 
-  // --- NUEVAS IMPLEMENTACIONES DE OPTIMIZACIÓN ---
+  // --- OPTIMIZACIÓN DE CARGA ---
 
-  /**
-   * 1. Trae solo los mensajes de UNA conversación específica.
-   * Evita cargar miles de mensajes innecesarios al inicio.
-   */
   async findMessagesByConversation(conversationId: string, limit = 50) {
     return await this.messageRepository.find({
       where: { conversation: { id: conversationId } as any },
@@ -75,17 +98,13 @@ export class ChatService {
     });
   }
 
-  /**
-   * 2. Trae la lista de conversaciones para el Sidebar.
-   * Ordena por la actividad más reciente.
-   */
   async findAllConversations() {
     return await this.conversationRepository.find({
       order: { lastMessageAt: 'DESC' }
     });
   }
 
-  // --- LOGICA DE IA ---
+  // --- LÓGICA DE IA ---
 
   async generateAiSuggestion(message: Message) {
     try {
@@ -122,10 +141,12 @@ export class ChatService {
 
       if (!history || history.length === 0) return "No hay historial para analizar.";
 
-      const contextMessages = history.reverse().map(m => ({
-        role: (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
-        content: m.content
-      }));
+      const contextMessages = history.reverse()
+        .filter(m => !m.content.includes('cloudinary')) // Filtramos imágenes del contexto para no confundir a la IA de texto
+        .map(m => ({
+          role: (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
+          content: m.content
+        }));
 
       const completion = await this.openai.chat.completions.create({
         model: "gpt-4o",
@@ -146,7 +167,6 @@ export class ChatService {
     }
   }
 
-  // Mantenemos este por si necesitas un dump completo, aunque se usará menos
   async findAllMessages() {
     return await this.messageRepository.find({
       relations: ['conversation'], 
