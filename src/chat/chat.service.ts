@@ -26,27 +26,52 @@ export class ChatService {
   }
 
   /**
-   * NUEVO: Sube una imagen a Cloudinary y retorna la URL segura.
+   * 🌟 SUBIDA DE IMÁGENES A CLOUDINARY
+   * Configura y envía el buffer del archivo a la nube.
    */
   async uploadImage(file: Express.Multer.File): Promise<string> {
+    // 1. Forzamos la configuración con los valores de las variables de entorno
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
       api_key: process.env.CLOUDINARY_API_KEY,
       api_secret: process.env.CLOUDINARY_API_SECRET,
     });
 
+    // Logs de depuración para Railway (puedes borrarlos cuando funcione)
+    console.log('--- Cloudinary Config Check ---');
+    console.log('Cloud Name:', process.env.CLOUDINARY_CLOUD_NAME ? 'OK' : 'MISSING');
+    console.log('API Key:', process.env.CLOUDINARY_API_KEY ? 'OK' : 'MISSING');
+
     return new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
-        { resource_type: 'image', folder: 'omnichannel_chats' }, 
+      // 2. Creamos el stream de subida
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { 
+          resource_type: 'image', 
+          folder: 'omnichannel_chats' 
+        },
         (error, result) => {
-          if (error) return reject(error);
-          if (!result) return reject(new Error("Cloudinary no retornó un resultado"))
+          if (error) {
+            console.error('Error detallado de Cloudinary:', error);
+            return reject(error);
+          }
+          // Validación para evitar error TS18048 (result is possibly undefined)
+          if (!result) {
+            return reject(new Error("Cloudinary no retornó un resultado válido"));
+          }
+          
+          console.log('Subida exitosa:', result.secure_url);
           resolve(result.secure_url);
         }
-      ).end(file.buffer);
+      );
+
+      // 3. Enviamos el buffer del archivo al stream
+      uploadStream.end(file.buffer);
     });
   }
 
+  /**
+   * GUARDAR MENSAJE Y ACTUALIZAR CONVERSACIÓN
+   */
   async saveMessage(data: any) {
     let conversation = await this.conversationRepository.findOne({
       where: { externalId: data.id || '123' }
@@ -61,7 +86,9 @@ export class ChatService {
     }
 
     // Identificamos si es una imagen para el texto de vista previa en el Sidebar
-    const isImageUrl = (url: string) => url?.match(/\.(jpeg|jpg|gif|png|webp)$/) != null || url?.includes('cloudinary');
+    const isImageUrl = (url: string) => 
+      (typeof url === 'string' && url.match(/\.(jpeg|jpg|gif|png|webp)$/) != null) || 
+      (typeof url === 'string' && url.includes('cloudinary'));
     
     conversation.lastMessageAt = new Date(); 
     conversation.lastMessage = isImageUrl(data.message) ? '📷 Imagen' : (data.message || 'Sin contenido');
@@ -72,14 +99,14 @@ export class ChatService {
       content: data.message || 'Sin contenido',
       channelType: data.platform || 'test',
       senderName: data.user || 'Cliente Desconocido',
-      direction: data.direction || 'inbound',
+      direction: data.direction || 'outbound',
       externalId: data.id || '123',
       conversation: conversation,
     });
     
     const saved = await this.messageRepository.save(newMessage);
     
-    // Solo generamos sugerencia si es texto (la IA no puede "leer" la imagen aún en este flujo)
+    // Solo generamos sugerencia si es texto entrante
     if (saved.direction === 'inbound' && !isImageUrl(saved.content)) {
       this.generateAiSuggestion(saved);
     }
@@ -143,7 +170,7 @@ export class ChatService {
       if (!history || history.length === 0) return "No hay historial para analizar.";
 
       const contextMessages = history.reverse()
-        .filter(m => !m.content.includes('cloudinary')) // Filtramos imágenes del contexto para no confundir a la IA de texto
+        .filter(m => !m.content.includes('cloudinary')) 
         .map(m => ({
           role: (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
           content: m.content
