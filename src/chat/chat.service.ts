@@ -7,6 +7,34 @@ import { ChatGateway } from './chat.gateway';
 import { OpenAI } from 'openai';
 import { v2 as cloudinary } from 'cloudinary';
 
+/** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
+const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
+
+function isAgentOnlyPlatform(platform: string | undefined | null): boolean {
+  if (platform == null || typeof platform !== 'string') return false;
+  return AGENT_ONLY_PLATFORMS.has(platform.trim().toLowerCase());
+}
+
+/** Solo guardamos en conversation.platform valores que describen WhatsApp / Instagram / etc. */
+function shouldPersistPlatformOnConversation(
+  platform: unknown,
+): platform is string {
+  return typeof platform === 'string' && platform.trim().length > 0
+    ? !isAgentOnlyPlatform(platform)
+    : false;
+}
+
+function normalizePlatformForApi(
+  conversationPlatform: string | null | undefined,
+  messageFallback: string | undefined,
+): string {
+  const p = conversationPlatform?.trim();
+  if (p && !isAgentOnlyPlatform(p)) return p.toLowerCase();
+  const fb = messageFallback?.trim();
+  if (fb && !isAgentOnlyPlatform(fb)) return fb.toLowerCase();
+  return 'unknown';
+}
+
 @Injectable()
 export class ChatService {
   private openai: OpenAI;
@@ -81,11 +109,13 @@ export class ChatService {
       conversation = this.conversationRepository.create({
         externalId: data.id || '123',
         contactName: data.user || 'Cliente Desconocido',
-        platform: data.platform || null,
+        platform: shouldPersistPlatformOnConversation(data.platform)
+          ? String(data.platform).trim()
+          : null,
       });
       conversation = await this.conversationRepository.save(conversation);
-    } else if (data.platform) {
-      conversation.platform = data.platform;
+    } else if (shouldPersistPlatformOnConversation(data.platform)) {
+      conversation.platform = String(data.platform).trim();
     }
 
     // Identificamos si es una imagen para el texto de vista previa en el Sidebar
@@ -134,19 +164,35 @@ export class ChatService {
       order: { lastMessageAt: 'DESC' },
     });
 
-    const idsWithoutPlatform = conversations
-      .filter((c) => !c.platform)
+    // Si falta plataforma o solo tenemos valores internos (p. ej. web-dashboard tras responder desde el panel),
+    // inferimos desde mensajes. Priorizamos el último mensaje con canal «real», no solo el último por fecha.
+    const idsNeedDerivedPlatform = conversations
+      .filter(
+        (c) =>
+          !c.platform?.trim() ||
+          isAgentOnlyPlatform(c.platform),
+      )
       .map((c) => c.id);
+
     const fallbackByConvId = new Map<string, string>();
-    if (idsWithoutPlatform.length) {
+    if (idsNeedDerivedPlatform.length) {
+      const agentList = [...AGENT_ONLY_PLATFORMS];
       const rows = await this.messageRepository
         .createQueryBuilder('m')
         .distinctOn(['m.conversationId'])
         .select('m.conversationId', 'conversationId')
         .addSelect('m.channelType', 'channelType')
-        .where('m.conversationId IN (:...ids)', { ids: idsWithoutPlatform })
+        .where('m.conversationId IN (:...ids)', {
+          ids: idsNeedDerivedPlatform,
+        })
         .orderBy('m.conversationId', 'ASC')
+        .addOrderBy(
+          // 0 = canal posiblemente real (whatsapp, instagram…), 1 = internos al final del grupo DISTINCT
+          `CASE WHEN LOWER(TRIM(BOTH FROM m.channelType)) IN (:...agentList) THEN 1 ELSE 0 END`,
+          'ASC',
+        )
         .addOrderBy('m.createdAt', 'DESC')
+        .setParameter('agentList', agentList)
         .getRawMany<{ conversationId: string; channelType: string }>();
       for (const row of rows) {
         fallbackByConvId.set(row.conversationId, row.channelType);
@@ -155,10 +201,7 @@ export class ChatService {
 
     return conversations.map((c) => ({
       ...c,
-      platform:
-        c.platform ||
-        fallbackByConvId.get(c.id) ||
-        'unknown',
+      platform: normalizePlatformForApi(c.platform, fallbackByConvId.get(c.id)),
     }));
   }
 
