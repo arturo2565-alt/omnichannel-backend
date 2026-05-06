@@ -35,27 +35,6 @@ function normalizePlatformForApi(
   return 'unknown';
 }
 
-/** PostgreSQL suele devolver alias en minúsculas en queries raw */
-function pickRawUuid(row: Record<string, unknown>): string | undefined {
-  const v =
-    row.conversationId ??
-    row.conversationid ??
-    row.m_conversationId ??
-    row.m_conversation_id;
-  if (v === undefined || v === null || v === '') return undefined;
-  return String(v);
-}
-
-function pickRawChannelType(row: Record<string, unknown>): string | undefined {
-  const v =
-    row.channelType ??
-    row.channeltype ??
-    row.m_channelType ??
-    row.m_channel_type;
-  if (v === undefined || v === null) return undefined;
-  return String(v);
-}
-
 @Injectable()
 export class ChatService {
   private openai: OpenAI;
@@ -172,12 +151,29 @@ export class ChatService {
   // --- OPTIMIZACIÓN DE CARGA ---
 
   async findMessagesByConversation(conversationId: string, limit = 50) {
-    return await this.messageRepository.find({
-      where: { conversation: { id: conversationId } as any },
-      relations: ['conversation'],
+    let rows = await this.messageRepository.find({
+      where: { conversationId },
       order: { createdAt: 'DESC' },
-      take: limit, 
+      take: limit,
     });
+    if (!rows.length) {
+      rows = await this.messageRepository.find({
+        where: { conversation: { id: conversationId } as any },
+        order: { createdAt: 'DESC' },
+        take: limit,
+      });
+    }
+    // Objeto plano: evita referencias circulares al serializar JSON (conversation ↔ messages)
+    return rows.map((m) => ({
+      id: m.id,
+      content: m.content,
+      channelType: m.channelType,
+      externalId: m.externalId,
+      direction: m.direction,
+      createdAt: m.createdAt,
+      senderName: m.senderName,
+      conversationId: m.conversationId,
+    }));
   }
 
   async findAllConversations() {
@@ -197,26 +193,47 @@ export class ChatService {
 
     const fallbackByConvId = new Map<string, string>();
     if (idsNeedDerivedPlatform.length) {
-      // No usar :...agentList dentro del CASE del ORDER BY: en varios drivers/bindings ROMPE la query (500 → bandeja vacía).
-      const rows = await this.messageRepository
-        .createQueryBuilder('m')
-        .distinctOn(['m.conversationId'])
-        .select('m.conversationId', 'conversationId')
-        .addSelect('m.channelType', 'channelType')
-        .where('m.conversationId IN (:...ids)', {
-          ids: idsNeedDerivedPlatform,
-        })
-        .orderBy('m.conversationId', 'ASC')
-        .addOrderBy(
-          `CASE WHEN COALESCE(LOWER(TRIM(BOTH FROM m.channelType)), '') IN ('web-dashboard', 'test') THEN 1 ELSE 0 END`,
-          'ASC',
-        )
-        .addOrderBy('m.createdAt', 'DESC')
-        .getRawMany<Record<string, unknown>>();
-      for (const row of rows) {
-        const cid = pickRawUuid(row);
-        const ct = pickRawChannelType(row);
-        if (cid && ct !== undefined) fallbackByConvId.set(cid, ct);
+      const meta = this.messageRepository.metadata;
+      const table = meta.tableName;
+      const colConv =
+        meta.findColumnWithPropertyPath('conversationId')?.databaseName ??
+        'conversationId';
+      const colType =
+        meta.findColumnWithPropertyPath('channelType')?.databaseName ??
+        'channelType';
+      const colCreated =
+        meta.findColumnWithPropertyPath('createdAt')?.databaseName ??
+        'createdAt';
+      const q = (name: string) => `"${name.replace(/"/g, '""')}"`;
+      try {
+        const rows: Record<string, unknown>[] =
+          await this.messageRepository.manager.query(
+            `SELECT ${q(colConv)} AS "conversationId", ${q(colType)} AS "channelType"
+             FROM (
+               SELECT ${q(colConv)}, ${q(colType)},
+                 ROW_NUMBER() OVER (
+                   PARTITION BY ${q(colConv)}
+                   ORDER BY
+                     CASE WHEN COALESCE(LOWER(TRIM(BOTH FROM ${q(colType)})), '') IN ('web-dashboard', 'test') THEN 1 ELSE 0 END ASC,
+                     ${q(colCreated)} DESC
+                 ) AS _rn
+               FROM ${q(table)}
+               WHERE ${q(colConv)} = ANY($1::uuid[])
+             ) _w WHERE _w._rn = 1`,
+            [idsNeedDerivedPlatform],
+          );
+        for (const row of rows) {
+          const cid =
+            row.conversationId != null ? String(row.conversationId) : undefined;
+          const ct =
+            row.channelType != null ? String(row.channelType) : undefined;
+          if (cid && ct !== undefined) fallbackByConvId.set(cid, ct);
+        }
+      } catch (err) {
+        console.error(
+          'findAllConversations: fallback de platform desde mensajes falló',
+          err,
+        );
       }
     }
 
