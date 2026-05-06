@@ -35,6 +35,27 @@ function normalizePlatformForApi(
   return 'unknown';
 }
 
+/** PostgreSQL suele devolver alias en minúsculas en queries raw */
+function pickRawUuid(row: Record<string, unknown>): string | undefined {
+  const v =
+    row.conversationId ??
+    row.conversationid ??
+    row.m_conversationId ??
+    row.m_conversation_id;
+  if (v === undefined || v === null || v === '') return undefined;
+  return String(v);
+}
+
+function pickRawChannelType(row: Record<string, unknown>): string | undefined {
+  const v =
+    row.channelType ??
+    row.channeltype ??
+    row.m_channelType ??
+    row.m_channel_type;
+  if (v === undefined || v === null) return undefined;
+  return String(v);
+}
+
 @Injectable()
 export class ChatService {
   private openai: OpenAI;
@@ -176,7 +197,7 @@ export class ChatService {
 
     const fallbackByConvId = new Map<string, string>();
     if (idsNeedDerivedPlatform.length) {
-      const agentList = [...AGENT_ONLY_PLATFORMS];
+      // No usar :...agentList dentro del CASE del ORDER BY: en varios drivers/bindings ROMPE la query (500 → bandeja vacía).
       const rows = await this.messageRepository
         .createQueryBuilder('m')
         .distinctOn(['m.conversationId'])
@@ -187,20 +208,25 @@ export class ChatService {
         })
         .orderBy('m.conversationId', 'ASC')
         .addOrderBy(
-          // 0 = canal posiblemente real (whatsapp, instagram…), 1 = internos al final del grupo DISTINCT
-          `CASE WHEN LOWER(TRIM(BOTH FROM m.channelType)) IN (:...agentList) THEN 1 ELSE 0 END`,
+          `CASE WHEN COALESCE(LOWER(TRIM(BOTH FROM m.channelType)), '') IN ('web-dashboard', 'test') THEN 1 ELSE 0 END`,
           'ASC',
         )
         .addOrderBy('m.createdAt', 'DESC')
-        .setParameter('agentList', agentList)
-        .getRawMany<{ conversationId: string; channelType: string }>();
+        .getRawMany<Record<string, unknown>>();
       for (const row of rows) {
-        fallbackByConvId.set(row.conversationId, row.channelType);
+        const cid = pickRawUuid(row);
+        const ct = pickRawChannelType(row);
+        if (cid && ct !== undefined) fallbackByConvId.set(cid, ct);
       }
     }
 
     return conversations.map((c) => ({
-      ...c,
+      id: c.id,
+      externalId: c.externalId,
+      contactName: c.contactName,
+      status: c.status,
+      lastMessageAt: c.lastMessageAt,
+      lastMessage: c.lastMessage,
       platform: normalizePlatformForApi(c.platform, fallbackByConvId.get(c.id)),
     }));
   }
