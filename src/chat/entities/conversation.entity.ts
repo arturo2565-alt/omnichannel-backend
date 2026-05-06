@@ -12,6 +12,9 @@ export class Conversation {
   @Column()
   contactName: string;
 
+  @Column({ nullable: true })
+  platform: string; // 'whatsapp' | 'instagram' | etc.
+
   @Column({ default: 'open' }) // 'open' o 'closed'
   status: string;
 

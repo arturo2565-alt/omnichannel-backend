@@ -81,8 +81,11 @@ export class ChatService {
       conversation = this.conversationRepository.create({
         externalId: data.id || '123',
         contactName: data.user || 'Cliente Desconocido',
+        platform: data.platform || null,
       });
       conversation = await this.conversationRepository.save(conversation);
+    } else if (data.platform) {
+      conversation.platform = data.platform;
     }
 
     // Identificamos si es una imagen para el texto de vista previa en el Sidebar
@@ -127,9 +130,36 @@ export class ChatService {
   }
 
   async findAllConversations() {
-    return await this.conversationRepository.find({
-      order: { lastMessageAt: 'DESC' }
+    const conversations = await this.conversationRepository.find({
+      order: { lastMessageAt: 'DESC' },
     });
+
+    const idsWithoutPlatform = conversations
+      .filter((c) => !c.platform)
+      .map((c) => c.id);
+    const fallbackByConvId = new Map<string, string>();
+    if (idsWithoutPlatform.length) {
+      const rows = await this.messageRepository
+        .createQueryBuilder('m')
+        .distinctOn(['m.conversationId'])
+        .select('m.conversationId', 'conversationId')
+        .addSelect('m.channelType', 'channelType')
+        .where('m.conversationId IN (:...ids)', { ids: idsWithoutPlatform })
+        .orderBy('m.conversationId', 'ASC')
+        .addOrderBy('m.createdAt', 'DESC')
+        .getRawMany<{ conversationId: string; channelType: string }>();
+      for (const row of rows) {
+        fallbackByConvId.set(row.conversationId, row.channelType);
+      }
+    }
+
+    return conversations.map((c) => ({
+      ...c,
+      platform:
+        c.platform ||
+        fallbackByConvId.get(c.id) ||
+        'unknown',
+    }));
   }
 
   // --- LÓGICA DE IA ---
