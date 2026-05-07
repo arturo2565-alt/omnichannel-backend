@@ -59,6 +59,23 @@ function normalizePlatformForApi(
   return 'unknown';
 }
 
+function pickFirstNonEmptyTrimmedString(...values: unknown[]): string {
+  for (const v of values) {
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (s.length > 0) return s;
+  }
+  return '';
+}
+
+/** UUID de conversación interna (panel / API). */
+function looksLikeConversationUuid(raw: unknown): boolean {
+  const s = String(raw ?? '').trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    s,
+  );
+}
+
 /** Imagen entrante: URL, data URL base64 o ya alojada en Cloudinary */
 function isIncomingImage(content: unknown): content is string {
   if (typeof content !== 'string' || !content.trim()) return false;
@@ -606,28 +623,83 @@ export class ChatService implements OnModuleDestroy {
    * GUARDAR MENSAJE Y ACTUALIZAR CONVERSACIÓN.
    * - Sin `direction` o distinto de `outbound` → **`inbound`** (mensajes del cliente / webhook canal).
    * - **`outbound`** → respuestas del agente (panel / cotización / dashboard); sin análisis de imagen entrante ni sugerencias IA sobre ese mismo mensaje.
+   *
+   * **Resolución de conversación (sin fallback `123`):**
+   * 1. Si `conversationId` es un UUID válido → carga esa fila (uso típico del panel con `direction: outbound`).
+   * 2. Si no → busca por `externalId` exacto usando el primer valor no vacío entre:
+   *    `externalId`, `id`, `from`, `sender_id`, `senderId`.
+   * 3. Si no existe → crea conversación nueva con ese `externalId` y `contactName` (o `user`, `username`, `name`).
    */
   async saveMessage(data: any) {
     const resolvedDirection =
       String(data.direction ?? '').toLowerCase().trim() === 'outbound'
         ? 'outbound'
         : 'inbound';
-    let conversation = await this.conversationRepository.findOne({
-      where: { externalId: data.id || '123' }
-    });
 
-    if (!conversation) {
-      conversation = this.conversationRepository.create({
-        externalId: data.id || '123',
-        contactName: data.user || 'Cliente Desconocido',
-        platform: shouldPersistPlatformOnConversation(data.platform)
-          ? String(data.platform).trim()
-          : null,
-        status: 'nuevo',
+    let conversation: Conversation | null = null;
+
+    const rawConversationId = pickFirstNonEmptyTrimmedString(
+      data.conversationId,
+    );
+    if (rawConversationId && looksLikeConversationUuid(rawConversationId)) {
+      conversation = await this.conversationRepository.findOne({
+        where: { id: rawConversationId },
       });
-      conversation = await this.conversationRepository.save(conversation);
+      if (!conversation) {
+        throw new BadRequestException(
+          `No existe conversación con id (UUID): ${rawConversationId}`,
+        );
+      }
+    }
+
+    let threadExternalId = '';
+    if (!conversation) {
+      threadExternalId = pickFirstNonEmptyTrimmedString(
+        data.externalId,
+        data.id,
+        data.from,
+        data.sender_id,
+        data.senderId,
+      );
+      if (!threadExternalId) {
+        throw new BadRequestException(
+          'No se pudo determinar la conversación: envía `conversationId` (UUID interno) desde el panel, o bien `externalId` / `id` / `from` con el ID estable del contacto en el canal. No existe conversación por defecto ni fallback.',
+        );
+      }
+
+      conversation = await this.conversationRepository.findOne({
+        where: { externalId: threadExternalId },
+      });
+
+      const contactName = pickFirstNonEmptyTrimmedString(
+        data.contactName,
+        data.user,
+        data.username,
+        data.name,
+      );
+
+      if (!conversation) {
+        conversation = this.conversationRepository.create({
+          externalId: threadExternalId,
+          contactName: contactName || 'Cliente Desconocido',
+          platform: shouldPersistPlatformOnConversation(data.platform)
+            ? String(data.platform).trim()
+            : null,
+          status: 'nuevo',
+        });
+        conversation = await this.conversationRepository.save(conversation);
+      } else {
+        if (contactName && conversation.contactName !== contactName) {
+          conversation.contactName = contactName;
+        }
+        if (shouldPersistPlatformOnConversation(data.platform)) {
+          conversation.platform = String(data.platform).trim();
+        }
+        await this.conversationRepository.save(conversation);
+      }
     } else if (shouldPersistPlatformOnConversation(data.platform)) {
       conversation.platform = String(data.platform).trim();
+      await this.conversationRepository.save(conversation);
     }
 
     let contentToSave = data.message || 'Sin contenido';
@@ -654,12 +726,28 @@ export class ChatService implements OnModuleDestroy {
 
     await this.conversationRepository.save(conversation);
 
+    const senderName = pickFirstNonEmptyTrimmedString(
+      data.user,
+      data.contactName,
+      data.username,
+      data.name,
+    );
+
+    const messageExternalId =
+      threadExternalId ||
+      pickFirstNonEmptyTrimmedString(
+        data.externalId,
+        data.id,
+        data.from,
+        conversation.externalId,
+      );
+
     const newMessage = this.messageRepository.create({
       content: contentToSave,
       channelType: data.platform || 'test',
-      senderName: data.user || 'Cliente Desconocido',
+      senderName: senderName || 'Cliente Desconocido',
       direction: resolvedDirection,
-      externalId: data.id || '123',
+      externalId: messageExternalId || conversation.externalId,
       conversation: conversation,
     });
     
