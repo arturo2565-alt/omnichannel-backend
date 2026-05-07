@@ -623,6 +623,7 @@ export class ChatService implements OnModuleDestroy {
         platform: shouldPersistPlatformOnConversation(data.platform)
           ? String(data.platform).trim()
           : null,
+        status: 'nuevo',
       });
       conversation = await this.conversationRepository.save(conversation);
     } else if (shouldPersistPlatformOnConversation(data.platform)) {
@@ -643,6 +644,13 @@ export class ChatService implements OnModuleDestroy {
     conversation.lastMessage = incomingIsImage
       ? '📷 Imagen'
       : contentToSave || 'Sin contenido';
+
+    if (
+      resolvedDirection === 'outbound' &&
+      String(data.conversationLeadStatus ?? '').trim() === 'cotizado'
+    ) {
+      conversation.status = 'cotizado';
+    }
 
     await this.conversationRepository.save(conversation);
 
@@ -1069,6 +1077,11 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
         { damageAnalysis: analysis, draftQuote: draftQuoteDoc },
       );
 
+      await this.conversationRepository.update(
+        { id: conversationId },
+        { status: 'por_cotizar' },
+      );
+
       this.chatGateway.emitDraftQuoteReady({
         draftQuoteId: savedDraft.id,
         conversationId,
@@ -1100,6 +1113,11 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
     await this.messageRepository.update(
       { id: messageId },
       { damageAnalysis: analysis, draftQuote: draftQuoteDoc },
+    );
+
+    await this.conversationRepository.update(
+      { id: conversationId },
+      { status: 'por_cotizar' },
     );
 
     this.chatGateway.emitDraftQuoteReady({

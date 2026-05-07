@@ -2,6 +2,17 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateCol
 import { Message } from './chat.entity';
 import { DraftQuoteEntity } from './draft-quote.entity';
 
+/** Estados de lead admitidos para `Conversation.status`. */
+export const CONVERSATION_LEAD_STATUSES = [
+  'nuevo',
+  'por_cotizar',
+  'cotizado',
+  'agendado',
+] as const;
+
+export type ConversationLeadStatus =
+  (typeof CONVERSATION_LEAD_STATUSES)[number];
+
 @Entity()
 export class Conversation {
   @PrimaryGeneratedColumn('uuid')
@@ -16,7 +27,8 @@ export class Conversation {
   @Column({ type: 'character varying', nullable: true })
   platform?: string | null; // 'whatsapp' | 'instagram' | etc.
 
-  @Column({ default: 'open' }) // 'open' o 'closed'
+  /** Lead: nuevo → por_cotizar (IA + borrador) → cotizado (envío cotización) → agendado (manual / futuro). */
+  @Column({ type: 'varchar', length: 32, default: 'nuevo' })
   status: string;
 
   @OneToMany(() => Message, (message) => message.conversation)
