@@ -2,7 +2,15 @@ import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, Jo
 import { Conversation } from './conversation.entity';
 import type { DraftQuote } from '../autofix-config';
 
-/** Resultado de analyzeDamageImage (JSON estructurado, AutoFix / gpt-4o) */
+/** Una fila del inventario multi-imagen (misma pieza puede agrupar varias URLs). */
+export interface DamageInventoryItem {
+  pieza: string;
+  severidad: string;
+  descripcion: string;
+  urls_asociadas: string[];
+}
+
+/** Resultado agregado del peritaje + cotización (AutoFix / gpt-4o). */
 export interface VehicleDamageAnalysis {
   /** Pieza principal (p. ej. Fascia, Puerta, Cofre) */
   pieza: string;
@@ -14,6 +22,8 @@ export interface VehicleDamageAnalysis {
   partesAfectadas: string[];
   /** Etiqueta legible o mismo código que `severidad` (compatibilidad) */
   severidadDelDano: string;
+  /** Si hubo varias imágenes, desglose por pieza con URLs asociadas. */
+  inventory?: DamageInventoryItem[];
 }
 
 @Entity()

@@ -1,8 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
-import { Message, VehicleDamageAnalysis } from './entities/chat.entity';
+import {
+  DamageInventoryItem,
+  Message,
+  VehicleDamageAnalysis,
+} from './entities/chat.entity';
 import { Conversation } from './entities/conversation.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { ChatGateway } from './chat.gateway';
@@ -12,10 +16,13 @@ import {
   AUTO_FIX_CURRENCY,
   calculateEstimate,
   coerceDamageLevelCode,
+  DAMAGE_LEVEL_KEYS,
   DraftQuote,
   DraftQuoteLine,
   formatAutoFixMoney,
   matchPiezaFromAnalysis,
+  matrixInventoryMaxLines,
+  type DamageLevel,
 } from './autofix-config';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
@@ -98,6 +105,136 @@ function normalizeDamageAnalysisJson(raw: unknown): VehicleDamageAnalysis {
     partesAfectadas,
     severidadDelDano: severidad,
   };
+}
+
+function damageLevelRank(level: DamageLevel): number {
+  const i = DAMAGE_LEVEL_KEYS.indexOf(level);
+  return i >= 0 ? i : 0;
+}
+
+function pickWorstDamageLevel(levels: string[]): DamageLevel {
+  let worst: DamageLevel = 'DL';
+  for (const raw of levels) {
+    const c = coerceDamageLevelCode(raw);
+    if (damageLevelRank(c) > damageLevelRank(worst)) worst = c;
+  }
+  return worst;
+}
+
+function normalizeDamageInventoryJson(raw: unknown): DamageInventoryItem[] {
+  const o =
+    raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const direct = Array.isArray(raw) ? raw : null;
+  const arr =
+    (Array.isArray(o['items']) ? o['items'] : null) ??
+    (Array.isArray(o['resultado']) ? o['resultado'] : null) ??
+    direct;
+  if (!Array.isArray(arr)) {
+    throw new Error(
+      'Se esperaba un JSON con la clave "items" (array de objetos con pieza, severidad, descripcion, urls_asociadas)',
+    );
+  }
+  const out: DamageInventoryItem[] = [];
+  for (const el of arr) {
+    if (!el || typeof el !== 'object') continue;
+    const r = el as Record<string, unknown>;
+    const pieza = typeof r['pieza'] === 'string' ? r['pieza'].trim() : '';
+    const severidad =
+      typeof r['severidad'] === 'string' ? r['severidad'].trim() : '';
+    const descripcion =
+      typeof r['descripcion'] === 'string'
+        ? r['descripcion'].trim()
+        : typeof r['descripcionTecnica'] === 'string'
+          ? String(r['descripcionTecnica']).trim()
+          : '';
+    let urls_asociadas: string[] = [];
+    const u = r['urls_asociadas'];
+    if (Array.isArray(u)) {
+      urls_asociadas = u.map((x) => String(x).trim()).filter(Boolean);
+    }
+    if (!pieza || !severidad) continue;
+    out.push({
+      pieza,
+      severidad,
+      descripcion: descripcion || 'Sin descripción.',
+      urls_asociadas,
+    });
+  }
+  if (!out.length) {
+    throw new Error(
+      'El inventario ("items") está vacío o no tiene filas con pieza y severidad válidas',
+    );
+  }
+  return out;
+}
+
+function inventoryItemsToVehicleAnalysis(
+  items: DamageInventoryItem[],
+  sourceUrls: string[],
+): VehicleDamageAnalysis {
+  const inv: DamageInventoryItem[] = items.map((it) => ({
+    pieza: it.pieza,
+    severidad: it.severidad,
+    descripcion: it.descripcion,
+    urls_asociadas: [...(it.urls_asociadas ?? [])],
+  }));
+  const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
+  const worst = pickWorstDamageLevel(inv.map((i) => i.severidad));
+  const piezaLabel =
+    partes.length === 1
+      ? partes[0]
+      : partes.length > 1
+        ? `${partes.slice(0, 2).join(' + ')}${partes.length > 2 ? ` (+${partes.length - 2} más)` : ''}`
+        : 'No identificada';
+  const desc = inv
+    .map(
+      (it) =>
+        `• ${it.pieza} (${coerceDamageLevelCode(it.severidad)}): ${it.descripcion}`,
+    )
+    .join('\n');
+  const just = `Inventario unificado de ${inv.length} registro(s) de daño. Regla: por pieza se tomó la mayor severidad entre las fotos asociadas. Imágenes de entrada: ${sourceUrls.length}.`;
+
+  return {
+    pieza: piezaLabel,
+    severidad: worst,
+    severidadDelDano: worst,
+    descripcionTecnica: desc,
+    justificacion: just,
+    partesAfectadas: partes.length ? partes : ['Estetica Exterior'],
+    inventory: inv,
+  };
+}
+
+/** URLs almacenadas en `draft_quotes.imageUrl` (una URL o JSON array). */
+function parseDraftImageUrls(imageUrl: string): string[] {
+  const s = String(imageUrl ?? '').trim();
+  if (!s) return [];
+  if (s.startsWith('[')) {
+    try {
+      const j = JSON.parse(s) as unknown;
+      return Array.isArray(j) ? j.map(String).filter(Boolean) : [s];
+    } catch {
+      return [s];
+    }
+  }
+  return [s];
+}
+
+export interface PatchInventoryLineDto {
+  pieza: string;
+  severidad: string;
+  precioMx: number;
+  descripcion?: string;
+  urls_asociadas?: string[];
+}
+
+export interface PatchDraftQuoteBody {
+  pieza?: string;
+  severidad?: string;
+  /** Precio final (MXN). Opcional: sustituye total y líneas tras recálculo por matriz. */
+  precioFinal?: number;
+  /** Varias piezas con precio por línea (panel). Si se envía, sustituye el flujo de una sola pieza. */
+  inventoryLines?: PatchInventoryLineDto[];
 }
 
 @Injectable()
@@ -228,9 +365,18 @@ export class ChatService {
   }
 
   /**
-   * Monto de matriz para la pieza principal del peritaje (calculateEstimate).
+   * Suma de matriz por piezas del inventario (o una sola pieza si no hay inventario).
    */
   private computePrimaryMatrixEstimate(analysis: VehicleDamageAnalysis): number {
+    if (analysis.inventory?.length) {
+      const sum = calculateEstimate(
+        analysis.inventory.map((i) => ({
+          pieza: i.pieza,
+          severidad: i.severidad,
+        })),
+      );
+      if (sum > 0) return sum;
+    }
     const level = coerceDamageLevelCode(analysis.severidad);
     const piezaMatriz =
       matchPiezaFromAnalysis(analysis.pieza) ??
@@ -308,23 +454,54 @@ export class ChatService {
   }
 
   /**
-   * Analiza una imagen (URL pública, p. ej. Cloudinary) con visión gpt-4o (perito AutoFix).
+   * Analiza una o varias imágenes (URLs públicas, p. ej. Cloudinary) con visión gpt-4o (perito AutoFix).
+   * Devuelve el inventario por pieza; usa {@link inventoryItemsToVehicleAnalysis} para unir a `VehicleDamageAnalysis`.
    */
-  async analyzeDamageImage(imageUrl: string): Promise<VehicleDamageAnalysis> {
+  async analyzeDamageImage(
+    imageUrls: string | string[],
+  ): Promise<DamageInventoryItem[]> {
+    const urlsRaw = Array.isArray(imageUrls) ? imageUrls : [imageUrls];
+    const urls = [
+      ...new Set(urlsRaw.map((u) => String(u).trim()).filter(Boolean)),
+    ];
+    if (!urls.length) {
+      throw new Error('Se requiere al menos una URL de imagen');
+    }
+
     const systemPrompt = `Eres un perito experto de AutoFix. Tu misión es analizar fotos de golpes vehiculares.
 
-Identifica qué pieza es (Fascia, Puerta, Cofre, etc.).
+Se te proporcionan varias imágenes de un mismo vehículo.
+
+Agrupa las imágenes que correspondan a la misma pieza.
+
+Identifica si hay piezas distintas (ej: Imagen 1 y 2 son Fascia, Imagen 3 es Puerta).
+
+Genera un inventario de daños único. Si una pieza tiene varias fotos, usa el ángulo que muestre mayor severidad para determinar el precio.
+
+Devuelve un array de objetos: [{ pieza, severidad, descripcion, urls_asociadas }].
 
 Clasifica la severidad EXACTAMENTE en una de estas categorías: DL (Leve), DML (Medio-Leve), DM (Medio), DMF (Medio-Fuerte), DF (Fuerte), DMFuerte (Muy Fuerte).
 
-Devuelve un JSON con: { pieza, severidad, descripcionTecnica, justificacion }.
 Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es estructural (DF/DMFuerte).`;
 
-    const userSchemaHint = `Responde ÚNICAMENTE con un objeto JSON válido (sin markdown) usando exactamente estas claves en minúsculas:
-- "pieza": string, nombre de la pieza principal (ej. Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo).
-- "severidad": string, EXACTAMENTE uno de: DL, DML, DM, DMF, DF, DMFuerte (código tal cual, sin espacios ni texto extra).
-- "descripcionTecnica": string en español, observaciones técnicas visibles en la foto.
-- "justificacion": string en español que explique por qué elegiste esa severidad (incluye si hubo ambigüedad por reflejos o ángulo).`;
+    const userSchemaHint = `Responde ÚNICAMENTE con un objeto JSON válido (sin markdown) con esta estructura exacta:
+{ "items": [ ... ] }
+donde cada elemento de "items" tiene estas claves:
+- "pieza": string, nombre de la pieza (ej. Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo).
+- "severidad": string, EXACTAMENTE uno de: DL, DML, DM, DMF, DF, DMFuerte (código tal cual).
+- "descripcion": string en español, observaciones técnicas visibles (consolidadas por pieza si hay varias fotos).
+- "urls_asociadas": array de strings; deben ser exactamente URLs que te fueron enviadas en este mensaje, las que correspondan a esa pieza.
+
+Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la segunda Imagen 2, etc.`;
+
+    const intro = urls
+      .map((_, i) => `Imagen ${i + 1}: posición ${i + 1} en el bloque de imágenes`)
+      .join('; ');
+
+    const imageParts = urls.map((url) => ({
+      type: 'image_url' as const,
+      image_url: { url, detail: 'high' as const },
+    }));
 
     const completion = await this.openai.chat.completions.create({
       model: 'gpt-4o',
@@ -336,16 +513,13 @@ Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es est
           content: [
             {
               type: 'text',
-              text: `${userSchemaHint}\n\nAnaliza esta imagen del vehículo.`,
+              text: `${userSchemaHint}\n\n${intro}\n\nURLs en orden (debes copiarlas literalmente en urls_asociadas cuando correspondan):\n${urls.map((u, i) => `${i + 1}. ${u}`).join('\n')}`,
             },
-            {
-              type: 'image_url',
-              image_url: { url: imageUrl, detail: 'high' },
-            },
+            ...imageParts,
           ],
         },
       ],
-      max_tokens: 1200,
+      max_tokens: 3000,
     });
 
     const text = completion.choices[0]?.message?.content?.trim();
@@ -358,7 +532,7 @@ Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es est
     } catch {
       throw new Error('Respuesta de OpenAI no es JSON válido');
     }
-    return normalizeDamageAnalysisJson(parsed);
+    return normalizeDamageInventoryJson(parsed);
   }
 
   /**
@@ -367,33 +541,57 @@ Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es est
    */
   generateDraftQuote(analysis: VehicleDamageAnalysis): DraftQuote {
     const lines: DraftQuoteLine[] = [];
-    const partes =
-      analysis.partesAfectadas?.length > 0
-        ? analysis.partesAfectadas
-        : analysis.pieza
-          ? [analysis.pieza]
-          : ['Estetica Exterior'];
+    let resolvedLevel: DamageLevel;
 
-    const resolvedLevel = coerceDamageLevelCode(
-      analysis.severidad || analysis.severidadDelDano,
-    );
+    if (analysis.inventory?.length) {
+      resolvedLevel = pickWorstDamageLevel(
+        analysis.inventory.map((i) => i.severidad),
+      );
+      const grouped = matrixInventoryMaxLines(
+        analysis.inventory.map((i) => ({
+          pieza: i.pieza,
+          severidad: i.severidad,
+        })),
+      );
+      for (const g of grouped) {
+        if (g.unitPrice <= 0) continue;
+        lines.push({
+          priceItemId: `matrix:${g.canonical}:${g.damageLevel}`,
+          description: `${g.canonical} — nivel ${g.damageLevel} (matriz; mayor costo entre filas de esta pieza)`,
+          quantity: 1,
+          unitPrice: g.unitPrice,
+          subtotal: g.unitPrice,
+        });
+      }
+    } else {
+      const partes =
+        analysis.partesAfectadas?.length > 0
+          ? analysis.partesAfectadas
+          : analysis.pieza
+            ? [analysis.pieza]
+            : ['Estetica Exterior'];
 
-    const seen = new Set<string>();
-    for (const parteRaw of partes) {
-      const canonical = matchPiezaFromAnalysis(parteRaw);
-      if (!canonical) continue;
-      const key = `${canonical}|${resolvedLevel}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const unit = calculateEstimate(canonical, resolvedLevel);
-      if (unit <= 0) continue;
-      lines.push({
-        priceItemId: `matrix:${canonical}:${resolvedLevel}`,
-        description: `${canonical} — nivel ${resolvedLevel} (según matriz de referencia)`,
-        quantity: 1,
-        unitPrice: unit,
-        subtotal: unit,
-      });
+      resolvedLevel = coerceDamageLevelCode(
+        analysis.severidad || analysis.severidadDelDano,
+      );
+
+      const seen = new Set<string>();
+      for (const parteRaw of partes) {
+        const canonical = matchPiezaFromAnalysis(parteRaw);
+        if (!canonical) continue;
+        const key = `${canonical}|${resolvedLevel}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const unit = calculateEstimate(canonical, resolvedLevel);
+        if (unit <= 0) continue;
+        lines.push({
+          priceItemId: `matrix:${canonical}:${resolvedLevel}`,
+          description: `${canonical} — nivel ${resolvedLevel} (según matriz de referencia)`,
+          quantity: 1,
+          unitPrice: unit,
+          subtotal: unit,
+        });
+      }
     }
 
     if (lines.length === 0) {
@@ -421,6 +619,37 @@ Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es est
       )
       .join('\n');
 
+    const resumenBlock =
+      analysis.inventory?.length && analysis.inventory.length > 0
+        ? [
+            'Resumen pericial (automático) — inventario multi-imagen:',
+            ...analysis.inventory.map((it, i) => {
+              const code = coerceDamageLevelCode(it.severidad);
+              const urlsLine =
+                it.urls_asociadas?.length > 0
+                  ? it.urls_asociadas.join('\n   ')
+                  : '(sin URLs listadas por el modelo)';
+              return [
+                `${i + 1}. Pieza: ${it.pieza} — severidad ${code}`,
+                `   Descripción: ${it.descripcion}`,
+                `   URLs asociadas:\n   ${urlsLine}`,
+              ].join('\n');
+            }),
+            '',
+            `- Severidad global máxima entre piezas: ${resolvedLevel}`,
+            `- Partes / zonas: ${analysis.partesAfectadas.length ? analysis.partesAfectadas.join(', ') : 'no detalladas'}`,
+            `- Justificación / reglas: ${analysis.justificacion}`,
+          ]
+        : [
+            'Resumen pericial (automático):',
+            `- Pieza identificada: ${analysis.pieza}`,
+            `- Severidad (código AutoFix): ${analysis.severidad}`,
+            `- Nivel aplicado en matriz de precios: ${resolvedLevel}`,
+            `- Partes / zonas: ${analysis.partesAfectadas.length ? analysis.partesAfectadas.join(', ') : 'no detalladas'}`,
+            `- Descripción técnica: ${analysis.descripcionTecnica}`,
+            `- Justificación del perito: ${analysis.justificacion}`,
+          ];
+
     const formalNarrative = [
       'Estimado cliente,',
       '',
@@ -428,13 +657,7 @@ Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es est
       '',
       'Estado del documento: PENDIENTE DE APROBACIÓN (PENDING_APPROVAL). Los importes, tiempos y alcances definitivos requieren inspección física en planta y autorización expresa de un asesor.',
       '',
-      'Resumen pericial (automático):',
-      `- Pieza identificada: ${analysis.pieza}`,
-      `- Severidad (código AutoFix): ${analysis.severidad}`,
-      `- Nivel aplicado en matriz de precios: ${resolvedLevel}`,
-      `- Partes / zonas: ${analysis.partesAfectadas.length ? analysis.partesAfectadas.join(', ') : 'no detalladas'}`,
-      `- Descripción técnica: ${analysis.descripcionTecnica}`,
-      `- Justificación del perito: ${analysis.justificacion}`,
+      ...resumenBlock,
       '',
       'Detalle económico propuesto (antes de impuestos):',
       lineText,
@@ -462,6 +685,9 @@ Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es est
         severidadDelDano: analysis.severidadDelDano,
         descripcionTecnica: analysis.descripcionTecnica,
         justificacion: analysis.justificacion,
+        ...(analysis.inventory?.length
+          ? { inventory: analysis.inventory }
+          : {}),
       },
     };
   }
@@ -474,14 +700,17 @@ Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es est
     conversationId: string,
     imageUrl: string,
   ): Promise<void> {
-    const analysis = await this.analyzeDamageImage(imageUrl);
+    const imageUrls = [imageUrl];
+    const inventory = await this.analyzeDamageImage(imageUrls);
+    const analysis = inventoryItemsToVehicleAnalysis(inventory, imageUrls);
     const estimateAmount = this.computePrimaryMatrixEstimate(analysis);
     const draftQuoteDoc = this.generateDraftQuote(analysis);
 
     const row = this.draftQuoteRepository.create({
       conversationId,
       messageId,
-      imageUrl,
+      imageUrl:
+        imageUrls.length === 1 ? imageUrls[0] : JSON.stringify(imageUrls),
       damageAnalysis: analysis,
       estimateAmount,
       quotePayload: draftQuoteDoc,
@@ -509,6 +738,256 @@ Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es est
       where: { conversationId },
       order: { createdAt: 'DESC' },
     });
+  }
+
+  /**
+   * Actualiza pieza / severidad / precio final de un borrador, recalcula totales y persiste.
+   */
+  async patchDraftQuote(id: string, body: PatchDraftQuoteBody): Promise<DraftQuoteEntity> {
+    const row = await this.draftQuoteRepository.findOne({ where: { id } });
+    if (!row) {
+      throw new NotFoundException(`DraftQuote no encontrada: ${id}`);
+    }
+
+    const hasMulti =
+      Array.isArray(body.inventoryLines) && body.inventoryLines.length > 0;
+
+    const hasAny =
+      body.pieza !== undefined ||
+      body.severidad !== undefined ||
+      body.precioFinal !== undefined ||
+      hasMulti;
+    if (!hasAny) {
+      throw new BadRequestException(
+        'Envía al menos uno de: pieza, severidad, precioFinal, inventoryLines',
+      );
+    }
+
+    if (
+      body.precioFinal !== undefined &&
+      (typeof body.precioFinal !== 'number' ||
+        !Number.isFinite(body.precioFinal) ||
+        body.precioFinal < 0)
+    ) {
+      throw new BadRequestException('precioFinal debe ser un número >= 0');
+    }
+
+    if (hasMulti) {
+      const prevInv = row.damageAnalysis.inventory ?? [];
+      const linesDto = body.inventoryLines!;
+      for (let i = 0; i < linesDto.length; i++) {
+        const L = linesDto[i];
+        if (!L || typeof L.pieza !== 'string' || !String(L.pieza).trim()) {
+          throw new BadRequestException(
+            `inventoryLines[${i}]: pieza es obligatoria`,
+          );
+        }
+        if (L.severidad == null || String(L.severidad).trim() === '') {
+          throw new BadRequestException(
+            `inventoryLines[${i}]: severidad es obligatoria`,
+          );
+        }
+        const pm = Number(L.precioMx);
+        if (!Number.isFinite(pm) || pm < 0) {
+          throw new BadRequestException(
+            `inventoryLines[${i}]: precioMx debe ser un número >= 0`,
+          );
+        }
+      }
+
+      const items: DamageInventoryItem[] = linesDto.map((L, i) => {
+        const prev = prevInv[i];
+        return {
+          pieza: String(L.pieza).trim(),
+          severidad: String(L.severidad).trim(),
+          descripcion:
+            typeof L.descripcion === 'string' && L.descripcion.trim()
+              ? L.descripcion.trim()
+              : (prev?.descripcion ?? 'Sin descripción.'),
+          urls_asociadas:
+            Array.isArray(L.urls_asociadas) && L.urls_asociadas.length > 0
+              ? L.urls_asociadas.map(String).filter(Boolean)
+              : Array.isArray(prev?.urls_asociadas)
+                ? [...prev.urls_asociadas]
+                : [],
+        };
+      });
+
+      const flatUrls = items.flatMap((it) => it.urls_asociadas);
+      const fallbackUrls = parseDraftImageUrls(row.imageUrl);
+      const sourceUrls = flatUrls.length > 0 ? flatUrls : fallbackUrls;
+
+      const analysisMerged = inventoryItemsToVehicleAnalysis(
+        items,
+        sourceUrls.length ? sourceUrls : fallbackUrls,
+      );
+
+      const manualLines: DraftQuoteLine[] = linesDto.map((L, idx) => {
+        const u = Math.round(Number(L.precioMx));
+        const canonical =
+          matchPiezaFromAnalysis(String(L.pieza).trim()) ??
+          String(L.pieza).trim();
+        const lev = coerceDamageLevelCode(String(L.severidad));
+        return {
+          priceItemId: `panel:${idx}:${canonical}:${lev}`,
+          description: `${canonical} — nivel ${lev} (panel)`,
+          quantity: 1,
+          unitPrice: u,
+          subtotal: u,
+        };
+      });
+      const total = manualLines.reduce((acc, l) => acc + l.subtotal, 0);
+      const estimateAmount = total;
+
+      let quotePayload = this.generateDraftQuote(analysisMerged);
+      quotePayload = {
+        ...quotePayload,
+        reference: row.quotePayload.reference,
+        generatedAt: row.quotePayload.generatedAt,
+        lines: manualLines,
+        subtotal: total,
+        total,
+        analysisBasis: {
+          ...quotePayload.analysisBasis,
+          pieza: analysisMerged.pieza,
+          severidad: analysisMerged.severidad,
+          partesAfectadas: [...analysisMerged.partesAfectadas],
+          severidadDelDano: analysisMerged.severidadDelDano,
+          descripcionTecnica: analysisMerged.descripcionTecnica,
+          justificacion: analysisMerged.justificacion,
+          inventory: items,
+        },
+      };
+
+      const marker = 'Detalle económico propuesto';
+      const lineText = manualLines
+        .map(
+          (l, i) =>
+            `${i + 1}. ${l.description} — ${l.quantity} × ${formatAutoFixMoney(l.unitPrice)} = ${formatAutoFixMoney(l.subtotal)}`,
+        )
+        .join('\n');
+      const idxM = quotePayload.formalNarrative.indexOf(marker);
+      const head =
+        idxM >= 0
+          ? quotePayload.formalNarrative.slice(0, idxM).trimEnd()
+          : quotePayload.formalNarrative;
+      quotePayload = {
+        ...quotePayload,
+        formalNarrative: [
+          head,
+          '',
+          marker + ' (antes de impuestos):',
+          lineText,
+          '',
+          `Subtotal propuesto: ${formatAutoFixMoney(total)} ${AUTO_FIX_CURRENCY}.`,
+          `Referencia interna: ${quotePayload.reference}. Fecha de emisión (UTC): ${quotePayload.generatedAt}.`,
+          '',
+          'Atentamente,',
+          'Área de cotizaciones — Taller (borrador automático)',
+        ].join('\n'),
+      };
+
+      row.damageAnalysis = analysisMerged;
+      row.estimateAmount = estimateAmount;
+      row.quotePayload = quotePayload;
+
+      const saved = await this.draftQuoteRepository.save(row);
+
+      if (row.messageId) {
+        await this.messageRepository.update(
+          { id: row.messageId },
+          { damageAnalysis: analysisMerged, draftQuote: quotePayload },
+        );
+      }
+
+      return saved;
+    }
+
+    const analysis: VehicleDamageAnalysis = {
+      ...row.damageAnalysis,
+      partesAfectadas: [...(row.damageAnalysis.partesAfectadas ?? [])],
+    };
+
+    if (body.pieza !== undefined) {
+      const p = String(body.pieza).trim();
+      if (!p) throw new BadRequestException('pieza no puede estar vacía');
+      analysis.pieza = p;
+      analysis.partesAfectadas = [p, ...analysis.partesAfectadas.filter((x) => x !== p)];
+    }
+
+    if (body.severidad !== undefined) {
+      const s = coerceDamageLevelCode(String(body.severidad));
+      analysis.severidad = s;
+      analysis.severidadDelDano = s;
+    }
+
+    let estimateAmount = this.computePrimaryMatrixEstimate(analysis);
+    let quotePayload = this.generateDraftQuote(analysis);
+    quotePayload = {
+      ...quotePayload,
+      reference: row.quotePayload.reference,
+      generatedAt: row.quotePayload.generatedAt,
+    };
+
+    if (body.precioFinal !== undefined) {
+      const total = Math.round(body.precioFinal);
+      estimateAmount = total;
+      const lineText = `1. Importe acordado (ajuste manual) — 1 × ${formatAutoFixMoney(total)} = ${formatAutoFixMoney(total)}`;
+      const marker = 'Detalle económico propuesto';
+      const idx = quotePayload.formalNarrative.indexOf(marker);
+      const head =
+        idx >= 0
+          ? quotePayload.formalNarrative.slice(0, idx).trimEnd()
+          : quotePayload.formalNarrative;
+      quotePayload = {
+        ...quotePayload,
+        lines: [
+          {
+            priceItemId: 'manual:precio-final',
+            description: 'Total ajustado manualmente (PATCH)',
+            quantity: 1,
+            unitPrice: total,
+            subtotal: total,
+          },
+        ],
+        subtotal: total,
+        total,
+        formalNarrative: [
+          head,
+          '',
+          marker + ' (antes de impuestos):',
+          lineText,
+          '',
+          `Subtotal propuesto: ${formatAutoFixMoney(total)} ${AUTO_FIX_CURRENCY}.`,
+          `Referencia interna: ${quotePayload.reference}. Fecha de emisión (UTC): ${quotePayload.generatedAt}.`,
+          '',
+          'Atentamente,',
+          'Área de cotizaciones — Taller (borrador automático)',
+        ].join('\n'),
+        analysisBasis: {
+          ...quotePayload.analysisBasis,
+          pieza: analysis.pieza,
+          severidad: analysis.severidad,
+          partesAfectadas: [...analysis.partesAfectadas],
+          severidadDelDano: analysis.severidadDelDano,
+        },
+      };
+    }
+
+    row.damageAnalysis = analysis;
+    row.estimateAmount = estimateAmount;
+    row.quotePayload = quotePayload;
+
+    const saved = await this.draftQuoteRepository.save(row);
+
+    if (row.messageId) {
+      await this.messageRepository.update(
+        { id: row.messageId },
+        { damageAnalysis: analysis, draftQuote: quotePayload },
+      );
+    }
+
+    return saved;
   }
 
   // --- OPTIMIZACIÓN DE CARGA ---

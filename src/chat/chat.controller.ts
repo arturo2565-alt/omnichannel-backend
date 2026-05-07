@@ -1,7 +1,8 @@
 import { 
   Controller, 
   Get, 
-  Post, 
+  Post,
+  Patch,
   Body, 
   Query, 
   Param, 
@@ -12,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
+import type { PatchDraftQuoteBody } from './chat.service';
 
 @Controller('webhook') 
 export class ChatController {
@@ -79,5 +81,13 @@ export class ChatController {
   async getSuggestion(@Param('id') id: string) {
     const suggestion = await this.chatService.getManualAiSuggestion(id);
     return { suggestion };
+  }
+
+  @Patch('quote/:id')
+  async patchDraftQuote(
+    @Param('id') id: string,
+    @Body() body: PatchDraftQuoteBody,
+  ) {
+    return await this.chatService.patchDraftQuote(id, body);
   }
 }

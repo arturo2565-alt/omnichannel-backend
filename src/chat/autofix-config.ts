@@ -176,15 +176,21 @@ export type CalculateEstimateOptions = {
   descripcionTecnica?: string;
 };
 
-/**
- * Precio exacto de la matriz para una pieza y un nivel de daño.
- * Si no hay coincidencia de pieza o nivel, devuelve 0 (por defecto) o lanza error si `onMissing: 'throw'`.
- */
-export function calculateEstimate(
+function damageLevelRank(level: DamageLevel): number {
+  const i = DAMAGE_LEVEL_KEYS.indexOf(level);
+  return i >= 0 ? i : 0;
+}
+
+export type PiezaSeveridadMatrizInput = {
+  pieza: string;
+  severidad: string;
+};
+
+function matrixAmountForPair(
   pieza: string,
   severidad: string,
   options?: CalculateEstimateOptions,
-): number {
+): { amount: number; level: DamageLevel | null; row: PiezaPriceRow | null } {
   const onMissing = options?.onMissing ?? 'zero';
   const row = findPiezaRow(pieza);
   const level = resolveDamageLevelFromText(
@@ -202,7 +208,7 @@ export function calculateEstimate(
         severidad,
       );
     }
-    return 0;
+    return { amount: 0, level, row };
   }
 
   const amount = row[level];
@@ -214,9 +220,86 @@ export function calculateEstimate(
         severidad,
       );
     }
-    return 0;
+    return { amount: 0, level, row };
   }
-  return amount;
+  return { amount, level, row };
+}
+
+/**
+ * Agrupa por pieza canónica en la matriz: suma una vez por pieza distinta usando
+ * el mayor precio entre filas de esa pieza (criterio preventivo). Sirve para alinear
+ * líneas de cotización con el total de `calculateEstimate(items)`.
+ */
+export function matrixInventoryMaxLines(
+  items: ReadonlyArray<PiezaSeveridadMatrizInput>,
+  options?: CalculateEstimateOptions,
+): { canonical: string; unitPrice: number; damageLevel: DamageLevel }[] {
+  type Best = { price: number; level: DamageLevel };
+  const byCanonical = new Map<string, Best>();
+
+  for (const it of items) {
+    const { amount, level, row } = matrixAmountForPair(
+      it.pieza,
+      it.severidad,
+      options,
+    );
+    if (!row || !level || amount <= 0) continue;
+
+    const canonical = row.pieza;
+    const cur = byCanonical.get(canonical);
+    if (!cur || amount > cur.price) {
+      byCanonical.set(canonical, { price: amount, level });
+    } else if (amount === cur.price) {
+      if (damageLevelRank(level) > damageLevelRank(cur.level)) {
+        byCanonical.set(canonical, { price: amount, level });
+      }
+    }
+  }
+
+  return [...byCanonical.entries()].map(([canonical, b]) => ({
+    canonical,
+    unitPrice: b.price,
+    damageLevel: b.level,
+  }));
+}
+
+/**
+ * Precio de matriz para una pieza y severidad, **o** total multi-pieza:
+ * - Una fila `{ pieza, severidad }` por detección de la IA.
+ * - **Piezas distintas** (canónico distinto en matriz): se **suman** los importes.
+ * - **Misma pieza** varias veces: se cuenta **una sola vez** el **mayor** importe (criterio preventivo).
+ */
+export function calculateEstimate(
+  pieza: string,
+  severidad: string,
+  options?: CalculateEstimateOptions,
+): number;
+export function calculateEstimate(
+  items: ReadonlyArray<PiezaSeveridadMatrizInput>,
+  options?: CalculateEstimateOptions,
+): number;
+export function calculateEstimate(
+  piezaOrItems: string | ReadonlyArray<PiezaSeveridadMatrizInput>,
+  severidadOrOptions?: string | CalculateEstimateOptions,
+  options?: CalculateEstimateOptions,
+): number {
+  if (typeof piezaOrItems !== 'string') {
+    const opts =
+      severidadOrOptions !== undefined &&
+      typeof severidadOrOptions === 'object' &&
+      !Array.isArray(severidadOrOptions)
+        ? (severidadOrOptions as CalculateEstimateOptions)
+        : undefined;
+    return matrixInventoryMaxLines(piezaOrItems, opts).reduce(
+      (acc, l) => acc + l.unitPrice,
+      0,
+    );
+  }
+
+  const pieza = piezaOrItems;
+  const severidad =
+    typeof severidadOrOptions === 'string' ? severidadOrOptions : '';
+  return matrixAmountForPair(pieza, severidad, options).amount;
 }
 
 export function formatAutoFixMoney(amount: number): string {
@@ -255,5 +338,11 @@ export interface DraftQuote {
     severidadDelDano: string;
     descripcionTecnica: string;
     justificacion: string;
+    inventory?: {
+      pieza: string;
+      severidad: string;
+      descripcion: string;
+      urls_asociadas: string[];
+    }[];
   };
 }
