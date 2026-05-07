@@ -2,13 +2,19 @@ import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, Jo
 import { Conversation } from './conversation.entity';
 import type { DraftQuote } from '../autofix-config';
 
-/** Una fila del inventario multi-imagen (misma pieza puede agrupar varias URLs). */
-export interface DamageInventoryItem {
+/**
+ * Daño único dentro del resultado de visión IA (analiza grupo de fotos sesión/conversación).
+ * `urls_origen`: URLs de entrada que evidencian este daño / pieza.
+ */
+export interface DetectedDamageItem {
   pieza: string;
   severidad: string;
-  descripcion: string;
-  urls_asociadas: string[];
+  descripcionTecnica: string;
+  urls_origen: string[];
 }
+
+/** @deprecated usar DetectedDamageItem (descripcion → descripcionTecnica, urls_asociadas → urls_origen). */
+export type DamageInventoryItem = DetectedDamageItem;
 
 /** Resultado agregado del peritaje + cotización (AutoFix / gpt-4o). */
 export interface VehicleDamageAnalysis {
@@ -22,8 +28,8 @@ export interface VehicleDamageAnalysis {
   partesAfectadas: string[];
   /** Etiqueta legible o mismo código que `severidad` (compatibilidad) */
   severidadDelDano: string;
-  /** Si hubo varias imágenes, desglose por pieza con URLs asociadas. */
-  inventory?: DamageInventoryItem[];
+  /** Daños consolidados sobre el grupo de imágenes de la sesión. */
+  inventory?: DetectedDamageItem[];
 }
 
 @Entity()

@@ -341,8 +341,8 @@ export interface DraftQuote {
     inventory?: {
       pieza: string;
       severidad: string;
-      descripcion: string;
-      urls_asociadas: string[];
+      descripcionTecnica: string;
+      urls_origen: string[];
     }[];
   };
 }

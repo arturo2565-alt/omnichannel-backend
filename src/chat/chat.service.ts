@@ -3,12 +3,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
 import {
-  DamageInventoryItem,
+  DetectedDamageItem,
   Message,
   VehicleDamageAnalysis,
 } from './entities/chat.entity';
 import { Conversation } from './entities/conversation.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
+import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { ChatGateway } from './chat.gateway';
 import { OpenAI } from 'openai';
 import { v2 as cloudinary } from 'cloudinary';
@@ -121,62 +122,66 @@ function pickWorstDamageLevel(levels: string[]): DamageLevel {
   return worst;
 }
 
-function normalizeDamageInventoryJson(raw: unknown): DamageInventoryItem[] {
+function normalizeDetectedDamagesJson(raw: unknown): DetectedDamageItem[] {
   const o =
     raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const direct = Array.isArray(raw) ? raw : null;
   const arr =
     (Array.isArray(o['items']) ? o['items'] : null) ??
+    (Array.isArray(o['detectedDamages']) ? o['detectedDamages'] : null) ??
     (Array.isArray(o['resultado']) ? o['resultado'] : null) ??
     direct;
   if (!Array.isArray(arr)) {
     throw new Error(
-      'Se esperaba un JSON con la clave "items" (array de objetos con pieza, severidad, descripcion, urls_asociadas)',
+      'Se esperaba JSON con la clave "items" u otro array de daños ({ pieza, severidad, descripcionTecnica, urls_origen })',
     );
   }
-  const out: DamageInventoryItem[] = [];
+  const out: DetectedDamageItem[] = [];
   for (const el of arr) {
     if (!el || typeof el !== 'object') continue;
     const r = el as Record<string, unknown>;
     const pieza = typeof r['pieza'] === 'string' ? r['pieza'].trim() : '';
     const severidad =
       typeof r['severidad'] === 'string' ? r['severidad'].trim() : '';
-    const descripcion =
-      typeof r['descripcion'] === 'string'
-        ? r['descripcion'].trim()
-        : typeof r['descripcionTecnica'] === 'string'
-          ? String(r['descripcionTecnica']).trim()
+    const descripcionTecnica =
+      typeof r['descripcionTecnica'] === 'string'
+        ? r['descripcionTecnica'].trim()
+        : typeof r['descripcion'] === 'string'
+          ? String(r['descripcion']).trim()
           : '';
-    let urls_asociadas: string[] = [];
-    const u = r['urls_asociadas'];
-    if (Array.isArray(u)) {
-      urls_asociadas = u.map((x) => String(x).trim()).filter(Boolean);
-    }
+    const u =
+      Array.isArray(r['urls_origen'])
+        ? r['urls_origen']
+        : Array.isArray(r['urls_asociadas'])
+          ? r['urls_asociadas']
+          : [];
+    let urls_origen = u.map((x) => String(x).trim()).filter(Boolean);
     if (!pieza || !severidad) continue;
     out.push({
       pieza,
       severidad,
-      descripcion: descripcion || 'Sin descripción.',
-      urls_asociadas,
+      descripcionTecnica:
+        descripcionTecnica || 'Sin descripción técnica disponible.',
+      urls_origen,
     });
   }
   if (!out.length) {
     throw new Error(
-      'El inventario ("items") está vacío o no tiene filas con pieza y severidad válidas',
+      'El array de daños detectados está vacío o sin filas con pieza y severidad válidas',
     );
   }
   return out;
 }
 
 function inventoryItemsToVehicleAnalysis(
-  items: DamageInventoryItem[],
+  items: DetectedDamageItem[],
   sourceUrls: string[],
 ): VehicleDamageAnalysis {
-  const inv: DamageInventoryItem[] = items.map((it) => ({
+  const inv: DetectedDamageItem[] = items.map((it) => ({
     pieza: it.pieza,
     severidad: it.severidad,
-    descripcion: it.descripcion,
-    urls_asociadas: [...(it.urls_asociadas ?? [])],
+    descripcionTecnica: it.descripcionTecnica,
+    urls_origen: [...(it.urls_origen ?? [])],
   }));
   const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
   const worst = pickWorstDamageLevel(inv.map((i) => i.severidad));
@@ -189,10 +194,10 @@ function inventoryItemsToVehicleAnalysis(
   const desc = inv
     .map(
       (it) =>
-        `• ${it.pieza} (${coerceDamageLevelCode(it.severidad)}): ${it.descripcion}`,
+        `• ${it.pieza} (${coerceDamageLevelCode(it.severidad)}): ${it.descripcionTecnica}`,
     )
     .join('\n');
-  const just = `Inventario unificado de ${inv.length} registro(s) de daño. Regla: por pieza se tomó la mayor severidad entre las fotos asociadas. Imágenes de entrada: ${sourceUrls.length}.`;
+  const just = `Inventario unificado (${inv.length} daño(s) detectado(s) en el grupo de imágenes de la sesión). Las piezas repetidas entre fotos se consolidan tomando la severidad más alta. Imágenes analizadas: ${sourceUrls.length}.`;
 
   return {
     pieza: piezaLabel,
@@ -224,7 +229,11 @@ export interface PatchInventoryLineDto {
   pieza: string;
   severidad: string;
   precioMx: number;
+  /** @deprecated usar descripcionTecnica */
   descripcion?: string;
+  descripcionTecnica?: string;
+  urls_origen?: string[];
+  /** @deprecated usar urls_origen */
   urls_asociadas?: string[];
 }
 
@@ -251,11 +260,149 @@ export class ChatService {
     @InjectRepository(DraftQuoteEntity)
     private readonly draftQuoteRepository: Repository<DraftQuoteEntity>,
 
+    @InjectRepository(DraftQuoteItem)
+    private readonly draftQuoteItemRepository: Repository<DraftQuoteItem>,
+
     private readonly chatGateway: ChatGateway,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
     });
+  }
+
+  /**
+   * Persiste líneas relacionales alineadas con `draftQuote.quotePayload.lines` y el inventario/análisis.
+   */
+  private buildDraftQuoteLineRowsForPersist(
+    analysis: VehicleDamageAnalysis,
+    doc: DraftQuote,
+    fallbackUrls: string[],
+  ): Omit<DraftQuoteItem, 'id' | 'draftQuote' | 'draftQuoteId'>[] {
+    const lines = doc.lines ?? [];
+    if (!lines.length) return [];
+
+    const inv = analysis.inventory ?? [];
+
+    if (inv.length > 0 && inv.length === lines.length) {
+      return lines.map((line, idx) => {
+        const row = inv[idx];
+        const canonical =
+          matchPiezaFromAnalysis(row.pieza.trim()) ??
+          row.pieza.trim();
+        return {
+          sortOrder: idx,
+          pieza: canonical,
+          severidad: coerceDamageLevelCode(row.severidad),
+          precioMx: Math.round(
+            Number(line.subtotal ?? line.unitPrice ?? 0),
+          ),
+          descripcionTecnica: row.descripcionTecnica ?? null,
+          urlsOrigen:
+            Array.isArray(row.urls_origen) && row.urls_origen.length > 0
+              ? [...row.urls_origen]
+              : null,
+        };
+      });
+    }
+
+    if (inv.length > 0 && lines.length === 1) {
+      const line0only = lines[0];
+      return [
+        {
+          sortOrder: 0,
+          pieza: analysis.pieza || 'Estetica Exterior',
+          severidad: coerceDamageLevelCode(
+            analysis.severidad || analysis.severidadDelDano,
+          ),
+          precioMx: Math.round(
+            Number(line0only.subtotal ?? line0only.unitPrice ?? 0),
+          ),
+          descripcionTecnica: analysis.descripcionTecnica ?? null,
+          urlsOrigen: fallbackUrls.length > 0 ? [...fallbackUrls] : null,
+        },
+      ];
+    }
+
+    if (inv.length > 0) {
+      const grouped = matrixInventoryMaxLines(
+        inv.map((it) => ({
+          pieza: it.pieza,
+          severidad: it.severidad,
+        })),
+      );
+      const out: Omit<DraftQuoteItem, 'id' | 'draftQuote' | 'draftQuoteId'>[] = [];
+      for (let idx = 0; idx < grouped.length; idx++) {
+        const g = grouped[idx];
+        const line = lines[idx];
+        const related = inv.filter(
+          (it) => matchPiezaFromAnalysis(it.pieza) === g.canonical,
+        );
+        const descParts = [...new Set(related.map((r) => r.descripcionTecnica))]
+          .filter(Boolean)
+          .join(' | ');
+        const urlsSet = [...new Set(related.flatMap((r) => r.urls_origen ?? []))];
+        const price = Math.round(
+          Number(line?.subtotal ?? line?.unitPrice ?? g.unitPrice ?? 0),
+        );
+        out.push({
+          sortOrder: idx,
+          pieza: g.canonical,
+          severidad: g.damageLevel,
+          precioMx: price,
+          descripcionTecnica: descParts ? descParts.slice(0, 16000) : null,
+          urlsOrigen: urlsSet.length > 0 ? urlsSet : null,
+        });
+      }
+      return out;
+    }
+
+    const line0 = lines[0];
+    return [
+      {
+        sortOrder: 0,
+        pieza: analysis.pieza || 'Estetica Exterior',
+        severidad: coerceDamageLevelCode(
+          analysis.severidad || analysis.severidadDelDano,
+        ),
+        precioMx: Math.round(
+          Number(
+            line0.subtotal ?? line0.unitPrice ?? doc.total ?? doc.subtotal ?? 0,
+          ),
+        ),
+        descripcionTecnica: analysis.descripcionTecnica ?? null,
+        urlsOrigen: fallbackUrls.length > 0 ? [...fallbackUrls] : null,
+      },
+    ];
+  }
+
+  private async syncDraftQuoteLineItems(
+    draftQuoteId: string,
+    analysis: VehicleDamageAnalysis,
+    doc: DraftQuote,
+    fallbackUrls: string[],
+  ): Promise<void> {
+    await this.draftQuoteItemRepository.delete({ draftQuoteId });
+    const rows = this.buildDraftQuoteLineRowsForPersist(
+      analysis,
+      doc,
+      fallbackUrls,
+    );
+    if (!rows.length) return;
+    await this.draftQuoteItemRepository.insert(
+      rows.map((r) => ({ ...r, draftQuoteId })),
+    );
+  }
+
+  private async loadDraftQuoteWithItemsOrThrow(id: string): Promise<DraftQuoteEntity> {
+    const row = await this.draftQuoteRepository.findOne({
+      where: { id },
+      relations: { items: true },
+    });
+    if (!row) {
+      throw new NotFoundException(`DraftQuote no encontrada: ${id}`);
+    }
+    row.items?.sort((a, b) => a.sortOrder - b.sortOrder);
+    return row;
   }
 
   /**
@@ -454,12 +601,13 @@ export class ChatService {
   }
 
   /**
-   * Analiza una o varias imágenes (URLs públicas, p. ej. Cloudinary) con visión gpt-4o (perito AutoFix).
-   * Devuelve el inventario por pieza; usa {@link inventoryItemsToVehicleAnalysis} para unir a `VehicleDamageAnalysis`.
+   * Analiza el grupo completo de imágenes (sesión/conversación) con visión gpt-4o.
+   * Devuelve un array de **daños detectados**; cada elemento es único por combinación útil de evidencia visual.
+   * Usa {@link inventoryItemsToVehicleAnalysis} para unirlo a `VehicleDamageAnalysis`.
    */
   async analyzeDamageImage(
     imageUrls: string | string[],
-  ): Promise<DamageInventoryItem[]> {
+  ): Promise<DetectedDamageItem[]> {
     const urlsRaw = Array.isArray(imageUrls) ? imageUrls : [imageUrls];
     const urls = [
       ...new Set(urlsRaw.map((u) => String(u).trim()).filter(Boolean)),
@@ -468,31 +616,31 @@ export class ChatService {
       throw new Error('Se requiere al menos una URL de imagen');
     }
 
-    const systemPrompt = `Eres un perito experto de AutoFix. Tu misión es analizar fotos de golpes vehiculares.
+    const systemPrompt = `Eres un perito experto de AutoFix. Analiza un GRUPO COMPLETO de fotos del mismo vehículo (una misma sesión / conversación).
 
-Se te proporcionan varias imágenes de un mismo vehículo.
+Debes producir una lista ordenada de **daños detectados**: cada entrada es una pieza afectada (o un daño bien delimitado) con evidencia técnica y vínculos a las fotos donde se ve.
 
-Agrupa las imágenes que correspondan a la misma pieza.
+Reglas obligatorias:
+1) **Pieza repetida entre varias fotos:** si ves la misma pieza en Imagen 1, 2 y 3 (solo Fascia varias veces), reporta UN SOLO elemento "Fascia" y asigna la **severidad más alta** vista en todo el grupo.
+2) **Dos daños visibles en UNA foto:** si en una única foto se advierten dos piezas o dos zonas de daño claramente distintos (ej. Fascia golpe frontal y Salpicadera lado), reporta **dos elementos separados** en el array con sus descripciones y las URLs donde se ve cada uno (puede ser la misma URL en ambos elementos si ambos aparecen ahí).
 
-Identifica si hay piezas distintas (ej: Imagen 1 y 2 son Fascia, Imagen 3 es Puerta).
+Clasifica la severidad EXACTAMENTE como uno de: DL, DML, DM, DMF, DF, DMFuerte.
 
-Genera un inventario de daños único. Si una pieza tiene varias fotos, usa el ángulo que muestre mayor severidad para determinar el precio.
+Ten en cuenta reflejos, encuadre y líneas de cierre entre piezas. Si el daño es estructural o hay descuadre fuerte entre piezas, prioriza DF o DMFuerte según aplique.
 
-Devuelve un array de objetos: [{ pieza, severidad, descripcion, urls_asociadas }].
-
-Clasifica la severidad EXACTAMENTE en una de estas categorías: DL (Leve), DML (Medio-Leve), DM (Medio), DMF (Medio-Fuerte), DF (Fuerte), DMFuerte (Muy Fuerte).
-
-Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es estructural (DF/DMFuerte).`;
+No inventes fotos ni URLs; solo URLs que hayas recibido en el usuario.`;
 
     const userSchemaHint = `Responde ÚNICAMENTE con un objeto JSON válido (sin markdown) con esta estructura exacta:
 { "items": [ ... ] }
-donde cada elemento de "items" tiene estas claves:
-- "pieza": string, nombre de la pieza (ej. Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo).
-- "severidad": string, EXACTAMENTE uno de: DL, DML, DM, DMF, DF, DMFuerte (código tal cual).
-- "descripcion": string en español, observaciones técnicas visibles (consolidadas por pieza si hay varias fotos).
-- "urls_asociadas": array de strings; deben ser exactamente URLs que te fueron enviadas en este mensaje, las que correspondan a esa pieza.
+Cada objeto en "items" representa UN daño por pieza (consolidando varias fotos de la MISMA pieza en UN solo objeto; varias piezas en la misma foto = varios objetos).
 
-Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la segunda Imagen 2, etc.`;
+Claves de cada objeto:
+- "pieza": string (ej. Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo).
+- "severidad": EXACTAMENTE uno de DL, DML, DM, DMF, DF, DMFuerte.
+- "descripcionTecnica": string en español (observaciones técnicas; si agrupaste varias fotos, sintetiza todas).
+- "urls_origen": array de strings; copiar **literalmente** las URLs proporcionadas abajo que soportan ese daño (las que muestran mejor esa pieza/severidad).
+
+Numeración auxiliar para tu razonamiento: la primera URL listada corresponde a Imagen 1, la segunda a Imagen 2, etc.`;
 
     const intro = urls
       .map((_, i) => `Imagen ${i + 1}: posición ${i + 1} en el bloque de imágenes`)
@@ -513,7 +661,7 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
           content: [
             {
               type: 'text',
-              text: `${userSchemaHint}\n\n${intro}\n\nURLs en orden (debes copiarlas literalmente en urls_asociadas cuando correspondan):\n${urls.map((u, i) => `${i + 1}. ${u}`).join('\n')}`,
+              text: `${userSchemaHint}\n\n${intro}\n\nURLs en orden — copiar en urls_origen las que evidencien cada daño:\n${urls.map((u, i) => `${i + 1}. ${u}`).join('\n')}`,
             },
             ...imageParts,
           ],
@@ -532,7 +680,7 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
     } catch {
       throw new Error('Respuesta de OpenAI no es JSON válido');
     }
-    return normalizeDamageInventoryJson(parsed);
+    return normalizeDetectedDamagesJson(parsed);
   }
 
   /**
@@ -625,14 +773,36 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
             'Resumen pericial (automático) — inventario multi-imagen:',
             ...analysis.inventory.map((it, i) => {
               const code = coerceDamageLevelCode(it.severidad);
+              const legacyDesc = (
+                it as { descripcionTecnica?: string; descripcion?: string }
+              ).descripcion;
+              const descLine =
+                it.descripcionTecnica?.trim() ||
+                legacyDesc?.trim() ||
+                '—';
+              const urls =
+                Array.isArray(it.urls_origen) && it.urls_origen.length > 0
+                  ? it.urls_origen
+                  : Array.isArray(
+                        (it as { urls_origen?: string[]; urls_asociadas?: string[] })
+                          .urls_asociadas,
+                      )
+                    ? (
+                        (
+                          it as {
+                            urls_asociadas?: string[];
+                          }
+                        ).urls_asociadas ?? []
+                      )
+                    : [];
               const urlsLine =
-                it.urls_asociadas?.length > 0
-                  ? it.urls_asociadas.join('\n   ')
+                urls.length > 0
+                  ? urls.join('\n   ')
                   : '(sin URLs listadas por el modelo)';
               return [
                 `${i + 1}. Pieza: ${it.pieza} — severidad ${code}`,
-                `   Descripción: ${it.descripcion}`,
-                `   URLs asociadas:\n   ${urlsLine}`,
+                `   Descripción técnica: ${descLine}`,
+                `   URLs origen:\n   ${urlsLine}`,
               ].join('\n');
             }),
             '',
@@ -693,30 +863,84 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
   }
 
   /**
-   * Tras guardar mensaje con imagen en Cloudinary: peritaje IA, estimate, tabla draft_quotes, socket.
+   * Tras guardar mensaje con imagen en Cloudinary: visión IA sobre el grupo de fotos **de la sesión**
+   * (una sola fila borrador pendiente por conversación; se fusionan nuevas URLs y se re-analiza todo).
    */
   private async finalizeInboundImagePipeline(
     messageId: string,
     conversationId: string,
     imageUrl: string,
   ): Promise<void> {
-    const imageUrls = [imageUrl];
+    const existingDraft = await this.draftQuoteRepository.findOne({
+      where: { conversationId, status: 'PENDING_APPROVAL' },
+      order: { createdAt: 'DESC' },
+    });
+
+    const previousUrls = existingDraft ? parseDraftImageUrls(existingDraft.imageUrl) : [];
+    const merged = [...previousUrls.filter(Boolean), imageUrl.trim()].filter(Boolean);
+    const imageUrls = [...new Set(merged)];
+
     const inventory = await this.analyzeDamageImage(imageUrls);
     const analysis = inventoryItemsToVehicleAnalysis(inventory, imageUrls);
     const estimateAmount = this.computePrimaryMatrixEstimate(analysis);
     const draftQuoteDoc = this.generateDraftQuote(analysis);
 
+    const persistedImageUrl =
+      imageUrls.length === 1 ? imageUrls[0] : JSON.stringify(imageUrls);
+
+    if (existingDraft) {
+      const priorMessageId = existingDraft.messageId;
+      existingDraft.messageId = messageId;
+      existingDraft.imageUrl = persistedImageUrl;
+      existingDraft.damageAnalysis = analysis;
+      existingDraft.estimateAmount = estimateAmount;
+      existingDraft.quotePayload = draftQuoteDoc;
+      const savedDraft = await this.draftQuoteRepository.save(existingDraft);
+      await this.syncDraftQuoteLineItems(
+        savedDraft.id,
+        analysis,
+        draftQuoteDoc,
+        imageUrls,
+      );
+
+      if (priorMessageId && priorMessageId !== messageId) {
+        await this.messageRepository.update(
+          { id: priorMessageId },
+          { damageAnalysis: null, draftQuote: null },
+        );
+      }
+      await this.messageRepository.update(
+        { id: messageId },
+        { damageAnalysis: analysis, draftQuote: draftQuoteDoc },
+      );
+
+      this.chatGateway.emitDraftQuoteReady({
+        draftQuoteId: savedDraft.id,
+        conversationId,
+        messageId,
+        damageAnalysis: analysis,
+        draftQuote: draftQuoteDoc,
+        estimateAmount,
+      });
+      return;
+    }
+
     const row = this.draftQuoteRepository.create({
       conversationId,
       messageId,
-      imageUrl:
-        imageUrls.length === 1 ? imageUrls[0] : JSON.stringify(imageUrls),
+      imageUrl: persistedImageUrl,
       damageAnalysis: analysis,
       estimateAmount,
       quotePayload: draftQuoteDoc,
       status: 'PENDING_APPROVAL',
     });
     const savedDraft = await this.draftQuoteRepository.save(row);
+    await this.syncDraftQuoteLineItems(
+      savedDraft.id,
+      analysis,
+      draftQuoteDoc,
+      imageUrls,
+    );
 
     await this.messageRepository.update(
       { id: messageId },
@@ -734,10 +958,15 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
   }
 
   async findDraftQuotesByConversation(conversationId: string) {
-    return this.draftQuoteRepository.find({
+    const rows = await this.draftQuoteRepository.find({
       where: { conversationId },
       order: { createdAt: 'DESC' },
+      relations: { items: true },
     });
+    for (const r of rows) {
+      r.items?.sort((a, b) => a.sortOrder - b.sortOrder);
+    }
+    return rows;
   }
 
   /**
@@ -795,25 +1024,48 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
         }
       }
 
-      const items: DamageInventoryItem[] = linesDto.map((L, i) => {
-        const prev = prevInv[i];
+      const items: DetectedDamageItem[] = linesDto.map((L, i) => {
+        const prev = prevInv[i] as DetectedDamageItem & {
+          descripcion?: string;
+          urls_asociadas?: string[];
+        };
+        const descFromDto =
+          typeof L.descripcionTecnica === 'string' &&
+          L.descripcionTecnica.trim()
+            ? L.descripcionTecnica.trim()
+            : typeof L.descripcion === 'string' && L.descripcion.trim()
+              ? L.descripcion.trim()
+              : '';
+        const desc =
+          descFromDto ||
+          prev?.descripcionTecnica ||
+          prev?.descripcion ||
+          'Sin descripción técnica disponible.';
+
+        const urlsFromDtoRaw =
+          Array.isArray(L.urls_origen) && L.urls_origen.length > 0
+            ? L.urls_origen.map(String).filter(Boolean)
+            : Array.isArray(L.urls_asociadas) && L.urls_asociadas.length > 0
+              ? L.urls_asociadas.map(String).filter(Boolean)
+              : [];
+        const urlsFromPrevRaw =
+          Array.isArray(prev?.urls_origen) && prev.urls_origen.length > 0
+            ? [...prev.urls_origen]
+            : Array.isArray(prev?.urls_asociadas) && prev.urls_asociadas.length
+              ? [...prev.urls_asociadas]
+              : [];
+        const urls_origen =
+          urlsFromDtoRaw.length > 0 ? urlsFromDtoRaw : urlsFromPrevRaw;
+
         return {
           pieza: String(L.pieza).trim(),
           severidad: String(L.severidad).trim(),
-          descripcion:
-            typeof L.descripcion === 'string' && L.descripcion.trim()
-              ? L.descripcion.trim()
-              : (prev?.descripcion ?? 'Sin descripción.'),
-          urls_asociadas:
-            Array.isArray(L.urls_asociadas) && L.urls_asociadas.length > 0
-              ? L.urls_asociadas.map(String).filter(Boolean)
-              : Array.isArray(prev?.urls_asociadas)
-                ? [...prev.urls_asociadas]
-                : [],
+          descripcionTecnica: desc,
+          urls_origen,
         };
       });
 
-      const flatUrls = items.flatMap((it) => it.urls_asociadas);
+      const flatUrls = items.flatMap((it) => it.urls_origen);
       const fallbackUrls = parseDraftImageUrls(row.imageUrl);
       const sourceUrls = flatUrls.length > 0 ? flatUrls : fallbackUrls;
 
@@ -892,6 +1144,12 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
       row.quotePayload = quotePayload;
 
       const saved = await this.draftQuoteRepository.save(row);
+      await this.syncDraftQuoteLineItems(
+        saved.id,
+        analysisMerged,
+        quotePayload,
+        sourceUrls.length ? sourceUrls : parseDraftImageUrls(row.imageUrl),
+      );
 
       if (row.messageId) {
         await this.messageRepository.update(
@@ -900,7 +1158,7 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
         );
       }
 
-      return saved;
+      return this.loadDraftQuoteWithItemsOrThrow(saved.id);
     }
 
     const analysis: VehicleDamageAnalysis = {
@@ -979,6 +1237,12 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
     row.quotePayload = quotePayload;
 
     const saved = await this.draftQuoteRepository.save(row);
+    await this.syncDraftQuoteLineItems(
+      saved.id,
+      analysis,
+      quotePayload,
+      parseDraftImageUrls(row.imageUrl),
+    );
 
     if (row.messageId) {
       await this.messageRepository.update(
@@ -987,7 +1251,7 @@ Numeración para tu razonamiento: la primera imagen del usuario es Imagen 1, la 
       );
     }
 
-    return saved;
+    return this.loadDraftQuoteWithItemsOrThrow(saved.id);
   }
 
   // --- OPTIMIZACIÓN DE CARGA ---

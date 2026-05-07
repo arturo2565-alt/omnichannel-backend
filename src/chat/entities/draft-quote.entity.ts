@@ -4,12 +4,14 @@ import {
   Column,
   CreateDateColumn,
   ManyToOne,
+  OneToMany,
   JoinColumn,
 } from 'typeorm';
 import { Conversation } from './conversation.entity';
 import { Message } from './chat.entity';
 import type { VehicleDamageAnalysis } from './chat.entity';
 import type { DraftQuote as DraftQuotePayload } from '../autofix-config';
+import { DraftQuoteItem } from './draft-quote-item.entity';
 
 @Entity('draft_quotes')
 export class DraftQuoteEntity {
@@ -48,4 +50,8 @@ export class DraftQuoteEntity {
 
   @CreateDateColumn()
   createdAt: Date;
+
+  /** Líneas/piezas con precio persistente (alternativa/alineación con quotePayload.lines). */
+  @OneToMany(() => DraftQuoteItem, (item) => item.draftQuote)
+  items: DraftQuoteItem[];
 }
