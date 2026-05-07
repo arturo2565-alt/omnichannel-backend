@@ -603,10 +603,15 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * GUARDAR MENSAJE Y ACTUALIZAR CONVERSACIÓN (webhook canal → cliente).
-   * `direction` siempre inbound: así coinciden sugerencias IA, filtros de imágenes recientes y análisis.
+   * GUARDAR MENSAJE Y ACTUALIZAR CONVERSACIÓN.
+   * - Sin `direction` o distinto de `outbound` → **`inbound`** (mensajes del cliente / webhook canal).
+   * - **`outbound`** → respuestas del agente (panel / cotización / dashboard); sin análisis de imagen entrante ni sugerencias IA sobre ese mismo mensaje.
    */
   async saveMessage(data: any) {
+    const resolvedDirection =
+      String(data.direction ?? '').toLowerCase().trim() === 'outbound'
+        ? 'outbound'
+        : 'inbound';
     let conversation = await this.conversationRepository.findOne({
       where: { externalId: data.id || '123' }
     });
@@ -645,7 +650,7 @@ export class ChatService implements OnModuleDestroy {
       content: contentToSave,
       channelType: data.platform || 'test',
       senderName: data.user || 'Cliente Desconocido',
-      direction: 'inbound',
+      direction: resolvedDirection,
       externalId: data.id || '123',
       conversation: conversation,
     });
@@ -659,7 +664,11 @@ export class ChatService implements OnModuleDestroy {
       this.generateAiSuggestion(saved);
     }
 
-    if (incomingIsImage && isIncomingImage(saved.content)) {
+    if (
+      saved.direction === 'inbound' &&
+      incomingIsImage &&
+      isIncomingImage(saved.content)
+    ) {
       this.scheduleConsolidatedInboundImageAnalysis(
         conversationIdForSockets,
         saved.id,
