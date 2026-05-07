@@ -73,7 +73,10 @@ export class ChatController {
   @Post()
   @HttpCode(HttpStatus.OK)
   async receiveMessage(@Body() body: any) {
-    const saved = await this.chatService.saveMessage(body);
+    const saved = await this.chatService.saveMessage({
+      ...body,
+      direction: 'inbound',
+    });
     return { status: 'EVENT_RECEIVED', id: saved.id };
   }
 

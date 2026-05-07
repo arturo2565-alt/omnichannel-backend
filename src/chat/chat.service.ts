@@ -599,7 +599,8 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * GUARDAR MENSAJE Y ACTUALIZAR CONVERSACIÓN
+   * GUARDAR MENSAJE Y ACTUALIZAR CONVERSACIÓN (webhook canal → cliente).
+   * `direction` siempre inbound: así coinciden sugerencias IA, filtros de imágenes recientes y análisis.
    */
   async saveMessage(data: any) {
     let conversation = await this.conversationRepository.findOne({
@@ -640,7 +641,7 @@ export class ChatService implements OnModuleDestroy {
       content: contentToSave,
       channelType: data.platform || 'test',
       senderName: data.user || 'Cliente Desconocido',
-      direction: data.direction || 'outbound',
+      direction: 'inbound',
       externalId: data.id || '123',
       conversation: conversation,
     });
