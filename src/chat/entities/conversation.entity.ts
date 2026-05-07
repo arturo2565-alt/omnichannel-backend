@@ -1,5 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
 import { Message } from './chat.entity';
+import { DraftQuoteEntity } from './draft-quote.entity';
 
 @Entity()
 export class Conversation {
@@ -12,7 +13,7 @@ export class Conversation {
   @Column()
   contactName: string;
 
-  @Column({ type: 'varchar',nullable: true })
+  @Column({ type: 'character varying', nullable: true })
   platform?: string | null; // 'whatsapp' | 'instagram' | etc.
 
   @Column({ default: 'open' }) // 'open' o 'closed'
@@ -20,6 +21,9 @@ export class Conversation {
 
   @OneToMany(() => Message, (message) => message.conversation)
   messages: Message[];
+
+  @OneToMany(() => DraftQuoteEntity, (q) => q.conversation)
+  draftQuotes: DraftQuoteEntity[];
 
   @UpdateDateColumn()
   lastMessageAt: Date;

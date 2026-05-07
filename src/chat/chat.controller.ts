@@ -47,6 +47,11 @@ export class ChatController {
     return await this.chatService.findMessagesByConversation(conversationId);
   }
 
+  @Get('conversations/:conversationId/draft-quotes')
+  async getDraftQuotes(@Param('conversationId') conversationId: string) {
+    return await this.chatService.findDraftQuotesByConversation(conversationId);
+  }
+
   // --- MULTIMEDIA (NUEVO) ---
 
   /**

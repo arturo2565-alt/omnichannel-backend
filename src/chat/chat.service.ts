@@ -4,15 +4,18 @@ import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
 import { Message, VehicleDamageAnalysis } from './entities/chat.entity';
 import { Conversation } from './entities/conversation.entity';
+import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { ChatGateway } from './chat.gateway';
 import { OpenAI } from 'openai';
 import { v2 as cloudinary } from 'cloudinary';
 import {
   AUTO_FIX_CURRENCY,
+  calculateEstimate,
+  coerceDamageLevelCode,
   DraftQuote,
   DraftQuoteLine,
   formatAutoFixMoney,
-  getAutoFixPriceById,
+  matchPiezaFromAnalysis,
 } from './autofix-config';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
@@ -43,24 +46,57 @@ function normalizePlatformForApi(
   return 'unknown';
 }
 
+/** Imagen entrante: URL, data URL base64 o ya alojada en Cloudinary */
+function isIncomingImage(content: unknown): content is string {
+  if (typeof content !== 'string' || !content.trim()) return false;
+  if (/^data:image\//i.test(content)) return true;
+  return (
+    content.match(/\.(jpeg|jpg|gif|png|webp)(\?|$)/i) != null ||
+    content.includes('cloudinary')
+  );
+}
+
 function normalizeDamageAnalysisJson(raw: unknown): VehicleDamageAnalysis {
   const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const piezaRaw = typeof o['pieza'] === 'string' ? o['pieza'].trim() : '';
+  const sevRaw =
+    typeof o['severidad'] === 'string'
+      ? o['severidad'].trim()
+      : typeof o['severidadDelDano'] === 'string'
+        ? String(o['severidadDelDano']).trim()
+        : '';
+  const severidad = coerceDamageLevelCode(sevRaw);
+  const desc =
+    typeof o['descripcionTecnica'] === 'string' && o['descripcionTecnica'].trim()
+      ? o['descripcionTecnica'].trim()
+      : typeof o['descripcion'] === 'string' && o['descripcion'].trim()
+        ? String(o['descripcion']).trim()
+        : 'Sin descripción técnica disponible.';
+  const justificacion =
+    typeof o['justificacion'] === 'string' && o['justificacion'].trim()
+      ? o['justificacion'].trim()
+      : 'Sin justificación detallada.';
+
   const parts = o['partesAfectadas'];
-  const partesAfectadas = Array.isArray(parts)
-    ? parts.map((p) => String(p))
+  let partesAfectadas: string[] = Array.isArray(parts)
+    ? parts.map((p) => String(p).trim()).filter(Boolean)
     : typeof parts === 'string' && parts.trim()
       ? [parts.trim()]
       : [];
-  const sev = o['severidadDelDano'] ?? o['severidad'];
-  const desc = o['descripcionTecnica'] ?? o['descripcion'];
+  const pieza = piezaRaw || (partesAfectadas[0] ?? '');
+  if (piezaRaw && !partesAfectadas.some((p) => p.includes(piezaRaw) || piezaRaw.includes(p))) {
+    partesAfectadas = [piezaRaw, ...partesAfectadas];
+  }
+  if (!partesAfectadas.length && pieza) partesAfectadas = [pieza];
+  if (!partesAfectadas.length) partesAfectadas = ['Estetica Exterior'];
+
   return {
+    pieza: pieza || 'No identificada',
+    severidad,
+    descripcionTecnica: desc,
+    justificacion,
     partesAfectadas,
-    severidadDelDano:
-      typeof sev === 'string' && sev.trim() ? sev.trim() : 'no determinada',
-    descripcionTecnica:
-      typeof desc === 'string' && desc.trim()
-        ? desc.trim()
-        : 'Sin descripción técnica disponible.',
+    severidadDelDano: severidad,
   };
 }
 
@@ -71,10 +107,13 @@ export class ChatService {
   constructor(
     @InjectRepository(Message)
     private readonly messageRepository: Repository<Message>,
-    
+
     @InjectRepository(Conversation)
     private readonly conversationRepository: Repository<Conversation>,
-    
+
+    @InjectRepository(DraftQuoteEntity)
+    private readonly draftQuoteRepository: Repository<DraftQuoteEntity>,
+
     private readonly chatGateway: ChatGateway,
   ) {
     this.openai = new OpenAI({
@@ -127,6 +166,80 @@ export class ChatService {
   }
 
   /**
+   * Sube un buffer de imagen a Cloudinary (misma carpeta que adjuntos del chat).
+   */
+  private async uploadImageBuffer(buffer: Buffer): Promise<string> {
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
+    return new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { resource_type: 'image', folder: 'omnichannel_chats' },
+        (error, result) => {
+          if (error) return reject(error);
+          if (!result?.secure_url) {
+            return reject(new Error('Cloudinary no devolvió secure_url'));
+          }
+          resolve(result.secure_url);
+        },
+      );
+      uploadStream.end(buffer);
+    });
+  }
+
+  /**
+   * Garantiza URL en Cloudinary: si ya es Cloudinary la devuelve;
+   * si es data URL sube el buffer; si es URL remota la importa a Cloudinary.
+   */
+  private async ensureImageOnCloudinary(raw: string): Promise<string> {
+    if (!raw.trim()) return raw;
+    if (raw.includes('res.cloudinary.com') || raw.includes('cloudinary.com')) {
+      return raw;
+    }
+
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
+
+    if (/^data:image\//i.test(raw)) {
+      const m = raw.match(/^data:(image\/[\w+.-]+);base64,([\s\S]+)$/i);
+      if (!m) throw new Error('data URL de imagen inválida');
+      const buffer = Buffer.from(m[2], 'base64');
+      return this.uploadImageBuffer(buffer);
+    }
+
+    return new Promise((resolve, reject) => {
+      cloudinary.uploader.upload(
+        raw,
+        { folder: 'omnichannel_chats', resource_type: 'image' },
+        (error, result) => {
+          if (error) return reject(error);
+          if (!result?.secure_url) {
+            return reject(new Error('Cloudinary upload remoto sin secure_url'));
+          }
+          resolve(result.secure_url);
+        },
+      );
+    });
+  }
+
+  /**
+   * Monto de matriz para la pieza principal del peritaje (calculateEstimate).
+   */
+  private computePrimaryMatrixEstimate(analysis: VehicleDamageAnalysis): number {
+    const level = coerceDamageLevelCode(analysis.severidad);
+    const piezaMatriz =
+      matchPiezaFromAnalysis(analysis.pieza) ??
+      matchPiezaFromAnalysis(analysis.partesAfectadas?.[0] ?? '') ??
+      analysis.pieza;
+    return calculateEstimate(piezaMatriz, level);
+  }
+
+  /**
    * GUARDAR MENSAJE Y ACTUALIZAR CONVERSACIÓN
    */
   async saveMessage(data: any) {
@@ -147,18 +260,25 @@ export class ChatService {
       conversation.platform = String(data.platform).trim();
     }
 
-    // Identificamos si es una imagen para el texto de vista previa en el Sidebar
-    const isImageUrl = (url: string) => 
-      (typeof url === 'string' && url.match(/\.(jpeg|jpg|gif|png|webp)$/) != null) || 
-      (typeof url === 'string' && url.includes('cloudinary'));
-    
-    conversation.lastMessageAt = new Date(); 
-    conversation.lastMessage = isImageUrl(data.message) ? '📷 Imagen' : (data.message || 'Sin contenido');
-    
-    await this.conversationRepository.save(conversation); 
+    let contentToSave = data.message || 'Sin contenido';
+    const incomingIsImage = isIncomingImage(contentToSave);
+    if (incomingIsImage) {
+      try {
+        contentToSave = await this.ensureImageOnCloudinary(contentToSave);
+      } catch (err) {
+        console.error('ensureImageOnCloudinary (recepción):', err);
+      }
+    }
+
+    conversation.lastMessageAt = new Date();
+    conversation.lastMessage = incomingIsImage
+      ? '📷 Imagen'
+      : contentToSave || 'Sin contenido';
+
+    await this.conversationRepository.save(conversation);
 
     const newMessage = this.messageRepository.create({
-      content: data.message || 'Sin contenido',
+      content: contentToSave,
       channelType: data.platform || 'test',
       senderName: data.user || 'Cliente Desconocido',
       direction: data.direction || 'outbound',
@@ -171,19 +291,16 @@ export class ChatService {
     const conversationIdForSockets =
       saved.conversationId ?? conversation.id;
 
-    // Solo generamos sugerencia si es texto entrante
-    if (saved.direction === 'inbound' && !isImageUrl(saved.content)) {
+    if (saved.direction === 'inbound' && !isIncomingImage(saved.content)) {
       this.generateAiSuggestion(saved);
     }
 
-    if (isImageUrl(saved.content)) {
-      void this.persistDamageAnalysisAfterImageSave(
+    if (incomingIsImage && isIncomingImage(saved.content)) {
+      void this.finalizeInboundImagePipeline(
         saved.id,
-        saved.content,
         conversationIdForSockets,
-      ).catch((err) =>
-        console.error('persistDamageAnalysisAfterImageSave:', err),
-      );
+        saved.content,
+      ).catch((err) => console.error('finalizeInboundImagePipeline:', err));
     }
 
     this.chatGateway.emitNewMessage(saved);
@@ -191,17 +308,23 @@ export class ChatService {
   }
 
   /**
-   * Analiza una imagen (URL pública, p. ej. Cloudinary) como técnico de hojalatería y pintura.
-   * Devuelve JSON: partes afectadas, severidad del daño, descripción técnica.
+   * Analiza una imagen (URL pública, p. ej. Cloudinary) con visión gpt-4o (perito AutoFix).
    */
   async analyzeDamageImage(imageUrl: string): Promise<VehicleDamageAnalysis> {
-    const systemPrompt = `Eres un perito senior en hojalatería y pintura automotriz con décadas de experiencia en taller, valoración de siniestros y acabados OEM.
-Tu tarea es examinar la fotografía del vehículo y describir con rigor técnico lo observable en la imagen (no inventes daños fuera de campo o zonas no visibles).
-Criterios: panel metálico vs plásticos, deformaciones, rayones, picaduras, óxido, roturas de cristales, desajustes de junta, trabajo de chapa (martilleo, masilla, soldadura) y de pintura (laca, barniz, mate, repintes, naranja, empañado).
-Responde ÚNICAMENTE con un objeto JSON válido (sin markdown ni texto adicional) con exactamente estas claves:
-- "partesAfectadas": array de strings con las zonas o piezas afectadas (ej. "Aleta delantera derecha", "Paragolpes trasero").
-- "severidadDelDano": string breve (ej. "leve", "moderada", "grave") o descripción corta si no encaja en esas categorías.
-- "descripcionTecnica": string con la descripción técnica detallada en español.`;
+    const systemPrompt = `Eres un perito experto de AutoFix. Tu misión es analizar fotos de golpes vehiculares.
+
+Identifica qué pieza es (Fascia, Puerta, Cofre, etc.).
+
+Clasifica la severidad EXACTAMENTE en una de estas categorías: DL (Leve), DML (Medio-Leve), DM (Medio), DMF (Medio-Fuerte), DF (Fuerte), DMFuerte (Muy Fuerte).
+
+Devuelve un JSON con: { pieza, severidad, descripcionTecnica, justificacion }.
+Ten en cuenta reflejos y descuadres de piezas para determinar si el daño es estructural (DF/DMFuerte).`;
+
+    const userSchemaHint = `Responde ÚNICAMENTE con un objeto JSON válido (sin markdown) usando exactamente estas claves en minúsculas:
+- "pieza": string, nombre de la pieza principal (ej. Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo).
+- "severidad": string, EXACTAMENTE uno de: DL, DML, DM, DMF, DF, DMFuerte (código tal cual, sin espacios ni texto extra).
+- "descripcionTecnica": string en español, observaciones técnicas visibles en la foto.
+- "justificacion": string en español que explique por qué elegiste esa severidad (incluye si hubo ambigüedad por reflejos o ángulo).`;
 
     const completion = await this.openai.chat.completions.create({
       model: 'gpt-4o',
@@ -213,7 +336,7 @@ Responde ÚNICAMENTE con un objeto JSON válido (sin markdown ni texto adicional
           content: [
             {
               type: 'text',
-              text: 'Analiza esta imagen del vehículo y devuelve el JSON solicitado.',
+              text: `${userSchemaHint}\n\nAnaliza esta imagen del vehículo.`,
             },
             {
               type: 'image_url',
@@ -244,73 +367,45 @@ Responde ÚNICAMENTE con un objeto JSON válido (sin markdown ni texto adicional
    */
   generateDraftQuote(analysis: VehicleDamageAnalysis): DraftQuote {
     const lines: DraftQuoteLine[] = [];
-    const partCount = Math.max(1, analysis.partesAfectadas.length);
+    const partes =
+      analysis.partesAfectadas?.length > 0
+        ? analysis.partesAfectadas
+        : analysis.pieza
+          ? [analysis.pieza]
+          : ['Estetica Exterior'];
 
-    const paint = getAutoFixPriceById('paint_per_panel');
-    if (paint) {
+    const resolvedLevel = coerceDamageLevelCode(
+      analysis.severidad || analysis.severidadDelDano,
+    );
+
+    const seen = new Set<string>();
+    for (const parteRaw of partes) {
+      const canonical = matchPiezaFromAnalysis(parteRaw);
+      if (!canonical) continue;
+      const key = `${canonical}|${resolvedLevel}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const unit = calculateEstimate(canonical, resolvedLevel);
+      if (unit <= 0) continue;
       lines.push({
-        priceItemId: paint.id,
-        description: `${paint.description} — zonas referidas: ${analysis.partesAfectadas.join('; ') || 'no especificadas'}`,
-        quantity: partCount,
-        unitPrice: paint.unitPrice,
-        subtotal: partCount * paint.unitPrice,
+        priceItemId: `matrix:${canonical}:${resolvedLevel}`,
+        description: `${canonical} — nivel ${resolvedLevel} (según matriz de referencia)`,
+        quantity: 1,
+        unitPrice: unit,
+        subtotal: unit,
       });
     }
 
-    const blob = `${analysis.severidadDelDano} ${analysis.descripcionTecnica}`.toLowerCase();
-    const suggestsDent =
-      /golpe|abollad|deform|chapa|hojalater|colisión|impacto|levantar|martille|panel metálico/i.test(
-        blob,
-      ) || /moderad|grave|sever/i.test(analysis.severidadDelDano.toLowerCase());
-
-    if (suggestsDent) {
-      const dent = getAutoFixPriceById('dent_removal');
-      if (dent) {
+    if (lines.length === 0) {
+      const fallbackPieza = 'Estetica Exterior';
+      const unit = calculateEstimate(fallbackPieza, resolvedLevel);
+      if (unit > 0) {
         lines.push({
-          priceItemId: dent.id,
-          description: dent.description,
+          priceItemId: `matrix:${fallbackPieza}:${resolvedLevel}`,
+          description: `${fallbackPieza} — nivel ${resolvedLevel} (referencia general; no se identificó pieza en el texto)`,
           quantity: 1,
-          unitPrice: dent.unitPrice,
-          subtotal: dent.unitPrice,
-        });
-      }
-    }
-
-    if (/paragolpe|defensa|plástico|poliuretano/i.test(blob)) {
-      const plastic = getAutoFixPriceById('plastic_bumper_repair');
-      if (plastic) {
-        lines.push({
-          priceItemId: plastic.id,
-          description: plastic.description,
-          quantity: 1,
-          unitPrice: plastic.unitPrice,
-          subtotal: plastic.unitPrice,
-        });
-      }
-    }
-
-    if (/rayón|arañazo|picadura|óxido|masilla|preparaci/i.test(blob)) {
-      const prep = getAutoFixPriceById('surface_prep_filler');
-      if (prep) {
-        lines.push({
-          priceItemId: prep.id,
-          description: prep.description,
-          quantity: 1,
-          unitPrice: prep.unitPrice,
-          subtotal: prep.unitPrice,
-        });
-      }
-    }
-
-    if (/mate|empañ|naranja|brillo|acabado|laca/i.test(blob)) {
-      const polish = getAutoFixPriceById('polish_correction');
-      if (polish) {
-        lines.push({
-          priceItemId: polish.id,
-          description: polish.description,
-          quantity: 1,
-          unitPrice: polish.unitPrice,
-          subtotal: polish.unitPrice,
+          unitPrice: unit,
+          subtotal: unit,
         });
       }
     }
@@ -334,9 +429,12 @@ Responde ÚNICAMENTE con un objeto JSON válido (sin markdown ni texto adicional
       'Estado del documento: PENDIENTE DE APROBACIÓN (PENDING_APPROVAL). Los importes, tiempos y alcances definitivos requieren inspección física en planta y autorización expresa de un asesor.',
       '',
       'Resumen pericial (automático):',
-      `- Severidad declarada: ${analysis.severidadDelDano}`,
-      `- Partes o zonas mencionadas: ${analysis.partesAfectadas.length ? analysis.partesAfectadas.join(', ') : 'no detalladas'}`,
+      `- Pieza identificada: ${analysis.pieza}`,
+      `- Severidad (código AutoFix): ${analysis.severidad}`,
+      `- Nivel aplicado en matriz de precios: ${resolvedLevel}`,
+      `- Partes / zonas: ${analysis.partesAfectadas.length ? analysis.partesAfectadas.join(', ') : 'no detalladas'}`,
       `- Descripción técnica: ${analysis.descripcionTecnica}`,
+      `- Justificación del perito: ${analysis.justificacion}`,
       '',
       'Detalle económico propuesto (antes de impuestos):',
       lineText,
@@ -358,29 +456,58 @@ Responde ÚNICAMENTE con un objeto JSON válido (sin markdown ni texto adicional
       total: subtotal,
       formalNarrative,
       analysisBasis: {
+        pieza: analysis.pieza,
+        severidad: analysis.severidad,
         partesAfectadas: [...analysis.partesAfectadas],
         severidadDelDano: analysis.severidadDelDano,
         descripcionTecnica: analysis.descripcionTecnica,
+        justificacion: analysis.justificacion,
       },
     };
   }
 
-  private async persistDamageAnalysisAfterImageSave(
+  /**
+   * Tras guardar mensaje con imagen en Cloudinary: peritaje IA, estimate, tabla draft_quotes, socket.
+   */
+  private async finalizeInboundImagePipeline(
     messageId: string,
-    imageUrl: string,
     conversationId: string,
+    imageUrl: string,
   ): Promise<void> {
     const analysis = await this.analyzeDamageImage(imageUrl);
-    const draftQuote = this.generateDraftQuote(analysis);
+    const estimateAmount = this.computePrimaryMatrixEstimate(analysis);
+    const draftQuoteDoc = this.generateDraftQuote(analysis);
+
+    const row = this.draftQuoteRepository.create({
+      conversationId,
+      messageId,
+      imageUrl,
+      damageAnalysis: analysis,
+      estimateAmount,
+      quotePayload: draftQuoteDoc,
+      status: 'PENDING_APPROVAL',
+    });
+    const savedDraft = await this.draftQuoteRepository.save(row);
+
     await this.messageRepository.update(
       { id: messageId },
-      { damageAnalysis: analysis, draftQuote },
+      { damageAnalysis: analysis, draftQuote: draftQuoteDoc },
     );
-    this.chatGateway.emitImageDamageAnalysis({
-      messageId,
+
+    this.chatGateway.emitDraftQuoteReady({
+      draftQuoteId: savedDraft.id,
       conversationId,
+      messageId,
       damageAnalysis: analysis,
-      draftQuote,
+      draftQuote: draftQuoteDoc,
+      estimateAmount,
+    });
+  }
+
+  async findDraftQuotesByConversation(conversationId: string) {
+    return this.draftQuoteRepository.find({
+      where: { conversationId },
+      order: { createdAt: 'DESC' },
     });
   }
 

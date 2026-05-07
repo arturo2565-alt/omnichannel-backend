@@ -2,11 +2,18 @@ import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, Jo
 import { Conversation } from './conversation.entity';
 import type { DraftQuote } from '../autofix-config';
 
-/** Resultado de analyzeDamageImage (JSON estructurado) */
+/** Resultado de analyzeDamageImage (JSON estructurado, AutoFix / gpt-4o) */
 export interface VehicleDamageAnalysis {
-  partesAfectadas: string[];
-  severidadDelDano: string;
+  /** Pieza principal (p. ej. Fascia, Puerta, Cofre) */
+  pieza: string;
+  /** Código exacto: DL | DML | DM | DMF | DF | DMFuerte */
+  severidad: string;
   descripcionTecnica: string;
+  justificacion: string;
+  /** Lista para cotización; suele incluir al menos `pieza` */
+  partesAfectadas: string[];
+  /** Etiqueta legible o mismo código que `severidad` (compatibilidad) */
+  severidadDelDano: string;
 }
 
 @Entity()
