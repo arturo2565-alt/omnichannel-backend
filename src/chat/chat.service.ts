@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
@@ -247,8 +252,25 @@ export interface PatchDraftQuoteBody {
 }
 
 @Injectable()
-export class ChatService {
+export class ChatService implements OnModuleDestroy {
   private openai: OpenAI;
+
+  /** Tras la última imagen: esperar tanto tiempo en silencio antes de lanzar GPT (reinicia con cada nueva foto). */
+  private static readonly INBOUND_IMAGE_ANALYSIS_DEBOUNCE_MS = 30 * 1000;
+
+  /** Ventana histórica (p. ej. fallback / consultas) para imágenes entrantes recientes en la conversación. */
+  static readonly RECENT_IMAGE_LOOKBACK_MS = 5 * 60 * 1000;
+
+  /** conversationId → timeout del análisis consolidado pendiente */
+  private readonly consolidatedImageTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+
+  /**
+   * conversationId → URLs de la **ráfaga actual** (orden de llegada; se vacía al ejecutar el análisis tras el quiet-period).
+   */
+  private readonly pendingBurstImageUrls = new Map<string, string[]>();
 
   constructor(
     @InjectRepository(Message)
@@ -268,6 +290,50 @@ export class ChatService {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
     });
+  }
+
+  onModuleDestroy(): void {
+    for (const t of this.consolidatedImageTimers.values()) {
+      clearTimeout(t);
+    }
+    this.consolidatedImageTimers.clear();
+    this.pendingBurstImageUrls.clear();
+  }
+
+  /**
+   * URLs únicas de imágenes entrantes (**inbound**) en esta conversación cuya `createdAt`
+   * cae dentro de los últimos 5 minutos, en orden cronológico (más antigua primero).
+   */
+  async getRecentImages(conversationId: string): Promise<string[]> {
+    const since = new Date(Date.now() - ChatService.RECENT_IMAGE_LOOKBACK_MS);
+    const messages = await this.messageRepository
+      .createQueryBuilder('m')
+      .where('m.conversationId = :cid', { cid: conversationId })
+      .andWhere('m.createdAt >= :since', { since })
+      .orderBy('m.createdAt', 'ASC')
+      .select(['m.content', 'm.direction'])
+      .getMany();
+
+    const ordered: string[] = [];
+    const seen = new Set<string>();
+
+    for (const msg of messages) {
+      if (String(msg.direction || '').toLowerCase() !== 'inbound') {
+        continue;
+      }
+      const content =
+        typeof msg.content === 'string' ? msg.content.trim() : '';
+      if (!content || !isIncomingImage(content)) {
+        continue;
+      }
+      if (seen.has(content)) {
+        continue;
+      }
+      seen.add(content);
+      ordered.push(content);
+    }
+
+    return ordered;
   }
 
   /**
@@ -589,11 +655,11 @@ export class ChatService {
     }
 
     if (incomingIsImage && isIncomingImage(saved.content)) {
-      void this.finalizeInboundImagePipeline(
-        saved.id,
+      this.scheduleConsolidatedInboundImageAnalysis(
         conversationIdForSockets,
-        saved.content,
-      ).catch((err) => console.error('finalizeInboundImagePipeline:', err));
+        saved.id,
+        String(saved.content).trim(),
+      );
     }
 
     this.chatGateway.emitNewMessage(saved);
@@ -601,46 +667,50 @@ export class ChatService {
   }
 
   /**
-   * Analiza el grupo completo de imágenes (sesión/conversación) con visión gpt-4o.
-   * Devuelve un array de **daños detectados**; cada elemento es único por combinación útil de evidencia visual.
-   * Usa {@link inventoryItemsToVehicleAnalysis} para unirlo a `VehicleDamageAnalysis`.
+   * Visión GPT-4o sobre **todas las URLs dadas**: un solo reporte consolidado en `items`.
+   *
+   * @param imageUrls Lote ordenado típicamente de la ráfaga acumulada en memoria o de {@link getRecentImages} (+ deduplicadas).
    */
-  async analyzeDamageImage(
-    imageUrls: string | string[],
-  ): Promise<DetectedDamageItem[]> {
-    const urlsRaw = Array.isArray(imageUrls) ? imageUrls : [imageUrls];
+  async analyzeDamageImage(imageUrls: readonly string[]): Promise<DetectedDamageItem[]> {
     const urls = [
-      ...new Set(urlsRaw.map((u) => String(u).trim()).filter(Boolean)),
+      ...new Set(imageUrls.map((u) => String(u).trim()).filter(Boolean)),
     ];
     if (!urls.length) {
       throw new Error('Se requiere al menos una URL de imagen');
     }
 
-    const systemPrompt = `Eres un perito experto de AutoFix. Analiza un GRUPO COMPLETO de fotos del mismo vehículo (una misma sesión / conversación).
+    const systemPrompt = `Eres un perito experto de AutoFix para hojalatería y pintura.
 
-Debes producir una lista ordenada de **daños detectados**: cada entrada es una pieza afectada (o un daño bien delimitado) con evidencia técnica y vínculos a las fotos donde se ve.
+Recibes un lote de fotos correspondiente a **un mismo envío/ráfaga de capturas**: todas las URLs del lote se acumulan mientras el usuario manda fotos seguidas; el análisis se hace cuando ha pasado un periodo sin nuevas imágenes en esa ráfaga (puede haber solo una foto o varias).
 
-Reglas obligatorias:
-1) **Pieza repetida entre varias fotos:** si ves la misma pieza en Imagen 1, 2 y 3 (solo Fascia varias veces), reporta UN SOLO elemento "Fascia" y asigna la **severidad más alta** vista en todo el grupo.
-2) **Dos daños visibles en UNA foto:** si en una única foto se advierten dos piezas o dos zonas de daño claramente distintos (ej. Fascia golpe frontal y Salpicadera lado), reporta **dos elementos separados** en el array con sus descripciones y las URLs donde se ve cada uno (puede ser la misma URL en ambos elementos si ambos aparecen ahí).
+Debes analizar el **CONJUNTO COMPLETO** de una sola vez (no hagas conclusiones foto a foto de forma independiente ignorando las demás) y producir UN ÚNICO REPORTE PERICIAL CONSOLIDADO en formato lista JSON (\`items\`).
 
-Clasifica la severidad EXACTAMENTE como uno de: DL, DML, DM, DMF, DF, DMFuerte.
+Interpretación geométrica y de proceso:
+• **Ángulos / encuadres distintos de la MISMA pieza** (mismo golpe, misma fascia, vistas lateral y frontal diferentes, foto lejana y foto cercana, etc.) → **un solo objeto** por esa pieza, con severidad igual a la **más alta** que observe en todas esas vistas.
+• **Piezas o zonas de daño claramente distintas** (ej. Fascia delantera y Puerta lado conductor claramente no es el mismo elemento) → **varios objetos** en la lista.
 
-Ten en cuenta reflejos, encuadre y líneas de cierre entre piezas. Si el daño es estructural o hay descuadre fuerte entre piezas, prioriza DF o DMFuerte según aplique.
+Si una sola foto muestra dos zonas/pestañas/pestanas diferentes con daño en piezas diferentes, registra cada una como entrada separada (puede repetir URL en urls_origen cuando ambas se ven en esa imagen).
 
-No inventes fotos ni URLs; solo URLs que hayas recibido en el usuario.`;
+Severidad: EXACTAMENTE uno de DL, DML, DM, DMF, DF, DMFuerte.
 
-    const userSchemaHint = `Responde ÚNICAMENTE con un objeto JSON válido (sin markdown) con esta estructura exacta:
+Ten en cuenta reflejos, sombras de carrocería y líneas de cierre entre piezas. Descuadre o daño muy profundo pueden justificar DF o DMFuerte.
+
+NO inventes URLs: solo pueden aparecer valores que figuraron en el texto del usuario.`;
+
+    const userSchemaHint = `Responde ÚNICAMENTE con un objeto JSON válido (sin markdown):
 { "items": [ ... ] }
-Cada objeto en "items" representa UN daño por pieza (consolidando varias fotos de la MISMA pieza en UN solo objeto; varias piezas en la misma foto = varios objetos).
 
-Claves de cada objeto:
-- "pieza": string (ej. Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo).
-- "severidad": EXACTAMENTE uno de DL, DML, DM, DMF, DF, DMFuerte.
-- "descripcionTecnica": string en español (observaciones técnicas; si agrupaste varias fotos, sintetiza todas).
-- "urls_origen": array de strings; copiar **literalmente** las URLs proporcionadas abajo que soportan ese daño (las que muestran mejor esa pieza/severidad).
+Cada elemento de items es una **pieza o zona agrupada lógica** tras consolidar vistas:
+- Varias fotos del mismo punto de impacto mismo componente ⇒ un solo objeto y severidad máxima vista.
+- Varios golpes/pestañas en piezas diferentes ⇒ varios objetos.
 
-Numeración auxiliar para tu razonamiento: la primera URL listada corresponde a Imagen 1, la segunda a Imagen 2, etc.`;
+Por objeto:
+- "pieza": string (nombre entendible: Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo, etc.).
+- "severidad": EXACTAMENTE DL | DML | DM | DMF | DF | DMFuerte.
+- "descripcionTecnica": texto en español (sintetiza lo visto considerando todas las fotos pertinentes).
+- "urls_origen": array copiando **literalmente** de la lista siguiente las URLs donde se ve ese daño (las que mejor apoyan la severidad declarada).
+
+Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min) en el mismo chat.`;
 
     const intro = urls
       .map((_, i) => `Imagen ${i + 1}: posición ${i + 1} en el bloque de imágenes`)
@@ -863,22 +933,91 @@ Numeración auxiliar para tu razonamiento: la primera URL listada corresponde a 
   }
 
   /**
-   * Tras guardar mensaje con imagen en Cloudinary: visión IA sobre el grupo de fotos **de la sesión**
-   * (una sola fila borrador pendiente por conversación; se fusionan nuevas URLs y se re-analiza todo).
+   * Cada imagen **reinicia** un temporizador de 30 s; solo cuando pasan 30 s sin nuevas fotos
+   * se ejecuta el análisis con las URLs acumuladas en la ráfaga (no una cotización por foto).
    */
-  private async finalizeInboundImagePipeline(
-    messageId: string,
+  private scheduleConsolidatedInboundImageAnalysis(
     conversationId: string,
+    triggeringMessageId: string,
     imageUrl: string,
+  ): void {
+    const url = String(imageUrl).trim();
+    if (!url || !isIncomingImage(url)) {
+      return;
+    }
+
+    let bucket = this.pendingBurstImageUrls.get(conversationId);
+    if (!bucket) {
+      bucket = [];
+      this.pendingBurstImageUrls.set(conversationId, bucket);
+    }
+    if (!bucket.includes(url)) {
+      bucket.push(url);
+    }
+
+    const prev = this.consolidatedImageTimers.get(conversationId);
+    if (prev !== undefined) {
+      clearTimeout(prev);
+    }
+    const t = setTimeout(() => {
+      this.consolidatedImageTimers.delete(conversationId);
+      const burst = [...(this.pendingBurstImageUrls.get(conversationId) ?? [])];
+      this.pendingBurstImageUrls.delete(conversationId);
+      void this.processConsolidatedInboundImages(
+        conversationId,
+        triggeringMessageId,
+        burst,
+      ).catch((err) =>
+        console.error('processConsolidatedInboundImages:', err),
+      );
+    }, ChatService.INBOUND_IMAGE_ANALYSIS_DEBOUNCE_MS);
+    this.consolidatedImageTimers.set(conversationId, t);
+  }
+
+  /**
+   * Usa el lote de la ráfaga si existe; si no, cae a {@link getRecentImages} + fallback al mensaje disparador.
+   */
+  private async processConsolidatedInboundImages(
+    conversationId: string,
+    attachingMessageId: string,
+    burstUrls: readonly string[],
   ): Promise<void> {
+    const fromBurst = [
+      ...new Set(
+        burstUrls.map((u) => String(u).trim()).filter((u) => u && isIncomingImage(u)),
+      ),
+    ];
+
+    let imageUrls = fromBurst;
+
+    if (!imageUrls.length) {
+      imageUrls = await this.getRecentImages(conversationId);
+    }
+
+    if (!imageUrls.length) {
+      const fallbackMsg = await this.messageRepository.findOne({
+        where: { id: attachingMessageId },
+      });
+      const raw =
+        fallbackMsg?.content &&
+        typeof fallbackMsg.content === 'string'
+          ? fallbackMsg.content.trim()
+          : '';
+      if (
+        raw &&
+        String(fallbackMsg?.direction ?? '').toLowerCase() === 'inbound' &&
+        isIncomingImage(raw)
+      ) {
+        imageUrls = [raw];
+      } else {
+        return;
+      }
+    }
+
     const existingDraft = await this.draftQuoteRepository.findOne({
       where: { conversationId, status: 'PENDING_APPROVAL' },
       order: { createdAt: 'DESC' },
     });
-
-    const previousUrls = existingDraft ? parseDraftImageUrls(existingDraft.imageUrl) : [];
-    const merged = [...previousUrls.filter(Boolean), imageUrl.trim()].filter(Boolean);
-    const imageUrls = [...new Set(merged)];
 
     const inventory = await this.analyzeDamageImage(imageUrls);
     const analysis = inventoryItemsToVehicleAnalysis(inventory, imageUrls);
@@ -887,6 +1026,8 @@ Numeración auxiliar para tu razonamiento: la primera URL listada corresponde a 
 
     const persistedImageUrl =
       imageUrls.length === 1 ? imageUrls[0] : JSON.stringify(imageUrls);
+
+    const messageId = attachingMessageId;
 
     if (existingDraft) {
       const priorMessageId = existingDraft.messageId;
