@@ -4,7 +4,7 @@ import type { DraftQuote } from '../autofix-config';
 
 /**
  * Daño único dentro del resultado de visión IA (analiza grupo de fotos sesión/conversación).
- * `urls_origen`: URLs de entrada que evidencian este daño / pieza.
+ * `urls_origen`: URLs de entrada que evidencian este daño / pieza (puede estar vacío en líneas manuales del panel).
  */
 export interface DetectedDamageItem {
   pieza: string;

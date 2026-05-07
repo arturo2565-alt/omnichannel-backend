@@ -237,6 +237,10 @@ export interface PatchInventoryLineDto {
   /** @deprecated usar descripcionTecnica */
   descripcion?: string;
   descripcionTecnica?: string;
+  /**
+   * Evidencias en URL. Omitir la propiedad conserva URLs previas (mismo índice en inventario).
+   * Enviar `[]` crea o mantiene la línea **sin** fotos (p. ej. pieza manual en el panel).
+   */
   urls_origen?: string[];
   /** @deprecated usar urls_origen */
   urls_asociadas?: string[];
@@ -1182,22 +1186,29 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
           descFromDto ||
           prev?.descripcionTecnica ||
           prev?.descripcion ||
-          'Sin descripción técnica disponible.';
+          (prev
+            ? 'Sin descripción técnica disponible.'
+            : 'Pieza añadida manualmente desde el panel de cotización.');
 
-        const urlsFromDtoRaw =
-          Array.isArray(L.urls_origen) && L.urls_origen.length > 0
+        /** `urls_origen: []` ⇒ sin evidencias (línea manual). Sin la propiedad ⇒ conservar URLs del inventario previo mismo índice. */
+        let urls_origen: string[];
+        if (Object.prototype.hasOwnProperty.call(L, 'urls_origen')) {
+          urls_origen = Array.isArray(L.urls_origen)
             ? L.urls_origen.map(String).filter(Boolean)
-            : Array.isArray(L.urls_asociadas) && L.urls_asociadas.length > 0
-              ? L.urls_asociadas.map(String).filter(Boolean)
-              : [];
-        const urlsFromPrevRaw =
-          Array.isArray(prev?.urls_origen) && prev.urls_origen.length > 0
-            ? [...prev.urls_origen]
-            : Array.isArray(prev?.urls_asociadas) && prev.urls_asociadas.length
-              ? [...prev.urls_asociadas]
-              : [];
-        const urls_origen =
-          urlsFromDtoRaw.length > 0 ? urlsFromDtoRaw : urlsFromPrevRaw;
+            : [];
+        } else if (Object.prototype.hasOwnProperty.call(L, 'urls_asociadas')) {
+          urls_origen = Array.isArray(L.urls_asociadas)
+            ? L.urls_asociadas.map(String).filter(Boolean)
+            : [];
+        } else {
+          urls_origen =
+            Array.isArray(prev?.urls_origen) && prev.urls_origen.length > 0
+              ? [...prev.urls_origen]
+              : Array.isArray(prev?.urls_asociadas) &&
+                  prev.urls_asociadas.length
+                ? [...prev.urls_asociadas]
+                : [];
+        }
 
         return {
           pieza: String(L.pieza).trim(),
