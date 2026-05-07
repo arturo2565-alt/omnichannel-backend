@@ -21,4 +21,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   emitNewMessage(message: any) {
     this.server.emit('newMessage', message);
   }
+
+  emitImageDamageAnalysis(payload: {
+    messageId: string;
+    conversationId: string;
+    damageAnalysis: unknown;
+    draftQuote?: unknown;
+  }) {
+    this.server.emit('imageDamageAnalysis', payload);
+  }
 }

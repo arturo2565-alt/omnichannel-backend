@@ -1,11 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
-import { Message } from './entities/chat.entity';
+import { Message, VehicleDamageAnalysis } from './entities/chat.entity';
 import { Conversation } from './entities/conversation.entity';
 import { ChatGateway } from './chat.gateway';
 import { OpenAI } from 'openai';
 import { v2 as cloudinary } from 'cloudinary';
+import {
+  AUTO_FIX_CURRENCY,
+  DraftQuote,
+  DraftQuoteLine,
+  formatAutoFixMoney,
+  getAutoFixPriceById,
+} from './autofix-config';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -33,6 +41,27 @@ function normalizePlatformForApi(
   const fb = messageFallback?.trim();
   if (fb && !isAgentOnlyPlatform(fb)) return fb.toLowerCase();
   return 'unknown';
+}
+
+function normalizeDamageAnalysisJson(raw: unknown): VehicleDamageAnalysis {
+  const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const parts = o['partesAfectadas'];
+  const partesAfectadas = Array.isArray(parts)
+    ? parts.map((p) => String(p))
+    : typeof parts === 'string' && parts.trim()
+      ? [parts.trim()]
+      : [];
+  const sev = o['severidadDelDano'] ?? o['severidad'];
+  const desc = o['descripcionTecnica'] ?? o['descripcion'];
+  return {
+    partesAfectadas,
+    severidadDelDano:
+      typeof sev === 'string' && sev.trim() ? sev.trim() : 'no determinada',
+    descripcionTecnica:
+      typeof desc === 'string' && desc.trim()
+        ? desc.trim()
+        : 'Sin descripción técnica disponible.',
+  };
 }
 
 @Injectable()
@@ -138,14 +167,221 @@ export class ChatService {
     });
     
     const saved = await this.messageRepository.save(newMessage);
-    
+
+    const conversationIdForSockets =
+      saved.conversationId ?? conversation.id;
+
     // Solo generamos sugerencia si es texto entrante
     if (saved.direction === 'inbound' && !isImageUrl(saved.content)) {
       this.generateAiSuggestion(saved);
     }
-    
+
+    if (isImageUrl(saved.content)) {
+      void this.persistDamageAnalysisAfterImageSave(
+        saved.id,
+        saved.content,
+        conversationIdForSockets,
+      ).catch((err) =>
+        console.error('persistDamageAnalysisAfterImageSave:', err),
+      );
+    }
+
     this.chatGateway.emitNewMessage(saved);
     return saved;
+  }
+
+  /**
+   * Analiza una imagen (URL pública, p. ej. Cloudinary) como técnico de hojalatería y pintura.
+   * Devuelve JSON: partes afectadas, severidad del daño, descripción técnica.
+   */
+  async analyzeDamageImage(imageUrl: string): Promise<VehicleDamageAnalysis> {
+    const systemPrompt = `Eres un perito senior en hojalatería y pintura automotriz con décadas de experiencia en taller, valoración de siniestros y acabados OEM.
+Tu tarea es examinar la fotografía del vehículo y describir con rigor técnico lo observable en la imagen (no inventes daños fuera de campo o zonas no visibles).
+Criterios: panel metálico vs plásticos, deformaciones, rayones, picaduras, óxido, roturas de cristales, desajustes de junta, trabajo de chapa (martilleo, masilla, soldadura) y de pintura (laca, barniz, mate, repintes, naranja, empañado).
+Responde ÚNICAMENTE con un objeto JSON válido (sin markdown ni texto adicional) con exactamente estas claves:
+- "partesAfectadas": array de strings con las zonas o piezas afectadas (ej. "Aleta delantera derecha", "Paragolpes trasero").
+- "severidadDelDano": string breve (ej. "leve", "moderada", "grave") o descripción corta si no encaja en esas categorías.
+- "descripcionTecnica": string con la descripción técnica detallada en español.`;
+
+    const completion = await this.openai.chat.completions.create({
+      model: 'gpt-4o',
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Analiza esta imagen del vehículo y devuelve el JSON solicitado.',
+            },
+            {
+              type: 'image_url',
+              image_url: { url: imageUrl, detail: 'high' },
+            },
+          ],
+        },
+      ],
+      max_tokens: 1200,
+    });
+
+    const text = completion.choices[0]?.message?.content?.trim();
+    if (!text) {
+      throw new Error('OpenAI no devolvió contenido para el análisis de daños');
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch {
+      throw new Error('Respuesta de OpenAI no es JSON válido');
+    }
+    return normalizeDamageAnalysisJson(parsed);
+  }
+
+  /**
+   * Arma una cotización formal en estado PENDING_APPROVAL a partir del peritaje
+   * y la lista de precios base (autofix-config).
+   */
+  generateDraftQuote(analysis: VehicleDamageAnalysis): DraftQuote {
+    const lines: DraftQuoteLine[] = [];
+    const partCount = Math.max(1, analysis.partesAfectadas.length);
+
+    const paint = getAutoFixPriceById('paint_per_panel');
+    if (paint) {
+      lines.push({
+        priceItemId: paint.id,
+        description: `${paint.description} — zonas referidas: ${analysis.partesAfectadas.join('; ') || 'no especificadas'}`,
+        quantity: partCount,
+        unitPrice: paint.unitPrice,
+        subtotal: partCount * paint.unitPrice,
+      });
+    }
+
+    const blob = `${analysis.severidadDelDano} ${analysis.descripcionTecnica}`.toLowerCase();
+    const suggestsDent =
+      /golpe|abollad|deform|chapa|hojalater|colisión|impacto|levantar|martille|panel metálico/i.test(
+        blob,
+      ) || /moderad|grave|sever/i.test(analysis.severidadDelDano.toLowerCase());
+
+    if (suggestsDent) {
+      const dent = getAutoFixPriceById('dent_removal');
+      if (dent) {
+        lines.push({
+          priceItemId: dent.id,
+          description: dent.description,
+          quantity: 1,
+          unitPrice: dent.unitPrice,
+          subtotal: dent.unitPrice,
+        });
+      }
+    }
+
+    if (/paragolpe|defensa|plástico|poliuretano/i.test(blob)) {
+      const plastic = getAutoFixPriceById('plastic_bumper_repair');
+      if (plastic) {
+        lines.push({
+          priceItemId: plastic.id,
+          description: plastic.description,
+          quantity: 1,
+          unitPrice: plastic.unitPrice,
+          subtotal: plastic.unitPrice,
+        });
+      }
+    }
+
+    if (/rayón|arañazo|picadura|óxido|masilla|preparaci/i.test(blob)) {
+      const prep = getAutoFixPriceById('surface_prep_filler');
+      if (prep) {
+        lines.push({
+          priceItemId: prep.id,
+          description: prep.description,
+          quantity: 1,
+          unitPrice: prep.unitPrice,
+          subtotal: prep.unitPrice,
+        });
+      }
+    }
+
+    if (/mate|empañ|naranja|brillo|acabado|laca/i.test(blob)) {
+      const polish = getAutoFixPriceById('polish_correction');
+      if (polish) {
+        lines.push({
+          priceItemId: polish.id,
+          description: polish.description,
+          quantity: 1,
+          unitPrice: polish.unitPrice,
+          subtotal: polish.unitPrice,
+        });
+      }
+    }
+
+    const subtotal = lines.reduce((acc, l) => acc + l.subtotal, 0);
+    const reference = `COT-AF-${randomUUID().slice(0, 8).toUpperCase()}`;
+    const generatedAt = new Date().toISOString();
+
+    const lineText = lines
+      .map(
+        (l, i) =>
+          `${i + 1}. ${l.description} — ${l.quantity} × ${formatAutoFixMoney(l.unitPrice)} = ${formatAutoFixMoney(l.subtotal)}`,
+      )
+      .join('\n');
+
+    const formalNarrative = [
+      'Estimado cliente,',
+      '',
+      'Por medio del presente documento se emite una PROPUESTA DE COTIZACIÓN en carácter MERAMENTE INFORMATIVO, elaborada con base en el análisis visual preliminar del daño y en la tabla de precios de referencia interna del taller (hojalatería y pintura).',
+      '',
+      'Estado del documento: PENDIENTE DE APROBACIÓN (PENDING_APPROVAL). Los importes, tiempos y alcances definitivos requieren inspección física en planta y autorización expresa de un asesor.',
+      '',
+      'Resumen pericial (automático):',
+      `- Severidad declarada: ${analysis.severidadDelDano}`,
+      `- Partes o zonas mencionadas: ${analysis.partesAfectadas.length ? analysis.partesAfectadas.join(', ') : 'no detalladas'}`,
+      `- Descripción técnica: ${analysis.descripcionTecnica}`,
+      '',
+      'Detalle económico propuesto (antes de impuestos):',
+      lineText,
+      '',
+      `Subtotal propuesto: ${formatAutoFixMoney(subtotal)} ${AUTO_FIX_CURRENCY}.`,
+      `Referencia interna: ${reference}. Fecha de emisión (UTC): ${generatedAt}.`,
+      '',
+      'Atentamente,',
+      'Área de cotizaciones — Taller (borrador automático)',
+    ].join('\n');
+
+    return {
+      status: 'PENDING_APPROVAL',
+      currency: AUTO_FIX_CURRENCY,
+      reference,
+      generatedAt,
+      lines,
+      subtotal,
+      total: subtotal,
+      formalNarrative,
+      analysisBasis: {
+        partesAfectadas: [...analysis.partesAfectadas],
+        severidadDelDano: analysis.severidadDelDano,
+        descripcionTecnica: analysis.descripcionTecnica,
+      },
+    };
+  }
+
+  private async persistDamageAnalysisAfterImageSave(
+    messageId: string,
+    imageUrl: string,
+    conversationId: string,
+  ): Promise<void> {
+    const analysis = await this.analyzeDamageImage(imageUrl);
+    const draftQuote = this.generateDraftQuote(analysis);
+    await this.messageRepository.update(
+      { id: messageId },
+      { damageAnalysis: analysis, draftQuote },
+    );
+    this.chatGateway.emitImageDamageAnalysis({
+      messageId,
+      conversationId,
+      damageAnalysis: analysis,
+      draftQuote,
+    });
   }
 
   // --- OPTIMIZACIÓN DE CARGA ---
@@ -173,6 +409,8 @@ export class ChatService {
       createdAt: m.createdAt,
       senderName: m.senderName,
       conversationId: m.conversationId,
+      damageAnalysis: m.damageAnalysis ?? null,
+      draftQuote: m.draftQuote ?? null,
     }));
   }
 

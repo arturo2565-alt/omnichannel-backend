@@ -1,5 +1,13 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { Conversation } from './conversation.entity';
+import type { DraftQuote } from '../autofix-config';
+
+/** Resultado de analyzeDamageImage (JSON estructurado) */
+export interface VehicleDamageAnalysis {
+  partesAfectadas: string[];
+  severidadDelDano: string;
+  descripcionTecnica: string;
+}
 
 @Entity()
 export class Message {
@@ -30,4 +38,12 @@ export class Message {
 
   @Column({ nullable: true })
   conversationId: string;
+
+  /** Análisis IA de daños (hojalatería / pintura) cuando el mensaje es una imagen */
+  @Column({ type: 'jsonb', nullable: true })
+  damageAnalysis: VehicleDamageAnalysis | null;
+
+  /** Cotización borrador generada a partir del análisis + lista base de precios */
+  @Column({ type: 'jsonb', nullable: true })
+  draftQuote: DraftQuote | null;
 }
