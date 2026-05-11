@@ -739,6 +739,40 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Perfil público del PSID vía Graph (nombre y foto). Requiere `FB_PAGE_ACCESS_TOKEN`.
+   */
+  async getFacebookProfile(psid: string): Promise<{
+    first_name?: string;
+    last_name?: string;
+    profile_pic?: string;
+  } | null> {
+    const token = process.env.FB_PAGE_ACCESS_TOKEN?.trim();
+    const id = String(psid ?? '').trim();
+    if (!token || !id) return null;
+    try {
+      const url = `https://graph.facebook.com/v21.0/${encodeURIComponent(id)}`;
+      const { data } = await axios.get<{
+        first_name?: string;
+        last_name?: string;
+        profile_pic?: string;
+      }>(url, {
+        params: {
+          fields: 'first_name,last_name,profile_pic',
+          access_token: token,
+        },
+      });
+      return data && typeof data === 'object' ? data : null;
+    } catch (err) {
+      console.warn(
+        '[getFacebookProfile] no se pudo obtener perfil para PSID',
+        id,
+        err,
+      );
+      return null;
+    }
+  }
+
+  /**
    * POST `/webhook`: payload del panel (legacy) o webhook Meta (`object: page`).
    */
   async ingestWebhookPayload(body: any): Promise<{
@@ -778,16 +812,26 @@ export class ChatService implements OnModuleDestroy {
         : [];
 
       for (const evt of messaging) {
-        const senderId =
-          evt?.sender?.id != null ? String(evt.sender.id) : '';
-        if (!senderId) continue;
-
-        if (senderId === pageId) continue;
-        if (envPage && senderId === envPage) continue;
-        if (evt?.message?.is_echo) continue;
-
         const msg = evt.message;
         if (!msg || typeof msg !== 'object') continue;
+
+        const isEcho = msg.is_echo === true;
+
+        /** PSID del cliente: en eco el remitente es la página → usar `recipient.id`. */
+        let threadPsid = '';
+        if (isEcho) {
+          threadPsid =
+            evt?.recipient?.id != null ? String(evt.recipient.id) : '';
+        } else {
+          threadPsid =
+            evt?.sender?.id != null ? String(evt.sender.id) : '';
+          if (!threadPsid) continue;
+          if (threadPsid === pageId || (envPage && threadPsid === envPage)) {
+            continue;
+          }
+        }
+
+        if (!threadPsid) continue;
 
         const text =
           typeof msg.text === 'string' ? msg.text.trim() : '';
@@ -809,22 +853,36 @@ export class ChatService implements OnModuleDestroy {
           }
         }
 
-        const contactHint = pickFirstNonEmptyTrimmedString(
-          (evt.sender as { name?: string })?.name,
-          `Messenger ${senderId.slice(0, 8)}`,
-        );
+        const contactHint = isEcho
+          ? ''
+          : pickFirstNonEmptyTrimmedString(
+              (evt.sender as { name?: string })?.name,
+              `Messenger ${threadPsid.slice(0, 8)}`,
+            );
+
+        const basePayload: Record<string, unknown> = {
+          externalId: threadPsid,
+          platform: 'facebook',
+          direction: isEcho ? 'outbound' : 'inbound',
+          skipOutboundFacebookSend: isEcho,
+          ...(isEcho
+            ? { user: 'Asistente IA' }
+            : contactHint
+              ? { contactName: contactHint }
+              : {}),
+        };
+
+        if (!text && imageUrls.length === 0) continue;
 
         if (text) {
           const saved = await this.saveMessage({
-            externalId: senderId,
+            ...basePayload,
             message: text,
-            platform: 'facebook',
-            contactName: contactHint || undefined,
           });
           console.log(
-            '[Meta webhook] texto | sender.id (PSID) === externalId conversación:',
-            senderId,
-            '| verificado message.externalId:',
+            `[Meta webhook] texto ${isEcho ? '(eco→outbound)' : '(inbound)'} | PSID hilo:`,
+            threadPsid,
+            '| message.externalId:',
             saved.externalId,
           );
           lastMessageId = saved.id;
@@ -832,15 +890,13 @@ export class ChatService implements OnModuleDestroy {
         }
         for (const url of imageUrls) {
           const saved = await this.saveMessage({
-            externalId: senderId,
+            ...basePayload,
             message: url,
-            platform: 'facebook',
-            contactName: contactHint || undefined,
           });
           console.log(
-            '[Meta webhook] imagen | sender.id (PSID) === externalId conversación:',
-            senderId,
-            '| verificado message.externalId:',
+            `[Meta webhook] imagen ${isEcho ? '(eco→outbound)' : '(inbound)'} | PSID hilo:`,
+            threadPsid,
+            '| message.externalId:',
             saved.externalId,
           );
           lastMessageId = saved.id;
@@ -912,9 +968,27 @@ export class ChatService implements OnModuleDestroy {
       );
 
       if (!conversation) {
+        let displayName = contactName;
+        let avatarUrl: string | null = null;
+        if (
+          shouldPersistPlatformOnConversation(data.platform) &&
+          isFacebookMessengerPlatform(data.platform)
+        ) {
+          const prof = await this.getFacebookProfile(threadExternalId);
+          if (prof) {
+            const full = [prof.first_name, prof.last_name]
+              .filter((x) => typeof x === 'string' && x.trim())
+              .map((x) => String(x).trim())
+              .join(' ')
+              .trim();
+            if (full) displayName = full;
+            if (prof.profile_pic) avatarUrl = prof.profile_pic;
+          }
+        }
         conversation = this.conversationRepository.create({
           externalId: threadExternalId,
-          contactName: contactName || 'Cliente Desconocido',
+          contactName: displayName || 'Cliente Desconocido',
+          avatarUrl,
           platform: shouldPersistPlatformOnConversation(data.platform)
             ? String(data.platform).trim()
             : null,
@@ -1020,7 +1094,8 @@ export class ChatService implements OnModuleDestroy {
     if (
       resolvedDirection === 'outbound' &&
       isFacebookMessengerPlatform(conversation.platform) &&
-      !isIncomingImage(contentToSave)
+      !isIncomingImage(contentToSave) &&
+      !data.skipOutboundFacebookSend
     ) {
       void this.sendFacebookMessengerText(
         conversation.externalId,
@@ -1851,6 +1926,7 @@ export class ChatService implements OnModuleDestroy {
       id: c.id,
       externalId: c.externalId,
       contactName: c.contactName,
+      avatarUrl: c.avatarUrl ?? null,
       status: c.status,
       lastMessageAt: c.lastMessageAt,
       lastMessage: c.lastMessage,

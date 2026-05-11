@@ -24,6 +24,10 @@ export class Conversation {
   @Column()
   contactName: string;
 
+  /** Foto de perfil del PSID (Messenger / Graph `profile_pic`), si se obtuvo al crear el contacto. */
+  @Column({ type: 'varchar', length: 2048, nullable: true })
+  avatarUrl?: string | null;
+
   @Column({ type: 'character varying', nullable: true })
   platform?: string | null; // 'whatsapp' | 'instagram' | etc.
 
