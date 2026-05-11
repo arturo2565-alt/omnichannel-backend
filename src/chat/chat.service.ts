@@ -34,6 +34,15 @@ import {
   matrixInventoryMaxLines,
   type DamageLevel,
 } from './autofix-config';
+import type {
+  ChatCompletionMessageParam,
+  ChatCompletionTool,
+} from 'openai/resources/chat/completions';
+import {
+  WORKSHOP_TIMEZONE,
+  validateWorkshopSlotUtc,
+  buildLlmServerTimeSystemPrefix,
+} from './appointment-intent';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -275,6 +284,57 @@ export interface PatchDraftQuoteBody {
   /** Varias piezas con precio por línea (panel). Si se envía, sustituye el flujo de una sola pieza. */
   inventoryLines?: PatchInventoryLineDto[];
 }
+
+/** Herramientas del autopilot (Chat Completions `tools`). */
+const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'createAppointment',
+      description:
+        'Registra una cita en la base de datos del taller. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral.',
+      parameters: {
+        type: 'object',
+        properties: {
+          scheduledAtIso: {
+            type: 'string',
+            description:
+              'Fecha y hora del turno en ISO 8601 (ej. 2026-05-08T15:00:00-06:00). Debe corresponder al acuerdo con el cliente.',
+          },
+          clientName: {
+            type: 'string',
+            description:
+              'Nombre del cliente si se menciona; si omites, se usará el nombre de la conversación.',
+          },
+          vehicleDescription: {
+            type: 'string',
+            description:
+              'Modelo o datos del vehículo si el cliente los dio en el chat.',
+          },
+          phone: {
+            type: 'string',
+            description:
+              'Teléfono del cliente si consta en el mensaje (solo dígitos o formato típico).',
+          },
+        },
+        required: ['scheduledAtIso'],
+      },
+    },
+  },
+];
+
+const AUTOPILOT_SYSTEM_PROMPT = [
+  'Eres el asistente virtual de un taller automotriz en México.',
+  `Zona horaria del taller: ${WORKSHOP_TIMEZONE}.`,
+  'Horario del taller: lunes a viernes 9:00–18:00; sábado 9:00–14:00; domingo cerrado.',
+  '',
+  'Tienes acceso a la función createAppointment para guardar citas en el sistema cuando el cliente ya definió día y hora concretos dentro de ese horario.',
+  '',
+  'Si el usuario confirma una fecha y hora válida para el taller, DEBES ejecutar la función createAppointment (scheduledAtIso en ISO 8601) para crear el registro antes de dar por cerrada la reserva; luego confirma al cliente en texto.',
+  'No invoques createAppointment si falta fecha u hora, si están fuera del horario del taller, si es domingo, o si el usuario solo explora sin comprometer una hora.',
+  'Si falta algún dato imprescindible, pregunta de forma breve.',
+  'Respuestas breves (como máximo 2–3 frases) salvo que pidan más detalle.',
+].join('\n');
 
 @Injectable()
 export class ChatService implements OnModuleDestroy {
@@ -1646,6 +1706,198 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
 
   // --- LÓGICA DE IA ---
 
+  /** Persiste cita tras llamada de herramienta createAppointment (validación de horario del taller). */
+  private async executeCreateAppointmentTool(
+    argsJson: string,
+    conversation: Conversation,
+  ): Promise<{
+    success: boolean;
+    appointmentId?: string;
+    scheduledAt?: string;
+    error?: string;
+  }> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+
+    const iso = pickFirstNonEmptyTrimmedString(
+      raw.scheduledAtIso,
+      raw.scheduled_at_iso,
+    );
+    if (!iso) {
+      return { success: false, error: 'Falta scheduledAtIso.' };
+    }
+
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) {
+      return { success: false, error: 'Fecha u hora no válida.' };
+    }
+
+    if (!validateWorkshopSlotUtc(d)) {
+      return {
+        success: false,
+        error:
+          'Fuera del horario del taller (lun–vie 9–18, sáb 9–14) o día cerrado.',
+      };
+    }
+
+    const clientName =
+      pickFirstNonEmptyTrimmedString(
+        raw.clientName,
+        conversation.contactName,
+      ) || 'Cliente';
+
+    const vehicleRaw = pickFirstNonEmptyTrimmedString(
+      raw.vehicleDescription,
+      raw.vehicle,
+    );
+    const vehicle = vehicleRaw.length > 0 ? vehicleRaw : null;
+
+    const rawPhone = pickFirstNonEmptyTrimmedString(raw.phone, raw.customerPhone);
+    const phone =
+      rawPhone.length > 0 ? rawPhone.replace(/\s+/g, '').slice(0, 32) : null;
+
+    const row = this.appointmentRepository.create({
+      conversationId: conversation.id,
+      clientName,
+      vehicle,
+      phone,
+      scheduledAt: d,
+      status: 'confirmada',
+    });
+    const saved = await this.appointmentRepository.save(row);
+    return {
+      success: true,
+      appointmentId: saved.id,
+      scheduledAt: saved.scheduledAt.toISOString(),
+    };
+  }
+
+  /** Autopilot con historial + tool `createAppointment`. */
+  private async composeAutopilotReplyWithTools(
+    conversation: Conversation,
+    inboundMsg: Message,
+  ): Promise<string | null> {
+    try {
+      const history = await this.messageRepository.find({
+        where: { conversation: { id: conversation.id } },
+        order: { createdAt: 'ASC' },
+        take: 36,
+      });
+
+      const dialogue: ChatCompletionMessageParam[] = [];
+      for (const m of history) {
+        const text = String(m.content ?? '').trim();
+        if (!text || text.includes('cloudinary')) continue;
+        const role = m.direction === 'inbound' ? 'user' : 'assistant';
+        dialogue.push({ role, content: text });
+      }
+
+      if (dialogue.length === 0) {
+        const t = String(inboundMsg.content ?? '').trim();
+        if (!t || t.includes('cloudinary')) return null;
+        dialogue.push({ role: 'user', content: t });
+      }
+
+      const messages: ChatCompletionMessageParam[] = [
+        {
+          role: 'system',
+          content: `${buildLlmServerTimeSystemPrefix()}\n\n${AUTOPILOT_SYSTEM_PROMPT}`,
+        },
+        ...dialogue,
+      ];
+
+      let lastConfirmedIso: string | null = null;
+
+      for (let step = 0; step < 6; step++) {
+        const completion = await this.openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages,
+          tools: AUTOPILOT_TOOLS,
+          tool_choice: 'auto',
+          temperature: 0.4,
+        });
+
+        const choice = completion.choices[0]?.message;
+        if (!choice) break;
+
+        const toolCalls = choice.tool_calls;
+        if (toolCalls?.length) {
+          messages.push(choice as ChatCompletionMessageParam);
+          for (const tc of toolCalls) {
+            if (tc.type !== 'function') {
+              messages.push({
+                role: 'tool',
+                tool_call_id: tc.id,
+                content: JSON.stringify({
+                  success: false,
+                  error: 'Tipo de herramienta no soportado.',
+                }),
+              });
+              continue;
+            }
+            const name = tc.function.name;
+            const args = tc.function.arguments ?? '{}';
+            let payload: {
+              success: boolean;
+              appointmentId?: string;
+              scheduledAt?: string;
+              error?: string;
+            };
+            if (name === 'createAppointment') {
+              payload = await this.executeCreateAppointmentTool(
+                args,
+                conversation,
+              );
+              if (payload.success && payload.scheduledAt) {
+                lastConfirmedIso = payload.scheduledAt;
+              }
+            } else {
+              payload = {
+                success: false,
+                error: `Función desconocida: ${name}`,
+              };
+            }
+            messages.push({
+              role: 'tool',
+              tool_call_id: tc.id,
+              content: JSON.stringify(payload),
+            });
+          }
+          continue;
+        }
+
+        const txt = choice.content?.trim();
+        if (txt) return txt;
+
+        if (lastConfirmedIso) {
+          try {
+            const d = new Date(lastConfirmedIso);
+            const human = d.toLocaleString('es-MX', {
+              timeZone: WORKSHOP_TIMEZONE,
+              dateStyle: 'medium',
+              timeStyle: 'short',
+            });
+            return `¡Listo! Tu cita quedó registrada para el ${human}. ¡Te esperamos en el taller!`;
+          } catch {
+            return 'Tu cita ha quedado registrada. ¡Te esperamos!';
+          }
+        }
+        return null;
+      }
+
+      return lastConfirmedIso
+        ? 'Tu cita ha quedado registrada. ¡Te esperamos!'
+        : null;
+    } catch (err) {
+      console.error('composeAutopilotReplyWithTools:', err);
+      return null;
+    }
+  }
+
   /** Texto sugerido para mensajes entrantes (ventas corto). */
   private async buildInboundSuggestionText(content: string): Promise<string | null> {
     try {
@@ -1675,7 +1927,10 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
     inboundMsg: Message,
     conversation: Conversation,
   ): Promise<void> {
-    const text = await this.buildInboundSuggestionText(inboundMsg.content);
+    const text = await this.composeAutopilotReplyWithTools(
+      conversation,
+      inboundMsg,
+    );
     if (!text) return;
 
     const outbound = this.messageRepository.create({
@@ -1734,7 +1989,9 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
         messages: [
           { 
             role: "system", 
-            content: "Eres un cerrador de ventas experto. Basado en el historial de chat, sugiere la mejor respuesta para cerrar la venta o resolver la duda del cliente de forma persuasiva y breve." 
+            content: `${buildLlmServerTimeSystemPrefix()}
+
+Eres un cerrador de ventas experto. Basado en el historial de chat, sugiere la mejor respuesta para cerrar la venta o resolver la duda del cliente de forma persuasiva y breve.` 
           },
           ...contextMessages 
         ],

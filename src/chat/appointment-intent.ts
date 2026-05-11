@@ -3,6 +3,33 @@ import OpenAI from 'openai';
 /** Zona del taller para interpretar «mañana» y validar día/hora */
 export const WORKSHOP_TIMEZONE = 'America/Mexico_City';
 
+/**
+ * Fragmento para system prompts: instante del servidor (ISO UTC en UTC + calendario legible en inglés en zona del taller).
+ * Necesario para interpretar «este miércoles», mañana, etc.
+ *
+ * @param now Por defecto `new Date()`; en tests puedes fijar el instante de referencia.
+ */
+export function buildLlmServerTimeSystemPrefix(now = new Date()): string {
+  const isoUtc = now.toISOString();
+  const humanWorkshop = now.toLocaleString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZone: WORKSHOP_TIMEZONE,
+    timeZoneName: 'short',
+  });
+  return [
+    `Current time is ${humanWorkshop} (workshop calendar in ${WORKSHOP_TIMEZONE}).`,
+    `Server instant ISO 8601 (UTC): ${isoUtc}.`,
+    `Treat these lines as authoritative “now” when resolving relative dates (“this Wednesday”, “tomorrow”, “este miércoles”).`,
+  ].join('\n');
+}
+
 export type AppointmentIntentResult = {
   isBookingIntent: boolean;
   /** ISO 8601 del turno confirmado solo si pasa validación de horario del taller */
@@ -146,7 +173,9 @@ export async function parseAppointmentIntent(
     messages: [
       {
         role: 'system',
-        content: `Eres un extractor de intención de CITA / AGENDAR para un taller automotriz en México (zona horaria ${WORKSHOP_TIMEZONE}).
+        content: `${buildLlmServerTimeSystemPrefix(referenceDate)}
+
+Eres un extractor de intención de CITA / AGENDAR para un taller automotriz en México (zona horaria ${WORKSHOP_TIMEZONE}).
 
 Devuelve SOLO un JSON con esta forma:
 {
@@ -249,4 +278,23 @@ Reglas:
     confirmedDate: utc.toISOString(),
     needsClarification: false,
   };
+}
+
+/**
+ * Valida que un instante UTC cae dentro del horario del taller en {@link WORKSHOP_TIMEZONE}
+ * (misma regla que {@link parseAppointmentIntent}: L–V 9–18, Sáb 9–14, Dom cerrado).
+ */
+export function validateWorkshopSlotUtc(instant: Date): boolean {
+  if (Number.isNaN(instant.getTime())) return false;
+  const ymd = ymdInTimezone(instant, WORKSHOP_TIMEZONE);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: WORKSHOP_TIMEZONE,
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  }).formatToParts(instant);
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
+  return isWithinBusinessHours(ymd, hour, minute);
 }
