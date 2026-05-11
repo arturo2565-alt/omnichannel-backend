@@ -9,8 +9,11 @@ import {
   HttpCode, 
   HttpStatus, 
   UseInterceptors, 
-  UploadedFile 
+  UploadedFile,
+  ForbiddenException,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
 import type { PatchDraftQuoteBody } from './chat.service';
@@ -23,22 +26,23 @@ export class ChatController {
     private readonly aiConfigService: AiConfigService,
   ) {}
 
-  // 1. Verificación de Meta O Carga de mensajes (Mantenemos por compatibilidad)
+  // Verificación GET de Meta (WhatsApp / webhooks): debe devolver el challenge en texto plano.
   @Get()
-  async handleGet(
+  verifyWebhook(
     @Query('hub.mode') mode: string,
     @Query('hub.verify_token') token: string,
     @Query('hub.challenge') challenge: string,
+    @Res() res: Response,
   ) {
-    const MY_VERIFY_TOKEN = 'mi_token_secreto_123';
-
-    if (mode === 'subscribe' && token === MY_VERIFY_TOKEN) {
-      console.log('WEBHOOK_VERIFIED');
-      return challenge;
+    const verifyToken =
+      process.env.FB_VERIFY_TOKEN?.trim() || 'AutoFix_Secret_2026';
+    if (mode === 'subscribe' && token === verifyToken) {
+      return res
+        .status(200)
+        .type('text/plain')
+        .send(String(challenge ?? ''));
     }
-
-    console.log('Frontend solicitando todos los mensajes...');
-    return await this.chatService.findAllMessages();
+    throw new ForbiddenException('Validación fallida');
   }
 
   // --- RUTAS DE OPTIMIZACIÓN ---
