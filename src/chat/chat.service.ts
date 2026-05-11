@@ -45,6 +45,7 @@ import {
 } from './appointment-intent';
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { AiConfigService } from './ai-config.service';
+import axios from 'axios';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -99,6 +100,20 @@ function isIncomingImage(content: unknown): content is string {
     content.match(/\.(jpeg|jpg|gif|png|webp)(\?|$)/i) != null ||
     content.includes('cloudinary')
   );
+}
+
+function isFacebookMessengerPlatform(
+  platform: string | null | undefined,
+): boolean {
+  const s = String(platform ?? '').toLowerCase().trim();
+  return (
+    s.includes('facebook') || s.includes('messenger') || s === 'fb'
+  );
+}
+
+function isMetaPageWebhook(body: unknown): boolean {
+  const b = body as Record<string, unknown> | null;
+  return b?.object === 'page' && Array.isArray(b?.entry);
 }
 
 function normalizeDamageAnalysisJson(raw: unknown): VehicleDamageAnalysis {
@@ -678,6 +693,133 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Envía texto al usuario por Send API de Messenger (Graph).
+   * Documentación: recipient PSID + mensaje de texto plano.
+   */
+  private async sendFacebookMessengerText(
+    recipientPsid: string,
+    messageText: string,
+  ): Promise<void> {
+    const token = process.env.FB_PAGE_ACCESS_TOKEN?.trim();
+    if (!token) {
+      console.warn(
+        'sendFacebookMessengerText: falta FB_PAGE_ACCESS_TOKEN en entorno',
+      );
+      return;
+    }
+    const text = String(messageText ?? '').trim();
+    if (!text) return;
+
+    const url = 'https://graph.facebook.com/v21.0/me/messages';
+    await axios.post(
+      url,
+      {
+        recipient: { id: recipientPsid },
+        message: { text: text.slice(0, 2000) },
+      },
+      {
+        params: { access_token: token },
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+  }
+
+  /**
+   * POST `/webhook`: payload del panel (legacy) o webhook Meta (`object: page`).
+   */
+  async ingestWebhookPayload(body: any): Promise<{
+    processed: number;
+    lastMessageId?: string;
+  }> {
+    if (isMetaPageWebhook(body)) {
+      return this.processMetaMessengerWebhook(body);
+    }
+    const saved = await this.saveMessage(body ?? {});
+    return { processed: 1, lastMessageId: saved.id };
+  }
+
+  /**
+   * Normaliza eventos `entry[].messaging[]` de Meta Messenger y delega en {@link saveMessage}.
+   */
+  private async processMetaMessengerWebhook(body: any): Promise<{
+    processed: number;
+    lastMessageId?: string;
+  }> {
+    let n = 0;
+    let lastMessageId: string | undefined;
+    const entries = Array.isArray(body.entry) ? body.entry : [];
+    const envPage = process.env.FB_PAGE_ID?.trim();
+
+    for (const entry of entries) {
+      const pageId = entry?.id != null ? String(entry.id) : '';
+      const messaging = Array.isArray(entry?.messaging)
+        ? entry.messaging
+        : [];
+
+      for (const evt of messaging) {
+        const senderId =
+          evt?.sender?.id != null ? String(evt.sender.id) : '';
+        if (!senderId) continue;
+
+        if (senderId === pageId) continue;
+        if (envPage && senderId === envPage) continue;
+        if (evt?.message?.is_echo) continue;
+
+        const msg = evt.message;
+        if (!msg || typeof msg !== 'object') continue;
+
+        const text =
+          typeof msg.text === 'string' ? msg.text.trim() : '';
+        const attachments = Array.isArray(msg.attachments)
+          ? msg.attachments
+          : [];
+        const imageUrls: string[] = [];
+        for (const a of attachments) {
+          if (
+            a &&
+            typeof a === 'object' &&
+            String((a as { type?: string }).type).toLowerCase() ===
+              'image' &&
+            (a as { payload?: { url?: string } }).payload?.url
+          ) {
+            imageUrls.push(
+              String((a as { payload: { url: string } }).payload.url),
+            );
+          }
+        }
+
+        const contactHint = pickFirstNonEmptyTrimmedString(
+          (evt.sender as { name?: string })?.name,
+          `Messenger ${senderId.slice(0, 8)}`,
+        );
+
+        if (text) {
+          const saved = await this.saveMessage({
+            externalId: senderId,
+            message: text,
+            platform: 'facebook',
+            contactName: contactHint || undefined,
+          });
+          lastMessageId = saved.id;
+          n++;
+        }
+        for (const url of imageUrls) {
+          const saved = await this.saveMessage({
+            externalId: senderId,
+            message: url,
+            platform: 'facebook',
+            contactName: contactHint || undefined,
+          });
+          lastMessageId = saved.id;
+          n++;
+        }
+      }
+    }
+
+    return { processed: n, lastMessageId };
+  }
+
+  /**
    * GUARDAR MENSAJE Y ACTUALIZAR CONVERSACIÓN.
    * - Sin `direction` o distinto de `outbound` → **`inbound`** (mensajes del cliente / webhook canal).
    * - **`outbound`** → respuestas del agente (panel / cotización / dashboard); sin análisis de imagen entrante ni sugerencias IA sobre ese mismo mensaje.
@@ -841,6 +983,20 @@ export class ChatService implements OnModuleDestroy {
     }
 
     this.chatGateway.emitNewMessage(saved);
+
+    if (
+      resolvedDirection === 'outbound' &&
+      isFacebookMessengerPlatform(conversation.platform) &&
+      !isIncomingImage(contentToSave)
+    ) {
+      void this.sendFacebookMessengerText(
+        conversation.externalId,
+        String(contentToSave),
+      ).catch((err) =>
+        console.error('sendFacebookMessengerText (outbound panel):', err),
+      );
+    }
+
     return saved;
   }
 
@@ -1963,6 +2119,13 @@ export class ChatService implements OnModuleDestroy {
     await this.conversationRepository.save(conversation);
 
     this.chatGateway.emitNewMessage(savedOut);
+
+    if (isFacebookMessengerPlatform(conversation.platform)) {
+      void this.sendFacebookMessengerText(conversation.externalId, text).catch(
+        (err) =>
+          console.error('sendFacebookMessengerText (autopilot):', err),
+      );
+    }
   }
 
   async generateAiSuggestion(message: Message) {

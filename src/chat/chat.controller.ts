@@ -81,9 +81,13 @@ export class ChatController {
   @Post()
   @HttpCode(HttpStatus.OK)
   async receiveMessage(@Body() body: any) {
-    /** `outbound`: agente/dashboard; omitido u otro valor: mensaje entrante del cliente. */
-    const saved = await this.chatService.saveMessage(body ?? {});
-    return { status: 'EVENT_RECEIVED', id: saved.id };
+    /** Meta Messenger envía `object: page` + `entry[].messaging[]`; el panel usa el formato legacy. */
+    const result = await this.chatService.ingestWebhookPayload(body ?? {});
+    return {
+      status: 'EVENT_RECEIVED',
+      processed: result.processed,
+      id: result.lastMessageId,
+    };
   }
 
   @Post('ai-suggest/:id')
