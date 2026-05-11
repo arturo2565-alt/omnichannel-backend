@@ -111,9 +111,23 @@ function isFacebookMessengerPlatform(
   );
 }
 
+/**
+ * Webhook de Meta Page (Messenger): `object: "page"` + `entry[]`.
+ * Si `object` falta pero hay `entry[].messaging[]`, también lo tratamos como Meta (evita perder eventos).
+ * Instagram usa `object: "instagram"` — no usar esta ruta.
+ */
 function isMetaPageWebhook(body: unknown): boolean {
   const b = body as Record<string, unknown> | null;
-  return b?.object === 'page' && Array.isArray(b?.entry);
+  if (!b || !Array.isArray(b.entry)) return false;
+  if (b.object === 'instagram') return false;
+  if (b.object === 'page') return true;
+  return b.entry.some(
+    (e) =>
+      e &&
+      typeof e === 'object' &&
+      Array.isArray((e as Record<string, unknown>).messaging) &&
+      ((e as Record<string, unknown>).messaging as unknown[]).length > 0,
+  );
 }
 
 function normalizeDamageAnalysisJson(raw: unknown): VehicleDamageAnalysis {
@@ -734,6 +748,13 @@ export class ChatService implements OnModuleDestroy {
     if (isMetaPageWebhook(body)) {
       return this.processMetaMessengerWebhook(body);
     }
+    if (body && typeof body === 'object' && Array.isArray((body as any).entry)) {
+      console.warn(
+        '[webhook] payload con `entry` pero no clasificado como Meta page; object=',
+        (body as any).object,
+        '— se intentará como legacy (puede fallar si es otro producto Meta).',
+      );
+    }
     const saved = await this.saveMessage(body ?? {});
     return { processed: 1, lastMessageId: saved.id };
   }
@@ -800,6 +821,12 @@ export class ChatService implements OnModuleDestroy {
             platform: 'facebook',
             contactName: contactHint || undefined,
           });
+          console.log(
+            '[Meta webhook] texto | sender.id (PSID) === externalId conversación:',
+            senderId,
+            '| verificado message.externalId:',
+            saved.externalId,
+          );
           lastMessageId = saved.id;
           n++;
         }
@@ -810,6 +837,12 @@ export class ChatService implements OnModuleDestroy {
             platform: 'facebook',
             contactName: contactHint || undefined,
           });
+          console.log(
+            '[Meta webhook] imagen | sender.id (PSID) === externalId conversación:',
+            senderId,
+            '| verificado message.externalId:',
+            saved.externalId,
+          );
           lastMessageId = saved.id;
           n++;
         }
