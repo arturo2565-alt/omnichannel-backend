@@ -15,6 +15,10 @@ import {
 import { Conversation } from './entities/conversation.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
+import {
+  AppointmentEntity,
+  type AppointmentStatus,
+} from './entities/appointment.entity';
 import { ChatGateway } from './chat.gateway';
 import { OpenAI } from 'openai';
 import { v2 as cloudinary } from 'cloudinary';
@@ -305,6 +309,9 @@ export class ChatService implements OnModuleDestroy {
 
     @InjectRepository(DraftQuoteItem)
     private readonly draftQuoteItemRepository: Repository<DraftQuoteItem>,
+
+    @InjectRepository(AppointmentEntity)
+    private readonly appointmentRepository: Repository<AppointmentEntity>,
 
     private readonly chatGateway: ChatGateway,
   ) {
@@ -686,6 +693,7 @@ export class ChatService implements OnModuleDestroy {
             ? String(data.platform).trim()
             : null,
           status: 'nuevo',
+          isAutoPilotActive: true,
         });
         conversation = await this.conversationRepository.save(conversation);
       } else {
@@ -757,7 +765,16 @@ export class ChatService implements OnModuleDestroy {
       saved.conversationId ?? conversation.id;
 
     if (saved.direction === 'inbound' && !isIncomingImage(saved.content)) {
-      this.generateAiSuggestion(saved);
+      const convRow = await this.conversationRepository.findOne({
+        where: { id: conversationIdForSockets },
+      });
+      if (convRow?.isAutoPilotActive) {
+        void this.autoPilotSendTextReply(saved, convRow).catch((err) =>
+          console.error('autoPilotSendTextReply:', err),
+        );
+      } else {
+        this.generateAiSuggestion(saved);
+      }
     }
 
     if (
@@ -1167,7 +1184,7 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
 
       await this.conversationRepository.update(
         { id: conversationId },
-        { status: 'por_cotizar' },
+        { status: 'por_cotizar', isAutoPilotActive: false },
       );
 
       this.chatGateway.emitDraftQuoteReady({
@@ -1177,6 +1194,7 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
         damageAnalysis: analysis,
         draftQuote: draftQuoteDoc,
         estimateAmount,
+        isAutoPilotActive: false,
       });
       return;
     }
@@ -1205,7 +1223,7 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
 
     await this.conversationRepository.update(
       { id: conversationId },
-      { status: 'por_cotizar' },
+      { status: 'por_cotizar', isAutoPilotActive: false },
     );
 
     this.chatGateway.emitDraftQuoteReady({
@@ -1215,6 +1233,7 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
       damageAnalysis: analysis,
       draftQuote: draftQuoteDoc,
       estimateAmount,
+      isAutoPilotActive: false,
     });
   }
 
@@ -1621,33 +1640,75 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
       lastMessageAt: c.lastMessageAt,
       lastMessage: c.lastMessage,
       platform: normalizePlatformForApi(c.platform, fallbackByConvId.get(c.id)),
+      isAutoPilotActive: Boolean(c.isAutoPilotActive),
     }));
   }
 
   // --- LÓGICA DE IA ---
 
-  async generateAiSuggestion(message: Message) {
+  /** Texto sugerido para mensajes entrantes (ventas corto). */
+  private async buildInboundSuggestionText(content: string): Promise<string | null> {
     try {
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-4o", 
+        model: 'gpt-4o',
         messages: [
-          { 
-            role: "system", 
-            content: "Eres un asistente de ventas experto. Sugiere una respuesta MUY corta (máximo 2 frases) para este mensaje. Sé amable y profesional." 
+          {
+            role: 'system',
+            content:
+              'Eres un asistente de ventas experto. Sugiere una respuesta MUY corta (máximo 2 frases) para este mensaje. Sé amable y profesional.',
           },
-          { role: "user", content: message.content }
+          { role: 'user', content },
         ],
       });
+      const suggestion = completion.choices[0]?.message?.content?.trim();
+      return suggestion || null;
+    } catch (error) {
+      console.error('buildInboundSuggestionText:', error);
+      return null;
+    }
+  }
 
-      const suggestion = completion.choices[0].message.content;
+  /**
+   * Autopilot: genera respuesta y la guarda como mensaje **outbound** para que aparezca en el chat.
+   */
+  private async autoPilotSendTextReply(
+    inboundMsg: Message,
+    conversation: Conversation,
+  ): Promise<void> {
+    const text = await this.buildInboundSuggestionText(inboundMsg.content);
+    if (!text) return;
+
+    const outbound = this.messageRepository.create({
+      content: text,
+      channelType: inboundMsg.channelType || conversation.platform || 'test',
+      senderName: 'Asistente IA',
+      direction: 'outbound',
+      externalId: conversation.externalId,
+      conversation,
+    });
+    const savedOut = await this.messageRepository.save(outbound);
+
+    conversation.lastMessageAt = new Date();
+    const preview =
+      text.length > 120 ? `${text.slice(0, 117)}…` : text;
+    conversation.lastMessage = preview;
+    await this.conversationRepository.save(conversation);
+
+    this.chatGateway.emitNewMessage(savedOut);
+  }
+
+  async generateAiSuggestion(message: Message) {
+    try {
+      const suggestion = await this.buildInboundSuggestionText(message.content);
+      if (!suggestion) return;
 
       this.chatGateway.server.emit('aiSuggestion', {
-        conversationId: message.conversation?.id || (message as any).conversationId,
-        suggestion: suggestion
+        conversationId:
+          message.conversation?.id || (message as { conversationId?: string }).conversationId,
+        suggestion,
       });
-
     } catch (error) {
-      console.error("Error con OpenAI:", error.message);
+      console.error('Error con OpenAI:', (error as Error).message);
     }
   }
 
@@ -1685,6 +1746,70 @@ Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min)
       console.error("Error en sugerencia manual:", error);
       return "No pude generar una sugerencia con contexto.";
     }
+  }
+
+  async patchConversationSettings(
+    id: string,
+    body: { isAutoPilotActive?: boolean },
+  ): Promise<{ id: string; isAutoPilotActive: boolean }> {
+    const row = await this.conversationRepository.findOne({ where: { id } });
+    if (!row) {
+      throw new NotFoundException(`Conversación no encontrada: ${id}`);
+    }
+    if (typeof body.isAutoPilotActive === 'boolean') {
+      row.isAutoPilotActive = body.isAutoPilotActive;
+      await this.conversationRepository.save(row);
+    }
+    return { id: row.id, isAutoPilotActive: Boolean(row.isAutoPilotActive) };
+  }
+
+  async findAllAppointments(): Promise<
+    {
+      id: string;
+      clientName: string;
+      vehicle: string | null;
+      phone: string | null;
+      scheduledAt: string;
+      status: AppointmentStatus;
+      conversationId: string | null;
+    }[]
+  > {
+    const rows = await this.appointmentRepository.find({
+      order: { scheduledAt: 'ASC' },
+    });
+    return rows.map((a) => ({
+      id: a.id,
+      clientName: a.clientName,
+      vehicle: a.vehicle,
+      phone: a.phone,
+      scheduledAt: a.scheduledAt.toISOString(),
+      status: a.status,
+      conversationId: a.conversationId,
+    }));
+  }
+
+  async patchAppointmentStatus(
+    id: string,
+    body: { status?: string },
+  ): Promise<{ id: string; status: AppointmentStatus }> {
+    const allowed: AppointmentStatus[] = [
+      'pendiente',
+      'confirmada',
+      'finalizada',
+    ];
+    const row = await this.appointmentRepository.findOne({ where: { id } });
+    if (!row) {
+      throw new NotFoundException(`Cita no encontrada: ${id}`);
+    }
+    const raw = String(body.status ?? '').toLowerCase().trim();
+    if (!allowed.includes(raw as AppointmentStatus)) {
+      throw new BadRequestException(
+        `status debe ser uno de: ${allowed.join(', ')}`,
+      );
+    }
+    row.status = raw as AppointmentStatus;
+    await this.appointmentRepository.save(row);
+    return { id: row.id, status: row.status };
   }
 
   async findAllMessages() {

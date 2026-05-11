@@ -84,11 +84,32 @@ export class ChatController {
     return { suggestion };
   }
 
+  @Patch('conversations/:id')
+  async patchConversation(
+    @Param('id') id: string,
+    @Body() body: { isAutoPilotActive?: boolean },
+  ) {
+    return await this.chatService.patchConversationSettings(id, body);
+  }
+
   @Patch('quote/:id')
   async patchDraftQuote(
     @Param('id') id: string,
     @Body() body: PatchDraftQuoteBody,
   ) {
     return await this.chatService.patchDraftQuote(id, body);
+  }
+
+  @Get('appointments')
+  async getAppointments() {
+    return await this.chatService.findAllAppointments();
+  }
+
+  @Patch('appointments/:id')
+  async patchAppointment(
+    @Param('id') id: string,
+    @Body() body: { status?: string },
+  ) {
+    return await this.chatService.patchAppointmentStatus(id, body);
   }
 }

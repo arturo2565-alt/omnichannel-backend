@@ -39,6 +39,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     damageAnalysis: unknown;
     draftQuote: unknown;
     estimateAmount: number;
+    /** Tras cotización IA el autopilot se apaga para revisión humana */
+    isAutoPilotActive?: boolean;
   }) {
     this.server.emit('draftQuoteReady', payload);
   }

@@ -31,6 +31,10 @@ export class Conversation {
   @Column({ type: 'varchar', length: 32, default: 'nuevo' })
   status: string;
 
+  /** Si es true, mensajes entrantes de texto reciben respuesta automática de IA; se desactiva al generarse un borrador de cotización. */
+  @Column({ type: 'boolean', default: true })
+  isAutoPilotActive: boolean;
+
   @OneToMany(() => Message, (message) => message.conversation)
   messages: Message[];
 
