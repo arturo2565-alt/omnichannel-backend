@@ -44,4 +44,16 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }) {
     this.server.emit('draftQuoteReady', payload);
   }
+
+  /** Actualización de estado de lead / bandeja sin nuevo mensaje */
+  emitConversationLeadUpdated(payload: {
+    conversationId: string;
+    status: string;
+    contactName?: string;
+    lastMessageAt?: string | null;
+    lastMessage?: string | null;
+    isAutoPilotActive?: boolean;
+  }) {
+    this.server.emit('conversationLeadUpdated', payload);
+  }
 }

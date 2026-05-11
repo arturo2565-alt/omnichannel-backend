@@ -1735,11 +1735,41 @@ export class ChatService implements OnModuleDestroy {
       status: 'confirmada',
     });
     const saved = await this.appointmentRepository.save(row);
+
+    conversation.status = 'agendado';
+    await this.conversationRepository.save(conversation);
+
+    this.chatGateway.emitConversationLeadUpdated({
+      conversationId: conversation.id,
+      status: conversation.status,
+      contactName: conversation.contactName,
+      lastMessageAt: conversation.lastMessageAt
+        ? conversation.lastMessageAt.toISOString()
+        : null,
+      lastMessage: conversation.lastMessage ?? null,
+      isAutoPilotActive: Boolean(conversation.isAutoPilotActive),
+    });
+
     return {
       success: true,
       appointmentId: saved.id,
       scheduledAt: saved.scheduledAt.toISOString(),
     };
+  }
+
+  /**
+   * System prompt del autopilot + bloque opcional cuando el lead ya está agendado
+   * (agradecimientos cortos vs dudas).
+   */
+  private buildAutopilotSystemSection(
+    conversation: Conversation,
+    baseChatPrompt: string,
+  ): string {
+    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}`;
+    if (conversation.status !== 'agendado') {
+      return head;
+    }
+    return `${head}\n\n[Estado del lead: AGENDADO — La cita ya está registrada. El autopilot permanece activo: si el cliente solo agradece, saluda o escribe algo breve sin una pregunta ni solicitud nueva, responde una sola frase cordial y cierra la interacción sin volver a agendar ni pedir datos. Si el mensaje plantea una duda razonable sobre la visita, el taller o el vehículo, respóndela en pocas frases.]`;
   }
 
   /** Autopilot con historial + tool `createAppointment`. */
@@ -1748,6 +1778,14 @@ export class ChatService implements OnModuleDestroy {
     inboundMsg: Message,
   ): Promise<string | null> {
     try {
+      const convFresh = await this.conversationRepository.findOne({
+        where: { id: conversation.id },
+      });
+      if (convFresh) {
+        conversation.status = convFresh.status;
+        conversation.isAutoPilotActive = convFresh.isAutoPilotActive;
+      }
+
       const history = await this.messageRepository.find({
         where: { conversation: { id: conversation.id } },
         order: { createdAt: 'ASC' },
@@ -1768,17 +1806,7 @@ export class ChatService implements OnModuleDestroy {
         dialogue.push({ role: 'user', content: t });
       }
 
-      const chatAppointmentPrompt = await this.aiConfigService.getValue(
-        AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
-      );
-
-      const messages: ChatCompletionMessageParam[] = [
-        {
-          role: 'system',
-          content: `${buildLlmServerTimeSystemPrefix()}\n\n${chatAppointmentPrompt}`,
-        },
-        ...dialogue,
-      ];
+      const messages: ChatCompletionMessageParam[] = [...dialogue];
 
       let lastConfirmedIso: string | null = null;
 
@@ -1786,10 +1814,15 @@ export class ChatService implements OnModuleDestroy {
         const freshChatPrompt = await this.aiConfigService.getValue(
           AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
         );
-        messages[0] = {
-          role: 'system',
-          content: `${buildLlmServerTimeSystemPrefix()}\n\n${freshChatPrompt}`,
-        };
+        const systemContent = this.buildAutopilotSystemSection(
+          conversation,
+          freshChatPrompt,
+        );
+        if (messages[0]?.role === 'system') {
+          messages[0] = { role: 'system', content: systemContent };
+        } else {
+          messages.unshift({ role: 'system', content: systemContent });
+        }
 
         const completion = await this.openai.chat.completions.create({
           model: 'gpt-4o',
