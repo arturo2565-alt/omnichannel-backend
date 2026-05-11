@@ -8,6 +8,8 @@ import { Conversation } from './entities/conversation.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { AppointmentEntity } from './entities/appointment.entity';
+import { AiConfigEntity } from './entities/ai-config.entity';
+import { AiConfigService } from './ai-config.service';
 
 @Module({
   imports: [
@@ -17,11 +19,12 @@ import { AppointmentEntity } from './entities/appointment.entity';
       DraftQuoteEntity,
       DraftQuoteItem,
       AppointmentEntity,
+      AiConfigEntity,
     ]),
   ],
   controllers: [ChatController],
-  providers: [ChatService, ChatGateway], // <--- AÑADE CHATGATEWAY AQUÍ
-  exports: [ChatService]
+  providers: [ChatService, ChatGateway, AiConfigService],
+  exports: [ChatService, AiConfigService],
 })
 
 export class ChatModule {}

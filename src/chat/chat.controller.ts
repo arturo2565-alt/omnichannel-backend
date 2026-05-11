@@ -14,10 +14,14 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
 import type { PatchDraftQuoteBody } from './chat.service';
+import { AiConfigService } from './ai-config.service';
 
 @Controller('webhook') 
 export class ChatController {
-  constructor(private readonly chatService: ChatService) {}
+  constructor(
+    private readonly chatService: ChatService,
+    private readonly aiConfigService: AiConfigService,
+  ) {}
 
   // 1. Verificación de Meta O Carga de mensajes (Mantenemos por compatibilidad)
   @Get()
@@ -111,5 +115,25 @@ export class ChatController {
     @Body() body: { status?: string },
   ) {
     return await this.chatService.patchAppointmentStatus(id, body);
+  }
+
+  @Get('ai-config')
+  async getAiConfig() {
+    return await this.aiConfigService.getAdminAiSettings();
+  }
+
+  @Patch('ai-config')
+  async patchAiConfig(
+    @Body()
+    body: {
+      visionPrompt: string;
+      chatAppointmentPrompt: string;
+      businessMapsUrl: string;
+      businessPhone: string;
+      businessHours: string;
+    },
+  ) {
+    await this.aiConfigService.saveAdminAiSettings(body);
+    return { ok: true };
   }
 }
