@@ -478,6 +478,9 @@ export class ChatService implements OnModuleDestroy {
     return out;
   }
 
+  /** Máx. turnos de historial en el payload del playground (sesión larga de prueba). */
+  private static readonly PLAYGROUND_HISTORY_PAYLOAD_MAX = 50;
+
   /** Historial opcional del panel playground (sin persistir en BD). */
   private normalizePlaygroundHistoryPayload(
     raw: unknown,
@@ -497,7 +500,7 @@ export class ChatService implements OnModuleDestroy {
         text: text.length > 8000 ? `${text.slice(0, 8000)}…` : text,
       });
     }
-    return out.slice(-(ChatService.LLM_CONVERSATION_HISTORY_LIMIT - 1));
+    return out.slice(-(ChatService.PLAYGROUND_HISTORY_PAYLOAD_MAX - 1));
   }
 
   /**
@@ -1290,14 +1293,16 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * Panel AI Playground: una llamada de prueba con prompts en borrador (no persiste conversaciones ni cotizaciones).
+   * Panel AI Playground: prueba con prompts en borrador (no persiste en BD).
+   * Si hay `imageBase64`, analiza visión y fusiona el resumen en el turno de usuario del chat;
+   * luego siempre ejecuta chat + probe de daños por texto sobre el contenido fusionado.
    */
   async testAiPlayground(body: {
     visionPrompt: string;
     chatAppointmentPrompt: string;
     userText?: string;
     imageBase64?: string;
-    /** Turnos previos del simulador (máx. 14 + `userText` = 15 turnos de chat sin contar system). */
+    /** Turnos previos del simulador (hasta {@link ChatService.PLAYGROUND_HISTORY_PAYLOAD_MAX} con el mensaje actual). */
     history?: unknown;
   }): Promise<{
     assistantMessage: string;
@@ -1313,6 +1318,15 @@ export class ChatService implements OnModuleDestroy {
 
     const visionPrompt = String(body.visionPrompt ?? '');
     const chatAppointmentPrompt = String(body.chatAppointmentPrompt ?? '');
+    if (!chatAppointmentPrompt.trim()) {
+      throw new BadRequestException('chatAppointmentPrompt vacío');
+    }
+
+    const historyTurns = this.normalizePlaygroundHistoryPayload(body.history);
+
+    let mergedUserForLlm = userText;
+    let mockDraftQuote: DraftQuote | undefined;
+    let visionItems: DetectedDamageItem[] | undefined;
 
     if (imageBase64) {
       const urls = [imageBase64];
@@ -1320,33 +1334,27 @@ export class ChatService implements OnModuleDestroy {
         systemPrompt: visionPrompt.trim() ? visionPrompt : undefined,
         allowEmptyInventory: true,
       });
-      if (!items.length) {
-        return {
-          assistantMessage:
-            'No se detectaron daños en la imagen con el prompt de visión actual (o la respuesta no incluyó ítems válidos).',
-          damageDetected: false,
-        };
+      if (items.length) {
+        visionItems = items;
+        const analysis = inventoryItemsToVehicleAnalysis(items, urls);
+        mockDraftQuote = this.generateDraftQuote(analysis);
+        const summary = this.buildPlaygroundDamageSummary(mockDraftQuote, items.length);
+        mergedUserForLlm = userText.trim()
+          ? `${userText}\n\n--- Resumen automático de la imagen adjunta en este mensaje ---\n${summary}`
+          : `Imagen recibida (playground). Resumen automático del análisis:\n\n${summary}`;
+      } else {
+        const note =
+          'No se detectaron daños en la imagen con el prompt de visión actual (o sin ítems válidos).';
+        mergedUserForLlm = userText.trim()
+          ? `${userText}\n\n--- Análisis visual ---\n${note}`
+          : note;
       }
-      const analysis = inventoryItemsToVehicleAnalysis(items, urls);
-      const mockDraftQuote = this.generateDraftQuote(analysis);
-      return {
-        assistantMessage: this.buildPlaygroundDamageSummary(mockDraftQuote, items.length),
-        damageDetected: true,
-        mockDraftQuote,
-        visionItems: items,
-      };
     }
-
-    if (!chatAppointmentPrompt.trim()) {
-      throw new BadRequestException('chatAppointmentPrompt vacío');
-    }
-
-    const historyTurns = this.normalizePlaygroundHistoryPayload(body.history);
 
     const chatMessages: ChatCompletionMessageParam[] = [
       { role: 'system', content: chatAppointmentPrompt },
       ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
-      { role: 'user', content: userText },
+      { role: 'user', content: mergedUserForLlm },
     ];
 
     const chatCompletion = await this.openai.chat.completions.create({
@@ -1360,7 +1368,7 @@ export class ChatService implements OnModuleDestroy {
 
     const probeSystem = `${visionPrompt.trim() || (await this.aiConfigService.getValue(AI_CONFIG_KEYS.DEFAULT_VISION_PROMPT))}
 
-[Modo playground — solo texto, sin fotos]
+[Modo playground — texto (puede incluir resumen de análisis de imagen pegado por el sistema)]
 Si el mensaje del usuario describe daños concretos de hojalatería o pintura (pieza o zona + severidad aproximada), responde ÚNICAMENTE con JSON válido:
 { "items": [ { "pieza": string, "severidad": "DL"|"DML"|"DM"|"DMF"|"DF"|"DMFuerte", "descripcionTecnica": string, "urls_origen": [] } ] }
 Si no hay daño vehicular claro, responde { "items": [] }.`;
@@ -1368,7 +1376,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     const probeMessages: ChatCompletionMessageParam[] = [
       { role: 'system', content: probeSystem },
       ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
-      { role: 'user', content: userText },
+      { role: 'user', content: mergedUserForLlm },
     ];
 
     const probe = await this.openai.chat.completions.create({
@@ -1384,23 +1392,32 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     } catch {
       probeParsed = null;
     }
-    const items = parseDetectedDamageItemsAllowEmpty(probeParsed);
+    const probeItems = parseDetectedDamageItemsAllowEmpty(probeParsed);
 
-    if (!items.length) {
+    if (mockDraftQuote) {
+      return {
+        assistantMessage: chatReply,
+        damageDetected: true,
+        mockDraftQuote,
+        visionItems,
+      };
+    }
+
+    if (!probeItems.length) {
       return {
         assistantMessage: chatReply,
         damageDetected: false,
       };
     }
 
-    const analysis = inventoryItemsToVehicleAnalysis(items, []);
-    const mockDraftQuote = this.generateDraftQuote(analysis);
-    const summary = this.buildPlaygroundDamageSummary(mockDraftQuote, items.length);
+    const analysis = inventoryItemsToVehicleAnalysis(probeItems, []);
+    const quoteFromText = this.generateDraftQuote(analysis);
+    const summary = this.buildPlaygroundDamageSummary(quoteFromText, probeItems.length);
     return {
       assistantMessage: `${chatReply}\n\n—\n${summary}`,
       damageDetected: true,
-      mockDraftQuote,
-      visionItems: items,
+      mockDraftQuote: quoteFromText,
+      visionItems: probeItems,
     };
   }
 
