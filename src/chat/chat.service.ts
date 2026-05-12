@@ -102,6 +102,47 @@ function isIncomingImage(content: unknown): content is string {
   );
 }
 
+/** Quita bloques ```json … ``` que a veces devuelve el modelo antes de JSON.parse. */
+function stripMarkdownCodeFencesFromModelText(raw: string): string {
+  let s = String(raw ?? '').trim();
+  const fullFence = /^```(?:json)?\s*([\s\S]*?)\s*```\s*$/im;
+  const m = fullFence.exec(s);
+  if (m) return m[1].trim();
+  s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/gim, '');
+  return s.trim();
+}
+
+/** Aísla el primer objeto `{...}` si hubo texto alrededor del JSON. */
+function extractLikelyJsonObjectSubstring(s: string): string {
+  const t = stripMarkdownCodeFencesFromModelText(s);
+  const first = t.indexOf('{');
+  const last = t.lastIndexOf('}');
+  if (first !== -1 && last > first) return t.slice(first, last + 1).trim();
+  return t;
+}
+
+/**
+ * Parsea JSON de visión. Si falla, no se interpreta como "sin daños": log claro y error.
+ */
+function parseVisionModelJsonResponse(rawText: string, context: string): unknown {
+  const candidate = extractLikelyJsonObjectSubstring(rawText);
+  try {
+    return JSON.parse(candidate) as unknown;
+  } catch (err) {
+    console.error(
+      `[Vision JSON ${context}] JSON.parse falló tras limpiar markdown/prosa. Error:`,
+      err,
+    );
+    console.error(
+      `[Vision JSON ${context}] Candidato (primeros 4000 chars):`,
+      candidate.slice(0, 4000),
+    );
+    throw new Error(
+      'La respuesta del modelo de visión no es JSON válido. Revisa la consola del servidor ("Respuesta cruda de Vision" y logs anteriores).',
+    );
+  }
+}
+
 function isFacebookMessengerPlatform(
   platform: string | null | undefined,
 ): boolean {
@@ -1255,10 +1296,35 @@ export class ChatService implements OnModuleDestroy {
         ? `\n\n[Contexto textual del cliente — úsalo para acotar pieza, vehículo y daño esperado]\n${clientCtxRaw.slice(0, 4000)}`
         : '';
 
-    const imageParts = urls.map((url) => ({
-      type: 'image_url' as const,
-      image_url: { url, detail: 'high' as const },
-    }));
+    const urlLinesForText = urls
+      .map((u, i) => {
+        const s = String(u);
+        if (/^data:image\//i.test(s)) {
+          return `${i + 1}. Imagen ${i + 1}: usa la misma data URL en urls_origen que la del bloque image_url en esa posición (longitud ${s.length} caracteres).`;
+        }
+        return `${i + 1}. ${s}`;
+      })
+      .join('\n');
+
+    const userTextBlock = [
+      userSchemaHint,
+      clientCtxBlock,
+      intro,
+      'Las imágenes van en bloques image_url a continuación (formato OpenAI).',
+      'Referencias de entrada (orden = posición de cada image_url):',
+      urlLinesForText,
+    ]
+      .filter((p) => String(p).trim().length > 0)
+      .join('\n\n')
+      .trim();
+
+    const userContent = [
+      { type: 'text' as const, text: userTextBlock },
+      ...urls.map((url) => ({
+        type: 'image_url' as const,
+        image_url: { url, detail: 'high' as const },
+      })),
+    ];
 
     const completion = await this.openai.chat.completions.create({
       model: 'gpt-4o',
@@ -1267,34 +1333,22 @@ export class ChatService implements OnModuleDestroy {
         { role: 'system', content: systemPrompt },
         {
           role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `${userSchemaHint}${clientCtxBlock}\n\n${intro}\n\nURLs en orden — copiar en urls_origen las que evidencien cada daño:\n${urls.map((u, i) => `${i + 1}. ${u}`).join('\n')}`,
-            },
-            ...imageParts,
-          ],
+          content: userContent,
         },
       ],
       max_tokens: 3000,
     });
 
-    const text = completion.choices[0]?.message?.content?.trim();
-    if (!text) {
+    const visionResponse = completion.choices[0]?.message?.content?.trim() ?? '';
+    console.log('Respuesta cruda de Vision:', visionResponse);
+
+    if (!visionResponse) {
       if (options?.allowEmptyInventory) {
         return [];
       }
       throw new Error('OpenAI no devolvió contenido para el análisis de daños');
     }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text) as unknown;
-    } catch {
-      if (options?.allowEmptyInventory) {
-        return [];
-      }
-      throw new Error('Respuesta de OpenAI no es JSON válido');
-    }
+    const parsed = parseVisionModelJsonResponse(visionResponse, 'analyzeDamageImage');
     if (options?.allowEmptyInventory) {
       return parseDetectedDamageItemsAllowEmpty(parsed);
     }
@@ -1427,6 +1481,11 @@ export class ChatService implements OnModuleDestroy {
     const imageBase64 = body.imageBase64 != null ? String(body.imageBase64).trim() : '';
     if (!userText && !imageBase64) {
       throw new BadRequestException('Envía userText o imageBase64');
+    }
+    if (imageBase64 && /^blob:/i.test(imageBase64)) {
+      throw new BadRequestException(
+        'imageBase64 no puede ser una blob URL. Envía data:image/...;base64,... desde el cliente.',
+      );
     }
 
     const visionPrompt = String(body.visionPrompt ?? '');
