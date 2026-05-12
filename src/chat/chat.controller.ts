@@ -167,6 +167,7 @@ export class ChatController {
       chatAppointmentPrompt?: string;
       userText?: string;
       imageBase64?: string;
+      history?: unknown;
     },
   ) {
     return await this.chatService.testAiPlayground({
@@ -174,6 +175,7 @@ export class ChatController {
       chatAppointmentPrompt: String(body.chatAppointmentPrompt ?? ''),
       userText: body.userText,
       imageBase64: body.imageBase64,
+      history: body.history,
     });
   }
 }

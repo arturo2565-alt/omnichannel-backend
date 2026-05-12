@@ -111,6 +111,18 @@ function isFacebookMessengerPlatform(
   );
 }
 
+/** Messenger / WhatsApp: autopilot por texto va en cola con debounce (no respuesta inmediata por mensaje). */
+function shouldDebounceAutopilotInboundText(
+  platform: string | null | undefined,
+): boolean {
+  const s = String(platform ?? '').toLowerCase().trim();
+  if (!s) return false;
+  return (
+    isFacebookMessengerPlatform(s) ||
+    s.includes('whatsapp')
+  );
+}
+
 /**
  * Webhook de Meta Page (Messenger): `object: "page"` + `entry[]`.
  * Si `object` falta pero hay `entry[].messaging[]`, también lo tratamos como Meta (evita perder eventos).
@@ -370,11 +382,26 @@ export class ChatService implements OnModuleDestroy {
   /** Tras la última imagen: esperar tanto tiempo en silencio antes de lanzar GPT (reinicia con cada nueva foto). */
   private static readonly INBOUND_IMAGE_ANALYSIS_DEBOUNCE_MS = 30 * 1000;
 
+  /**
+   * Tras el último mensaje de texto entrante (Messenger / WhatsApp): esperar antes de lanzar el autopilot.
+   * Se reinicia con cada nuevo texto; al vencer, se responde en bloque a todos los textos aún sin contestar.
+   */
+  private static readonly AUTOPILOT_INBOUND_TEXT_DEBOUNCE_MS = 60 * 1000;
+
+  /** Mensajes recientes (cliente + IA/sistema) que recibe el modelo en cada llamada de chat. */
+  private static readonly LLM_CONVERSATION_HISTORY_LIMIT = 15;
+
   /** Ventana histórica (p. ej. fallback / consultas) para imágenes entrantes recientes en la conversación. */
   static readonly RECENT_IMAGE_LOOKBACK_MS = 5 * 60 * 1000;
 
   /** conversationId → timeout del análisis consolidado pendiente */
   private readonly consolidatedImageTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+
+  /** conversationId → timeout del autopilot por texto (Messenger / WhatsApp) */
+  private readonly autopilotTextDebounceTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
   >();
@@ -415,6 +442,62 @@ export class ChatService implements OnModuleDestroy {
     }
     this.consolidatedImageTimers.clear();
     this.pendingBurstImageUrls.clear();
+    for (const t of this.autopilotTextDebounceTimers.values()) {
+      clearTimeout(t);
+    }
+    this.autopilotTextDebounceTimers.clear();
+  }
+
+  /**
+   * Últimos {@link ChatService.LLM_CONVERSATION_HISTORY_LIMIT} mensajes de la conversación,
+   * en orden cronológico (más antiguo primero).
+   */
+  private async loadRecentMessagesForLlm(
+    conversationId: string,
+  ): Promise<Message[]> {
+    const rows = await this.messageRepository.find({
+      where: { conversationId },
+      order: { createdAt: 'DESC' },
+      take: ChatService.LLM_CONVERSATION_HISTORY_LIMIT,
+    });
+    return rows.reverse();
+  }
+
+  /** Convierte filas persistidas a turnos `user` / `assistant` (omite vacíos e imágenes). */
+  private messagesToChatCompletionTurns(
+    rows: readonly Message[],
+  ): ChatCompletionMessageParam[] {
+    const out: ChatCompletionMessageParam[] = [];
+    for (const m of rows) {
+      const text = String(m.content ?? '').trim();
+      if (!text || text.includes('cloudinary')) continue;
+      const role: 'user' | 'assistant' =
+        m.direction === 'inbound' ? 'user' : 'assistant';
+      out.push({ role, content: text });
+    }
+    return out;
+  }
+
+  /** Historial opcional del panel playground (sin persistir en BD). */
+  private normalizePlaygroundHistoryPayload(
+    raw: unknown,
+  ): { role: 'user' | 'assistant'; text: string }[] {
+    if (!Array.isArray(raw)) return [];
+    const out: { role: 'user' | 'assistant'; text: string }[] = [];
+    for (const el of raw) {
+      if (!el || typeof el !== 'object') continue;
+      const o = el as Record<string, unknown>;
+      const role = o['role'];
+      const textRaw = o['text'];
+      if (role !== 'user' && role !== 'assistant') continue;
+      const text = String(textRaw ?? '').trim();
+      if (!text) continue;
+      out.push({
+        role,
+        text: text.length > 8000 ? `${text.slice(0, 8000)}…` : text,
+      });
+    }
+    return out.slice(-(ChatService.LLM_CONVERSATION_HISTORY_LIMIT - 1));
   }
 
   /**
@@ -1078,9 +1161,13 @@ export class ChatService implements OnModuleDestroy {
         where: { id: conversationIdForSockets },
       });
       if (convRow?.isAutoPilotActive) {
-        void this.autoPilotSendTextReply(saved, convRow).catch((err) =>
-          console.error('autoPilotSendTextReply:', err),
-        );
+        if (shouldDebounceAutopilotInboundText(convRow.platform)) {
+          this.scheduleDebouncedAutopilotTextReply(conversationIdForSockets);
+        } else {
+          void this.autoPilotSendTextReply(saved, convRow).catch((err) =>
+            console.error('autoPilotSendTextReply:', err),
+          );
+        }
       } else {
         this.generateAiSuggestion(saved);
       }
@@ -1210,6 +1297,8 @@ export class ChatService implements OnModuleDestroy {
     chatAppointmentPrompt: string;
     userText?: string;
     imageBase64?: string;
+    /** Turnos previos del simulador (máx. 14 + `userText` = 15 turnos de chat sin contar system). */
+    history?: unknown;
   }): Promise<{
     assistantMessage: string;
     damageDetected: boolean;
@@ -1252,12 +1341,17 @@ export class ChatService implements OnModuleDestroy {
       throw new BadRequestException('chatAppointmentPrompt vacío');
     }
 
+    const historyTurns = this.normalizePlaygroundHistoryPayload(body.history);
+
+    const chatMessages: ChatCompletionMessageParam[] = [
+      { role: 'system', content: chatAppointmentPrompt },
+      ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
+      { role: 'user', content: userText },
+    ];
+
     const chatCompletion = await this.openai.chat.completions.create({
       model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: chatAppointmentPrompt },
-        { role: 'user', content: userText },
-      ],
+      messages: chatMessages,
       max_tokens: 1200,
     });
     const chatReply =
@@ -1271,13 +1365,16 @@ Si el mensaje del usuario describe daños concretos de hojalatería o pintura (p
 { "items": [ { "pieza": string, "severidad": "DL"|"DML"|"DM"|"DMF"|"DF"|"DMFuerte", "descripcionTecnica": string, "urls_origen": [] } ] }
 Si no hay daño vehicular claro, responde { "items": [] }.`;
 
+    const probeMessages: ChatCompletionMessageParam[] = [
+      { role: 'system', content: probeSystem },
+      ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
+      { role: 'user', content: userText },
+    ];
+
     const probe = await this.openai.chat.completions.create({
       model: 'gpt-4o-mini',
       response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: probeSystem },
-        { role: 'user', content: userText },
-      ],
+      messages: probeMessages,
       max_tokens: 900,
     });
     const probeText = probe.choices[0]?.message?.content?.trim();
@@ -2182,6 +2279,74 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
   }
 
   /**
+   * Textos entrantes del cliente posteriores al último mensaje **outbound** (aún sin respuesta del taller/IA).
+   */
+  private async findUnansweredInboundTextMessages(
+    conversationId: string,
+  ): Promise<Message[]> {
+    const all = await this.messageRepository.find({
+      where: { conversationId },
+      order: { createdAt: 'ASC' },
+    });
+    let lastOutboundIdx = -1;
+    for (let i = 0; i < all.length; i++) {
+      if (String(all[i].direction ?? '').toLowerCase() === 'outbound') {
+        lastOutboundIdx = i;
+      }
+    }
+    const tail = lastOutboundIdx < 0 ? all : all.slice(lastOutboundIdx + 1);
+    return tail.filter(
+      (m) =>
+        String(m.direction ?? '').toLowerCase() === 'inbound' &&
+        !isIncomingImage(m.content) &&
+        String(m.content ?? '').trim().length > 0,
+    );
+  }
+
+  /** Reinicia el temporizador: un solo envío de autopilot al cabo del silencio. */
+  private scheduleDebouncedAutopilotTextReply(conversationId: string): void {
+    const prev = this.autopilotTextDebounceTimers.get(conversationId);
+    if (prev !== undefined) {
+      clearTimeout(prev);
+    }
+    const t = setTimeout(() => {
+      this.autopilotTextDebounceTimers.delete(conversationId);
+      void this.processDebouncedAutopilotTextReply(conversationId).catch(
+        (err) =>
+          console.error('processDebouncedAutopilotTextReply:', err),
+      );
+    }, ChatService.AUTOPILOT_INBOUND_TEXT_DEBOUNCE_MS);
+    this.autopilotTextDebounceTimers.set(conversationId, t);
+  }
+
+  private async processDebouncedAutopilotTextReply(
+    conversationId: string,
+  ): Promise<void> {
+    const conv = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+    });
+    if (!conv?.isAutoPilotActive) {
+      return;
+    }
+
+    const batch = await this.findUnansweredInboundTextMessages(conversationId);
+    if (batch.length === 0) {
+      return;
+    }
+
+    const anchor = batch[batch.length - 1]!;
+    await this.autoPilotSendTextReply(anchor, conv, {
+      inboundTextBatch: batch,
+    });
+
+    const stillPending =
+      await this.findUnansweredInboundTextMessages(conversationId);
+    if (stillPending.length > 0) {
+      this.scheduleDebouncedAutopilotTextReply(conversationId);
+    }
+  }
+
+  /**
    * System prompt del autopilot + bloque opcional cuando el lead ya está agendado
    * (agradecimientos cortos vs dudas).
    */
@@ -2200,6 +2365,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
   private async composeAutopilotReplyWithTools(
     conversation: Conversation,
     inboundMsg: Message,
+    options?: { inboundTextBatch?: Message[] },
   ): Promise<string | null> {
     try {
       const convFresh = await this.conversationRepository.findOne({
@@ -2209,22 +2375,37 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
         conversation.status = convFresh.status;
         conversation.isAutoPilotActive = convFresh.isAutoPilotActive;
       }
-
-      const history = await this.messageRepository.find({
-        where: { conversation: { id: conversation.id } },
-        order: { createdAt: 'ASC' },
-        take: 36,
-      });
-
-      const dialogue: ChatCompletionMessageParam[] = [];
-      for (const m of history) {
-        const text = String(m.content ?? '').trim();
-        if (!text || text.includes('cloudinary')) continue;
-        const role = m.direction === 'inbound' ? 'user' : 'assistant';
-        dialogue.push({ role, content: text });
+      if (!conversation.isAutoPilotActive) {
+        return null;
       }
 
-      if (dialogue.length === 0) {
+      const history = await this.loadRecentMessagesForLlm(conversation.id);
+
+      const batchInbound = options?.inboundTextBatch?.filter(
+        (m) =>
+          m &&
+          String(m.content ?? '').trim().length > 0 &&
+          !isIncomingImage(m.content),
+      );
+      const batchIdSet =
+        batchInbound && batchInbound.length > 0
+          ? new Set(batchInbound.map((m) => m.id))
+          : null;
+
+      const historySansBatch = batchIdSet
+        ? history.filter((m) => !batchIdSet.has(m.id))
+        : history;
+      const dialogue = this.messagesToChatCompletionTurns(historySansBatch);
+
+      if (batchInbound?.length) {
+        const merged = batchInbound
+          .map((m, i) => `(${i + 1}) ${String(m.content).trim()}`)
+          .join('\n\n');
+        dialogue.push({
+          role: 'user',
+          content: `El cliente ha enviado varios mensajes seguidos (aún sin responder). Intégralos y respóndelos todos en un solo mensaje claro y ordenado:\n\n${merged}`,
+        });
+      } else if (dialogue.length === 0) {
         const t = String(inboundMsg.content ?? '').trim();
         if (!t || t.includes('cloudinary')) return null;
         dialogue.push({ role: 'user', content: t });
@@ -2333,26 +2514,23 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     }
   }
 
-  /** Texto sugerido para mensajes entrantes (ventas corto). */
-  private async buildInboundSuggestionText(content: string): Promise<string | null> {
+  /** Texto sugerido para mensajes entrantes (ventas corto), con historial reciente. */
+  private async buildInboundSuggestionFromHistory(
+    turns: ChatCompletionMessageParam[],
+  ): Promise<string | null> {
+    if (!turns.length) return null;
     try {
       const systemPrompt = await this.aiConfigService.getValue(
         AI_CONFIG_KEYS.INBOUND_SUGGESTION_PROMPT,
       );
       const completion = await this.openai.chat.completions.create({
         model: 'gpt-4o',
-        messages: [
-          {
-            role: 'system',
-            content: systemPrompt,
-          },
-          { role: 'user', content },
-        ],
+        messages: [{ role: 'system', content: systemPrompt }, ...turns],
       });
       const suggestion = completion.choices[0]?.message?.content?.trim();
       return suggestion || null;
     } catch (error) {
-      console.error('buildInboundSuggestionText:', error);
+      console.error('buildInboundSuggestionFromHistory:', error);
       return null;
     }
   }
@@ -2363,10 +2541,12 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
   private async autoPilotSendTextReply(
     inboundMsg: Message,
     conversation: Conversation,
+    options?: { inboundTextBatch?: Message[] },
   ): Promise<void> {
     const text = await this.composeAutopilotReplyWithTools(
       conversation,
       inboundMsg,
+      options,
     );
     if (!text) return;
 
@@ -2398,7 +2578,20 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
 
   async generateAiSuggestion(message: Message) {
     try {
-      const suggestion = await this.buildInboundSuggestionText(message.content);
+      const cid =
+        message.conversation?.id ||
+        (message as { conversationId?: string }).conversationId;
+      let turns: ChatCompletionMessageParam[] = [];
+      if (cid) {
+        const recent = await this.loadRecentMessagesForLlm(String(cid));
+        turns = this.messagesToChatCompletionTurns(recent);
+      }
+      if (turns.length === 0) {
+        const single = String(message.content ?? '').trim();
+        if (!single || single.includes('cloudinary')) return;
+        turns = [{ role: 'user', content: single }];
+      }
+      const suggestion = await this.buildInboundSuggestionFromHistory(turns);
       if (!suggestion) return;
 
       this.chatGateway.server.emit('aiSuggestion', {
@@ -2413,43 +2606,32 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
 
   async getManualAiSuggestion(conversationId: string) {
     try {
-      const history = await this.messageRepository.find({
-        where: { conversation: { id: conversationId } as any },
-        order: { createdAt: 'DESC' },
-        take: 10 
-      });
+      const recent = await this.loadRecentMessagesForLlm(conversationId);
+      const contextMessages = this.messagesToChatCompletionTurns(recent);
 
-      if (!history || history.length === 0) return "No hay historial para analizar.";
-
-      const contextMessages = history.reverse()
-        .filter(m => !m.content.includes('cloudinary')) 
-        .map(m => ({
-          role: (m.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
-          content: m.content
-        }));
+      if (!contextMessages.length) return 'No hay historial para analizar.';
 
       const closerPrompt = await this.aiConfigService.getValue(
         AI_CONFIG_KEYS.MANUAL_AI_CLOSER_PROMPT,
       );
 
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-4o",
+        model: 'gpt-4o',
         messages: [
-          { 
-            role: "system", 
+          {
+            role: 'system',
             content: `${buildLlmServerTimeSystemPrefix()}
 
-${closerPrompt}` 
+${closerPrompt}`,
           },
-          ...contextMessages 
+          ...contextMessages,
         ],
       });
 
       return completion.choices[0].message.content;
-
     } catch (error) {
-      console.error("Error en sugerencia manual:", error);
-      return "No pude generar una sugerencia con contexto.";
+      console.error('Error en sugerencia manual:', error);
+      return 'No pude generar una sugerencia con contexto.';
     }
   }
 
