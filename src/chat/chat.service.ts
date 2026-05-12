@@ -1292,6 +1292,46 @@ export class ChatService implements OnModuleDestroy {
     return normalizeDetectedDamagesJson(parsed);
   }
 
+  private sanitizeVisionItemsForPlaygroundPrompt(
+    items: DetectedDamageItem[],
+  ): Array<{
+    pieza: string;
+    severidad: string;
+    descripcionTecnica: string;
+    urls_origen: string[];
+  }> {
+    return items.map((it) => ({
+      pieza: it.pieza,
+      severidad: it.severidad,
+      descripcionTecnica: it.descripcionTecnica,
+      urls_origen: (it.urls_origen ?? []).map((u) => {
+        const s = String(u);
+        return s.length > 200 ? `[url omitida, ${s.length} caracteres]` : s;
+      }),
+    }));
+  }
+
+  /** Inyecta el JSON de visión en el system del chat para que el modelo no ignore el peritaje. */
+  private buildPlaygroundVisionSystemAppend(items: DetectedDamageItem[]): string {
+    const sanitized = this.sanitizeVisionItemsForPlaygroundPrompt(items);
+    const json = JSON.stringify({ items: sanitized }, null, 2);
+    const header =
+      `[Playground — resultado del servicio de visión]\n` +
+      `Las imágenes del lote ya fueron analizadas con el motor de visión del taller. El JSON siguiente es el peritaje codificado ("items").\n` +
+      `OBLIGATORIO:\n` +
+      `- Usa estos datos como fuente de verdad sobre daños cuando el mensaje incluye imagen o el cliente pregunta por ellos.\n` +
+      `- No pidas otra fotografía, imagen ni archivo adjunto.\n` +
+      `- No digas que no puedes ver imágenes ni que no tienes acceso al archivo.\n` +
+      `- Si "items" está vacío, indica con prudencia que el análisis visual no devolvió piezas con severidad codificada.\n\n` +
+      `JSON del peritaje:\n`;
+    let block = `${header}${json}`;
+    const max = 14000;
+    if (block.length > max) {
+      block = `${block.slice(0, max)}\n…[truncado por tamaño]`;
+    }
+    return `\n\n${block}`;
+  }
+
   /**
    * Panel AI Playground: prueba con prompts en borrador (no persiste en BD).
    * Si hay `imageBase64`, analiza visión y fusiona el resumen en el turno de usuario del chat;
@@ -1327,18 +1367,25 @@ export class ChatService implements OnModuleDestroy {
     let mergedUserForLlm = userText;
     let mockDraftQuote: DraftQuote | undefined;
     let visionItems: DetectedDamageItem[] | undefined;
+    let visionItemsAfterImage: DetectedDamageItem[] = [];
 
     if (imageBase64) {
       const urls = [imageBase64];
-      const items = await this.analyzeDamageImage(urls, {
+      visionItemsAfterImage = await this.analyzeDamageImage(urls, {
         systemPrompt: visionPrompt.trim() ? visionPrompt : undefined,
         allowEmptyInventory: true,
       });
-      if (items.length) {
-        visionItems = items;
-        const analysis = inventoryItemsToVehicleAnalysis(items, urls);
+      if (visionItemsAfterImage.length) {
+        visionItems = visionItemsAfterImage;
+        const analysis = inventoryItemsToVehicleAnalysis(
+          visionItemsAfterImage,
+          urls,
+        );
         mockDraftQuote = this.generateDraftQuote(analysis);
-        const summary = this.buildPlaygroundDamageSummary(mockDraftQuote, items.length);
+        const summary = this.buildPlaygroundDamageSummary(
+          mockDraftQuote,
+          visionItemsAfterImage.length,
+        );
         mergedUserForLlm = userText.trim()
           ? `${userText}\n\n--- Resumen automático de la imagen adjunta en este mensaje ---\n${summary}`
           : `Imagen recibida (playground). Resumen automático del análisis:\n\n${summary}`;
@@ -1351,8 +1398,15 @@ export class ChatService implements OnModuleDestroy {
       }
     }
 
+    const visionSystemAppend = imageBase64
+      ? this.buildPlaygroundVisionSystemAppend(visionItemsAfterImage)
+      : '';
+
     const chatMessages: ChatCompletionMessageParam[] = [
-      { role: 'system', content: chatAppointmentPrompt },
+      {
+        role: 'system',
+        content: `${chatAppointmentPrompt}${visionSystemAppend}`,
+      },
       ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
       { role: 'user', content: mergedUserForLlm },
     ];
