@@ -178,4 +178,28 @@ export class ChatController {
       history: body.history,
     });
   }
+
+  /**
+   * Playground: tras autorizar borrador (lote con imagen), primera respuesta del asistente de chat.
+   */
+  @Post('ai-playground/resume-after-draft')
+  @HttpCode(HttpStatus.OK)
+  async testAiPlaygroundResumeAfterDraft(
+    @Body()
+    body: {
+      chatAppointmentPrompt?: string;
+      userBatchText?: string;
+      authorizedQuoteSummary?: string;
+      history?: unknown;
+      visionItems?: unknown;
+    },
+  ) {
+    return await this.chatService.testAiPlaygroundResumeAfterDraft({
+      chatAppointmentPrompt: String(body.chatAppointmentPrompt ?? ''),
+      userBatchText: body.userBatchText,
+      authorizedQuoteSummary: String(body.authorizedQuoteSummary ?? ''),
+      history: body.history,
+      visionItems: body.visionItems,
+    });
+  }
 }
