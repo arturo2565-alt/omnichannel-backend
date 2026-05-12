@@ -239,6 +239,15 @@ function normalizeDetectedDamagesJson(raw: unknown): DetectedDamageItem[] {
   return out;
 }
 
+/** Igual que {@link normalizeDetectedDamagesJson} pero devuelve `[]` si el JSON no es válido o no hay ítems. */
+function parseDetectedDamageItemsAllowEmpty(parsed: unknown): DetectedDamageItem[] {
+  try {
+    return normalizeDetectedDamagesJson(parsed);
+  } catch {
+    return [];
+  }
+}
+
 function inventoryItemsToVehicleAnalysis(
   items: DetectedDamageItem[],
   sourceUrls: string[],
@@ -1112,8 +1121,16 @@ export class ChatService implements OnModuleDestroy {
    * Visión GPT-4o sobre **todas las URLs dadas**: un solo reporte consolidado en `items`.
    *
    * @param imageUrls Lote ordenado típicamente de la ráfaga acumulada en memoria o de {@link getRecentImages} (+ deduplicadas).
+   * @param options `systemPrompt` / `userSchemaHint` sustituyen la config guardada; `allowEmptyInventory` evita error si no hay daños.
    */
-  async analyzeDamageImage(imageUrls: readonly string[]): Promise<DetectedDamageItem[]> {
+  async analyzeDamageImage(
+    imageUrls: readonly string[],
+    options?: {
+      systemPrompt?: string;
+      userSchemaHint?: string;
+      allowEmptyInventory?: boolean;
+    },
+  ): Promise<DetectedDamageItem[]> {
     const urls = [
       ...new Set(imageUrls.map((u) => String(u).trim()).filter(Boolean)),
     ];
@@ -1121,13 +1138,19 @@ export class ChatService implements OnModuleDestroy {
       throw new Error('Se requiere al menos una URL de imagen');
     }
 
-    const systemPrompt = await this.aiConfigService.getValue(
-      AI_CONFIG_KEYS.DEFAULT_VISION_PROMPT,
-    );
+    const systemPrompt =
+      options?.systemPrompt != null && String(options.systemPrompt).trim() !== ''
+        ? String(options.systemPrompt).trim()
+        : await this.aiConfigService.getValue(
+            AI_CONFIG_KEYS.DEFAULT_VISION_PROMPT,
+          );
 
-    const userSchemaHint = await this.aiConfigService.getValue(
-      AI_CONFIG_KEYS.VISION_JSON_USER_INSTRUCTION,
-    );
+    const userSchemaHint =
+      options?.userSchemaHint != null && String(options.userSchemaHint).trim() !== ''
+        ? String(options.userSchemaHint).trim()
+        : await this.aiConfigService.getValue(
+            AI_CONFIG_KEYS.VISION_JSON_USER_INSTRUCTION,
+          );
 
     const intro = urls
       .map((_, i) => `Imagen ${i + 1}: posición ${i + 1} en el bloque de imágenes`)
@@ -1159,15 +1182,151 @@ export class ChatService implements OnModuleDestroy {
 
     const text = completion.choices[0]?.message?.content?.trim();
     if (!text) {
+      if (options?.allowEmptyInventory) {
+        return [];
+      }
       throw new Error('OpenAI no devolvió contenido para el análisis de daños');
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(text) as unknown;
     } catch {
+      if (options?.allowEmptyInventory) {
+        return [];
+      }
       throw new Error('Respuesta de OpenAI no es JSON válido');
     }
+    if (options?.allowEmptyInventory) {
+      return parseDetectedDamageItemsAllowEmpty(parsed);
+    }
     return normalizeDetectedDamagesJson(parsed);
+  }
+
+  /**
+   * Panel AI Playground: una llamada de prueba con prompts en borrador (no persiste conversaciones ni cotizaciones).
+   */
+  async testAiPlayground(body: {
+    visionPrompt: string;
+    chatAppointmentPrompt: string;
+    userText?: string;
+    imageBase64?: string;
+  }): Promise<{
+    assistantMessage: string;
+    damageDetected: boolean;
+    mockDraftQuote?: DraftQuote;
+    visionItems?: DetectedDamageItem[];
+  }> {
+    const userText = body.userText != null ? String(body.userText).trim() : '';
+    const imageBase64 = body.imageBase64 != null ? String(body.imageBase64).trim() : '';
+    if (!userText && !imageBase64) {
+      throw new BadRequestException('Envía userText o imageBase64');
+    }
+
+    const visionPrompt = String(body.visionPrompt ?? '');
+    const chatAppointmentPrompt = String(body.chatAppointmentPrompt ?? '');
+
+    if (imageBase64) {
+      const urls = [imageBase64];
+      const items = await this.analyzeDamageImage(urls, {
+        systemPrompt: visionPrompt.trim() ? visionPrompt : undefined,
+        allowEmptyInventory: true,
+      });
+      if (!items.length) {
+        return {
+          assistantMessage:
+            'No se detectaron daños en la imagen con el prompt de visión actual (o la respuesta no incluyó ítems válidos).',
+          damageDetected: false,
+        };
+      }
+      const analysis = inventoryItemsToVehicleAnalysis(items, urls);
+      const mockDraftQuote = this.generateDraftQuote(analysis);
+      return {
+        assistantMessage: this.buildPlaygroundDamageSummary(mockDraftQuote, items.length),
+        damageDetected: true,
+        mockDraftQuote,
+        visionItems: items,
+      };
+    }
+
+    if (!chatAppointmentPrompt.trim()) {
+      throw new BadRequestException('chatAppointmentPrompt vacío');
+    }
+
+    const chatCompletion = await this.openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: chatAppointmentPrompt },
+        { role: 'user', content: userText },
+      ],
+      max_tokens: 1200,
+    });
+    const chatReply =
+      chatCompletion.choices[0]?.message?.content?.trim() ||
+      '(La IA no devolvió texto.)';
+
+    const probeSystem = `${visionPrompt.trim() || (await this.aiConfigService.getValue(AI_CONFIG_KEYS.DEFAULT_VISION_PROMPT))}
+
+[Modo playground — solo texto, sin fotos]
+Si el mensaje del usuario describe daños concretos de hojalatería o pintura (pieza o zona + severidad aproximada), responde ÚNICAMENTE con JSON válido:
+{ "items": [ { "pieza": string, "severidad": "DL"|"DML"|"DM"|"DMF"|"DF"|"DMFuerte", "descripcionTecnica": string, "urls_origen": [] } ] }
+Si no hay daño vehicular claro, responde { "items": [] }.`;
+
+    const probe = await this.openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: probeSystem },
+        { role: 'user', content: userText },
+      ],
+      max_tokens: 900,
+    });
+    const probeText = probe.choices[0]?.message?.content?.trim();
+    let probeParsed: unknown = null;
+    try {
+      probeParsed = probeText ? (JSON.parse(probeText) as unknown) : null;
+    } catch {
+      probeParsed = null;
+    }
+    const items = parseDetectedDamageItemsAllowEmpty(probeParsed);
+
+    if (!items.length) {
+      return {
+        assistantMessage: chatReply,
+        damageDetected: false,
+      };
+    }
+
+    const analysis = inventoryItemsToVehicleAnalysis(items, []);
+    const mockDraftQuote = this.generateDraftQuote(analysis);
+    const summary = this.buildPlaygroundDamageSummary(mockDraftQuote, items.length);
+    return {
+      assistantMessage: `${chatReply}\n\n—\n${summary}`,
+      damageDetected: true,
+      mockDraftQuote,
+      visionItems: items,
+    };
+  }
+
+  private buildPlaygroundDamageSummary(quote: DraftQuote, itemCount: number): string {
+    const previewLines = quote.lines
+      .slice(0, 5)
+      .map(
+        (l, i) =>
+          `${i + 1}. ${l.description} — ${formatAutoFixMoney(l.subtotal)}`,
+      );
+    const more =
+      quote.lines.length > 5
+        ? `\n… y ${quote.lines.length - 5} línea(s) más.`
+        : '';
+    return [
+      `Daños detectados (${itemCount} ítem en peritaje de prueba).`,
+      `Borrador: ${quote.reference} · subtotal ${formatAutoFixMoney(quote.subtotal)} ${quote.currency}.`,
+      '',
+      ...previewLines,
+      more,
+    ]
+      .filter(Boolean)
+      .join('\n');
   }
 
   /**

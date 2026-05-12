@@ -154,4 +154,26 @@ export class ChatController {
     await this.aiConfigService.saveAdminAiSettings(body);
     return { ok: true };
   }
+
+  /**
+   * Prueba de IA para el panel (prompts en borrador). No persiste conversaciones ni borradores en BD.
+   */
+  @Post('ai-playground/test')
+  @HttpCode(HttpStatus.OK)
+  async testAiPlayground(
+    @Body()
+    body: {
+      visionPrompt?: string;
+      chatAppointmentPrompt?: string;
+      userText?: string;
+      imageBase64?: string;
+    },
+  ) {
+    return await this.chatService.testAiPlayground({
+      visionPrompt: String(body.visionPrompt ?? ''),
+      chatAppointmentPrompt: String(body.chatAppointmentPrompt ?? ''),
+      userText: body.userText,
+      imageBase64: body.imageBase64,
+    });
+  }
 }
