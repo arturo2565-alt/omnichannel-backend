@@ -7,6 +7,10 @@ import {
   type MatrixPricingSnapshot,
 } from './matrix-pricing-snapshot';
 import { buildFlatRowsFromLegacyFrontendMatrix } from './legacy-price-matrix-import';
+import {
+  syncInstantServiceFlags,
+  upsertInstantQuoteMatrixRows,
+} from './instant-quote-matrix-sync';
 
 @Injectable()
 export class CatalogService {
@@ -75,14 +79,28 @@ export class CatalogService {
     severidad: string;
     precio: number;
     diasEntrega: number;
+    isInstantService?: boolean;
   }): Promise<PriceMatrix> {
     const row = this.priceMatrixRepository.create({
       servicio: dto.servicio.slice(0, 120),
       severidad: dto.severidad.slice(0, 32),
       precio: dto.precio,
       diasEntrega: dto.diasEntrega,
+      isInstantService: dto.isInstantService ?? false,
     });
-    return this.priceMatrixRepository.save(row);
+    const saved = await this.priceMatrixRepository.save(row);
+    await syncInstantServiceFlags(this.priceMatrixRepository.manager);
+    return saved;
+  }
+
+  /**
+   * Carga / actualiza filas InstantQuote y re-calcula banderas en toda la tabla.
+   */
+  async seedInstantQuoteMatrixRows(): Promise<{ upserted: number; totalInDb: number }> {
+    const upserted = await upsertInstantQuoteMatrixRows(this.priceMatrixRepository);
+    await syncInstantServiceFlags(this.priceMatrixRepository.manager);
+    const totalInDb = await this.priceMatrixRepository.count();
+    return { upserted, totalInDb };
   }
 
   /**
@@ -102,6 +120,7 @@ export class CatalogService {
         severidad: r.severidad.slice(0, 32),
         precio: r.precio,
         diasEntrega: r.diasEntrega,
+        isInstantService: false,
       })),
       {
         conflictPaths: ['servicio', 'severidad'],
@@ -109,6 +128,7 @@ export class CatalogService {
       },
     );
     const totalInDb = await this.priceMatrixRepository.count();
+    await syncInstantServiceFlags(this.priceMatrixRepository.manager);
     return { upserted: flat.length, totalInDb };
   }
 }

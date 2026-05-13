@@ -23,6 +23,7 @@ export class CatalogController {
       severidad: r.severidad,
       precio: r.precio,
       diasEntrega: r.diasEntrega,
+      isInstantService: r.isInstantService,
     }));
   }
 
@@ -84,12 +85,19 @@ export class CatalogController {
       severidad?: unknown;
       precio?: unknown;
       diasEntrega?: unknown;
+      isInstantService?: unknown;
     },
   ) {
     const servicio = String(body?.servicio ?? body?.pieza ?? '').trim();
     const severidad = String(body?.severidad ?? '').trim();
     const precio = Number(body?.precio);
     const diasEntrega = Number(body?.diasEntrega);
+    const rawInstant = body?.isInstantService;
+    const isInstantService =
+      rawInstant === true ||
+      rawInstant === 'true' ||
+      rawInstant === 1 ||
+      rawInstant === '1';
     if (!servicio) throw new BadRequestException('servicio obligatorio');
     if (!severidad) throw new BadRequestException('severidad obligatoria');
     if (!Number.isFinite(precio) || precio < 0 || !Number.isInteger(precio)) {
@@ -104,6 +112,7 @@ export class CatalogController {
         severidad,
         precio,
         diasEntrega,
+        isInstantService,
       });
       return {
         ok: true,
@@ -147,8 +156,24 @@ export class CatalogController {
     return {
       ok: true,
       message:
-        'Importación aplicada (upsert). Origen: réplica de autofix-pricing.js en el backend.',
+        'Importación aplicada (upsert). Origen: réplica de autofix-pricing.js en el backend. Banderas InstantQuote sincronizadas.',
       diasEntregaUsado: dias,
+      upserted: result.upserted,
+      totalInDb: result.totalInDb,
+      rows: this.mapRows(rows),
+    };
+  }
+
+  /** Carga masiva Baño de pintura / Estética + sincroniza `isInstantService` en toda la tabla. */
+  @Post('seed-instant-quote-matrix')
+  @HttpCode(HttpStatus.OK)
+  async seedInstantQuoteMatrix() {
+    const result = await this.catalogService.seedInstantQuoteMatrixRows();
+    const rows = await this.catalogService.findAllPriceMatrixRows();
+    return {
+      ok: true,
+      message:
+        'Filas InstantQuote aplicadas (upsert). Cerámico / Baños / Estética marcados según reglas.',
       upserted: result.upserted,
       totalInDb: result.totalInDb,
       rows: this.mapRows(rows),

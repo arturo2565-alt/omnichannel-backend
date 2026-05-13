@@ -24,4 +24,11 @@ export class PriceMatrix {
   /** Días hábiles orientativos de entrega para esta celda (no existía en la matriz JS). */
   @Column({ type: 'int', name: 'dias_entrega' })
   diasEntrega: number;
+
+  /**
+   * Cotización inmediata (sin peritaje pesado): baños de pintura, cerámico, estética, etc.
+   * Hojalatería clásica permanece en `false`.
+   */
+  @Column({ type: 'boolean', name: 'is_instant_service', default: false })
+  isInstantService: boolean;
 }

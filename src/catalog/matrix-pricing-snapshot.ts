@@ -24,6 +24,10 @@ export type MatrixPricingSnapshot = {
     items: ReadonlyArray<ServicioSeveridadInput>,
   ): { canonical: string; unitPrice: number; damageLevel: DamageLevel }[];
   inventoryMaxTotal(items: ReadonlyArray<ServicioSeveridadInput>): number;
+  /** Precio exacto por clave catálogo `servicio|severidad` (p. ej. tamaño de baño de pintura). */
+  getPriceExact(parteLibre: string, severidadLiteral: string): number;
+  /** Celda marcada como InstantQuote en BD. */
+  isInstantExact(parteLibre: string, severidadLiteral: string): boolean;
 };
 
 /**
@@ -36,8 +40,11 @@ export function createMatrixPricingSnapshot(
   servicios.sort((a, b) => b.length - a.length);
 
   const priceByKey = new Map<string, number>();
+  const instantByKey = new Map<string, boolean>();
   for (const r of rows) {
-    priceByKey.set(`${r.servicio}|${r.severidad}`, r.precio);
+    const k = `${r.servicio}|${r.severidad}`;
+    priceByKey.set(k, r.precio);
+    instantByKey.set(k, r.isInstantService === true);
   }
 
   const matchServicio = (parte: string) =>
@@ -68,6 +75,23 @@ export function createMatrixPricingSnapshot(
       }
     }
     return 0;
+  };
+
+  const getPriceExact = (parteLibre: string, severidadLiteral: string): number => {
+    const c = matchServicio(parteLibre);
+    if (!c) return 0;
+    const sev = String(severidadLiteral ?? '').trim();
+    if (!sev) return 0;
+    const v = priceByKey.get(`${c}|${sev}`);
+    return typeof v === 'number' && !Number.isNaN(v) && v > 0 ? v : 0;
+  };
+
+  const isInstantExact = (parteLibre: string, severidadLiteral: string): boolean => {
+    const c = matchServicio(parteLibre);
+    if (!c) return false;
+    const sev = String(severidadLiteral ?? '').trim();
+    if (!sev) return false;
+    return instantByKey.get(`${c}|${sev}`) === true;
   };
 
   const matrixInventoryMaxLines = (
@@ -113,6 +137,8 @@ export function createMatrixPricingSnapshot(
     matchServicio,
     matchPieza: matchServicio,
     getAmount,
+    getPriceExact,
+    isInstantExact,
     matrixInventoryMaxLines,
     inventoryMaxTotal,
   };

@@ -12,6 +12,10 @@ import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { PriceMatrix } from '../src/catalog/entities/price-matrix.entity';
 import { buildPriceMatrixSeedRows } from '../src/catalog/price-matrix-seed.data';
+import {
+  syncInstantServiceFlags,
+  upsertInstantQuoteMatrixRows,
+} from '../src/catalog/instant-quote-matrix-sync';
 
 async function main() {
   const url = process.env.DATABASE_URL?.trim();
@@ -38,13 +42,20 @@ async function main() {
   await ds.initialize();
   try {
     const repo = ds.getRepository(PriceMatrix);
-    const seed = buildPriceMatrixSeedRows(diasEntrega);
+    const seed = buildPriceMatrixSeedRows(diasEntrega).map((r) => ({
+      ...r,
+      isInstantService: false,
+    }));
     await repo.upsert(seed, {
       conflictPaths: ['servicio', 'severidad'],
       skipUpdateIfNoValuesChanged: false,
     });
+    const instantN = await upsertInstantQuoteMatrixRows(repo);
+    await syncInstantServiceFlags(ds.manager);
     const count = await repo.count();
-    console.log(`OK: ${seed.length} filas upsert (servicio×severidad). Total en tabla: ${count}.`);
+    console.log(
+      `OK: ${seed.length} filas legacy upsert + ${instantN} InstantQuote. Total en tabla: ${count}.`,
+    );
   } finally {
     await ds.destroy();
   }

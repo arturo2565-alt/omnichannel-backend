@@ -41,13 +41,17 @@ export function coerceDamageLevelCode(raw: string): DamageLevel {
   return 'DM';
 }
 
-function normalizeText(s: string): string {
+export function normalizeTextForMatch(s: string): string {
   return s
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizeText(s: string): string {
+  return normalizeTextForMatch(s);
 }
 
 function escapeRegExpChars(s: string): string {

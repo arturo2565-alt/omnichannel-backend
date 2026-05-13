@@ -45,6 +45,10 @@ import { AiConfigService } from './ai-config.service';
 import axios from 'axios';
 import { CatalogService } from '../catalog/catalog.service';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
+import {
+  formatInstantQuoteClientMessage,
+  tryResolveInstantQuoteFromUserText,
+} from './instant-quote-from-text';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -1522,6 +1526,13 @@ export class ChatService implements OnModuleDestroy {
 
     if (!imageBase64 && userText) {
       const snapCat = await this.catalogService.getMatrixPricingSnapshot();
+      const instant = tryResolveInstantQuoteFromUserText(userText, snapCat);
+      if (instant) {
+        return {
+          assistantMessage: formatInstantQuoteClientMessage(instant),
+          damageDetected: true,
+        };
+      }
       const catalogOnly = this.tryCatalogOnlyDamageItemsFromUserText(
         userText,
         snapCat,
@@ -1671,7 +1682,7 @@ ${catalogAppend}`;
         return '\n\n[Catálogo de piezas/servicios aún sin datos en base de datos.]';
       }
       const list = names.join(', ');
-      return `\n\nEstos son los servicios y piezas que ofrecemos actualmente: ${list}. Si el usuario menciona alguno de estos, ofrécelo. Si menciona algo que no está en la lista, indícale amablemente que por ahora no contamos con ese servicio. Para servicios del catálogo cotizados solo con severidad "N/A" (p. ej. cerámico sin golpe que peritar), no pidas fotos del vehículo para cotizar: puedes armar la propuesta y aclarar que un asesor validará el borrador.`;
+      return `\n\nEstos son los servicios y piezas que ofrecemos actualmente: ${list}. Si el usuario menciona alguno de estos, ofrécelo. Si menciona algo que no está en la lista, indícale amablemente que por ahora no contamos con ese servicio. Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide baño de pintura y además "cambio de color", suma el suplemento: $8,000 MXN si el tamaño es Chico o Mediano (incluye variantes Premium de esos tamaños), y $10,000 MXN si es Grande o XL (incluye Premium). Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.`;
     } catch (err) {
       console.warn('[loadCatalogPromptAppendForLlm]', err);
       return '';
@@ -2667,6 +2678,21 @@ ${catalogAppend}`;
           String(m.content ?? '').trim().length > 0 &&
           !isIncomingImage(m.content),
       );
+      const mergedForInstant = batchInbound?.length
+        ? batchInbound.map((m) => String(m.content ?? '').trim()).join('\n\n')
+        : String(inboundMsg.content ?? '').trim();
+
+      if (mergedForInstant) {
+        const snapInstant = await this.catalogService.getMatrixPricingSnapshot();
+        const instant = tryResolveInstantQuoteFromUserText(
+          mergedForInstant,
+          snapInstant,
+        );
+        if (instant) {
+          return formatInstantQuoteClientMessage(instant);
+        }
+      }
+
       const batchIdSet =
         batchInbound && batchInbound.length > 0
           ? new Set(batchInbound.map((m) => m.id))
@@ -2894,6 +2920,21 @@ ${catalogAppend}`;
       const contextMessages = this.messagesToChatCompletionTurns(recent);
 
       if (!contextMessages.length) return 'No hay historial para analizar.';
+
+      for (let i = contextMessages.length - 1; i >= 0; i--) {
+        const turn = contextMessages[i];
+        if (turn?.role === 'user') {
+          const lastUser = String(turn.content ?? '').trim();
+          if (lastUser) {
+            const snapM = await this.catalogService.getMatrixPricingSnapshot();
+            const instantM = tryResolveInstantQuoteFromUserText(lastUser, snapM);
+            if (instantM) {
+              return formatInstantQuoteClientMessage(instantM);
+            }
+          }
+          break;
+        }
+      }
 
       const closerPrompt = await this.aiConfigService.getValue(
         AI_CONFIG_KEYS.MANUAL_AI_CLOSER_PROMPT,
