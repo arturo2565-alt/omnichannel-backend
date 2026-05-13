@@ -5,14 +5,22 @@
 
 export const AUTO_FIX_CURRENCY = 'MXN' as const;
 
-/** Niveles de daño (columnas de la matriz / catálogo) */
-export const DAMAGE_LEVEL_KEYS = [
+/** Columnas típicas de matriz ancha legacy (sin fila N/A en documentos viejos). */
+export const DAMAGE_LEVEL_KEYS_STANDARD = [
   'DL',
   'DML',
   'DM',
   'DMF',
   'DF',
   'DMFuerte',
+] as const;
+
+export type StandardDamageLevel = (typeof DAMAGE_LEVEL_KEYS_STANDARD)[number];
+
+/** Niveles en catálogo / cotización (`N/A` primero = menor “rango” de daño para desempates). */
+export const DAMAGE_LEVEL_KEYS = [
+  'N/A',
+  ...DAMAGE_LEVEL_KEYS_STANDARD,
 ] as const;
 
 export type DamageLevel = (typeof DAMAGE_LEVEL_KEYS)[number];
@@ -24,6 +32,7 @@ export type DamageLevel = (typeof DAMAGE_LEVEL_KEYS)[number];
 export function coerceDamageLevelCode(raw: string): DamageLevel {
   const t = (raw ?? '').trim();
   if (!t) return 'DM';
+  if (/\bn\s*\/\s*a\b|^n\/a$/i.test(t)) return 'N/A';
   const order: DamageLevel[] = ['DMFuerte', 'DF', 'DMF', 'DM', 'DML', 'DL'];
   for (const level of order) {
     const escaped = level.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -81,7 +90,14 @@ export function resolveDamageLevelFromText(
   const blob = normalizeText(`${severidad} ${descripcionTecnica ?? ''}`);
   if (!blob) return null;
 
+  if (
+    /\bn\s*\/\s*a\b|^n\/a$|no aplica|sin severidad|servicio sin dan/i.test(blob)
+  ) {
+    return 'N/A';
+  }
+
   for (const level of DAMAGE_LEVEL_KEYS) {
+    if (level === 'N/A') continue;
     if (level === 'DMFuerte') {
       if (/\bdmfuerte\b|\bdmf\s*fuerte\b/i.test(blob)) return 'DMFuerte';
       continue;

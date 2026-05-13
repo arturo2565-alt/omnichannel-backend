@@ -1,10 +1,10 @@
-import type { DamageLevel } from '../chat/autofix-config';
+import type { StandardDamageLevel } from '../chat/autofix-config';
 
 /**
  * Réplica de `omnichannel-frontend/src/autofix-pricing.js` → `PIEZA_DANO_PRICE_MATRIX`.
  * El backend no puede importar ese archivo en producción (Railway); mantén ambos alineados al editar precios.
  */
-export type WideLegacyPriceRow = { pieza: string } & Record<DamageLevel, number>;
+export type WideLegacyPriceRow = { pieza: string } & Record<StandardDamageLevel, number>;
 
 export const LEGACY_PIEZA_DANO_PRICE_MATRIX: readonly WideLegacyPriceRow[] = [
   { pieza: 'Fascia', DL: 2900, DML: 3300, DM: 3600, DMF: 3500, DF: 3500, DMFuerte: 4900 },

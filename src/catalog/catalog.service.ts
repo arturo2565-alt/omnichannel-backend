@@ -21,6 +21,17 @@ export class CatalogService {
     });
   }
 
+  /** Nombres únicos de pieza/servicio (orden alfabético) para inyectar en prompts de texto. */
+  async getDistinctPiezaNamesForPrompt(): Promise<string[]> {
+    const raw = await this.priceMatrixRepository
+      .createQueryBuilder('p')
+      .select('p.pieza', 'pieza')
+      .distinct(true)
+      .orderBy('p.pieza', 'ASC')
+      .getRawMany<{ pieza: string }>();
+    return raw.map((r) => String(r.pieza ?? '').trim()).filter(Boolean);
+  }
+
   /** Lectura única de `price_matrix` para armar líneas de cotización (sin N queries por celda). */
   async getMatrixPricingSnapshot(): Promise<MatrixPricingSnapshot> {
     const rows = await this.priceMatrixRepository.find({

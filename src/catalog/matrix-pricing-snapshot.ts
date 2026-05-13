@@ -45,12 +45,24 @@ export function createMatrixPricingSnapshot(
   ): number => {
     const level = resolveDamageLevelFromText(severidadRaw, descripcionTecnica);
     if (!level) return 0;
-    const direct = priceByKey.get(`${piezaRaw}|${level}`);
-    if (typeof direct === 'number' && !Number.isNaN(direct)) return direct;
+
+    const read = (pie: string, sev: string): number | null => {
+      const x = priceByKey.get(`${pie}|${sev}`);
+      return typeof x === 'number' && !Number.isNaN(x) ? x : null;
+    };
+
+    let v = read(piezaRaw, level);
+    if (v != null && v > 0) return v;
     const canonical = matchPieza(piezaRaw);
-    if (!canonical) return 0;
-    const v = priceByKey.get(`${canonical}|${level}`);
-    return typeof v === 'number' && !Number.isNaN(v) ? v : 0;
+    if (canonical) {
+      v = read(canonical, level);
+      if (v != null && v > 0) return v;
+      if (level !== 'N/A') {
+        const na = read(canonical, 'N/A');
+        if (na != null && na > 0) return na;
+      }
+    }
+    return 0;
   };
 
   const matrixInventoryMaxLines = (

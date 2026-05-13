@@ -44,6 +44,7 @@ import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { AiConfigService } from './ai-config.service';
 import axios from 'axios';
 import { CatalogService } from '../catalog/catalog.service';
+import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -229,9 +230,10 @@ function normalizeDamageAnalysisJson(raw: unknown): VehicleDamageAnalysis {
 }
 
 function pickWorstDamageLevel(levels: string[]): DamageLevel {
-  let worst: DamageLevel = 'DL';
-  for (const raw of levels) {
-    const c = coerceDamageLevelCode(raw);
+  if (!levels.length) return 'DM';
+  let worst: DamageLevel = coerceDamageLevelCode(levels[0] ?? 'DM');
+  for (let i = 1; i < levels.length; i++) {
+    const c = coerceDamageLevelCode(levels[i] ?? '');
     if (damageLevelRank(c) > damageLevelRank(worst)) worst = c;
   }
   return worst;
@@ -1433,6 +1435,8 @@ export class ChatService implements OnModuleDestroy {
     const visionParsed = this.normalizePlaygroundResumeVisionItems(body.visionItems);
     const visionAppend = this.buildPlaygroundVisionSystemAppend(visionParsed);
 
+    const catalogAppend = await this.loadCatalogPromptAppendForLlm();
+
     const batchCtx =
       userBatchText ||
       '(El cliente envió imagen(es) y mensaje en el mismo lote; no hay texto adicional.)';
@@ -1455,7 +1459,7 @@ export class ChatService implements OnModuleDestroy {
     const chatMessages: ChatCompletionMessageParam[] = [
       {
         role: 'system',
-        content: `${chatAppointmentPrompt}${visionAppend}${resumePlaygroundAuthHint}`,
+        content: `${chatAppointmentPrompt}${visionAppend}${resumePlaygroundAuthHint}${catalogAppend}`,
       },
       ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
       { role: 'user', content: mergedUserForLlm },
@@ -1511,8 +1515,29 @@ export class ChatService implements OnModuleDestroy {
 
     const historyTurns = this.normalizePlaygroundHistoryPayload(body.history);
 
+    const catalogAppend = await this.loadCatalogPromptAppendForLlm();
+
     let mergedUserForLlm = userText;
     let visionItemsAfterImage: DetectedDamageItem[] = [];
+
+    if (!imageBase64 && userText) {
+      const snapCat = await this.catalogService.getMatrixPricingSnapshot();
+      const catalogOnly = this.tryCatalogOnlyDamageItemsFromUserText(
+        userText,
+        snapCat,
+      );
+      if (catalogOnly?.length) {
+        const analysis = inventoryItemsToVehicleAnalysis(catalogOnly, []);
+        const mockDraftQuote = await this.generateDraftQuote(analysis);
+        return {
+          assistantMessage: '',
+          damageDetected: true,
+          mockDraftQuote,
+          visionItems: catalogOnly,
+          isDraftPending: true,
+        };
+      }
+    }
 
     if (imageBase64) {
       const urls = [imageBase64];
@@ -1551,7 +1576,7 @@ export class ChatService implements OnModuleDestroy {
     const chatMessages: ChatCompletionMessageParam[] = [
       {
         role: 'system',
-        content: `${chatAppointmentPrompt}${visionSystemAppend}`,
+        content: `${chatAppointmentPrompt}${visionSystemAppend}${catalogAppend}`,
       },
       ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
       { role: 'user', content: mergedUserForLlm },
@@ -1570,8 +1595,10 @@ export class ChatService implements OnModuleDestroy {
 
 [Modo playground — texto (puede incluir resumen de análisis de imagen pegado por el sistema)]
 Si el mensaje del usuario describe daños concretos de hojalatería o pintura (pieza o zona + severidad aproximada), responde ÚNICAMENTE con JSON válido:
-{ "items": [ { "pieza": string, "severidad": "DL"|"DML"|"DM"|"DMF"|"DF"|"DMFuerte", "descripcionTecnica": string, "urls_origen": [] } ] }
-Si no hay daño vehicular claro, responde { "items": [] }.`;
+{ "items": [ { "pieza": string, "severidad": "DL"|"DML"|"DM"|"DMF"|"DF"|"DMFuerte"|"N/A", "descripcionTecnica": string, "urls_origen": [] } ] }
+Usa "N/A" solo para servicios sin grado de daño (p. ej. tratamiento cerámico). Si no hay daño vehicular claro ni servicio identificable, responde { "items": [] }.
+
+${catalogAppend}`;
 
     const probeMessages: ChatCompletionMessageParam[] = [
       { role: 'system', content: probeSystem },
@@ -1632,6 +1659,48 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     ]
       .filter(Boolean)
       .join('\n');
+  }
+
+  /**
+   * Lista de piezas/servicios en BD para inyectar en prompts de texto (playground, autopilot, sugerencias).
+   */
+  private async loadCatalogPromptAppendForLlm(): Promise<string> {
+    try {
+      const names = await this.catalogService.getDistinctPiezaNamesForPrompt();
+      if (!names.length) {
+        return '\n\n[Catálogo de piezas/servicios aún sin datos en base de datos.]';
+      }
+      const list = names.join(', ');
+      return `\n\nEstos son los servicios y piezas que ofrecemos actualmente: ${list}. Si el usuario menciona alguno de estos, ofrécelo. Si menciona algo que no está en la lista, indícale amablemente que por ahora no contamos con ese servicio. Para servicios del catálogo cotizados solo con severidad "N/A" (p. ej. cerámico sin golpe que peritar), no pidas fotos del vehículo para cotizar: puedes armar la propuesta y aclarar que un asesor validará el borrador.`;
+    } catch (err) {
+      console.warn('[loadCatalogPromptAppendForLlm]', err);
+      return '';
+    }
+  }
+
+  /**
+   * Texto sin imagen: si el mensaje encaja con una pieza del catálogo y tiene precio con severidad N/A,
+   * devuelve un inventario mínimo para generar borrador (sin visión).
+   */
+  private tryCatalogOnlyDamageItemsFromUserText(
+    userText: string,
+    snap: MatrixPricingSnapshot,
+  ): DetectedDamageItem[] | null {
+    const t = String(userText ?? '').trim();
+    if (!t) return null;
+    const canonical = snap.matchPieza(t);
+    if (!canonical) return null;
+    const na = snap.getAmount(canonical, 'N/A');
+    if (na <= 0) return null;
+    return [
+      {
+        pieza: canonical,
+        severidad: 'N/A',
+        descripcionTecnica:
+          'Servicio o producto del catálogo solicitado por texto (sin imagen de peritaje).',
+        urls_origen: [],
+      },
+    ];
   }
 
   /**
@@ -2560,11 +2629,12 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
    * System prompt del autopilot + bloque opcional cuando el lead ya está agendado
    * (agradecimientos cortos vs dudas).
    */
-  private buildAutopilotSystemSection(
+  private async buildAutopilotSystemSection(
     conversation: Conversation,
     baseChatPrompt: string,
-  ): string {
-    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}`;
+  ): Promise<string> {
+    const catalogAppend = await this.loadCatalogPromptAppendForLlm();
+    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}`;
     if (conversation.status !== 'agendado') {
       return head;
     }
@@ -2629,7 +2699,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
         const freshChatPrompt = await this.aiConfigService.getValue(
           AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
         );
-        const systemContent = this.buildAutopilotSystemSection(
+        const systemContent = await this.buildAutopilotSystemSection(
           conversation,
           freshChatPrompt,
         );
@@ -2733,9 +2803,13 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
       const systemPrompt = await this.aiConfigService.getValue(
         AI_CONFIG_KEYS.INBOUND_SUGGESTION_PROMPT,
       );
+      const catalogAppend = await this.loadCatalogPromptAppendForLlm();
       const completion = await this.openai.chat.completions.create({
         model: 'gpt-4o',
-        messages: [{ role: 'system', content: systemPrompt }, ...turns],
+        messages: [
+          { role: 'system', content: `${systemPrompt}${catalogAppend}` },
+          ...turns,
+        ],
       });
       const suggestion = completion.choices[0]?.message?.content?.trim();
       return suggestion || null;
@@ -2825,6 +2899,8 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
         AI_CONFIG_KEYS.MANUAL_AI_CLOSER_PROMPT,
       );
 
+      const catalogAppend = await this.loadCatalogPromptAppendForLlm();
+
       const completion = await this.openai.chat.completions.create({
         model: 'gpt-4o',
         messages: [
@@ -2832,7 +2908,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
             role: 'system',
             content: `${buildLlmServerTimeSystemPrefix()}
 
-${closerPrompt}`,
+${closerPrompt}${catalogAppend}`,
           },
           ...contextMessages,
         ],

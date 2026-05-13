@@ -1,4 +1,7 @@
-import { DAMAGE_LEVEL_KEYS, type DamageLevel } from '../chat/autofix-config';
+import {
+  DAMAGE_LEVEL_KEYS_STANDARD,
+  type StandardDamageLevel,
+} from '../chat/autofix-config';
 import { LEGACY_PIEZA_DANO_PRICE_MATRIX } from './legacy-pieza-dano-from-frontend';
 
 export type FlatLegacyImportRow = {
@@ -16,8 +19,8 @@ export function buildFlatRowsFromLegacyFrontendMatrix(
 ): FlatLegacyImportRow[] {
   const out: FlatLegacyImportRow[] = [];
   for (const row of LEGACY_PIEZA_DANO_PRICE_MATRIX) {
-    for (const sev of DAMAGE_LEVEL_KEYS) {
-      const precio = row[sev as DamageLevel];
+    for (const sev of DAMAGE_LEVEL_KEYS_STANDARD) {
+      const precio = row[sev as StandardDamageLevel];
       if (typeof precio !== 'number' || Number.isNaN(precio)) continue;
       out.push({
         pieza: row.pieza,
