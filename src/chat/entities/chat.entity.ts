@@ -16,7 +16,7 @@ export interface DetectedDamageItem {
 /** @deprecated usar DetectedDamageItem (descripcion → descripcionTecnica, urls_asociadas → urls_origen). */
 export type DamageInventoryItem = DetectedDamageItem;
 
-/** Resultado agregado del peritaje + cotización (AutoFix / gpt-4o). */
+/** Resultado agregado del peritaje + cotización (AutoFix / visión multimodal). */
 export interface VehicleDamageAnalysis {
   /** Pieza principal (p. ej. Fascia, Puerta, Cofre) */
   pieza: string;

@@ -55,6 +55,9 @@ function isAgentOnlyPlatform(platform: string | undefined | null): boolean {
   return AGENT_ONLY_PLATFORMS.has(platform.trim().toLowerCase());
 }
 
+/** Modelo multimodal para peritaje por imagen (`analyzeDamageImage`). */
+const VISION_DAMAGE_MODEL = 'gpt-5.5';
+
 /** Solo guardamos en conversation.platform valores que describen WhatsApp / Instagram / etc. */
 function shouldPersistPlatformOnConversation(
   platform: unknown,
@@ -1249,7 +1252,7 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * Visión GPT-4o sobre **todas las URLs dadas**: un solo reporte consolidado en `items`.
+   * Visión multimodal (GPT-5.5) sobre **todas las URLs dadas**: un solo reporte consolidado en `items`.
    *
    * @param imageUrls Lote ordenado típicamente de la ráfaga acumulada en memoria o de {@link getRecentImages} (+ deduplicadas).
    * @param options `systemPrompt` / `userSchemaHint` sustituyen la config guardada; `allowEmptyInventory` evita error si no hay daños.
@@ -1327,7 +1330,7 @@ export class ChatService implements OnModuleDestroy {
     ];
 
     const completion = await this.openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: VISION_DAMAGE_MODEL,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: systemPrompt },
