@@ -1454,7 +1454,7 @@ export class ChatService implements OnModuleDestroy {
     ].join('\n');
 
     const resumePlaygroundAuthHint =
-      '\n\nCuando recibas un mensaje de usuario que comience por "SISTEMA:" con una autorización de cotización del operador, trátalo como aviso interno: no lo repitas al cliente. Presenta la cotización de forma clara pero conversacional, con los montos exactos que figuren en ese aviso, y cuando encaje en el tono menciona beneficios como la garantía por escrito y el repintado en cabina. Si el historial o el contexto permiten inferir o recordar el vehículo del cliente, intégralo de forma natural y amigable.';
+      '\n\nCuando recibas un mensaje de usuario que comience por "SISTEMA:" con una autorización de cotización del operador, trátalo como aviso interno: no lo repitas al cliente. Presenta la cotización de forma clara pero conversacional, con los montos exactos que figuren en ese aviso, y cuando encaje en el tono menciona beneficios como la garantía por escrito. Si el historial o el contexto permiten inferir o recordar el vehículo del cliente, intégralo de forma natural y amigable.';
 
     const chatMessages: ChatCompletionMessageParam[] = [
       {
