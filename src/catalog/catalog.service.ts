@@ -50,7 +50,12 @@ export class CatalogService {
   }
 
   async bulkUpdatePrecioDias(
-    updates: Array<{ id: string; precio: number; diasEntrega: number }>,
+    updates: Array<{
+      id: string;
+      precio: number;
+      diasEntrega: number;
+      isInstantService?: boolean;
+    }>,
   ): Promise<PriceMatrix[]> {
     const ids = updates.map((u) => u.id);
     const existing = await this.priceMatrixRepository.find({
@@ -64,11 +69,14 @@ export class CatalogService {
     }
     await this.priceMatrixRepository.manager.transaction(async (em) => {
       for (const u of updates) {
-        await em.update(
-          PriceMatrix,
-          { id: u.id },
-          { precio: u.precio, diasEntrega: u.diasEntrega },
-        );
+        const patch: Partial<PriceMatrix> = {
+          precio: u.precio,
+          diasEntrega: u.diasEntrega,
+        };
+        if (typeof u.isInstantService === 'boolean') {
+          patch.isInstantService = u.isInstantService;
+        }
+        await em.update(PriceMatrix, { id: u.id }, patch);
       }
     });
     return this.findAllPriceMatrixRows();

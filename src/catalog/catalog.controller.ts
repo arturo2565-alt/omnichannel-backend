@@ -49,12 +49,19 @@ export class CatalogController {
   async patchPriceMatrix(
     @Body()
     body: {
-      updates?: Array<{ id?: string; precio?: unknown; diasEntrega?: unknown }>;
+      updates?: Array<{
+        id?: string;
+        precio?: unknown;
+        diasEntrega?: unknown;
+        isInstantService?: unknown;
+      }>;
     },
   ) {
     const updates = body?.updates;
     if (!Array.isArray(updates) || updates.length === 0) {
-      throw new BadRequestException('Envía updates: [{ id, precio, diasEntrega }, …]');
+      throw new BadRequestException(
+        'Envía updates: [{ id, precio, diasEntrega, isInstantService? }, …]',
+      );
     }
     const normalized = updates.map((u, i) => {
       const id = String(u?.id ?? '').trim();
@@ -69,7 +76,30 @@ export class CatalogController {
       if (!Number.isFinite(diasEntrega) || diasEntrega < 0 || !Number.isInteger(diasEntrega)) {
         throw new BadRequestException(`updates[${i}]: diasEntrega entero >= 0`);
       }
-      return { id, precio, diasEntrega };
+      const rawI = u?.isInstantService;
+      let isInstantService: boolean | undefined;
+      if (rawI !== undefined && rawI !== null && String(rawI) !== '') {
+        if (
+          rawI === true ||
+          rawI === 'true' ||
+          rawI === 1 ||
+          rawI === '1'
+        ) {
+          isInstantService = true;
+        } else if (
+          rawI === false ||
+          rawI === 'false' ||
+          rawI === 0 ||
+          rawI === '0'
+        ) {
+          isInstantService = false;
+        } else {
+          throw new BadRequestException(
+            `updates[${i}]: isInstantService debe ser booleano si se envía`,
+          );
+        }
+      }
+      return { id, precio, diasEntrega, isInstantService };
     });
     const rows = await this.catalogService.bulkUpdatePrecioDias(normalized);
     return { ok: true, count: rows.length, rows: this.mapRows(rows) };
