@@ -52,6 +52,11 @@ import {
   composeBañoNaturalInstantReply,
 } from './baño-pintura-llm';
 import {
+  buildPlaygroundPostQuoteSchedulingSystemAppend,
+  getPlaygroundInstantInterceptorDecision,
+  playgroundUserMessageMentionsWeekdayOnlyRough,
+} from './playground-instant-quote-interceptor';
+import {
   formatInstantQuoteClientMessage,
   inferBañoTierSeveridad,
   isBañoDePinturaServicio,
@@ -399,7 +404,7 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: 'createAppointment',
       description:
-        'Registra una cita en la base de datos del taller. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral.',
+        'Registra una cita en la base de datos del taller. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. En el panel de simulación (playground), la misma llamada solo valida horario y devuelve vista previa sin persistir en BD.',
       parameters: {
         type: 'object',
         properties: {
@@ -1619,6 +1624,14 @@ export class ChatService implements OnModuleDestroy {
 
     const historyTurns = this.normalizePlaygroundHistoryPayload(body.history);
 
+    const instantIntercept = getPlaygroundInstantInterceptorDecision({
+      historyTurns,
+      currentUserText: userText,
+    });
+    if (instantIntercept.skipInstantInterceptor) {
+      console.log('[PlaygroundInstantQuote]', JSON.stringify(instantIntercept));
+    }
+
     const catalogAppend = await this.loadCatalogPromptAppendForLlm();
 
     let mergedUserForLlm = userText;
@@ -1628,36 +1641,38 @@ export class ChatService implements OnModuleDestroy {
     if (!imageBase64 && userText) {
       catalogSnapForTextOnly = await this.catalogService.getMatrixPricingSnapshot();
       const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
-      const gateReply = tryBañoPinturaVehicleGateReply(
-        userText,
-        playBañoCtx,
-        catalogSnapForTextOnly,
-      );
-      if (gateReply) {
-        return {
-          assistantMessage: gateReply,
-          damageDetected: false,
-        };
-      }
-      const bañoNatural = await this.tryBañoPinturaLlmInstantClientMessage(
-        userText,
-        playBañoCtx,
-        catalogSnapForTextOnly,
-      );
-      if (bañoNatural) {
-        return {
-          assistantMessage: bañoNatural,
-          damageDetected: false,
-        };
-      }
-      const instant = tryResolveInstantQuoteFromUserText(userText, catalogSnapForTextOnly, {
-        fullContextForBaño: playBañoCtx,
-      });
-      if (instant) {
-        return {
-          assistantMessage: formatInstantQuoteClientMessage(instant),
-          damageDetected: false,
-        };
+      if (!instantIntercept.skipInstantInterceptor) {
+        const gateReply = tryBañoPinturaVehicleGateReply(
+          userText,
+          playBañoCtx,
+          catalogSnapForTextOnly,
+        );
+        if (gateReply) {
+          return {
+            assistantMessage: gateReply,
+            damageDetected: false,
+          };
+        }
+        const bañoNatural = await this.tryBañoPinturaLlmInstantClientMessage(
+          userText,
+          playBañoCtx,
+          catalogSnapForTextOnly,
+        );
+        if (bañoNatural) {
+          return {
+            assistantMessage: bañoNatural,
+            damageDetected: false,
+          };
+        }
+        const instant = tryResolveInstantQuoteFromUserText(userText, catalogSnapForTextOnly, {
+          fullContextForBaño: playBañoCtx,
+        });
+        if (instant) {
+          return {
+            assistantMessage: formatInstantQuoteClientMessage(instant),
+            damageDetected: false,
+          };
+        }
       }
       const catalogOnly = this.tryCatalogOnlyDamageItemsFromUserText(
         userText,
@@ -1710,25 +1725,41 @@ export class ChatService implements OnModuleDestroy {
       ? this.buildPlaygroundVisionSystemAppend(visionItemsAfterImage)
       : '';
 
-    const chatMessages: ChatCompletionMessageParam[] = [
-      {
-        role: 'system',
-        content: `${chatAppointmentPrompt}${visionSystemAppend}${catalogAppend}`,
-      },
-      ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
-      { role: 'user', content: mergedUserForLlm },
-    ];
+    const schedulingAppend = instantIntercept.skipInstantInterceptor
+      ? buildPlaygroundPostQuoteSchedulingSystemAppend({
+          userMentionedWeekday:
+            playgroundUserMessageMentionsWeekdayOnlyRough(userText),
+        })
+      : '';
 
-    const chatCompletion = await this.openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: chatMessages,
-      max_tokens: 1200,
-    });
-    const chatReply =
-      chatCompletion.choices[0]?.message?.content?.trim() ||
-      '(La IA no devolvió texto.)';
+    const chatSystemFull = `${chatAppointmentPrompt}${visionSystemAppend}${catalogAppend}${schedulingAppend}`;
 
-    if (!imageBase64 && catalogSnapForTextOnly) {
+    let chatReply: string;
+    if (instantIntercept.skipInstantInterceptor) {
+      chatReply = await this.runPlaygroundChatWithCreateAppointmentTool({
+        baseSystem: chatSystemFull,
+        historyTurns,
+        userContentForTurn: mergedUserForLlm,
+      });
+    } else {
+      const chatCompletion = await this.openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: chatSystemFull,
+          },
+          ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
+          { role: 'user', content: mergedUserForLlm },
+        ],
+        max_tokens: 1200,
+      });
+      chatReply =
+        chatCompletion.choices[0]?.message?.content?.trim() ||
+        '(La IA no devolvió texto.)';
+    }
+
+    if (!imageBase64 && catalogSnapForTextOnly && !instantIntercept.skipInstantInterceptor) {
       const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
       const gateMerged = tryBañoPinturaVehicleGateReply(
         userText,
@@ -1850,7 +1881,8 @@ Si el usuario dice "baño de pintura" o similar sin decir "Exterior", correspond
 **Baño de pintura (obligatorio):** si en el mensaje actual y el historial reciente del cliente NO aparece el modelo de su auto ni camioneta (ni año, ni marca, ni frases tipo "es un…", "tengo un…", "mi …") y tampoco dice explícitamente el tamaño de carrocería (Chico, Mediano, Grande, XL, con o sin Premium), PROHIBIDO dar cifras o totales. Responde exactamente: "¡Claro! Con gusto. Para darte el precio estimado, ¿qué auto o camioneta tienes?" Si el modelo ya se dijo antes en el chat, úsalo y cotiza sin volver a preguntar.
 **Servicios de precio fijo en catálogo (p. ej. Estética Automotriz, Cerámico cuando aplique en la lista):** puedes dar el precio de inmediato; no dependen del tamaño del vehículo en nuestro flujo actual.
 Para baño de pintura con vehículo ya conocido, tamaños de referencia: Audi A4/A5, BMW Serie 3 / 318–335, Mercedes Clase C, Mazda 6 = severidad "Mediano Premium" salvo que el usuario indique explícitamente otro tamaño (Chico, Grande, XL, Premium, etc.).
-Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide baño de pintura y además "cambio de color", suma el suplemento: $8,000 MXN si el tamaño es Chico o Mediano (incluye variantes Premium de esos tamaños), y $10,000 MXN si es Grande o XL (incluye Premium). Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.`;
+Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide baño de pintura y además "cambio de color", suma el suplemento: $8,000 MXN si el tamaño es Chico o Mediano (incluye variantes Premium de esos tamaños), y $10,000 MXN si es Grande o XL (incluye Premium). Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.
+**Después de cotizar:** si el cliente ya recibió el precio y muestra interés, pide día/hora o menciona un día de la semana, tu prioridad es **agendar** (en canales con herramientas: función createAppointment). No repitas montos que ya enviaste salvo que pida otra cotización explícita.`;
     } catch (err) {
       console.warn('[loadCatalogPromptAppendForLlm]', err);
       return '';
@@ -2734,6 +2766,138 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       appointmentId: saved.id,
       scheduledAt: saved.scheduledAt.toISOString(),
     };
+  }
+
+  /**
+   * Misma validación que {@link executeCreateAppointmentTool} pero sin persistir (panel de pruebas).
+   */
+  private async executeCreateAppointmentToolPlayground(argsJson: string): Promise<{
+    success: boolean;
+    appointmentId?: string | null;
+    scheduledAt?: string;
+    error?: string;
+    preview?: boolean;
+  }> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+
+    const iso = pickFirstNonEmptyTrimmedString(
+      raw.scheduledAtIso,
+      raw.scheduled_at_iso,
+    );
+    if (!iso) {
+      return { success: false, error: 'Falta scheduledAtIso.' };
+    }
+
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) {
+      return { success: false, error: 'Fecha u hora no válida.' };
+    }
+
+    if (!validateWorkshopSlotUtc(d)) {
+      return {
+        success: false,
+        error:
+          'Fuera del horario del taller (lun–vie 9–18, sáb 9–14) o día cerrado.',
+      };
+    }
+
+    return {
+      success: true,
+      appointmentId: null,
+      scheduledAt: d.toISOString(),
+      preview: true,
+    };
+  }
+
+  private async runPlaygroundChatWithCreateAppointmentTool(params: {
+    baseSystem: string;
+    historyTurns: { role: 'user' | 'assistant'; text: string }[];
+    userContentForTurn: string;
+  }): Promise<string> {
+    const messages: ChatCompletionMessageParam[] = [
+      { role: 'system', content: params.baseSystem },
+      ...params.historyTurns.map((h) => ({ role: h.role, content: h.text })),
+      { role: 'user', content: params.userContentForTurn },
+    ];
+
+    let lastConfirmedIso: string | null = null;
+    for (let step = 0; step < 6; step++) {
+      const completion = await this.openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages,
+        tools: AUTOPILOT_TOOLS,
+        tool_choice: 'auto',
+        temperature: 0.35,
+        max_tokens: 1200,
+      });
+
+      const choice = completion.choices[0]?.message;
+      if (!choice) break;
+
+      const toolCalls = choice.tool_calls;
+      if (toolCalls?.length) {
+        messages.push(choice as ChatCompletionMessageParam);
+        for (const tc of toolCalls) {
+          if (tc.type !== 'function') {
+            messages.push({
+              role: 'tool',
+              tool_call_id: tc.id,
+              content: JSON.stringify({
+                success: false,
+                error: 'Tipo de herramienta no soportado.',
+              }),
+            });
+            continue;
+          }
+          const name = tc.function.name;
+          let payload: Record<string, unknown>;
+          if (name === 'createAppointment') {
+            const r = await this.executeCreateAppointmentToolPlayground(
+              tc.function.arguments ?? '{}',
+            );
+            payload = { ...r };
+            if (r.success && r.scheduledAt) {
+              lastConfirmedIso = r.scheduledAt;
+            }
+          } else {
+            payload = { success: false, error: `Función no soportada: ${name}` };
+          }
+          messages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: JSON.stringify(payload),
+          });
+        }
+        continue;
+      }
+
+      const txt = choice.content?.trim();
+      if (txt) return txt;
+
+      if (lastConfirmedIso) {
+        try {
+          const d = new Date(lastConfirmedIso);
+          const human = d.toLocaleString('es-MX', {
+            timeZone: WORKSHOP_TIMEZONE,
+            dateStyle: 'medium',
+            timeStyle: 'short',
+          });
+          return `(Simulador) Quedó acordada la visita para el ${human}. En este panel no se guardó en base de datos; es solo prueba.`;
+        } catch {
+          return '(Simulador) Cita en vista previa. No persistida en BD.';
+        }
+      }
+      break;
+    }
+
+    return lastConfirmedIso
+      ? '(Simulador) Cita en vista previa. No persistida en BD.'
+      : '(La IA no devolvió texto.)';
   }
 
   /**
