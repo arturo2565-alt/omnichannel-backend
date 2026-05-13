@@ -54,6 +54,7 @@ import {
 import {
   buildPlaygroundPostQuoteSchedulingSystemAppend,
   getPlaygroundInstantInterceptorDecision,
+  PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS,
   playgroundUserMessageMentionsWeekdayOnlyRough,
 } from './playground-instant-quote-interceptor';
 import {
@@ -565,18 +566,20 @@ export class ChatService implements OnModuleDestroy {
     return out.slice(-(ChatService.PLAYGROUND_HISTORY_PAYLOAD_MAX - 1));
   }
 
-  /** Turnos user del playground + mensaje actual (memoria para baño de pintura / modelo). */
+  /** Últimos turnos (user + assistant) para enlazar baño de pintura con modelo en mensajes posteriores. */
   private buildPlaygroundUserBañoContext(
     historyTurns: { role: 'user' | 'assistant'; text: string }[],
     currentUserText: string,
   ): string {
-    const parts = historyTurns
-      .filter((h) => h.role === 'user')
+    const window = historyTurns.slice(-PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS);
+    const segments = window
       .map((h) => String(h.text ?? '').trim())
       .filter((t) => t.length > 0);
     const cur = String(currentUserText ?? '').trim();
-    if (cur) parts.push(cur);
-    return parts.join('\n\n');
+    if (cur && segments[segments.length - 1] !== cur) {
+      segments.push(cur);
+    }
+    return segments.join('\n\n');
   }
 
   /**
@@ -1523,7 +1526,7 @@ export class ChatService implements OnModuleDestroy {
     const full = String(fullContextForBaño ?? '').trim();
     const tierSource = full || latest;
     const tierNorm = normalizeTextForMatch(tierSource);
-    if (shouldAskVehicleBeforeBañoQuote(tierNorm)) return null;
+    if (shouldAskVehicleBeforeBañoQuote(tierNorm, latest)) return null;
 
     const resolved = resolveInstantCanonicalLatestThenFull(latest, full, snap);
     if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) return null;
@@ -3026,7 +3029,8 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const priorInboundPieces = historySansBatch
         .filter((m) => String(m.direction ?? '').toLowerCase() === 'inbound')
         .map((m) => String(m.content ?? '').trim())
-        .filter((t) => t.length > 0 && !t.includes('cloudinary'));
+        .filter((t) => t.length > 0 && !t.includes('cloudinary'))
+        .slice(-PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS);
 
       const fullBañoCtx = [...priorInboundPieces, mergedForInstant]
         .filter(Boolean)
@@ -3279,8 +3283,8 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       if (!contextMessages.length) return 'No hay historial para analizar.';
 
       const snapM = await this.catalogService.getMatrixPricingSnapshot();
-      const userBañoCtx = contextMessages
-        .filter((m) => m.role === 'user')
+      const convoWindow = contextMessages.slice(-PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS);
+      const userBañoCtx = convoWindow
         .map((m) => String(m.content ?? '').trim())
         .filter((t) => t.length > 0)
         .join('\n\n');

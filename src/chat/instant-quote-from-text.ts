@@ -96,9 +96,101 @@ const CAR_BRANDS_RE =
 
 /** Modelos frecuentes sin marca (evita depender solo de "es un …"). */
 const COMMON_MODELS_RE =
-  /\b(march|versa|sentra|altima|maxima|micra|note|jetta|golf|passat|polo|vento|virtus|tiguan|taos|tcross|t-cross|civic|accord|fit|cr-v|hr-v|pilot|odyssey|corolla|camry|rav4|highlander|4runner|sequoia|sienna|frontier|titan|l200|hilux|ranger|f-150|f-250|f-350|silverado|sierra|traverse|explorer|escape|edge|bronco|patriot|cherokee|wrangler|compass|renegade|tracker|onix|prisma|aveo|spark|beat|mirage|outlander|asx|cx-3|cx-5|cx-9|mazda\s*2|mazda\s*3|mazda\s*6|rio|forte|optima|stinger|elantra|sonata|tucson|santa\s*fe|palisade|venue|kicks|rogue|murano|pathfinder|armada|sorento|telluride|sportage|soul|kwid|duster|sandero|argo|mobilio|city|wr-v)\b/i;
+  /\b(march|versa|sentra|altima|maxima|micra|note|figo|fiesta|ikon|etios|attitude|gol|voyage|fox|\bup\b|uno|palio|siena|jetta|golf|passat|polo|vento|virtus|tiguan|taos|tcross|t-cross|civic|accord|fit|cr-v|hr-v|pilot|odyssey|corolla|camry|rav4|highlander|4runner|sequoia|sienna|frontier|titan|l200|hilux|ranger|f-150|f-250|f-350|silverado|sierra|traverse|explorer|escape|edge|bronco|patriot|cherokee|wrangler|compass|renegade|tracker|onix|prisma|aveo|spark|beat|mirage|outlander|asx|cx-3|cx-5|cx-9|mazda\s*2|mazda\s*3|mazda\s*6|rio|forte|optima|stinger|elantra|sonata|tucson|santa\s*fe|palisade|venue|kicks|rogue|murano|pathfinder|armada|sorento|telluride|sportage|soul|kwid|duster|sandero|argo|mobilio|city|wr-v)\b/i;
 
 const YEAR_RE = /\b(19[89][0-9]|20[0-3][0-9])\b/;
+
+/** Palabras que no deben interpretarse como nombre de modelo en un mensaje muy corto. */
+const LATEST_REPLY_NON_MODEL_WORDS = new Set([
+  'hola',
+  'buenas',
+  'gracias',
+  'ok',
+  'si',
+  'sí',
+  'vale',
+  'bueno',
+  'listo',
+  'perfecto',
+  'claro',
+  'bien',
+  'bano',
+  'pintura',
+  'servicio',
+  'cita',
+  'precio',
+  'cuanto',
+  'cotiz',
+  'cotizacion',
+  'exterior',
+  'auto',
+  'carro',
+  'coche',
+  'camioneta',
+  'me',
+  'interesa',
+  'mucho',
+  'quiero',
+  'necesito',
+  'info',
+  'porfavor',
+  'favor',
+  'dias',
+  'tardes',
+  'noches',
+  'tengo',
+  'una',
+  'un',
+  'el',
+  'la',
+  'los',
+  'las',
+  'les',
+  'del',
+  'al',
+  'por',
+  'manana',
+  'chico',
+  'mediano',
+  'grande',
+  'premium',
+  'xl',
+  'taller',
+  'horario',
+  'ayer',
+  'hoy',
+  'ahora',
+]);
+
+function isLikelyStandaloneModelToken(w: string): boolean {
+  const n = w.toLowerCase();
+  if (n.length < 3 || n.length > 22) return false;
+  if (LATEST_REPLY_NON_MODEL_WORDS.has(n)) return false;
+  if (/^\d+$/.test(n)) return false;
+  return /^[a-z][a-z0-9-]*$/i.test(n);
+}
+
+/**
+ * Mensaje actual solo con modelo o marca+modelo breve (p. ej. "Figo", "Ford Figo")
+ * tras haber pedido baño en turnos anteriores (el contexto completo lo valida aparte).
+ */
+export function userLatestMessageLooksLikeVehicleModelReply(latestUserText: string): boolean {
+  const raw = String(latestUserText ?? '').trim();
+  if (!raw || raw.length > 120) return false;
+  const n = normalizeTextForMatch(raw);
+  const words = n.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return false;
+
+  const joined = words.join(' ');
+  if (CAR_BRANDS_RE.test(joined)) return true;
+  if (COMMON_MODELS_RE.test(joined)) return true;
+
+  if (words.length <= 6) {
+    const modelTokens = words.filter(isLikelyStandaloneModelToken);
+    if (modelTokens.length >= 1) return true;
+  }
+  return false;
+}
 
 function hasVehicleModelHint(normalizedBlob: string): boolean {
   if (hasExplicitBañoTierInContext(normalizedBlob)) return true;
@@ -115,10 +207,18 @@ function hasVehicleModelHint(normalizedBlob: string): boolean {
   return false;
 }
 
-export function shouldAskVehicleBeforeBañoQuote(normalizedFullContext: string): boolean {
+export function shouldAskVehicleBeforeBañoQuote(
+  normalizedFullContext: string,
+  latestUserText?: string,
+): boolean {
   if (!mentionsBañoDePinturaIntent(normalizedFullContext)) return false;
   if (hasExplicitBañoTierInContext(normalizedFullContext)) return false;
-  return !hasVehicleModelHint(normalizedFullContext);
+  if (hasVehicleModelHint(normalizedFullContext)) return false;
+  const latest = String(latestUserText ?? '').trim();
+  if (latest && userLatestMessageLooksLikeVehicleModelReply(latest)) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -130,18 +230,19 @@ export function tryBañoPinturaVehicleGateReply(
   fullContextForBaño: string,
   snap: MatrixPricingSnapshot,
 ): string | null {
+  const latest = String(latestUserText ?? '').trim();
   const full = String(fullContextForBaño ?? '').trim();
   const fullNorm = normalizeTextForMatch(full);
   if (!mentionsBañoDePinturaIntent(fullNorm)) return null;
 
-  const resolved = resolveInstantCanonicalLatestThenFull(
-    String(latestUserText ?? '').trim(),
-    full,
-    snap,
-  );
+  const resolved = resolveInstantCanonicalLatestThenFull(latest, full, snap);
   if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) return null;
 
-  if (!shouldAskVehicleBeforeBañoQuote(fullNorm)) return null;
+  if (!shouldAskVehicleBeforeBañoQuote(fullNorm, latest)) return null;
+
+  console.log(
+    `[DEBUG] Re-preguntando porque no detecté modelo en: ${latest.slice(0, 400)}`,
+  );
   return BAÑO_PINTURA_VEHICLE_PROMPT_REPLY;
 }
 
@@ -189,7 +290,7 @@ export function inferBañoTierSeveridad(contextText: string): string {
   }
 
   if (
-    /\bmarch\b|\bversa\b|\bnote\b|\bmicra\b|\bspark\b|\bbeat\b|\bmirage\b|\bi10\b|\bi20\b|\bagile\b|\bkwid\b|\bmazda\s*2\b|\byaris\b|\bfit\b|\brio\b|\baveo\b/.test(
+    /\bmarch\b|\bversa\b|\bnote\b|\bmicra\b|\bspark\b|\bbeat\b|\bmirage\b|\bfigo\b|\bfiesta\b|\bikon\b|\betios\b|\batitude\b|\bi10\b|\bi20\b|\bagile\b|\bkwid\b|\bmazda\s*2\b|\byaris\b|\bfit\b|\brio\b|\baveo\b/.test(
       n,
     )
   ) {
@@ -346,7 +447,7 @@ export function tryResolveInstantQuoteFromUserText(
   if (canonical === 'Estética Automotriz') {
     severidadLiteral = 'N/A';
   } else if (isBañoDePinturaServicio(canonical)) {
-    if (shouldAskVehicleBeforeBañoQuote(tierNorm)) {
+    if (shouldAskVehicleBeforeBañoQuote(tierNorm, latest)) {
       logInstantResolution({
         matched: false,
         reason: 'bano_requires_vehicle_model',

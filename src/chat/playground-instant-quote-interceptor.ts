@@ -1,5 +1,8 @@
 import { normalizeTextForMatch } from './autofix-config';
 
+/** Turnos recientes que analizan gate de cotización / post-cotización en el playground. */
+export const PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS = 10;
+
 export type PlaygroundHistoryTurn = { role: 'user' | 'assistant'; text: string };
 
 /** Último turno del asistente en el historial del playground (excluye el mensaje user actual). */
@@ -90,7 +93,8 @@ export function getPlaygroundInstantInterceptorDecision(args: {
   historyTurns: readonly PlaygroundHistoryTurn[];
   currentUserText: string;
 }): PlaygroundInstantInterceptorDecision {
-  const last = playgroundLastAssistantMessage(args.historyTurns);
+  const window = args.historyTurns.slice(-PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS);
+  const last = playgroundLastAssistantMessage(window);
   const lastPrice =
     last != null && playgroundAssistantLikelyDeliveredInstantCatalogQuote(last);
   const sched = playgroundUserSchedulingOrInterestIntent(args.currentUserText);
