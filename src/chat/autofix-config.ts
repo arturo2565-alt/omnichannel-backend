@@ -74,38 +74,6 @@ export const PIEZA_DANO_PRICE_MATRIX: readonly PiezaPriceRow[] = [
   },
 ] as const;
 
-/**
- * Días hábiles por defecto al sembrar {@link getPriceMatrixSeedRows} en BD
- * (la matriz histórica en código solo tenía precios).
- */
-export const DEFAULT_PRICE_MATRIX_SEED_DIAS_ENTREGA = 4;
-
-export type PriceMatrixSeedRow = {
-  pieza: string;
-  severidad: DamageLevel;
-  precio: number;
-  diasEntrega: number;
-};
-
-/** Filas normalizadas (pieza × severidad) para insertar en `price_matrix`. */
-export function getPriceMatrixSeedRows(
-  diasEntrega = DEFAULT_PRICE_MATRIX_SEED_DIAS_ENTREGA,
-): PriceMatrixSeedRow[] {
-  const out: PriceMatrixSeedRow[] = [];
-  for (const row of PIEZA_DANO_PRICE_MATRIX) {
-    for (const sev of DAMAGE_LEVEL_KEYS) {
-      const precio = row[sev];
-      out.push({
-        pieza: row.pieza,
-        severidad: sev,
-        precio: typeof precio === 'number' ? precio : 0,
-        diasEntrega,
-      });
-    }
-  }
-  return out;
-}
-
 export class AutofixPricingLookupError extends Error {
   constructor(
     message: string,
