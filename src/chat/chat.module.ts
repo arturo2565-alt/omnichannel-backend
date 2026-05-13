@@ -10,9 +10,11 @@ import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { AppointmentEntity } from './entities/appointment.entity';
 import { AiConfigEntity } from './entities/ai-config.entity';
 import { AiConfigService } from './ai-config.service';
+import { CatalogModule } from '../catalog/catalog.module';
 
 @Module({
   imports: [
+    CatalogModule,
     TypeOrmModule.forFeature([
       Message,
       Conversation,
