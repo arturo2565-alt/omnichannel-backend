@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatModule } from './chat/chat.module';
+import { CatalogModule } from './catalog/catalog.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { ChatModule } from './chat/chat.module';
       ssl: false,
     }),
     ChatModule,
+    CatalogModule,
   ],
 })
 export class AppModule {}
