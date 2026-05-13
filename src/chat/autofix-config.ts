@@ -1,7 +1,6 @@
 /**
  * Matriz de precios (pieza × nivel de daño) para hojalatería / pintura.
- * Los importes viven en BD (`price_matrix`); aquí solo tipos y funciones puras
- * que reciben la matriz en memoria (p. ej. caché del servidor).
+ * Montos en MXN según tabla operativa.
  */
 
 export const AUTO_FIX_CURRENCY = 'MXN' as const;
@@ -35,6 +34,78 @@ export function coerceDamageLevelCode(raw: string): DamageLevel {
 
 export type PiezaPriceRow = { pieza: string } & Record<DamageLevel, number>;
 
+/**
+ * Matriz: cada fila es una pieza; cada columna un nivel de daño (precio MXN).
+ */
+export const PIEZA_DANO_PRICE_MATRIX: readonly PiezaPriceRow[] = [
+  { pieza: 'Fascia', DL: 2900, DML: 3300, DM: 3600, DMF: 3500, DF: 3500, DMFuerte: 4900 },
+  { pieza: 'Salpicadera', DL: 2900, DML: 2900, DM: 3350, DMF: 3900, DF: 4400, DMFuerte: 6150 },
+  { pieza: 'Puerta', DL: 3100, DML: 2800, DM: 3250, DMF: 4200, DF: 5150, DMFuerte: 7200 },
+  {
+    pieza: 'Salpicadera trasera',
+    DL: 2900,
+    DML: 3200,
+    DM: 3700,
+    DMF: 4700,
+    DF: 5700,
+    DMFuerte: 8000,
+  },
+  { pieza: 'Cofre', DL: 4000, DML: 4500, DM: 5000, DMF: 4500, DF: 5450, DMFuerte: 7650 },
+  {
+    pieza: 'Tapa Cajuela',
+    DL: 3500,
+    DML: 3900,
+    DM: 4900,
+    DMF: 5800,
+    DF: 6900,
+    DMFuerte: 7650,
+  },
+  { pieza: 'Toldo', DL: 4500, DML: 5400, DM: 6500, DMF: 7500, DF: 8000, DMFuerte: 9800 },
+  { pieza: 'Espejo', DL: 900, DML: 1050, DM: 1225, DMF: 1450, DF: 1650, DMFuerte: 2300 },
+  { pieza: 'Estribo', DL: 2500, DML: 3200, DM: 3400, DMF: 3900, DF: 4500, DMFuerte: 5500 },
+  {
+    pieza: 'Estetica Exterior',
+    DL: 3500,
+    DML: 3500,
+    DM: 3500,
+    DMF: 3500,
+    DF: 3500,
+    DMFuerte: 3500,
+  },
+] as const;
+
+/**
+ * Días hábiles por defecto al sembrar {@link getPriceMatrixSeedRows} en BD
+ * (la matriz histórica en código solo tenía precios).
+ */
+export const DEFAULT_PRICE_MATRIX_SEED_DIAS_ENTREGA = 4;
+
+export type PriceMatrixSeedRow = {
+  pieza: string;
+  severidad: DamageLevel;
+  precio: number;
+  diasEntrega: number;
+};
+
+/** Filas normalizadas (pieza × severidad) para insertar en `price_matrix`. */
+export function getPriceMatrixSeedRows(
+  diasEntrega = DEFAULT_PRICE_MATRIX_SEED_DIAS_ENTREGA,
+): PriceMatrixSeedRow[] {
+  const out: PriceMatrixSeedRow[] = [];
+  for (const row of PIEZA_DANO_PRICE_MATRIX) {
+    for (const sev of DAMAGE_LEVEL_KEYS) {
+      const precio = row[sev];
+      out.push({
+        pieza: row.pieza,
+        severidad: sev,
+        precio: typeof precio === 'number' ? precio : 0,
+        diasEntrega,
+      });
+    }
+  }
+  return out;
+}
+
 export class AutofixPricingLookupError extends Error {
   constructor(
     message: string,
@@ -46,7 +117,7 @@ export class AutofixPricingLookupError extends Error {
   }
 }
 
-export function normalizePiezaTextForMatch(s: string): string {
+function normalizeText(s: string): string {
   return s
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -55,64 +126,26 @@ export function normalizePiezaTextForMatch(s: string): string {
     .trim();
 }
 
-/**
- * Construye filas agregadas pieza × niveles a partir de entradas planas (BD).
- */
-export function buildPiezaPriceRowsFromFlatEntries(
-  entries: ReadonlyArray<{ pieza: string; severidad: string; precio: number }>,
-): PiezaPriceRow[] {
-  const byPieza = new Map<string, PiezaPriceRow>();
-  for (const e of entries) {
-    const pieza = String(e.pieza ?? '').trim();
-    if (!pieza) continue;
-    const sevRaw = String(e.severidad ?? '').trim();
-    const sev = DAMAGE_LEVEL_KEYS.includes(sevRaw as DamageLevel)
-      ? (sevRaw as DamageLevel)
-      : coerceDamageLevelCode(sevRaw);
-    const precio = Number(e.precio);
-    if (!Number.isFinite(precio) || precio < 0) continue;
-    let row = byPieza.get(pieza);
-    if (!row) {
-      row = { pieza } as PiezaPriceRow;
-      for (const k of DAMAGE_LEVEL_KEYS) {
-        (row as Record<DamageLevel, number>)[k] = 0;
-      }
-      byPieza.set(pieza, row);
-    }
-    (row as Record<DamageLevel, number>)[sev] = precio;
-  }
-  return [...byPieza.values()];
+const rowByPiezaNorm = new Map<string, PiezaPriceRow>();
+for (const row of PIEZA_DANO_PRICE_MATRIX) {
+  rowByPiezaNorm.set(normalizeText(row.pieza), row);
 }
 
-function buildRowIndex(matrix: readonly PiezaPriceRow[]): {
-  rowByPiezaNorm: Map<string, PiezaPriceRow>;
-  rowsByPiezaLengthDesc: PiezaPriceRow[];
-} {
-  const rowByPiezaNorm = new Map<string, PiezaPriceRow>();
-  for (const row of matrix) {
-    rowByPiezaNorm.set(normalizePiezaTextForMatch(row.pieza), row);
-  }
-  const rowsByPiezaLengthDesc = [...matrix].sort(
-    (a, b) => b.pieza.length - a.pieza.length,
-  );
-  return { rowByPiezaNorm, rowsByPiezaLengthDesc };
-}
+/** Filas ordenadas por longitud de nombre (coincidencias largas primero, p. ej. Salpicadera trasera). */
+const rowsByPiezaLengthDesc = [...PIEZA_DANO_PRICE_MATRIX].sort(
+  (a, b) => b.pieza.length - a.pieza.length,
+);
 
 /**
- * Intenta emparejar texto libre del peritaje con una fila de la matriz en memoria.
+ * Intenta emparejar texto libre del peritaje con una fila de la matriz.
  * @returns nombre canónico de `pieza` en la matriz, o null.
  */
-export function matchPiezaFromAnalysisWithMatrix(
-  parteLibre: string,
-  matrix: readonly PiezaPriceRow[],
-): string | null {
-  if (!matrix.length) return null;
-  const { rowByPiezaNorm, rowsByPiezaLengthDesc } = buildRowIndex(matrix);
-  const n = normalizePiezaTextForMatch(parteLibre);
+export function matchPiezaFromAnalysis(parteLibre: string): string | null {
+  const n = normalizeText(parteLibre);
   if (!n) return null;
   if (rowByPiezaNorm.has(n)) return rowByPiezaNorm.get(n)!.pieza;
   for (const row of rowsByPiezaLengthDesc) {
-    const key = normalizePiezaTextForMatch(row.pieza);
+    const key = normalizeText(row.pieza);
     if (!key) continue;
     if (n.includes(key) || (key.length >= 4 && key.includes(n))) {
       return row.pieza;
@@ -121,17 +154,15 @@ export function matchPiezaFromAnalysisWithMatrix(
   return null;
 }
 
-export function findPiezaRowInMatrix(
-  pieza: string,
-  matrix: readonly PiezaPriceRow[],
-): PiezaPriceRow | null {
-  if (!matrix.length) return null;
-  const { rowByPiezaNorm } = buildRowIndex(matrix);
-  const n = normalizePiezaTextForMatch(pieza);
+/**
+ * Obtiene la fila de matriz para un nombre de pieza (exacto o ya canónico).
+ */
+export function findPiezaRow(pieza: string): PiezaPriceRow | null {
+  const n = normalizeText(pieza);
   if (rowByPiezaNorm.has(n)) return rowByPiezaNorm.get(n)!;
-  const matched = matchPiezaFromAnalysisWithMatrix(pieza, matrix);
+  const matched = matchPiezaFromAnalysis(pieza);
   if (!matched) return null;
-  return rowByPiezaNorm.get(normalizePiezaTextForMatch(matched)) ?? null;
+  return rowByPiezaNorm.get(normalizeText(matched)) ?? null;
 }
 
 /**
@@ -141,9 +172,7 @@ export function resolveDamageLevelFromText(
   severidad: string,
   descripcionTecnica?: string,
 ): DamageLevel | null {
-  const blob = normalizePiezaTextForMatch(
-    `${severidad} ${descripcionTecnica ?? ''}`,
-  );
+  const blob = normalizeText(`${severidad} ${descripcionTecnica ?? ''}`);
   if (!blob) return null;
 
   for (const level of DAMAGE_LEVEL_KEYS) {
@@ -189,14 +218,13 @@ export type PiezaSeveridadMatrizInput = {
   severidad: string;
 };
 
-export function matrixAmountForPairWithMatrix(
+function matrixAmountForPair(
   pieza: string,
   severidad: string,
-  matrix: readonly PiezaPriceRow[],
   options?: CalculateEstimateOptions,
 ): { amount: number; level: DamageLevel | null; row: PiezaPriceRow | null } {
   const onMissing = options?.onMissing ?? 'zero';
-  const row = findPiezaRowInMatrix(pieza, matrix);
+  const row = findPiezaRow(pieza);
   const level = resolveDamageLevelFromText(
     severidad,
     options?.descripcionTecnica,
@@ -231,21 +259,20 @@ export function matrixAmountForPairWithMatrix(
 
 /**
  * Agrupa por pieza canónica en la matriz: suma una vez por pieza distinta usando
- * el mayor precio entre filas de esa pieza (criterio preventivo).
+ * el mayor precio entre filas de esa pieza (criterio preventivo). Sirve para alinear
+ * líneas de cotización con el total de `calculateEstimate(items)`.
  */
-export function matrixInventoryMaxLinesWithMatrix(
+export function matrixInventoryMaxLines(
   items: ReadonlyArray<PiezaSeveridadMatrizInput>,
-  matrix: readonly PiezaPriceRow[],
   options?: CalculateEstimateOptions,
 ): { canonical: string; unitPrice: number; damageLevel: DamageLevel }[] {
   type Best = { price: number; level: DamageLevel };
   const byCanonical = new Map<string, Best>();
 
   for (const it of items) {
-    const { amount, level, row } = matrixAmountForPairWithMatrix(
+    const { amount, level, row } = matrixAmountForPair(
       it.pieza,
       it.severidad,
-      matrix,
       options,
     );
     if (!row || !level || amount <= 0) continue;
@@ -269,22 +296,21 @@ export function matrixInventoryMaxLinesWithMatrix(
 }
 
 /**
- * Precio de matriz para una pieza y severidad, **o** total multi-pieza,
- * usando la matriz en memoria (p. ej. desde BD).
+ * Precio de matriz para una pieza y severidad, **o** total multi-pieza:
+ * - Una fila `{ pieza, severidad }` por detección de la IA.
+ * - **Piezas distintas** (canónico distinto en matriz): se **suman** los importes.
+ * - **Misma pieza** varias veces: se cuenta **una sola vez** el **mayor** importe (criterio preventivo).
  */
-export function calculateEstimateWithMatrix(
-  matrix: readonly PiezaPriceRow[],
+export function calculateEstimate(
   pieza: string,
   severidad: string,
   options?: CalculateEstimateOptions,
 ): number;
-export function calculateEstimateWithMatrix(
-  matrix: readonly PiezaPriceRow[],
+export function calculateEstimate(
   items: ReadonlyArray<PiezaSeveridadMatrizInput>,
   options?: CalculateEstimateOptions,
 ): number;
-export function calculateEstimateWithMatrix(
-  matrix: readonly PiezaPriceRow[],
+export function calculateEstimate(
   piezaOrItems: string | ReadonlyArray<PiezaSeveridadMatrizInput>,
   severidadOrOptions?: string | CalculateEstimateOptions,
   options?: CalculateEstimateOptions,
@@ -296,7 +322,7 @@ export function calculateEstimateWithMatrix(
       !Array.isArray(severidadOrOptions)
         ? (severidadOrOptions as CalculateEstimateOptions)
         : undefined;
-    return matrixInventoryMaxLinesWithMatrix(piezaOrItems, matrix, opts).reduce(
+    return matrixInventoryMaxLines(piezaOrItems, opts).reduce(
       (acc, l) => acc + l.unitPrice,
       0,
     );
@@ -305,7 +331,7 @@ export function calculateEstimateWithMatrix(
   const pieza = piezaOrItems;
   const severidad =
     typeof severidadOrOptions === 'string' ? severidadOrOptions : '';
-  return matrixAmountForPairWithMatrix(pieza, severidad, matrix, options).amount;
+  return matrixAmountForPair(pieza, severidad, options).amount;
 }
 
 export function formatAutoFixMoney(amount: number): string {
@@ -337,8 +363,6 @@ export interface DraftQuote {
   subtotal: number;
   total: number;
   formalNarrative: string;
-  /** Avisos internos (p. ej. pieza no catalogada con precio referencia). */
-  pricingCatalogNotes?: string[];
   analysisBasis: {
     pieza: string;
     severidad: string;

@@ -1,57 +1,48 @@
 /**
- * Pobla `price_matrix` con los valores legados (misma matriz que antes en código).
- * Uso: desde omnichannel-backend, con DATABASE_URL en el entorno:
- *   npx ts-node -r tsconfig-paths/register scripts/seed-price-matrix.ts
+ * Semilla de `price_matrix` desde la matriz canónica en `src/chat/autofix-config.ts`
+ * (mismos precios que antes estaban hardcoded).
  *
- * No inserta nada si la tabla ya tiene filas (idempotente).
+ * Uso (desde `omnichannel-backend/`):
+ *   DATABASE_URL=postgres://... npm run seed:price-matrix
  */
 import 'reflect-metadata';
-import { DataSource } from 'typeorm';
-import { PriceMatrixEntity } from '../src/chat/entities/price-matrix.entity';
-import { buildFlatSeedRows } from '../src/chat/price-matrix.seed-data';
+import { NestFactory } from '@nestjs/core';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { AppModule } from '../src/app.module';
+import { PriceMatrix } from '../src/catalog/entities/price-matrix.entity';
+import { getPriceMatrixSeedRows } from '../src/chat/autofix-config';
 
 async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!url || !String(url).trim()) {
-    console.error('DATABASE_URL no está definida en el entorno.');
+  if (!process.env.DATABASE_URL?.trim()) {
+    console.error('Falta DATABASE_URL en el entorno.');
     process.exit(1);
   }
 
-  const ds = new DataSource({
-    type: 'postgres',
-    url: String(url).trim(),
-    entities: [PriceMatrixEntity],
-    synchronize: false,
-    ssl:
-      process.env.DATABASE_SSL === 'true' ||
-      String(url).includes('supabase') ||
-      String(url).includes('neon.tech')
-        ? { rejectUnauthorized: false }
-        : false,
+  const app = await NestFactory.createApplicationContext(AppModule, {
+    logger: ['error', 'warn', 'log'],
   });
 
-  await ds.initialize();
-  const repo = ds.getRepository(PriceMatrixEntity);
-  const n = await repo.count();
-  if (n > 0) {
-    console.log(`price_matrix ya contiene ${n} filas; no se modifica.`);
-    await ds.destroy();
-    return;
-  }
+  try {
+    const repo = app.get<Repository<PriceMatrix>>(getRepositoryToken(PriceMatrix));
+    const rows = getPriceMatrixSeedRows();
 
-  const flat = buildFlatSeedRows();
-  await repo.save(
-    flat.map((f) =>
-      repo.create({
-        pieza: f.pieza,
-        severidad: f.severidad,
-        precio: f.precio,
-        diasEntrega: f.diasEntrega,
-      }),
-    ),
-  );
-  console.log(`Insertadas ${flat.length} filas en price_matrix.`);
-  await ds.destroy();
+    await repo.manager.transaction(async (em) => {
+      await em.getRepository(PriceMatrix).createQueryBuilder().delete().execute();
+      await em.getRepository(PriceMatrix).insert(
+        rows.map((r) => ({
+          pieza: r.pieza,
+          severidad: r.severidad,
+          precio: r.precio,
+          diasEntrega: r.diasEntrega,
+        })),
+      );
+    });
+
+    console.log(`Semilla OK: ${rows.length} filas en price_matrix.`);
+  } finally {
+    await app.close();
+  }
 }
 
 main().catch((e) => {

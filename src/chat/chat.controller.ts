@@ -3,7 +3,6 @@ import {
   Get, 
   Post,
   Patch,
-  Delete,
   Body, 
   Query, 
   Param, 
@@ -20,14 +19,12 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
 import type { PatchDraftQuoteBody } from './chat.service';
 import { AiConfigService } from './ai-config.service';
-import { PriceMatrixService } from './price-matrix.service';
 
 @Controller('webhook') 
 export class ChatController {
   constructor(
     private readonly chatService: ChatService,
     private readonly aiConfigService: AiConfigService,
-    private readonly priceMatrixService: PriceMatrixService,
   ) {}
 
   // Verificación GET de Meta (WhatsApp / webhooks): debe devolver el challenge en texto plano.
@@ -204,47 +201,5 @@ export class ChatController {
       history: body.history,
       visionItems: body.visionItems,
     });
-  }
-
-  /** Catálogo editable pieza × severidad (matriz de cotización). */
-  @Get('price-matrix')
-  @HttpCode(HttpStatus.OK)
-  listPriceMatrix() {
-    return this.priceMatrixService.listAll();
-  }
-
-  @Post('price-matrix/seed-if-empty')
-  @HttpCode(HttpStatus.OK)
-  seedPriceMatrixIfEmpty() {
-    return this.priceMatrixService.seedFromLegacyIfEmpty();
-  }
-
-  @Post('price-matrix')
-  @HttpCode(HttpStatus.CREATED)
-  createPriceMatrixRow(
-    @Body()
-    body: {
-      pieza: string;
-      severidad: string;
-      precio: number;
-      diasEntrega?: number;
-    },
-  ) {
-    return this.priceMatrixService.createRow(body);
-  }
-
-  @Patch('price-matrix/:id')
-  @HttpCode(HttpStatus.OK)
-  patchPriceMatrixRow(
-    @Param('id') id: string,
-    @Body() body: { precio?: number; diasEntrega?: number },
-  ) {
-    return this.priceMatrixService.updateRow(id, body);
-  }
-
-  @Delete('price-matrix/:id')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  async deletePriceMatrixRow(@Param('id') id: string) {
-    await this.priceMatrixService.deleteRow(id);
   }
 }

@@ -3,16 +3,18 @@ import {
   Entity,
   Index,
   PrimaryGeneratedColumn,
-  UpdateDateColumn,
 } from 'typeorm';
 
+/**
+ * Matriz de precios (pieza × severidad). Migración desde valores que vivían en código.
+ */
 @Entity('price_matrix')
 @Index(['pieza', 'severidad'], { unique: true })
-export class PriceMatrixEntity {
+export class PriceMatrix {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar', length: 160 })
+  @Column({ type: 'varchar', length: 128 })
   pieza: string;
 
   @Column({ type: 'varchar', length: 32 })
@@ -21,9 +23,7 @@ export class PriceMatrixEntity {
   @Column({ type: 'double precision' })
   precio: number;
 
-  @Column({ type: 'int', default: 4 })
+  /** Días hábiles orientativos de entrega para esa línea (no existía en la matriz en código). */
+  @Column({ type: 'int', name: 'dias_entrega' })
   diasEntrega: number;
-
-  @UpdateDateColumn({ type: 'timestamptz' })
-  updatedAt: Date;
 }

@@ -38,7 +38,7 @@ export class DraftQuoteEntity {
   @Column({ type: 'jsonb' })
   damageAnalysis: VehicleDamageAnalysis;
 
-  /** Monto principal según matriz de precios (BD `price_matrix`, pieza × severidad) */
+  /** Monto principal según `calculateEstimate` (matriz pieza × severidad) */
   @Column({ type: 'int' })
   estimateAmount: number;
 
