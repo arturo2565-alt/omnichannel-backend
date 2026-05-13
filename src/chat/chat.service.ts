@@ -24,14 +24,15 @@ import { OpenAI } from 'openai';
 import { v2 as cloudinary } from 'cloudinary';
 import {
   AUTO_FIX_CURRENCY,
-  calculateEstimate,
   coerceDamageLevelCode,
   DAMAGE_LEVEL_KEYS,
   DraftQuote,
   DraftQuoteLine,
   formatAutoFixMoney,
-  matchPiezaFromAnalysis,
-  matrixInventoryMaxLines,
+  matchPiezaFromAnalysisWithMatrix,
+  matrixInventoryMaxLinesWithMatrix,
+  calculateEstimateWithMatrix,
+  normalizePiezaTextForMatch,
   type DamageLevel,
 } from './autofix-config';
 import type {
@@ -46,6 +47,7 @@ import {
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { AiConfigService } from './ai-config.service';
 import axios from 'axios';
+import { PriceMatrixService } from './price-matrix.service';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -474,6 +476,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly chatGateway: ChatGateway,
 
     private readonly aiConfigService: AiConfigService,
+
+    private readonly priceMatrixService: PriceMatrixService,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -591,6 +595,7 @@ export class ChatService implements OnModuleDestroy {
     doc: DraftQuote,
     fallbackUrls: string[],
   ): Omit<DraftQuoteItem, 'id' | 'draftQuote' | 'draftQuoteId'>[] {
+    const matrix = this.priceMatrixService.getMatrixRows();
     const lines = doc.lines ?? [];
     if (!lines.length) return [];
 
@@ -600,7 +605,7 @@ export class ChatService implements OnModuleDestroy {
       return lines.map((line, idx) => {
         const row = inv[idx];
         const canonical =
-          matchPiezaFromAnalysis(row.pieza.trim()) ??
+          matchPiezaFromAnalysisWithMatrix(row.pieza.trim(), matrix) ??
           row.pieza.trim();
         return {
           sortOrder: idx,
@@ -637,18 +642,20 @@ export class ChatService implements OnModuleDestroy {
     }
 
     if (inv.length > 0) {
-      const grouped = matrixInventoryMaxLines(
+      const grouped = matrixInventoryMaxLinesWithMatrix(
         inv.map((it) => ({
           pieza: it.pieza,
           severidad: it.severidad,
         })),
+        matrix,
       );
       const out: Omit<DraftQuoteItem, 'id' | 'draftQuote' | 'draftQuoteId'>[] = [];
       for (let idx = 0; idx < grouped.length; idx++) {
         const g = grouped[idx];
         const line = lines[idx];
         const related = inv.filter(
-          (it) => matchPiezaFromAnalysis(it.pieza) === g.canonical,
+          (it) =>
+            matchPiezaFromAnalysisWithMatrix(it.pieza, matrix) === g.canonical,
         );
         const descParts = [...new Set(related.map((r) => r.descripcionTecnica))]
           .filter(Boolean)
@@ -828,21 +835,24 @@ export class ChatService implements OnModuleDestroy {
    * Suma de matriz por piezas del inventario (o una sola pieza si no hay inventario).
    */
   private computePrimaryMatrixEstimate(analysis: VehicleDamageAnalysis): number {
-    if (analysis.inventory?.length) {
-      const sum = calculateEstimate(
-        analysis.inventory.map((i) => ({
-          pieza: i.pieza,
-          severidad: i.severidad,
-        })),
-      );
-      if (sum > 0) return sum;
-    }
+    const inv = analysis.inventory?.map((i) => ({
+      pieza: i.pieza,
+      severidad: i.severidad,
+    }));
     const level = coerceDamageLevelCode(analysis.severidad);
+    const matrix = this.priceMatrixService.getMatrixRows();
     const piezaMatriz =
-      matchPiezaFromAnalysis(analysis.pieza) ??
-      matchPiezaFromAnalysis(analysis.partesAfectadas?.[0] ?? '') ??
+      matchPiezaFromAnalysisWithMatrix(analysis.pieza, matrix) ??
+      matchPiezaFromAnalysisWithMatrix(
+        analysis.partesAfectadas?.[0] ?? '',
+        matrix,
+      ) ??
       analysis.pieza;
-    return calculateEstimate(piezaMatriz, level);
+    return this.priceMatrixService.estimateForAnalysis(
+      inv,
+      piezaMatriz,
+      level,
+    );
   }
 
   /**
@@ -1528,7 +1538,7 @@ export class ChatService implements OnModuleDestroy {
           visionItemsAfterImage,
           urls,
         );
-        const mockDraftQuote = this.generateDraftQuote(analysis);
+        const mockDraftQuote = await this.generateDraftQuote(analysis);
         return {
           assistantMessage: '',
           damageDetected: true,
@@ -1603,7 +1613,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     }
 
     const analysis = inventoryItemsToVehicleAnalysis(probeItems, []);
-    const quoteFromText = this.generateDraftQuote(analysis);
+    const quoteFromText = await this.generateDraftQuote(analysis);
     const summary = this.buildPlaygroundDamageSummary(quoteFromText, probeItems.length);
     return {
       assistantMessage: `${chatReply}\n\n—\n${summary}`,
@@ -1637,9 +1647,13 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
 
   /**
    * Arma una cotización formal en estado PENDING_APPROVAL a partir del peritaje
-   * y la lista de precios base (autofix-config).
+   * y la matriz de precios en base de datos (`price_matrix`).
    */
-  generateDraftQuote(analysis: VehicleDamageAnalysis): DraftQuote {
+  async generateDraftQuote(
+    analysis: VehicleDamageAnalysis,
+  ): Promise<DraftQuote> {
+    const matrix = this.priceMatrixService.getMatrixRows();
+    const pricingCatalogNotes: string[] = [];
     const lines: DraftQuoteLine[] = [];
     let resolvedLevel: DamageLevel;
 
@@ -1647,11 +1661,12 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
       resolvedLevel = pickWorstDamageLevel(
         analysis.inventory.map((i) => i.severidad),
       );
-      const grouped = matrixInventoryMaxLines(
+      const grouped = matrixInventoryMaxLinesWithMatrix(
         analysis.inventory.map((i) => ({
           pieza: i.pieza,
           severidad: i.severidad,
         })),
+        matrix,
       );
       for (const g of grouped) {
         if (g.unitPrice <= 0) continue;
@@ -1661,6 +1676,28 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
           quantity: 1,
           unitPrice: g.unitPrice,
           subtotal: g.unitPrice,
+        });
+      }
+      const seenUnknown = new Set<string>();
+      for (const it of analysis.inventory) {
+        const raw = String(it.pieza ?? '').trim();
+        if (!raw) continue;
+        if (matchPiezaFromAnalysisWithMatrix(raw, matrix)) continue;
+        const key = normalizePiezaTextForMatch(raw);
+        if (seenUnknown.has(key)) continue;
+        seenUnknown.add(key);
+        const fb = this.priceMatrixService.getGenericFallbackUnitPrice();
+        const lev = coerceDamageLevelCode(it.severidad);
+        this.priceMatrixService.logUnknownCatalogPieza(raw);
+        pricingCatalogNotes.push(
+          `Pieza «${raw}» sin catálogo: se aplicó precio referencia ${formatAutoFixMoney(fb)} (${lev}).`,
+        );
+        lines.push({
+          priceItemId: `generic:${key.slice(0, 48)}:${lev}`,
+          description: `${raw} — nivel ${lev} (precio referencia; pieza no catalogada)`,
+          quantity: 1,
+          unitPrice: fb,
+          subtotal: fb,
         });
       }
     } else {
@@ -1675,28 +1712,57 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
         analysis.severidad || analysis.severidadDelDano,
       );
 
-      const seen = new Set<string>();
+      const seenPartes = new Set<string>();
+      const seenMatrixKeys = new Set<string>();
       for (const parteRaw of partes) {
-        const canonical = matchPiezaFromAnalysis(parteRaw);
-        if (!canonical) continue;
-        const key = `${canonical}|${resolvedLevel}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const unit = calculateEstimate(canonical, resolvedLevel);
-        if (unit <= 0) continue;
+        const trimmed = String(parteRaw).trim();
+        if (!trimmed) continue;
+        const norm = normalizePiezaTextForMatch(trimmed);
+        if (seenPartes.has(norm)) continue;
+        const canonical = matchPiezaFromAnalysisWithMatrix(trimmed, matrix);
+        if (canonical) {
+          const levKey = `${canonical}|${resolvedLevel}`;
+          if (seenMatrixKeys.has(levKey)) continue;
+          seenMatrixKeys.add(levKey);
+          seenPartes.add(norm);
+          const unit = calculateEstimateWithMatrix(
+            matrix,
+            canonical,
+            resolvedLevel,
+          );
+          if (unit <= 0) continue;
+          lines.push({
+            priceItemId: `matrix:${canonical}:${resolvedLevel}`,
+            description: `${canonical} — nivel ${resolvedLevel} (según matriz de referencia)`,
+            quantity: 1,
+            unitPrice: unit,
+            subtotal: unit,
+          });
+          continue;
+        }
+        seenPartes.add(norm);
+        const fb = this.priceMatrixService.getGenericFallbackUnitPrice();
+        this.priceMatrixService.logUnknownCatalogPieza(trimmed);
+        pricingCatalogNotes.push(
+          `Pieza «${trimmed}» sin catálogo: se aplicó precio referencia ${formatAutoFixMoney(fb)} (${resolvedLevel}).`,
+        );
         lines.push({
-          priceItemId: `matrix:${canonical}:${resolvedLevel}`,
-          description: `${canonical} — nivel ${resolvedLevel} (según matriz de referencia)`,
+          priceItemId: `generic:${norm.slice(0, 48)}:${resolvedLevel}`,
+          description: `${trimmed} — nivel ${resolvedLevel} (precio referencia; pieza no catalogada)`,
           quantity: 1,
-          unitPrice: unit,
-          subtotal: unit,
+          unitPrice: fb,
+          subtotal: fb,
         });
       }
     }
 
     if (lines.length === 0) {
       const fallbackPieza = 'Estetica Exterior';
-      const unit = calculateEstimate(fallbackPieza, resolvedLevel);
+      const unit = calculateEstimateWithMatrix(
+        matrix,
+        fallbackPieza,
+        resolvedLevel,
+      );
       if (unit > 0) {
         lines.push({
           priceItemId: `matrix:${fallbackPieza}:${resolvedLevel}`,
@@ -1705,6 +1771,18 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
           unitPrice: unit,
           subtotal: unit,
         });
+      } else {
+        const fb = this.priceMatrixService.getGenericFallbackUnitPrice();
+        lines.push({
+          priceItemId: `generic:fallback:${resolvedLevel}`,
+          description: `${fallbackPieza} — nivel ${resolvedLevel} (precio referencia; matriz sin fila para esta combinación)`,
+          quantity: 1,
+          unitPrice: fb,
+          subtotal: fb,
+        });
+        pricingCatalogNotes.push(
+          `Matriz sin precio para ${fallbackPieza} / ${resolvedLevel}: se usó referencia ${formatAutoFixMoney(fb)}.`,
+        );
       }
     }
 
@@ -1772,6 +1850,15 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
             `- Justificación del perito: ${analysis.justificacion}`,
           ];
 
+    const catalogNotesBlock =
+      pricingCatalogNotes.length > 0
+        ? [
+            '',
+            'Notas de catálogo (revisar con el cliente):',
+            ...pricingCatalogNotes.map((n) => `- ${n}`),
+          ]
+        : [];
+
     const formalNarrative = [
       'Estimado cliente,',
       '',
@@ -1786,6 +1873,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
       '',
       `Subtotal propuesto: ${formatAutoFixMoney(subtotal)} ${AUTO_FIX_CURRENCY}.`,
       `Referencia interna: ${reference}. Fecha de emisión (UTC): ${generatedAt}.`,
+      ...catalogNotesBlock,
       '',
       'Atentamente,',
       'Área de cotizaciones — Taller (borrador automático)',
@@ -1800,6 +1888,9 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
       subtotal,
       total: subtotal,
       formalNarrative,
+      ...(pricingCatalogNotes.length
+        ? { pricingCatalogNotes: [...pricingCatalogNotes] }
+        : {}),
       analysisBasis: {
         pieza: analysis.pieza,
         severidad: analysis.severidad,
@@ -1904,7 +1995,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     const inventory = await this.analyzeDamageImage(imageUrls);
     const analysis = inventoryItemsToVehicleAnalysis(inventory, imageUrls);
     const estimateAmount = this.computePrimaryMatrixEstimate(analysis);
-    const draftQuoteDoc = this.generateDraftQuote(analysis);
+    const draftQuoteDoc = await this.generateDraftQuote(analysis);
 
     const persistedImageUrl =
       imageUrls.length === 1 ? imageUrls[0] : JSON.stringify(imageUrls);
@@ -2116,10 +2207,12 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
         sourceUrls.length ? sourceUrls : fallbackUrls,
       );
 
+      const matrix = this.priceMatrixService.getMatrixRows();
+
       const manualLines: DraftQuoteLine[] = linesDto.map((L, idx) => {
         const u = Math.round(Number(L.precioMx));
         const canonical =
-          matchPiezaFromAnalysis(String(L.pieza).trim()) ??
+          matchPiezaFromAnalysisWithMatrix(String(L.pieza).trim(), matrix) ??
           String(L.pieza).trim();
         const lev = coerceDamageLevelCode(String(L.severidad));
         return {
@@ -2133,7 +2226,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
       const total = manualLines.reduce((acc, l) => acc + l.subtotal, 0);
       const estimateAmount = total;
 
-      let quotePayload = this.generateDraftQuote(analysisMerged);
+      let quotePayload = await this.generateDraftQuote(analysisMerged);
       quotePayload = {
         ...quotePayload,
         reference: row.quotePayload.reference,
@@ -2222,7 +2315,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     }
 
     let estimateAmount = this.computePrimaryMatrixEstimate(analysis);
-    let quotePayload = this.generateDraftQuote(analysis);
+    let quotePayload = await this.generateDraftQuote(analysis);
     quotePayload = {
       ...quotePayload,
       reference: row.quotePayload.reference,
