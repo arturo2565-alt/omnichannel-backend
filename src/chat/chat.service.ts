@@ -47,6 +47,7 @@ import { CatalogService } from '../catalog/catalog.service';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import {
   formatInstantQuoteClientMessage,
+  tryBañoPinturaVehicleGateReply,
   tryResolveInstantQuoteFromUserText,
 } from './instant-quote-from-text';
 
@@ -546,6 +547,20 @@ export class ChatService implements OnModuleDestroy {
       });
     }
     return out.slice(-(ChatService.PLAYGROUND_HISTORY_PAYLOAD_MAX - 1));
+  }
+
+  /** Turnos user del playground + mensaje actual (memoria para baño de pintura / modelo). */
+  private buildPlaygroundUserBañoContext(
+    historyTurns: { role: 'user' | 'assistant'; text: string }[],
+    currentUserText: string,
+  ): string {
+    const parts = historyTurns
+      .filter((h) => h.role === 'user')
+      .map((h) => String(h.text ?? '').trim())
+      .filter((t) => t.length > 0);
+    const cur = String(currentUserText ?? '').trim();
+    if (cur) parts.push(cur);
+    return parts.join('\n\n');
   }
 
   /**
@@ -1527,10 +1542,21 @@ export class ChatService implements OnModuleDestroy {
 
     if (!imageBase64 && userText) {
       catalogSnapForTextOnly = await this.catalogService.getMatrixPricingSnapshot();
-      const instant = tryResolveInstantQuoteFromUserText(
+      const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
+      const gateReply = tryBañoPinturaVehicleGateReply(
         userText,
+        playBañoCtx,
         catalogSnapForTextOnly,
       );
+      if (gateReply) {
+        return {
+          assistantMessage: gateReply,
+          damageDetected: false,
+        };
+      }
+      const instant = tryResolveInstantQuoteFromUserText(userText, catalogSnapForTextOnly, {
+        fullContextForBaño: playBañoCtx,
+      });
       if (instant) {
         return {
           assistantMessage: formatInstantQuoteClientMessage(instant),
@@ -1607,10 +1633,21 @@ export class ChatService implements OnModuleDestroy {
       '(La IA no devolvió texto.)';
 
     if (!imageBase64 && catalogSnapForTextOnly) {
-      const instantMerged = tryResolveInstantQuoteFromUserText(
-        mergedUserForLlm,
+      const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
+      const gateMerged = tryBañoPinturaVehicleGateReply(
+        userText,
+        playBañoCtx,
         catalogSnapForTextOnly,
       );
+      if (gateMerged) {
+        return {
+          assistantMessage: gateMerged,
+          damageDetected: false,
+        };
+      }
+      const instantMerged = tryResolveInstantQuoteFromUserText(userText, catalogSnapForTextOnly, {
+        fullContextForBaño: playBañoCtx,
+      });
       if (instantMerged) {
         return {
           assistantMessage: formatInstantQuoteClientMessage(instantMerged),
@@ -1702,8 +1739,10 @@ ${catalogAppend}`;
       const list = names.join(', ');
       return `\n\nEstos son los nombres EXACTOS de servicios y piezas en base de datos (PriceMatrix): ${list}.
 NUNCA inventes precios ni inventes nombres de servicio: si cotizas algo, el nombre del servicio debe ser uno de esa lista (copiado tal cual) y el importe debe salir solo de la matriz para la severidad correcta.
-Si el usuario dice "baño de pintura" o similar sin decir "Exterior", corresponde al servicio de catálogo "Baño de Pintura Exterior" y al tamaño (severidad) que toque según el vehículo.
-Para baño de pintura, tamaños de referencia: Audi A4/A5, BMW Serie 3 / 318–335, Mercedes Clase C, Mazda 6 = severidad "Mediano Premium" salvo que el usuario indique explícitamente otro tamaño (Chico, Grande, XL, Premium, etc.).
+Si el usuario dice "baño de pintura" o similar sin decir "Exterior", corresponde al servicio de catálogo "Baño de Pintura Exterior" y al tamaño (severidad) que toque según el vehículo o el tamaño que el cliente indique.
+**Baño de pintura (obligatorio):** si en el mensaje actual y el historial reciente del cliente NO aparece el modelo de su auto ni camioneta (ni año, ni marca, ni frases tipo "es un…", "tengo un…", "mi …") y tampoco dice explícitamente el tamaño de carrocería (Chico, Mediano, Grande, XL, con o sin Premium), PROHIBIDO dar cifras o totales. Responde exactamente: "¡Claro! Con gusto. Para darte el precio estimado, ¿qué auto o camioneta tienes?" Si el modelo ya se dijo antes en el chat, úsalo y cotiza sin volver a preguntar.
+**Servicios de precio fijo en catálogo (p. ej. Estética Automotriz, Cerámico cuando aplique en la lista):** puedes dar el precio de inmediato; no dependen del tamaño del vehículo en nuestro flujo actual.
+Para baño de pintura con vehículo ya conocido, tamaños de referencia: Audi A4/A5, BMW Serie 3 / 318–335, Mercedes Clase C, Mazda 6 = severidad "Mediano Premium" salvo que el usuario indique explícitamente otro tamaño (Chico, Grande, XL, Premium, etc.).
 Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide baño de pintura y además "cambio de color", suma el suplemento: $8,000 MXN si el tamaño es Chico o Mediano (incluye variantes Premium de esos tamaños), y $10,000 MXN si es Grande o XL (incluye Premium). Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.`;
     } catch (err) {
       console.warn('[loadCatalogPromptAppendForLlm]', err);
@@ -2704,17 +2743,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         ? batchInbound.map((m) => String(m.content ?? '').trim()).join('\n\n')
         : String(inboundMsg.content ?? '').trim();
 
-      if (mergedForInstant) {
-        const snapInstant = await this.catalogService.getMatrixPricingSnapshot();
-        const instant = tryResolveInstantQuoteFromUserText(
-          mergedForInstant,
-          snapInstant,
-        );
-        if (instant) {
-          return formatInstantQuoteClientMessage(instant);
-        }
-      }
-
       const batchIdSet =
         batchInbound && batchInbound.length > 0
           ? new Set(batchInbound.map((m) => m.id))
@@ -2723,6 +2751,34 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const historySansBatch = batchIdSet
         ? history.filter((m) => !batchIdSet.has(m.id))
         : history;
+
+      const priorInboundPieces = historySansBatch
+        .filter((m) => String(m.direction ?? '').toLowerCase() === 'inbound')
+        .map((m) => String(m.content ?? '').trim())
+        .filter((t) => t.length > 0 && !t.includes('cloudinary'));
+
+      const fullBañoCtx = [...priorInboundPieces, mergedForInstant]
+        .filter(Boolean)
+        .join('\n\n');
+
+      if (mergedForInstant) {
+        const snapInstant = await this.catalogService.getMatrixPricingSnapshot();
+        const gateReply = tryBañoPinturaVehicleGateReply(
+          mergedForInstant,
+          fullBañoCtx || mergedForInstant,
+          snapInstant,
+        );
+        if (gateReply) {
+          return gateReply;
+        }
+        const instant = tryResolveInstantQuoteFromUserText(mergedForInstant, snapInstant, {
+          fullContextForBaño: fullBañoCtx || mergedForInstant,
+        });
+        if (instant) {
+          return formatInstantQuoteClientMessage(instant);
+        }
+      }
+
       const dialogue = this.messagesToChatCompletionTurns(historySansBatch);
 
       if (batchInbound?.length) {
@@ -2943,13 +2999,29 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
       if (!contextMessages.length) return 'No hay historial para analizar.';
 
+      const snapM = await this.catalogService.getMatrixPricingSnapshot();
+      const userBañoCtx = contextMessages
+        .filter((m) => m.role === 'user')
+        .map((m) => String(m.content ?? '').trim())
+        .filter((t) => t.length > 0)
+        .join('\n\n');
+
       for (let i = contextMessages.length - 1; i >= 0; i--) {
         const turn = contextMessages[i];
         if (turn?.role === 'user') {
           const lastUser = String(turn.content ?? '').trim();
           if (lastUser) {
-            const snapM = await this.catalogService.getMatrixPricingSnapshot();
-            const instantM = tryResolveInstantQuoteFromUserText(lastUser, snapM);
+            const gateM = tryBañoPinturaVehicleGateReply(
+              lastUser,
+              userBañoCtx || lastUser,
+              snapM,
+            );
+            if (gateM) {
+              return gateM;
+            }
+            const instantM = tryResolveInstantQuoteFromUserText(lastUser, snapM, {
+              fullContextForBaño: userBañoCtx || lastUser,
+            });
             if (instantM) {
               return formatInstantQuoteClientMessage(instantM);
             }

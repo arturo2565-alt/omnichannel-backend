@@ -15,13 +15,38 @@ export type InstantQuoteResolution = {
   currency: typeof AUTO_FIX_CURRENCY;
 };
 
+export type InstantQuoteFromTextOptions = {
+  /**
+   * Texto acumulado del hilo (p. ej. varios mensajes user del chat) para:
+   * - recordar "baño de pintura" + respuesta posterior "es un March"
+   * - clasificar tamaño con marca/modelo mencionados antes
+   */
+  fullContextForBaño?: string;
+};
+
 const BAÑO_CANON_NORM = 'bano de pintura';
+
+/** Respuesta fija cuando hay intención de baño pero falta modelo / tamaño explícito. */
+export const BAÑO_PINTURA_VEHICLE_PROMPT_REPLY =
+  '¡Claro! Con gusto. Para darte el precio estimado, ¿qué auto o camioneta tienes?';
 
 function isBañoDePinturaServicio(canonical: string): boolean {
   return normalizeTextForMatch(canonical).includes(BAÑO_CANON_NORM);
 }
 
 type CanonicalResolve = { canonical: string; via: 'direct' | 'bano_pintura_synonym' };
+
+export function mentionsBañoDePinturaIntent(text: string): boolean {
+  return normalizeTextForMatch(text).includes(BAÑO_CANON_NORM);
+}
+
+function resolveBañoCanonicalFromSnap(snap: MatrixPricingSnapshot): string | null {
+  for (const svc of snap.serviciosOrderedLongestFirst) {
+    const ks = normalizeTextForMatch(svc);
+    if (ks.includes(BAÑO_CANON_NORM)) return svc;
+  }
+  return null;
+}
 
 /**
  * Alinea texto libre del usuario con el nombre exacto en `price_matrix`.
@@ -37,23 +62,107 @@ export function resolveInstantCanonicalServicio(
   const direct = snap.matchServicio(t);
   if (direct) return { canonical: direct, via: 'direct' };
 
-  const n = normalizeTextForMatch(t);
-  if (!n.includes('bano de pintura')) return null;
+  if (!mentionsBañoDePinturaIntent(t)) return null;
 
   for (const svc of snap.serviciosOrderedLongestFirst) {
     const ks = normalizeTextForMatch(svc);
-    if (ks.includes('bano de pintura')) {
+    if (ks.includes(BAÑO_CANON_NORM)) {
       return { canonical: svc, via: 'bano_pintura_synonym' };
     }
   }
   return null;
 }
 
-/** Severidad en BD para filas de Baño de Pintura Exterior (tamaño / variante). */
-function inferBañoTierSeveridad(userText: string): string {
-  const n = normalizeTextForMatch(userText);
+function resolveInstantCanonicalLatestThenFull(
+  latestUserText: string,
+  fullContextText: string,
+  snap: MatrixPricingSnapshot,
+): CanonicalResolve | null {
+  const latest = String(latestUserText ?? '').trim();
+  const full = String(fullContextText ?? '').trim();
+  return (
+    resolveInstantCanonicalServicio(latest, snap) ??
+    resolveInstantCanonicalServicio(full, snap)
+  );
+}
 
-  // Sedán / coupé premium mediano (catálogo: fila "Mediano Premium")
+/** Tamaño explícito en el texto → se puede cotizar baño sin nombre de auto. */
+export function hasExplicitBañoTierInContext(normalizedBlob: string): boolean {
+  return /\b(chico|mediano|grande|xl)(\s+premium)?\b/.test(normalizedBlob);
+}
+
+const CAR_BRANDS_RE =
+  /\b(audi|bmw|mercedes|benz|nissan|infiniti|toyota|lexus|honda|acura|ford|lincoln|chevrolet|chevy|gmc|cadillac|buick|volkswagen|vw|mazda|hyundai|kia|genesis|suzuki|mitsubishi|subaru|fiat|jeep|ram|dodge|tesla|porsche|mini|seat|skoda|peugeot|renault|citroen|dacia|chery|byd|jac|isuzu|changan|geely|baic|alfa|romeo|iveco|maserati)\b/i;
+
+/** Modelos frecuentes sin marca (evita depender solo de "es un …"). */
+const COMMON_MODELS_RE =
+  /\b(march|versa|sentra|altima|maxima|micra|note|jetta|golf|passat|polo|vento|virtus|tiguan|taos|tcross|t-cross|civic|accord|fit|cr-v|hr-v|pilot|odyssey|corolla|camry|rav4|highlander|4runner|sequoia|sienna|frontier|titan|l200|hilux|ranger|f-150|f-250|f-350|silverado|sierra|traverse|explorer|escape|edge|bronco|patriot|cherokee|wrangler|compass|renegade|tracker|onix|prisma|aveo|spark|beat|mirage|outlander|asx|cx-3|cx-5|cx-9|mazda\s*2|mazda\s*3|mazda\s*6|rio|forte|optima|stinger|elantra|sonata|tucson|santa\s*fe|palisade|venue|kicks|rogue|murano|pathfinder|armada|sorento|telluride|sportage|soul|kwid|duster|sandero|argo|mobilio|city|wr-v)\b/i;
+
+const YEAR_RE = /\b(19[89][0-9]|20[0-3][0-9])\b/;
+
+function hasVehicleModelHint(normalizedBlob: string): boolean {
+  if (hasExplicitBañoTierInContext(normalizedBlob)) return true;
+  if (CAR_BRANDS_RE.test(normalizedBlob)) return true;
+  if (COMMON_MODELS_RE.test(normalizedBlob)) return true;
+  if (YEAR_RE.test(normalizedBlob)) return true;
+  if (
+    /\b(es\s+un|es\s+una|tengo\s+un|tengo\s+una|es\s+el|es\s+la|seria\s+un|sería\s+un|seria\s+una|sería\s+una|manejo\s+un|manejo\s+una|dueño\s+de\s+un|dueno\s+de\s+un|mi\s+[a-z0-9][a-z0-9\s-]{1,40})\b/i.test(
+      normalizedBlob,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function shouldAskVehicleBeforeBañoQuote(normalizedFullContext: string): boolean {
+  if (!mentionsBañoDePinturaIntent(normalizedFullContext)) return false;
+  if (hasExplicitBañoTierInContext(normalizedFullContext)) return false;
+  return !hasVehicleModelHint(normalizedFullContext);
+}
+
+/**
+ * Si el hilo pide baño de pintura y aún no hay modelo/tamaño suficiente, devuelve la respuesta fija (sin precio).
+ * No aplica a cerámico / estética u otros instant.
+ */
+export function tryBañoPinturaVehicleGateReply(
+  latestUserText: string,
+  fullContextForBaño: string,
+  snap: MatrixPricingSnapshot,
+): string | null {
+  const full = String(fullContextForBaño ?? '').trim();
+  const fullNorm = normalizeTextForMatch(full);
+  if (!mentionsBañoDePinturaIntent(fullNorm)) return null;
+
+  const resolved = resolveInstantCanonicalLatestThenFull(
+    String(latestUserText ?? '').trim(),
+    full,
+    snap,
+  );
+  if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) return null;
+
+  if (!shouldAskVehicleBeforeBañoQuote(fullNorm)) return null;
+  return BAÑO_PINTURA_VEHICLE_PROMPT_REPLY;
+}
+
+/** Severidad en BD para filas de Baño de Pintura Exterior (tamaño / variante). */
+function inferBañoTierSeveridad(contextText: string): string {
+  const n = normalizeTextForMatch(contextText);
+
+  const explicitTierRules: { re: RegExp; sev: string }[] = [
+    { re: /\bxl\s*premium\b/, sev: 'XL Premium' },
+    { re: /\bgrande\s*premium\b/, sev: 'Grande Premium' },
+    { re: /\bmediano\s*premium\b/, sev: 'Mediano Premium' },
+    { re: /\bchico\s*premium\b/, sev: 'Chico Premium' },
+    { re: /\bxl\b/, sev: 'XL' },
+    { re: /\bgrande\b/, sev: 'Grande' },
+    { re: /\bmediano\b/, sev: 'Mediano' },
+    { re: /\bchico\b/, sev: 'Chico' },
+  ];
+  for (const { re, sev } of explicitTierRules) {
+    if (re.test(n)) return sev;
+  }
+
   if (
     /\baud?i\s*a\s*[45]\b/.test(n) ||
     /\baud?i\s*a[45]\b/.test(n) ||
@@ -69,19 +178,30 @@ function inferBañoTierSeveridad(userText: string): string {
     return 'Mediano Premium';
   }
 
-  const rules: { re: RegExp; sev: string }[] = [
-    { re: /\bxl\s*premium\b/, sev: 'XL Premium' },
-    { re: /\bgrande\s*premium\b/, sev: 'Grande Premium' },
-    { re: /\bmediano\s*premium\b/, sev: 'Mediano Premium' },
-    { re: /\bchico\s*premium\b/, sev: 'Chico Premium' },
-    { re: /\bxl\b/, sev: 'XL' },
-    { re: /\bgrande\b/, sev: 'Grande' },
-    { re: /\bmediano\b/, sev: 'Mediano' },
-    { re: /\bchico\b/, sev: 'Chico' },
-  ];
-  for (const { re, sev } of rules) {
-    if (re.test(n)) return sev;
+  if (
+    /\bmarch\b|\bversa\b|\bnote\b|\bmicra\b|\bspark\b|\bbeat\b|\bmirage\b|\bi10\b|\bi20\b|\bagile\b|\bkwid\b|\bmazda\s*2\b|\byaris\b|\bfit\b|\brio\b|\baveo\b/.test(
+      n,
+    )
+  ) {
+    return 'Chico';
   }
+
+  if (
+    /\b(yukon|suburban|tahoe|expedition|sequoia|land\s*cruiser|patrol|armada|qx80|escalade|navigator|transit|sprinter|f-250|f-350|ram\s*2500|silverado\s*2500)\b/.test(
+      n,
+    )
+  ) {
+    return 'XL';
+  }
+
+  if (
+    /\b(traverse|explorer|pilot|pathfinder|highlander|4runner|durango|grand\s*cherokee|touareg|atlas|tiguan|edge|bronco|sport|telluride|palisade)\b/.test(
+      n,
+    )
+  ) {
+    return 'Grande';
+  }
+
   return 'Mediano';
 }
 
@@ -115,16 +235,22 @@ function logInstantResolution(payload: Record<string, unknown>): void {
 export function tryResolveInstantQuoteFromUserText(
   userText: string,
   snap: MatrixPricingSnapshot,
+  opts?: InstantQuoteFromTextOptions,
 ): InstantQuoteResolution | null {
-  const t = String(userText ?? '').trim();
-  if (!t) return null;
+  const latest = String(userText ?? '').trim();
+  const fullCtxRaw = String(opts?.fullContextForBaño ?? latest).trim();
+  const tierSource = fullCtxRaw || latest;
+  const tierNorm = normalizeTextForMatch(tierSource);
 
-  const resolved = resolveInstantCanonicalServicio(t, snap);
+  if (!latest && !fullCtxRaw) return null;
+
+  const resolved = resolveInstantCanonicalLatestThenFull(latest, fullCtxRaw, snap);
   if (!resolved) {
     logInstantResolution({
       matched: false,
       reason: 'no_canonical',
-      inputPreview: t.slice(0, 400),
+      inputPreview: latest.slice(0, 400),
+      contextPreview: fullCtxRaw.slice(0, 400),
     });
     return null;
   }
@@ -134,7 +260,17 @@ export function tryResolveInstantQuoteFromUserText(
   if (canonical === 'Estética Automotriz') {
     severidadLiteral = 'N/A';
   } else if (isBañoDePinturaServicio(canonical)) {
-    severidadLiteral = inferBañoTierSeveridad(t);
+    if (shouldAskVehicleBeforeBañoQuote(tierNorm)) {
+      logInstantResolution({
+        matched: false,
+        reason: 'bano_requires_vehicle_model',
+        inputPreview: latest.slice(0, 400),
+        contextPreview: fullCtxRaw.slice(0, 400),
+        canonicalServicioDb: canonical,
+      });
+      return null;
+    }
+    severidadLiteral = inferBañoTierSeveridad(tierSource);
   } else {
     severidadLiteral = 'N/A';
   }
@@ -146,7 +282,8 @@ export function tryResolveInstantQuoteFromUserText(
     logInstantResolution({
       matched: false,
       reason: base <= 0 ? 'price_zero' : 'not_instant_service_cell',
-      inputPreview: t.slice(0, 400),
+      inputPreview: latest.slice(0, 400),
+      contextPreview: fullCtxRaw.slice(0, 400),
       resolveVia: via,
       canonicalServicioDb: canonical,
       severidadLiteral,
@@ -158,7 +295,8 @@ export function tryResolveInstantQuoteFromUserText(
 
   logInstantResolution({
     matched: true,
-    inputPreview: t.slice(0, 400),
+    inputPreview: latest.slice(0, 400),
+    contextPreview: fullCtxRaw.slice(0, 400),
     resolveVia: via,
     canonicalServicioDb: canonical,
     severidadLiteral,
@@ -175,7 +313,7 @@ export function tryResolveInstantQuoteFromUserText(
   const extras: InstantQuoteLine[] = [];
 
   let add = 0;
-  if (isBañoDePinturaServicio(canonical) && mentionsCambioDeColor(t)) {
+  if (isBañoDePinturaServicio(canonical) && mentionsCambioDeColor(tierSource)) {
     add = cambioDeColorAddonMx(severidadLiteral);
     extras.push({
       label: 'Cambio de color (suplemento)',
