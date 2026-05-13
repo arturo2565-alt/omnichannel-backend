@@ -50,30 +50,70 @@ function normalizeText(s: string): string {
     .trim();
 }
 
+function escapeRegExpChars(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * Empareja texto libre del peritaje con un nombre canónico de pieza del catálogo.
- * `piezasOrderedLongestFirst` debe ser la lista DISTINCT de piezas ordenada por nombre largo → corto.
+ * `needle` ya normalizado (minúsculas, sin acentos). Comprueba que aparezca como unidad,
+ * no como prefijo accidental de otra palabra (p. ej. evita "cia" dentro de "ceramico").
  */
-export function matchPiezaFromCatalog(
+function normalizedHaystackContainsWholeNeedle(
+  haystackNorm: string,
+  needleNorm: string,
+): boolean {
+  if (!needleNorm) return false;
+  if (haystackNorm === needleNorm) return true;
+  const re = new RegExp(
+    `(?:^|[^a-z0-9]+)${escapeRegExpChars(needleNorm)}(?:[^a-z0-9]+|$)`,
+    'i',
+  );
+  return re.test(haystackNorm);
+}
+
+const MIN_SERVICIO_FUZZ_LEN = 4;
+
+/**
+ * Empareja texto libre con un nombre canónico del catálogo (misma capitalización que en BD).
+ * Compara con {@link normalizeText} (minúsculas, sin acentos). Entre varios candidatos, gana el nombre más largo.
+ */
+export function matchServicioFromCatalog(
   parteLibre: string,
-  piezasOrderedLongestFirst: readonly string[],
+  serviciosOrderedLongestFirst: readonly string[],
 ): string | null {
   const n = normalizeText(parteLibre);
   if (!n) return null;
-  const rowByPiezaNorm = new Map<string, string>();
-  for (const p of piezasOrderedLongestFirst) {
-    rowByPiezaNorm.set(normalizeText(p), p);
+  const byNorm = new Map<string, string>();
+  for (const s of serviciosOrderedLongestFirst) {
+    byNorm.set(normalizeText(s), s);
   }
-  if (rowByPiezaNorm.has(n)) return rowByPiezaNorm.get(n)!;
-  for (const pieza of piezasOrderedLongestFirst) {
-    const key = normalizeText(pieza);
-    if (!key) continue;
-    if (n.includes(key) || (key.length >= 4 && key.includes(n))) {
-      return pieza;
+  if (byNorm.has(n)) return byNorm.get(n)!;
+
+  let best: { keyLen: number; name: string } | null = null;
+  for (const svc of serviciosOrderedLongestFirst) {
+    const key = normalizeText(svc);
+    if (!key || key.length < MIN_SERVICIO_FUZZ_LEN) continue;
+
+    let hit = false;
+    if (n.includes(key) && normalizedHaystackContainsWholeNeedle(n, key)) {
+      hit = true;
+    } else if (
+      key.length >= n.length &&
+      n.length >= MIN_SERVICIO_FUZZ_LEN &&
+      key.includes(n)
+    ) {
+      hit = true;
+    }
+
+    if (hit && (!best || key.length > best.keyLen)) {
+      best = { keyLen: key.length, name: svc };
     }
   }
-  return null;
+  return best?.name ?? null;
 }
+
+/** @deprecated usar {@link matchServicioFromCatalog} */
+export const matchPiezaFromCatalog = matchServicioFromCatalog;
 
 export function damageLevelRank(level: DamageLevel): number {
   const i = DAMAGE_LEVEL_KEYS.indexOf(level);

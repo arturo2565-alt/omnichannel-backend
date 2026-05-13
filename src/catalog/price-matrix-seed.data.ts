@@ -1,7 +1,7 @@
 import { buildFlatRowsFromLegacyFrontendMatrix } from './legacy-price-matrix-import';
 
 export type PriceMatrixSeedRow = {
-  pieza: string;
+  servicio: string;
   severidad: string;
   precio: number;
   diasEntrega: number;

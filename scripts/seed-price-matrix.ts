@@ -40,11 +40,11 @@ async function main() {
     const repo = ds.getRepository(PriceMatrix);
     const seed = buildPriceMatrixSeedRows(diasEntrega);
     await repo.upsert(seed, {
-      conflictPaths: ['pieza', 'severidad'],
+      conflictPaths: ['servicio', 'severidad'],
       skipUpdateIfNoValuesChanged: false,
     });
     const count = await repo.count();
-    console.log(`OK: ${seed.length} filas upsert (pieza×severidad). Total en tabla: ${count}.`);
+    console.log(`OK: ${seed.length} filas upsert (servicio×severidad). Total en tabla: ${count}.`);
   } finally {
     await ds.destroy();
   }

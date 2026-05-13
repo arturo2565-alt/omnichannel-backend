@@ -19,7 +19,7 @@ export class CatalogController {
   private mapRows(rows: Awaited<ReturnType<CatalogService['findAllPriceMatrixRows']>>) {
     return rows.map((r) => ({
       id: r.id,
-      pieza: r.pieza,
+      servicio: r.servicio,
       severidad: r.severidad,
       precio: r.precio,
       diasEntrega: r.diasEntrega,
@@ -79,17 +79,18 @@ export class CatalogController {
   async createPriceMatrixRow(
     @Body()
     body: {
+      servicio?: unknown;
       pieza?: unknown;
       severidad?: unknown;
       precio?: unknown;
       diasEntrega?: unknown;
     },
   ) {
-    const pieza = String(body?.pieza ?? '').trim();
+    const servicio = String(body?.servicio ?? body?.pieza ?? '').trim();
     const severidad = String(body?.severidad ?? '').trim();
     const precio = Number(body?.precio);
     const diasEntrega = Number(body?.diasEntrega);
-    if (!pieza) throw new BadRequestException('pieza obligatoria');
+    if (!servicio) throw new BadRequestException('servicio obligatorio');
     if (!severidad) throw new BadRequestException('severidad obligatoria');
     if (!Number.isFinite(precio) || precio < 0 || !Number.isInteger(precio)) {
       throw new BadRequestException('precio entero >= 0');
@@ -99,7 +100,7 @@ export class CatalogController {
     }
     try {
       const row = await this.catalogService.createRow({
-        pieza,
+        servicio,
         severidad,
         precio,
         diasEntrega,
@@ -113,7 +114,7 @@ export class CatalogController {
         const pg = e.driverError as { code?: string } | undefined;
         if (pg?.code === '23505') {
           throw new ConflictException(
-            'Ya existe una fila con esa pieza y severidad.',
+            'Ya existe una fila con ese servicio y severidad.',
           );
         }
       }

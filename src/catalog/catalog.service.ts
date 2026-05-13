@@ -17,25 +17,30 @@ export class CatalogService {
 
   async findAllPriceMatrixRows(): Promise<PriceMatrix[]> {
     return this.priceMatrixRepository.find({
-      order: { pieza: 'ASC', severidad: 'ASC' },
+      order: { servicio: 'ASC', severidad: 'ASC' },
     });
   }
 
-  /** Nombres únicos de pieza/servicio (orden alfabético) para inyectar en prompts de texto. */
-  async getDistinctPiezaNamesForPrompt(): Promise<string[]> {
+  /** Nombres únicos de servicio/pieza (orden alfabético) para inyectar en prompts de texto. */
+  async getDistinctServicioNamesForPrompt(): Promise<string[]> {
     const raw = await this.priceMatrixRepository
       .createQueryBuilder('p')
-      .select('p.pieza', 'pieza')
+      .select('p.servicio', 'servicio')
       .distinct(true)
-      .orderBy('p.pieza', 'ASC')
-      .getRawMany<{ pieza: string }>();
-    return raw.map((r) => String(r.pieza ?? '').trim()).filter(Boolean);
+      .orderBy('p.servicio', 'ASC')
+      .getRawMany<{ servicio: string }>();
+    return raw.map((r) => String(r.servicio ?? '').trim()).filter(Boolean);
+  }
+
+  /** @deprecated usar {@link CatalogService.getDistinctServicioNamesForPrompt} */
+  async getDistinctPiezaNamesForPrompt(): Promise<string[]> {
+    return this.getDistinctServicioNamesForPrompt();
   }
 
   /** Lectura única de `price_matrix` para armar líneas de cotización (sin N queries por celda). */
   async getMatrixPricingSnapshot(): Promise<MatrixPricingSnapshot> {
     const rows = await this.priceMatrixRepository.find({
-      order: { pieza: 'ASC', severidad: 'ASC' },
+      order: { servicio: 'ASC', severidad: 'ASC' },
     });
     return createMatrixPricingSnapshot(rows);
   }
@@ -66,13 +71,13 @@ export class CatalogService {
   }
 
   async createRow(dto: {
-    pieza: string;
+    servicio: string;
     severidad: string;
     precio: number;
     diasEntrega: number;
   }): Promise<PriceMatrix> {
     const row = this.priceMatrixRepository.create({
-      pieza: dto.pieza.slice(0, 120),
+      servicio: dto.servicio.slice(0, 120),
       severidad: dto.severidad.slice(0, 32),
       precio: dto.precio,
       diasEntrega: dto.diasEntrega,
@@ -81,8 +86,8 @@ export class CatalogService {
   }
 
   /**
-   * Importa la matriz ancha réplica de `autofix-pricing.js` (pieza × severidad).
-   * Upsert por (pieza, severidad): no duplica; actualiza precio y días si ya existía.
+   * Importa la matriz ancha réplica de `autofix-pricing.js` (servicio × severidad).
+   * Upsert por (servicio, severidad): no duplica; actualiza precio y días si ya existía.
    */
   async importFromLegacyFrontendMirror(
     diasEntregaDefault = 3,
@@ -93,13 +98,13 @@ export class CatalogService {
     }
     await this.priceMatrixRepository.upsert(
       flat.map((r) => ({
-        pieza: r.pieza.slice(0, 120),
+        servicio: r.servicio.slice(0, 120),
         severidad: r.severidad.slice(0, 32),
         precio: r.precio,
         diasEntrega: r.diasEntrega,
       })),
       {
-        conflictPaths: ['pieza', 'severidad'],
+        conflictPaths: ['servicio', 'severidad'],
         skipUpdateIfNoValuesChanged: false,
       },
     );

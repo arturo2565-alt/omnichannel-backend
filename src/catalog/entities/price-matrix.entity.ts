@@ -1,18 +1,19 @@
 import { Column, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
 
 /**
- * Celda de la matriz pieza × severidad (hojalatería / pintura).
- * Tabla física: `price_matrix`.
+ * Celda de la matriz servicio × severidad (hojalatería / pintura / otros).
+ * Tabla física: `price_matrix`. La columna en BD sigue siendo `pieza` (migración opcional a `servicio`).
  */
 @Entity({ name: 'price_matrix' })
-@Unique(['pieza', 'severidad'])
+@Unique(['servicio', 'severidad'])
 export class PriceMatrix {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar', length: 120 })
+  /** Nombre del servicio o pieza en catálogo (columna BD: `pieza`). */
+  @Column({ type: 'varchar', length: 120, name: 'pieza' })
   @Index()
-  pieza: string;
+  servicio: string;
 
   @Column({ type: 'varchar', length: 32 })
   severidad: string;

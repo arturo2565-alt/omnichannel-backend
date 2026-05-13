@@ -5,7 +5,7 @@ import {
 import { LEGACY_PIEZA_DANO_PRICE_MATRIX } from './legacy-pieza-dano-from-frontend';
 
 export type FlatLegacyImportRow = {
-  pieza: string;
+  servicio: string;
   severidad: string;
   precio: number;
   diasEntrega: number;
@@ -23,7 +23,7 @@ export function buildFlatRowsFromLegacyFrontendMatrix(
       const precio = row[sev as StandardDamageLevel];
       if (typeof precio !== 'number' || Number.isNaN(precio)) continue;
       out.push({
-        pieza: row.pieza,
+        servicio: row.pieza,
         severidad: sev,
         precio,
         diasEntrega: diasEntregaDefault,

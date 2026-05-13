@@ -598,7 +598,7 @@ export class ChatService implements OnModuleDestroy {
       return lines.map((line, idx) => {
         const row = inv[idx];
         const canonical =
-          snap.matchPieza(row.pieza.trim()) ??
+          snap.matchServicio(row.pieza.trim()) ??
           row.pieza.trim();
         return {
           sortOrder: idx,
@@ -637,7 +637,7 @@ export class ChatService implements OnModuleDestroy {
     if (inv.length > 0) {
       const grouped = snap.matrixInventoryMaxLines(
         inv.map((it) => ({
-          pieza: it.pieza,
+          servicio: it.pieza,
           severidad: it.severidad,
         })),
       );
@@ -646,7 +646,7 @@ export class ChatService implements OnModuleDestroy {
         const g = grouped[idx];
         const line = lines[idx];
         const related = inv.filter(
-          (it) => snap.matchPieza(it.pieza) === g.canonical,
+          (it) => snap.matchServicio(it.pieza) === g.canonical,
         );
         const descParts = [...new Set(related.map((r) => r.descripcionTecnica))]
           .filter(Boolean)
@@ -832,7 +832,7 @@ export class ChatService implements OnModuleDestroy {
     if (analysis.inventory?.length) {
       const sum = snap.inventoryMaxTotal(
         analysis.inventory.map((i) => ({
-          pieza: i.pieza,
+          servicio: i.pieza,
           severidad: i.severidad,
         })),
       );
@@ -840,8 +840,8 @@ export class ChatService implements OnModuleDestroy {
     }
     const level = coerceDamageLevelCode(analysis.severidad);
     const piezaMatriz =
-      snap.matchPieza(analysis.pieza) ??
-      snap.matchPieza(analysis.partesAfectadas?.[0] ?? '') ??
+      snap.matchServicio(analysis.pieza) ??
+      snap.matchServicio(analysis.partesAfectadas?.[0] ?? '') ??
       analysis.pieza;
     return snap.getAmount(piezaMatriz, level);
   }
@@ -1666,7 +1666,7 @@ ${catalogAppend}`;
    */
   private async loadCatalogPromptAppendForLlm(): Promise<string> {
     try {
-      const names = await this.catalogService.getDistinctPiezaNamesForPrompt();
+      const names = await this.catalogService.getDistinctServicioNamesForPrompt();
       if (!names.length) {
         return '\n\n[Catálogo de piezas/servicios aún sin datos en base de datos.]';
       }
@@ -1679,7 +1679,7 @@ ${catalogAppend}`;
   }
 
   /**
-   * Texto sin imagen: si el mensaje encaja con una pieza del catálogo y tiene precio con severidad N/A,
+   * Texto sin imagen: si el mensaje encaja con un servicio del catálogo y tiene precio con severidad N/A,
    * devuelve un inventario mínimo para generar borrador (sin visión).
    */
   private tryCatalogOnlyDamageItemsFromUserText(
@@ -1688,7 +1688,7 @@ ${catalogAppend}`;
   ): DetectedDamageItem[] | null {
     const t = String(userText ?? '').trim();
     if (!t) return null;
-    const canonical = snap.matchPieza(t);
+    const canonical = snap.matchServicio(t);
     if (!canonical) return null;
     const na = snap.getAmount(canonical, 'N/A');
     if (na <= 0) return null;
@@ -1718,7 +1718,7 @@ ${catalogAppend}`;
       );
       const grouped = snap.matrixInventoryMaxLines(
         analysis.inventory.map((i) => ({
-          pieza: i.pieza,
+          servicio: i.pieza,
           severidad: i.severidad,
         })),
       );
@@ -1726,7 +1726,7 @@ ${catalogAppend}`;
         if (g.unitPrice <= 0) continue;
         lines.push({
           priceItemId: `matrix:${g.canonical}:${g.damageLevel}`,
-          description: `${g.canonical} — nivel ${g.damageLevel} (catálogo; mayor costo entre filas de esta pieza)`,
+          description: `${g.canonical} — nivel ${g.damageLevel} (catálogo; mayor costo entre filas de este servicio)`,
           quantity: 1,
           unitPrice: g.unitPrice,
           subtotal: g.unitPrice,
@@ -1746,7 +1746,7 @@ ${catalogAppend}`;
 
       const seen = new Set<string>();
       for (const parteRaw of partes) {
-        const canonical = snap.matchPieza(parteRaw);
+        const canonical = snap.matchServicio(parteRaw);
         if (!canonical) continue;
         const key = `${canonical}|${resolvedLevel}`;
         if (seen.has(key)) continue;
@@ -1821,7 +1821,7 @@ ${catalogAppend}`;
                   ? urls.join('\n   ')
                   : '(sin URLs listadas por el modelo)';
               return [
-                `${i + 1}. Pieza: ${it.pieza} — severidad ${code}`,
+                `${i + 1}. Servicio: ${it.pieza} — severidad ${code}`,
                 `   Descripción técnica: ${descLine}`,
                 `   URLs origen:\n   ${urlsLine}`,
               ].join('\n');
@@ -1833,7 +1833,7 @@ ${catalogAppend}`;
           ]
         : [
             'Resumen pericial (automático):',
-            `- Pieza identificada: ${analysis.pieza}`,
+            `- Servicio identificado: ${analysis.pieza}`,
             `- Severidad (código AutoFix): ${analysis.severidad}`,
             `- Nivel aplicado en catálogo de precios: ${resolvedLevel}`,
             `- Partes / zonas: ${analysis.partesAfectadas.length ? analysis.partesAfectadas.join(', ') : 'no detalladas'}`,
@@ -2190,7 +2190,7 @@ ${catalogAppend}`;
       const manualLines: DraftQuoteLine[] = linesDto.map((L, idx) => {
         const u = Math.round(Number(L.precioMx));
         const canonical =
-          snap.matchPieza(String(L.pieza).trim()) ?? String(L.pieza).trim();
+          snap.matchServicio(String(L.pieza).trim()) ?? String(L.pieza).trim();
         const lev = coerceDamageLevelCode(String(L.severidad));
         return {
           priceItemId: `panel:${idx}:${canonical}:${lev}`,
