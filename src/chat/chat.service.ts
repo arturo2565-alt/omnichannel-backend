@@ -1339,7 +1339,7 @@ export class ChatService implements OnModuleDestroy {
           content: userContent,
         },
       ],
-      max_tokens: 3000,
+      max_completion_tokens: 3000,
     });
 
     const visionResponse = completion.choices[0]?.message?.content?.trim() ?? '';
