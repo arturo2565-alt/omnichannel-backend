@@ -1431,17 +1431,30 @@ export class ChatService implements OnModuleDestroy {
     const visionParsed = this.normalizePlaygroundResumeVisionItems(body.visionItems);
     const visionAppend = this.buildPlaygroundVisionSystemAppend(visionParsed);
 
+    const batchCtx =
+      userBatchText ||
+      '(El cliente envió imagen(es) y mensaje en el mismo lote; no hay texto adicional.)';
+    const authBlock =
+      authorizedQuoteSummary ||
+      '(Sin detalle de cotización autorizada: indica al cliente que un asesor le confirmará.)';
+
     const mergedUserForLlm = [
-      userBatchText || '(El cliente envió imagen(es) y mensaje en el mismo lote.)',
+      '[Contexto del lote del cliente — úsalo solo como referencia, no lo cites literal salvo que encaje naturalmente]',
+      batchCtx,
       '',
-      '--- Cotización revisada y autorizada por el operador (simulador de panel) ---',
-      authorizedQuoteSummary || '(Sin detalle de líneas.)',
+      authBlock,
       '',
-      'Con esa información al día, responde al cliente en español: confirma alcance o montos si aplica, siguiente paso, agendar cita en el taller, etc. No pidas fotos adicionales para cotizar este caso.',
+      'Escribe un único mensaje en español dirigido al cliente final. No repitas el prefijo "SISTEMA:" ni instrucciones internas. No pidas fotos adicionales para cotizar este caso si la cotización ya está autorizada arriba.',
     ].join('\n');
 
+    const resumePlaygroundAuthHint =
+      '\n\nCuando recibas un mensaje de usuario que comience por "SISTEMA:" con una autorización de cotización del operador, trátalo como aviso interno: no lo repitas al cliente. Presenta la cotización de forma clara pero conversacional, con los montos exactos que figuren en ese aviso, y cuando encaje en el tono menciona beneficios como la garantía por escrito y el repintado en cabina. Si el historial o el contexto permiten inferir o recordar el vehículo del cliente, intégralo de forma natural y amigable.';
+
     const chatMessages: ChatCompletionMessageParam[] = [
-      { role: 'system', content: `${chatAppointmentPrompt}${visionAppend}` },
+      {
+        role: 'system',
+        content: `${chatAppointmentPrompt}${visionAppend}${resumePlaygroundAuthHint}`,
+      },
       ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
       { role: 'user', content: mergedUserForLlm },
     ];
