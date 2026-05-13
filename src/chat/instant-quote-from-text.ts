@@ -15,15 +15,60 @@ export type InstantQuoteResolution = {
   currency: typeof AUTO_FIX_CURRENCY;
 };
 
-const BAÑO_CANON_SUBSTR = 'baño de pintura';
+const BAÑO_CANON_NORM = 'bano de pintura';
 
 function isBañoDePinturaServicio(canonical: string): boolean {
-  return normalizeTextForMatch(canonical).includes(BAÑO_CANON_SUBSTR);
+  return normalizeTextForMatch(canonical).includes(BAÑO_CANON_NORM);
+}
+
+type CanonicalResolve = { canonical: string; via: 'direct' | 'bano_pintura_synonym' };
+
+/**
+ * Alinea texto libre del usuario con el nombre exacto en `price_matrix`.
+ * Ej.: "Baño de pintura para Audi A5" → "Baño de Pintura Exterior" (no inventar servicio).
+ */
+export function resolveInstantCanonicalServicio(
+  userText: string,
+  snap: MatrixPricingSnapshot,
+): CanonicalResolve | null {
+  const t = String(userText ?? '').trim();
+  if (!t) return null;
+
+  const direct = snap.matchServicio(t);
+  if (direct) return { canonical: direct, via: 'direct' };
+
+  const n = normalizeTextForMatch(t);
+  if (!n.includes('bano de pintura')) return null;
+
+  for (const svc of snap.serviciosOrderedLongestFirst) {
+    const ks = normalizeTextForMatch(svc);
+    if (ks.includes('bano de pintura')) {
+      return { canonical: svc, via: 'bano_pintura_synonym' };
+    }
+  }
+  return null;
 }
 
 /** Severidad en BD para filas de Baño de Pintura Exterior (tamaño / variante). */
 function inferBañoTierSeveridad(userText: string): string {
   const n = normalizeTextForMatch(userText);
+
+  // Sedán / coupé premium mediano (catálogo: fila "Mediano Premium")
+  if (
+    /\baud?i\s*a\s*[45]\b/.test(n) ||
+    /\baud?i\s*a[45]\b/.test(n) ||
+    /\bbmw\s*(3[0-9]{2}i?|serie\s*3)\b/.test(n) ||
+    /\bserie\s*3\b/.test(n) ||
+    /\bmercedes[\s-]*(benz\s*)?(c[\s-]*(class|200|220|250|300)|clase\s*c)\b/.test(
+      n,
+    ) ||
+    /\bclase\s*c\b/.test(n) ||
+    /\bc[\s-]*class\b/.test(n) ||
+    /\bmazda\s*6\b/.test(n)
+  ) {
+    return 'Mediano Premium';
+  }
+
   const rules: { re: RegExp; sev: string }[] = [
     { re: /\bxl\s*premium\b/, sev: 'XL Premium' },
     { re: /\bgrande\s*premium\b/, sev: 'Grande Premium' },
@@ -59,6 +104,10 @@ export function cambioDeColorAddonMx(severidadBaño: string): number {
   return 8_000;
 }
 
+function logInstantResolution(payload: Record<string, unknown>): void {
+  console.log('[InstantQuote]', JSON.stringify(payload));
+}
+
 /**
  * Si el texto encaja con un servicio InstantQuote en catálogo, devuelve líneas y total.
  * No usa borrador ni visión.
@@ -70,8 +119,16 @@ export function tryResolveInstantQuoteFromUserText(
   const t = String(userText ?? '').trim();
   if (!t) return null;
 
-  const canonical = snap.matchServicio(t);
-  if (!canonical) return null;
+  const resolved = resolveInstantCanonicalServicio(t, snap);
+  if (!resolved) {
+    logInstantResolution({
+      matched: false,
+      reason: 'no_canonical',
+      inputPreview: t.slice(0, 400),
+    });
+    return null;
+  }
+  const { canonical, via } = resolved;
 
   let severidadLiteral: string;
   if (canonical === 'Estética Automotriz') {
@@ -82,9 +139,32 @@ export function tryResolveInstantQuoteFromUserText(
     severidadLiteral = 'N/A';
   }
 
-  const base = snap.getPriceExact(t, severidadLiteral);
-  if (base <= 0) return null;
-  if (!snap.isInstantExact(t, severidadLiteral)) return null;
+  const base = snap.getPriceForCanonical(canonical, severidadLiteral);
+  const isInstant = snap.isInstantForCanonical(canonical, severidadLiteral);
+
+  if (base <= 0 || !isInstant) {
+    logInstantResolution({
+      matched: false,
+      reason: base <= 0 ? 'price_zero' : 'not_instant_service_cell',
+      inputPreview: t.slice(0, 400),
+      resolveVia: via,
+      canonicalServicioDb: canonical,
+      severidadLiteral,
+      precioMx: base,
+      isInstantService: isInstant,
+    });
+    return null;
+  }
+
+  logInstantResolution({
+    matched: true,
+    inputPreview: t.slice(0, 400),
+    resolveVia: via,
+    canonicalServicioDb: canonical,
+    severidadLiteral,
+    precioMx: base,
+    isInstantService: true,
+  });
 
   const lines: InstantQuoteLine[] = [
     {
@@ -117,7 +197,7 @@ export function tryResolveInstantQuoteFromUserText(
 /** Formato amigable tipo WhatsApp / panel (negritas con *). */
 export function formatInstantQuoteClientMessage(r: InstantQuoteResolution): string {
   const blocks: string[] = [
-    '¡Hola! Te comparto una cotización *orientativa* con los precios vigentes del catálogo:',
+    '¡Hola! Con gusto te comparto la cotización según nuestro catálogo vigente:',
     '',
     ...r.lines.map((l) => `• *${l.label}*: ${formatAutoFixMoney(l.amount)} ${r.currency}`),
   ];
@@ -129,9 +209,9 @@ export function formatInstantQuoteClientMessage(r: InstantQuoteResolution): stri
   }
   blocks.push(
     '',
-    `*Total aproximado: ${formatAutoFixMoney(r.total)} ${r.currency}*`,
+    `*Total: ${formatAutoFixMoney(r.total)} ${r.currency}*`,
     '',
-    'Los importes y tiempos pueden ajustarse tras una revisión en taller. Si quieres, te ayudo a agendar una visita.',
+    'Si quieres, te ayudo a agendar una visita al taller.',
   );
   return blocks.join('\n');
 }

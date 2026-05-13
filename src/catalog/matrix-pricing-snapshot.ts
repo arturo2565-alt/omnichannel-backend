@@ -28,6 +28,10 @@ export type MatrixPricingSnapshot = {
   getPriceExact(parteLibre: string, severidadLiteral: string): number;
   /** Celda marcada como InstantQuote en BD. */
   isInstantExact(parteLibre: string, severidadLiteral: string): boolean;
+  /** Precio usando el nombre canónico exacto de BD (sin re-ejecutar match sobre texto libre). */
+  getPriceForCanonical(canonicalServicio: string, severidadLiteral: string): number;
+  /** InstantQuote usando nombre canónico exacto de BD. */
+  isInstantForCanonical(canonicalServicio: string, severidadLiteral: string): boolean;
 };
 
 /**
@@ -94,6 +98,27 @@ export function createMatrixPricingSnapshot(
     return instantByKey.get(`${c}|${sev}`) === true;
   };
 
+  const getPriceForCanonical = (
+    canonicalServicio: string,
+    severidadLiteral: string,
+  ): number => {
+    const c = String(canonicalServicio ?? '').trim();
+    const sev = String(severidadLiteral ?? '').trim();
+    if (!c || !sev) return 0;
+    const v = priceByKey.get(`${c}|${sev}`);
+    return typeof v === 'number' && !Number.isNaN(v) && v > 0 ? v : 0;
+  };
+
+  const isInstantForCanonical = (
+    canonicalServicio: string,
+    severidadLiteral: string,
+  ): boolean => {
+    const c = String(canonicalServicio ?? '').trim();
+    const sev = String(severidadLiteral ?? '').trim();
+    if (!c || !sev) return false;
+    return instantByKey.get(`${c}|${sev}`) === true;
+  };
+
   const matrixInventoryMaxLines = (
     items: ReadonlyArray<ServicioSeveridadInput>,
   ): { canonical: string; unitPrice: number; damageLevel: DamageLevel }[] => {
@@ -139,6 +164,8 @@ export function createMatrixPricingSnapshot(
     getAmount,
     getPriceExact,
     isInstantExact,
+    getPriceForCanonical,
+    isInstantForCanonical,
     matrixInventoryMaxLines,
     inventoryMaxTotal,
   };

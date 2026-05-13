@@ -1523,19 +1523,23 @@ export class ChatService implements OnModuleDestroy {
 
     let mergedUserForLlm = userText;
     let visionItemsAfterImage: DetectedDamageItem[] = [];
+    let catalogSnapForTextOnly: MatrixPricingSnapshot | null = null;
 
     if (!imageBase64 && userText) {
-      const snapCat = await this.catalogService.getMatrixPricingSnapshot();
-      const instant = tryResolveInstantQuoteFromUserText(userText, snapCat);
+      catalogSnapForTextOnly = await this.catalogService.getMatrixPricingSnapshot();
+      const instant = tryResolveInstantQuoteFromUserText(
+        userText,
+        catalogSnapForTextOnly,
+      );
       if (instant) {
         return {
           assistantMessage: formatInstantQuoteClientMessage(instant),
-          damageDetected: true,
+          damageDetected: false,
         };
       }
       const catalogOnly = this.tryCatalogOnlyDamageItemsFromUserText(
         userText,
-        snapCat,
+        catalogSnapForTextOnly,
       );
       if (catalogOnly?.length) {
         const analysis = inventoryItemsToVehicleAnalysis(catalogOnly, []);
@@ -1602,12 +1606,26 @@ export class ChatService implements OnModuleDestroy {
       chatCompletion.choices[0]?.message?.content?.trim() ||
       '(La IA no devolvió texto.)';
 
+    if (!imageBase64 && catalogSnapForTextOnly) {
+      const instantMerged = tryResolveInstantQuoteFromUserText(
+        mergedUserForLlm,
+        catalogSnapForTextOnly,
+      );
+      if (instantMerged) {
+        return {
+          assistantMessage: formatInstantQuoteClientMessage(instantMerged),
+          damageDetected: false,
+        };
+      }
+    }
+
     const probeSystem = `${visionPrompt.trim() || (await this.aiConfigService.getValue(AI_CONFIG_KEYS.DEFAULT_VISION_PROMPT))}
 
 [Modo playground — texto (puede incluir resumen de análisis de imagen pegado por el sistema)]
 Si el mensaje del usuario describe daños concretos de hojalatería o pintura (pieza o zona + severidad aproximada), responde ÚNICAMENTE con JSON válido:
 { "items": [ { "pieza": string, "severidad": "DL"|"DML"|"DM"|"DMF"|"DF"|"DMFuerte"|"N/A", "descripcionTecnica": string, "urls_origen": [] } ] }
 Usa "N/A" solo para servicios sin grado de daño (p. ej. tratamiento cerámico). Si no hay daño vehicular claro ni servicio identificable, responde { "items": [] }.
+Si el usuario solo pide cotización de estética / baño de pintura / cerámico / servicio del catálogo sin describir un golpe o rasguño concreto, responde SIEMPRE { "items": [] }. No inventes daños ni piezas para poder cotizar.
 
 ${catalogAppend}`;
 
@@ -1682,7 +1700,11 @@ ${catalogAppend}`;
         return '\n\n[Catálogo de piezas/servicios aún sin datos en base de datos.]';
       }
       const list = names.join(', ');
-      return `\n\nEstos son los servicios y piezas que ofrecemos actualmente: ${list}. Si el usuario menciona alguno de estos, ofrécelo. Si menciona algo que no está en la lista, indícale amablemente que por ahora no contamos con ese servicio. Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide baño de pintura y además "cambio de color", suma el suplemento: $8,000 MXN si el tamaño es Chico o Mediano (incluye variantes Premium de esos tamaños), y $10,000 MXN si es Grande o XL (incluye Premium). Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.`;
+      return `\n\nEstos son los nombres EXACTOS de servicios y piezas en base de datos (PriceMatrix): ${list}.
+NUNCA inventes precios ni inventes nombres de servicio: si cotizas algo, el nombre del servicio debe ser uno de esa lista (copiado tal cual) y el importe debe salir solo de la matriz para la severidad correcta.
+Si el usuario dice "baño de pintura" o similar sin decir "Exterior", corresponde al servicio de catálogo "Baño de Pintura Exterior" y al tamaño (severidad) que toque según el vehículo.
+Para baño de pintura, tamaños de referencia: Audi A4/A5, BMW Serie 3 / 318–335, Mercedes Clase C, Mazda 6 = severidad "Mediano Premium" salvo que el usuario indique explícitamente otro tamaño (Chico, Grande, XL, Premium, etc.).
+Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide baño de pintura y además "cambio de color", suma el suplemento: $8,000 MXN si el tamaño es Chico o Mediano (incluye variantes Premium de esos tamaños), y $10,000 MXN si es Grande o XL (incluye Premium). Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.`;
     } catch (err) {
       console.warn('[loadCatalogPromptAppendForLlm]', err);
       return '';
