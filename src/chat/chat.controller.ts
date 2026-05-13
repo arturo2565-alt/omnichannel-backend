@@ -19,12 +19,14 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
 import type { PatchDraftQuoteBody } from './chat.service';
 import { AiConfigService } from './ai-config.service';
+import { PriceMatrixService } from './price-matrix.service';
 
 @Controller('webhook') 
 export class ChatController {
   constructor(
     private readonly chatService: ChatService,
     private readonly aiConfigService: AiConfigService,
+    private readonly priceMatrixService: PriceMatrixService,
   ) {}
 
   // Verificación GET de Meta (WhatsApp / webhooks): debe devolver el challenge en texto plano.
@@ -138,6 +140,35 @@ export class ChatController {
   @Get('ai-config')
   async getAiConfig() {
     return await this.aiConfigService.getAdminAiSettings();
+  }
+
+  /** Catálogo pieza × severidad (matriz de precios editable). */
+  @Get('price-matrix')
+  async getPriceMatrix() {
+    const rows = await this.priceMatrixService.findAllOrdered();
+    return { rows };
+  }
+
+  @Patch('price-matrix/:id')
+  async patchPriceMatrixCell(
+    @Param('id') id: string,
+    @Body() body: { precio?: number; diasEntrega?: number },
+  ) {
+    return await this.priceMatrixService.updateById(id, body);
+  }
+
+  @Post('price-matrix')
+  @HttpCode(HttpStatus.CREATED)
+  async postPriceMatrixCell(
+    @Body()
+    body: {
+      pieza: string;
+      severidad: string;
+      precio: number;
+      diasEntrega?: number;
+    },
+  ) {
+    return await this.priceMatrixService.create(body);
   }
 
   @Patch('ai-config')

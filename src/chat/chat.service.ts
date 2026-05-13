@@ -24,14 +24,12 @@ import { OpenAI } from 'openai';
 import { v2 as cloudinary } from 'cloudinary';
 import {
   AUTO_FIX_CURRENCY,
-  calculateEstimate,
   coerceDamageLevelCode,
   DAMAGE_LEVEL_KEYS,
   DraftQuote,
   DraftQuoteLine,
   formatAutoFixMoney,
-  matchPiezaFromAnalysis,
-  matrixInventoryMaxLines,
+  normalizeMatrixText,
   type DamageLevel,
 } from './autofix-config';
 import type {
@@ -46,6 +44,7 @@ import {
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { AiConfigService } from './ai-config.service';
 import axios from 'axios';
+import { PriceMatrixService } from './price-matrix.service';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -474,6 +473,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly chatGateway: ChatGateway,
 
     private readonly aiConfigService: AiConfigService,
+
+    private readonly priceMatrix: PriceMatrixService,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -600,7 +601,7 @@ export class ChatService implements OnModuleDestroy {
       return lines.map((line, idx) => {
         const row = inv[idx];
         const canonical =
-          matchPiezaFromAnalysis(row.pieza.trim()) ??
+          this.priceMatrix.matchPiezaFromAnalysis(row.pieza.trim()) ??
           row.pieza.trim();
         return {
           sortOrder: idx,
@@ -637,19 +638,23 @@ export class ChatService implements OnModuleDestroy {
     }
 
     if (inv.length > 0) {
-      const grouped = matrixInventoryMaxLines(
+      const grouped = this.priceMatrix.matrixInventoryMaxLines(
         inv.map((it) => ({
           pieza: it.pieza,
           severidad: it.severidad,
+          descripcionTecnica: it.descripcionTecnica,
         })),
       );
       const out: Omit<DraftQuoteItem, 'id' | 'draftQuote' | 'draftQuoteId'>[] = [];
       for (let idx = 0; idx < grouped.length; idx++) {
         const g = grouped[idx];
         const line = lines[idx];
-        const related = inv.filter(
-          (it) => matchPiezaFromAnalysis(it.pieza) === g.canonical,
-        );
+        const related = inv.filter((it) => {
+          const label =
+            this.priceMatrix.matchPiezaFromAnalysis(it.pieza) ??
+            it.pieza.trim();
+          return label === g.canonical;
+        });
         const descParts = [...new Set(related.map((r) => r.descripcionTecnica))]
           .filter(Boolean)
           .join(' | ');
@@ -829,20 +834,29 @@ export class ChatService implements OnModuleDestroy {
    */
   private computePrimaryMatrixEstimate(analysis: VehicleDamageAnalysis): number {
     if (analysis.inventory?.length) {
-      const sum = calculateEstimate(
+      const sum = this.priceMatrix.calculateEstimateForItems(
         analysis.inventory.map((i) => ({
           pieza: i.pieza,
           severidad: i.severidad,
+          descripcionTecnica: i.descripcionTecnica,
         })),
       );
       if (sum > 0) return sum;
     }
-    const level = coerceDamageLevelCode(analysis.severidad);
+    const level = coerceDamageLevelCode(
+      analysis.severidad || analysis.severidadDelDano,
+    );
     const piezaMatriz =
-      matchPiezaFromAnalysis(analysis.pieza) ??
-      matchPiezaFromAnalysis(analysis.partesAfectadas?.[0] ?? '') ??
+      this.priceMatrix.matchPiezaFromAnalysis(analysis.pieza) ??
+      this.priceMatrix.matchPiezaFromAnalysis(
+        analysis.partesAfectadas?.[0] ?? '',
+      ) ??
       analysis.pieza;
-    return calculateEstimate(piezaMatriz, level);
+    return this.priceMatrix.calculateEstimate(
+      piezaMatriz,
+      level,
+      analysis.descripcionTecnica,
+    );
   }
 
   /**
@@ -1528,7 +1542,7 @@ export class ChatService implements OnModuleDestroy {
           visionItemsAfterImage,
           urls,
         );
-        const mockDraftQuote = this.generateDraftQuote(analysis);
+        const mockDraftQuote = await this.generateDraftQuote(analysis);
         return {
           assistantMessage: '',
           damageDetected: true,
@@ -1603,7 +1617,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     }
 
     const analysis = inventoryItemsToVehicleAnalysis(probeItems, []);
-    const quoteFromText = this.generateDraftQuote(analysis);
+    const quoteFromText = await this.generateDraftQuote(analysis);
     const summary = this.buildPlaygroundDamageSummary(quoteFromText, probeItems.length);
     return {
       assistantMessage: `${chatReply}\n\n—\n${summary}`,
@@ -1637,9 +1651,9 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
 
   /**
    * Arma una cotización formal en estado PENDING_APPROVAL a partir del peritaje
-   * y la lista de precios base (autofix-config).
+   * y el catálogo `price_matrix` (vía {@link PriceMatrixService}).
    */
-  generateDraftQuote(analysis: VehicleDamageAnalysis): DraftQuote {
+  async generateDraftQuote(analysis: VehicleDamageAnalysis): Promise<DraftQuote> {
     const lines: DraftQuoteLine[] = [];
     let resolvedLevel: DamageLevel;
 
@@ -1647,20 +1661,25 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
       resolvedLevel = pickWorstDamageLevel(
         analysis.inventory.map((i) => i.severidad),
       );
-      const grouped = matrixInventoryMaxLines(
+      const grouped = this.priceMatrix.matrixInventoryMaxLines(
         analysis.inventory.map((i) => ({
           pieza: i.pieza,
           severidad: i.severidad,
+          descripcionTecnica: i.descripcionTecnica,
         })),
       );
       for (const g of grouped) {
         if (g.unitPrice <= 0) continue;
+        const suffix = g.usedUnknownPiezaFallback
+          ? ' [pieza sin ficha en catálogo — referencia genérica]'
+          : '';
         lines.push({
-          priceItemId: `matrix:${g.canonical}:${g.damageLevel}`,
-          description: `${g.canonical} — nivel ${g.damageLevel} (matriz; mayor costo entre filas de esta pieza)`,
+          priceItemId: `matrix:${encodeURIComponent(g.canonical)}:${g.damageLevel}`,
+          description: `${g.canonical} — nivel ${g.damageLevel} (matriz; mayor costo entre filas de esta pieza)${suffix}`,
           quantity: 1,
           unitPrice: g.unitPrice,
           subtotal: g.unitPrice,
+          diasEntrega: g.diasEntrega,
         });
       }
     } else {
@@ -1677,33 +1696,53 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
 
       const seen = new Set<string>();
       for (const parteRaw of partes) {
-        const canonical = matchPiezaFromAnalysis(parteRaw);
-        if (!canonical) continue;
-        const key = `${canonical}|${resolvedLevel}`;
+        const canonical = this.priceMatrix.matchPiezaFromAnalysis(parteRaw);
+        const piezaForLookup = (canonical ?? parteRaw).trim();
+        if (!piezaForLookup) continue;
+        const key = `${normalizeMatrixText(piezaForLookup)}|${resolvedLevel}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        const unit = calculateEstimate(canonical, resolvedLevel);
-        if (unit <= 0) continue;
+        const unitInfo = this.priceMatrix.matrixAmountForPair(
+          piezaForLookup,
+          resolvedLevel,
+          analysis.descripcionTecnica,
+        );
+        if (unitInfo.amount <= 0) continue;
+        const disp = canonical ?? parteRaw.trim();
+        const unk = unitInfo.usedUnknownPiezaFallback
+          ? ' (referencia genérica; pieza no catalogada)'
+          : ' (según matriz de referencia)';
         lines.push({
-          priceItemId: `matrix:${canonical}:${resolvedLevel}`,
-          description: `${canonical} — nivel ${resolvedLevel} (según matriz de referencia)`,
+          priceItemId: `matrix:${encodeURIComponent(disp)}:${resolvedLevel}`,
+          description: `${disp} — nivel ${resolvedLevel}${unk}`,
           quantity: 1,
-          unitPrice: unit,
-          subtotal: unit,
+          unitPrice: unitInfo.amount,
+          subtotal: unitInfo.amount,
+          diasEntrega: unitInfo.diasEntrega,
         });
       }
     }
 
     if (lines.length === 0) {
       const fallbackPieza = 'Estetica Exterior';
-      const unit = calculateEstimate(fallbackPieza, resolvedLevel);
+      const unit = this.priceMatrix.calculateEstimate(
+        fallbackPieza,
+        resolvedLevel,
+        analysis.descripcionTecnica,
+      );
       if (unit > 0) {
+        const dias = this.priceMatrix.matrixAmountForPair(
+          fallbackPieza,
+          resolvedLevel,
+          analysis.descripcionTecnica,
+        ).diasEntrega;
         lines.push({
-          priceItemId: `matrix:${fallbackPieza}:${resolvedLevel}`,
+          priceItemId: `matrix:${encodeURIComponent(fallbackPieza)}:${resolvedLevel}`,
           description: `${fallbackPieza} — nivel ${resolvedLevel} (referencia general; no se identificó pieza en el texto)`,
           quantity: 1,
           unitPrice: unit,
           subtotal: unit,
+          diasEntrega: dias,
         });
       }
     }
@@ -1904,7 +1943,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     const inventory = await this.analyzeDamageImage(imageUrls);
     const analysis = inventoryItemsToVehicleAnalysis(inventory, imageUrls);
     const estimateAmount = this.computePrimaryMatrixEstimate(analysis);
-    const draftQuoteDoc = this.generateDraftQuote(analysis);
+    const draftQuoteDoc = await this.generateDraftQuote(analysis);
 
     const persistedImageUrl =
       imageUrls.length === 1 ? imageUrls[0] : JSON.stringify(imageUrls);
@@ -2119,7 +2158,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
       const manualLines: DraftQuoteLine[] = linesDto.map((L, idx) => {
         const u = Math.round(Number(L.precioMx));
         const canonical =
-          matchPiezaFromAnalysis(String(L.pieza).trim()) ??
+          this.priceMatrix.matchPiezaFromAnalysis(String(L.pieza).trim()) ??
           String(L.pieza).trim();
         const lev = coerceDamageLevelCode(String(L.severidad));
         return {
@@ -2133,7 +2172,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
       const total = manualLines.reduce((acc, l) => acc + l.subtotal, 0);
       const estimateAmount = total;
 
-      let quotePayload = this.generateDraftQuote(analysisMerged);
+      let quotePayload = await this.generateDraftQuote(analysisMerged);
       quotePayload = {
         ...quotePayload,
         reference: row.quotePayload.reference,
@@ -2222,7 +2261,7 @@ Si no hay daño vehicular claro, responde { "items": [] }.`;
     }
 
     let estimateAmount = this.computePrimaryMatrixEstimate(analysis);
-    let quotePayload = this.generateDraftQuote(analysis);
+    let quotePayload = await this.generateDraftQuote(analysis);
     quotePayload = {
       ...quotePayload,
       reference: row.quotePayload.reference,
