@@ -9,9 +9,7 @@ import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { AppointmentEntity } from './entities/appointment.entity';
 import { AiConfigEntity } from './entities/ai-config.entity';
-import { PriceMatrixEntity } from './entities/price-matrix.entity';
 import { AiConfigService } from './ai-config.service';
-import { PriceMatrixService } from './price-matrix.service';
 
 @Module({
   imports: [
@@ -22,12 +20,11 @@ import { PriceMatrixService } from './price-matrix.service';
       DraftQuoteItem,
       AppointmentEntity,
       AiConfigEntity,
-      PriceMatrixEntity,
     ]),
   ],
   controllers: [ChatController],
-  providers: [ChatService, ChatGateway, AiConfigService, PriceMatrixService],
-  exports: [ChatService, AiConfigService, PriceMatrixService],
+  providers: [ChatService, ChatGateway, AiConfigService],
+  exports: [ChatService, AiConfigService],
 })
 
 export class ChatModule {}
