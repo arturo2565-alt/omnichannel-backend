@@ -32,6 +32,8 @@ export type MatrixPricingSnapshot = {
   getPriceForCanonical(canonicalServicio: string, severidadLiteral: string): number;
   /** InstantQuote usando nombre canónico exacto de BD. */
   isInstantForCanonical(canonicalServicio: string, severidadLiteral: string): boolean;
+  /** Severidades definidas en catálogo para un servicio canónico (p. ej. tamaños de baño de pintura). */
+  listSeveridadesForCanonical(canonicalServicio: string): string[];
 };
 
 /**
@@ -119,6 +121,21 @@ export function createMatrixPricingSnapshot(
     return instantByKey.get(`${c}|${sev}`) === true;
   };
 
+  const listSeveridadesForCanonical = (canonicalServicio: string): string[] => {
+    const c = String(canonicalServicio ?? '').trim();
+    if (!c) return [];
+    const prefix = `${c}|`;
+    const out: string[] = [];
+    for (const k of priceByKey.keys()) {
+      if (k.startsWith(prefix)) {
+        const sev = k.slice(prefix.length);
+        if (sev) out.push(sev);
+      }
+    }
+    out.sort((a, b) => a.localeCompare(b, 'es'));
+    return out;
+  };
+
   const matrixInventoryMaxLines = (
     items: ReadonlyArray<ServicioSeveridadInput>,
   ): { canonical: string; unitPrice: number; damageLevel: DamageLevel }[] => {
@@ -166,6 +183,7 @@ export function createMatrixPricingSnapshot(
     isInstantExact,
     getPriceForCanonical,
     isInstantForCanonical,
+    listSeveridadesForCanonical,
     matrixInventoryMaxLines,
     inventoryMaxTotal,
   };

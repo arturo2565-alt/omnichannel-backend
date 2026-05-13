@@ -29,6 +29,7 @@ import {
   DraftQuote,
   DraftQuoteLine,
   formatAutoFixMoney,
+  normalizeTextForMatch,
   type DamageLevel,
 } from './autofix-config';
 import type {
@@ -46,7 +47,17 @@ import axios from 'axios';
 import { CatalogService } from '../catalog/catalog.service';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import {
+  classifyBañoPinturaTierWithLlm,
+  coerceBañoSeveridadToCatalog,
+  composeBañoNaturalInstantReply,
+} from './baño-pintura-llm';
+import {
   formatInstantQuoteClientMessage,
+  inferBañoTierSeveridad,
+  isBañoDePinturaServicio,
+  materializeInstantQuoteResolution,
+  resolveInstantCanonicalLatestThenFull,
+  shouldAskVehicleBeforeBañoQuote,
   tryBañoPinturaVehicleGateReply,
   tryResolveInstantQuoteFromUserText,
 } from './instant-quote-from-text';
@@ -1496,6 +1507,80 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Baño de Pintura Exterior: clasifica severidad (tamaño) con LLM y redacta el mensaje con cifras exactas del catálogo.
+   */
+  private async tryBañoPinturaLlmInstantClientMessage(
+    latestUserText: string,
+    fullContextForBaño: string,
+    snap: MatrixPricingSnapshot,
+  ): Promise<string | null> {
+    const latest = String(latestUserText ?? '').trim();
+    const full = String(fullContextForBaño ?? '').trim();
+    const tierSource = full || latest;
+    const tierNorm = normalizeTextForMatch(tierSource);
+    if (shouldAskVehicleBeforeBañoQuote(tierNorm)) return null;
+
+    const resolved = resolveInstantCanonicalLatestThenFull(latest, full, snap);
+    if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) return null;
+
+    const allowed = snap.listSeveridadesForCanonical(resolved.canonical);
+    if (!allowed.length) return null;
+
+    let vehicleLabel = '';
+    let segmentoEs = '';
+    let severidadLiteral: string;
+
+    try {
+      const cls = await classifyBañoPinturaTierWithLlm(
+        this.openai,
+        tierSource,
+        allowed,
+      );
+      vehicleLabel = cls.vehicleLabel;
+      segmentoEs = cls.segmentoEs;
+      severidadLiteral = cls.severidadLiteral;
+    } catch (err) {
+      console.warn('[BañoPinturaLlm] classify fallback:', err);
+      const inferred = inferBañoTierSeveridad(tierSource);
+      severidadLiteral =
+        coerceBañoSeveridadToCatalog(inferred, allowed) ??
+        coerceBañoSeveridadToCatalog('Mediano', allowed) ??
+        allowed[0]!;
+    }
+
+    const sevFinal =
+      coerceBañoSeveridadToCatalog(severidadLiteral, allowed) ??
+      coerceBañoSeveridadToCatalog(inferBañoTierSeveridad(tierSource), allowed) ??
+      allowed[0]!;
+
+    const resolution = materializeInstantQuoteResolution(snap, {
+      canonical: resolved.canonical,
+      severidadLiteral: sevFinal,
+      tierSourceForCambioColor: tierSource,
+      resolveVia: resolved.via,
+      latestPreview: latest,
+      fullCtxPreview: full,
+    });
+    if (!resolution) return null;
+
+    const vl = vehicleLabel.trim() || 'tu vehículo';
+    const seg = segmentoEs.trim() || 'categoría de tamaño según nuestro catálogo';
+
+    try {
+      return await composeBañoNaturalInstantReply(this.openai, {
+        vehicleLabel: vl,
+        segmentoEs: seg,
+        servicioDb: resolved.canonical,
+        severidadLiteral: sevFinal,
+        resolution,
+      });
+    } catch (err) {
+      console.warn('[BañoPinturaLlm] compose fallback plantilla:', err);
+      return formatInstantQuoteClientMessage(resolution);
+    }
+  }
+
+  /**
    * Panel AI Playground: prueba con prompts en borrador (no persiste en BD).
    * Con imagen e ítems de visión: **vision-first** — no ejecuta el chat hasta el paso
    * {@link testAiPlaygroundResumeAfterDraft} (el front llama tras “Autorizar y Enviar”).
@@ -1551,6 +1636,17 @@ export class ChatService implements OnModuleDestroy {
       if (gateReply) {
         return {
           assistantMessage: gateReply,
+          damageDetected: false,
+        };
+      }
+      const bañoNatural = await this.tryBañoPinturaLlmInstantClientMessage(
+        userText,
+        playBañoCtx,
+        catalogSnapForTextOnly,
+      );
+      if (bañoNatural) {
+        return {
+          assistantMessage: bañoNatural,
           damageDetected: false,
         };
       }
@@ -1642,6 +1738,17 @@ export class ChatService implements OnModuleDestroy {
       if (gateMerged) {
         return {
           assistantMessage: gateMerged,
+          damageDetected: false,
+        };
+      }
+      const bañoNaturalMerged = await this.tryBañoPinturaLlmInstantClientMessage(
+        userText,
+        playBañoCtx,
+        catalogSnapForTextOnly,
+      );
+      if (bañoNaturalMerged) {
+        return {
+          assistantMessage: bañoNaturalMerged,
           damageDetected: false,
         };
       }
@@ -2771,6 +2878,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         if (gateReply) {
           return gateReply;
         }
+        const bañoNat = await this.tryBañoPinturaLlmInstantClientMessage(
+          mergedForInstant,
+          fullBañoCtx || mergedForInstant,
+          snapInstant,
+        );
+        if (bañoNat) {
+          return bañoNat;
+        }
         const instant = tryResolveInstantQuoteFromUserText(mergedForInstant, snapInstant, {
           fullContextForBaño: fullBañoCtx || mergedForInstant,
         });
@@ -3018,6 +3133,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             );
             if (gateM) {
               return gateM;
+            }
+            const bañoNat = await this.tryBañoPinturaLlmInstantClientMessage(
+              lastUser,
+              userBañoCtx || lastUser,
+              snapM,
+            );
+            if (bañoNat) {
+              return bañoNat;
             }
             const instantM = tryResolveInstantQuoteFromUserText(lastUser, snapM, {
               fullContextForBaño: userBañoCtx || lastUser,

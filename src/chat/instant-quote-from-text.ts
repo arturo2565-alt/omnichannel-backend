@@ -30,7 +30,7 @@ const BAÑO_CANON_NORM = 'bano de pintura';
 export const BAÑO_PINTURA_VEHICLE_PROMPT_REPLY =
   '¡Claro! Con gusto. Para darte el precio estimado, ¿qué auto o camioneta tienes?';
 
-function isBañoDePinturaServicio(canonical: string): boolean {
+export function isBañoDePinturaServicio(canonical: string): boolean {
   return normalizeTextForMatch(canonical).includes(BAÑO_CANON_NORM);
 }
 
@@ -73,7 +73,7 @@ export function resolveInstantCanonicalServicio(
   return null;
 }
 
-function resolveInstantCanonicalLatestThenFull(
+export function resolveInstantCanonicalLatestThenFull(
   latestUserText: string,
   fullContextText: string,
   snap: MatrixPricingSnapshot,
@@ -145,8 +145,8 @@ export function tryBañoPinturaVehicleGateReply(
   return BAÑO_PINTURA_VEHICLE_PROMPT_REPLY;
 }
 
-/** Severidad en BD para filas de Baño de Pintura Exterior (tamaño / variante). */
-function inferBañoTierSeveridad(contextText: string): string {
+/** Severidad en BD para filas de Baño de Pintura Exterior (tamaño / variante). Fallback si falla la IA. */
+export function inferBañoTierSeveridad(contextText: string): string {
   const n = normalizeTextForMatch(contextText);
 
   const explicitTierRules: { re: RegExp; sev: string }[] = [
@@ -176,6 +176,16 @@ function inferBañoTierSeveridad(contextText: string): string {
     /\bmazda\s*6\b/.test(n)
   ) {
     return 'Mediano Premium';
+  }
+
+  if (
+    /\baud?i\s*q[357]\b/.test(n) ||
+    /\bbmw\s*x[13567]\b/.test(n) ||
+    /\bmercedes[\s-]*(benz\s*)?gl[bcen]\b/.test(n) ||
+    /\bporsche\s*macan\b/.test(n) ||
+    /\b(volvo\s*xc\d+|land\s*rover|range\s*rover|defender)\b/.test(n)
+  ) {
+    return 'Grande Premium';
   }
 
   if (
@@ -228,6 +238,82 @@ function logInstantResolution(payload: Record<string, unknown>): void {
   console.log('[InstantQuote]', JSON.stringify(payload));
 }
 
+type CanonicalVia = 'direct' | 'bano_pintura_synonym';
+
+/** Construye la resolución instantánea si la celda existe en catálogo (precio + instant). */
+export function materializeInstantQuoteResolution(
+  snap: MatrixPricingSnapshot,
+  params: {
+    canonical: string;
+    severidadLiteral: string;
+    tierSourceForCambioColor: string;
+    resolveVia: CanonicalVia;
+    latestPreview: string;
+    fullCtxPreview: string;
+  },
+): InstantQuoteResolution | null {
+  const {
+    canonical,
+    severidadLiteral,
+    tierSourceForCambioColor,
+    resolveVia,
+    latestPreview,
+    fullCtxPreview,
+  } = params;
+
+  const base = snap.getPriceForCanonical(canonical, severidadLiteral);
+  const isInstant = snap.isInstantForCanonical(canonical, severidadLiteral);
+
+  if (base <= 0 || !isInstant) {
+    logInstantResolution({
+      matched: false,
+      reason: base <= 0 ? 'price_zero' : 'not_instant_service_cell',
+      inputPreview: latestPreview.slice(0, 400),
+      contextPreview: fullCtxPreview.slice(0, 400),
+      resolveVia,
+      canonicalServicioDb: canonical,
+      severidadLiteral,
+      precioMx: base,
+      isInstantService: isInstant,
+    });
+    return null;
+  }
+
+  logInstantResolution({
+    matched: true,
+    inputPreview: latestPreview.slice(0, 400),
+    contextPreview: fullCtxPreview.slice(0, 400),
+    resolveVia,
+    canonicalServicioDb: canonical,
+    severidadLiteral,
+    precioMx: base,
+    isInstantService: true,
+  });
+
+  const lines: InstantQuoteLine[] = [
+    { label: `${canonical} (${severidadLiteral})`, amount: base },
+  ];
+  const extras: InstantQuoteLine[] = [];
+  let add = 0;
+  if (isBañoDePinturaServicio(canonical) && mentionsCambioDeColor(tierSourceForCambioColor)) {
+    add = cambioDeColorAddonMx(severidadLiteral);
+    extras.push({
+      label: 'Cambio de color (suplemento)',
+      amount: add,
+    });
+  }
+
+  const subtotal = base;
+  const total = base + add;
+  return {
+    lines,
+    extras,
+    subtotal,
+    total,
+    currency: AUTO_FIX_CURRENCY,
+  };
+}
+
 /**
  * Si el texto encaja con un servicio InstantQuote en catálogo, devuelve líneas y total.
  * No usa borrador ni visión.
@@ -275,61 +361,14 @@ export function tryResolveInstantQuoteFromUserText(
     severidadLiteral = 'N/A';
   }
 
-  const base = snap.getPriceForCanonical(canonical, severidadLiteral);
-  const isInstant = snap.isInstantForCanonical(canonical, severidadLiteral);
-
-  if (base <= 0 || !isInstant) {
-    logInstantResolution({
-      matched: false,
-      reason: base <= 0 ? 'price_zero' : 'not_instant_service_cell',
-      inputPreview: latest.slice(0, 400),
-      contextPreview: fullCtxRaw.slice(0, 400),
-      resolveVia: via,
-      canonicalServicioDb: canonical,
-      severidadLiteral,
-      precioMx: base,
-      isInstantService: isInstant,
-    });
-    return null;
-  }
-
-  logInstantResolution({
-    matched: true,
-    inputPreview: latest.slice(0, 400),
-    contextPreview: fullCtxRaw.slice(0, 400),
-    resolveVia: via,
-    canonicalServicioDb: canonical,
+  return materializeInstantQuoteResolution(snap, {
+    canonical,
     severidadLiteral,
-    precioMx: base,
-    isInstantService: true,
+    tierSourceForCambioColor: tierSource,
+    resolveVia: via,
+    latestPreview: latest,
+    fullCtxPreview: fullCtxRaw,
   });
-
-  const lines: InstantQuoteLine[] = [
-    {
-      label: `${canonical} (${severidadLiteral})`,
-      amount: base,
-    },
-  ];
-  const extras: InstantQuoteLine[] = [];
-
-  let add = 0;
-  if (isBañoDePinturaServicio(canonical) && mentionsCambioDeColor(tierSource)) {
-    add = cambioDeColorAddonMx(severidadLiteral);
-    extras.push({
-      label: 'Cambio de color (suplemento)',
-      amount: add,
-    });
-  }
-
-  const subtotal = base;
-  const total = base + add;
-  return {
-    lines,
-    extras,
-    subtotal,
-    total,
-    currency: AUTO_FIX_CURRENCY,
-  };
 }
 
 /** Formato amigable tipo WhatsApp / panel (negritas con *). */
