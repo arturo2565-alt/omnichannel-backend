@@ -120,4 +120,37 @@ export class CatalogController {
       throw e;
     }
   }
+
+  /**
+   * Importación desde la réplica de `autofix-pricing.js` (matriz ancha → `price_matrix`).
+   * Upsert: no duplica pieza+severidad; actualiza precio y días de entrega.
+   */
+  @Post('import-legacy-js')
+  @HttpCode(HttpStatus.OK)
+  async importLegacyJs(
+    @Body()
+    body?: {
+      diasEntrega?: unknown;
+    },
+  ) {
+    const raw = body?.diasEntrega;
+    const dias =
+      raw !== undefined && raw !== null && String(raw).trim() !== ''
+        ? Number(raw)
+        : 3;
+    if (!Number.isFinite(dias) || dias < 0 || !Number.isInteger(dias)) {
+      throw new BadRequestException('diasEntrega debe ser entero >= 0');
+    }
+    const result = await this.catalogService.importFromLegacyFrontendMirror(dias);
+    const rows = await this.catalogService.findAllPriceMatrixRows();
+    return {
+      ok: true,
+      message:
+        'Importación aplicada (upsert). Origen: réplica de autofix-pricing.js en el backend.',
+      diasEntregaUsado: dias,
+      upserted: result.upserted,
+      totalInDb: result.totalInDb,
+      rows: this.mapRows(rows),
+    };
+  }
 }

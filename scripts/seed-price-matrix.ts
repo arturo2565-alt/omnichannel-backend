@@ -1,5 +1,5 @@
 /**
- * Rellena `price_matrix` desde los datos de seed en `price-matrix-seed.data.ts`.
+ * Rellena `price_matrix` desde la misma fuente que el front (`legacy-pieza-dano-from-frontend.ts` / réplica de autofix-pricing.js).
  *
  * Uso (desde omnichannel-backend/):
  *   DATABASE_URL=postgres://... npm run seed:price-matrix

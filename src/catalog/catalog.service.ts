@@ -6,6 +6,7 @@ import {
   createMatrixPricingSnapshot,
   type MatrixPricingSnapshot,
 } from './matrix-pricing-snapshot';
+import { buildFlatRowsFromLegacyFrontendMatrix } from './legacy-price-matrix-import';
 
 @Injectable()
 export class CatalogService {
@@ -66,5 +67,32 @@ export class CatalogService {
       diasEntrega: dto.diasEntrega,
     });
     return this.priceMatrixRepository.save(row);
+  }
+
+  /**
+   * Importa la matriz ancha réplica de `autofix-pricing.js` (pieza × severidad).
+   * Upsert por (pieza, severidad): no duplica; actualiza precio y días si ya existía.
+   */
+  async importFromLegacyFrontendMirror(
+    diasEntregaDefault = 3,
+  ): Promise<{ upserted: number; totalInDb: number }> {
+    const flat = buildFlatRowsFromLegacyFrontendMatrix(diasEntregaDefault);
+    if (flat.length === 0) {
+      return { upserted: 0, totalInDb: await this.priceMatrixRepository.count() };
+    }
+    await this.priceMatrixRepository.upsert(
+      flat.map((r) => ({
+        pieza: r.pieza.slice(0, 120),
+        severidad: r.severidad.slice(0, 32),
+        precio: r.precio,
+        diasEntrega: r.diasEntrega,
+      })),
+      {
+        conflictPaths: ['pieza', 'severidad'],
+        skipUpdateIfNoValuesChanged: false,
+      },
+    );
+    const totalInDb = await this.priceMatrixRepository.count();
+    return { upserted: flat.length, totalInDb };
   }
 }
