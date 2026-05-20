@@ -377,6 +377,40 @@ function parseDraftImageUrls(imageUrl: string): string[] {
   return [s];
 }
 
+/** Serializa evidencias visuales para `imageUrl` (una URL o JSON array). */
+function persistDraftImageUrlField(imageUrls: readonly string[]): string {
+  const urls = [
+    ...new Set(imageUrls.map((u) => String(u).trim()).filter(Boolean)),
+  ];
+  if (!urls.length) return '';
+  return urls.length === 1 ? urls[0]! : JSON.stringify(urls);
+}
+
+function attachImageUrlToDraftQuote(
+  quote: DraftQuote,
+  imageUrls: readonly string[],
+): DraftQuote & { imageUrl: string } {
+  return { ...quote, imageUrl: persistDraftImageUrlField(imageUrls) };
+}
+
+/** Lote de imágenes del playground (`imagesBase64[]`; acepta `imageBase64` legacy). */
+function normalizePlaygroundImagesBase64Input(body: {
+  imagesBase64?: unknown;
+  imageBase64?: unknown;
+}): string[] {
+  const urls: string[] = [];
+  if (Array.isArray(body.imagesBase64)) {
+    for (const el of body.imagesBase64) {
+      const s = String(el ?? '').trim();
+      if (s) urls.push(s);
+    }
+  }
+  const legacy =
+    body.imageBase64 != null ? String(body.imageBase64).trim() : '';
+  if (legacy) urls.push(legacy);
+  return [...new Set(urls)];
+}
+
 export interface PatchInventoryLineDto {
   pieza: string;
   severidad: string;
@@ -1665,27 +1699,33 @@ export class ChatService implements OnModuleDestroy {
     visionPrompt: string;
     chatAppointmentPrompt: string;
     userText?: string;
+    /** Lote de imágenes (data URL) analizadas en un solo turno de visión. */
+    imagesBase64?: string[];
+    /** @deprecated Usar {@link testAiPlayground.imagesBase64} */
     imageBase64?: string;
     /** Turnos previos del simulador (hasta {@link ChatService.PLAYGROUND_HISTORY_PAYLOAD_MAX} con el mensaje actual). */
     history?: unknown;
   }): Promise<{
     assistantMessage: string;
     damageDetected: boolean;
-    mockDraftQuote?: DraftQuote;
+    mockDraftQuote?: DraftQuote & { imageUrl?: string };
     visionItems?: DetectedDamageItem[];
     /** Visión devolvió cotización: el front debe revisar borrador antes de mostrar respuesta de chat. */
     isDraftPending?: boolean;
   }> {
     const userText = body.userText != null ? String(body.userText).trim() : '';
-    const imageBase64 = body.imageBase64 != null ? String(body.imageBase64).trim() : '';
-    if (!userText && !imageBase64) {
-      throw new BadRequestException('Envía userText o imageBase64');
+    const visionImageUrls = normalizePlaygroundImagesBase64Input(body);
+    if (!userText && visionImageUrls.length === 0) {
+      throw new BadRequestException('Envía userText o imagesBase64');
     }
-    if (imageBase64 && /^blob:/i.test(imageBase64)) {
-      throw new BadRequestException(
-        'imageBase64 no puede ser una blob URL. Envía data:image/...;base64,... desde el cliente.',
-      );
+    for (const url of visionImageUrls) {
+      if (/^blob:/i.test(url)) {
+        throw new BadRequestException(
+          'imagesBase64 no puede incluir blob URLs. Envía data:image/...;base64,... desde el cliente.',
+        );
+      }
     }
+    const hasVisionImages = visionImageUrls.length > 0;
 
     const visionPrompt = String(body.visionPrompt ?? '');
     const chatAppointmentPrompt = String(body.chatAppointmentPrompt ?? '');
@@ -1709,7 +1749,7 @@ export class ChatService implements OnModuleDestroy {
     let visionItemsAfterImage: DetectedDamageItem[] = [];
     let catalogSnapForTextOnly: MatrixPricingSnapshot | null = null;
 
-    if (!imageBase64 && userText) {
+    if (!hasVisionImages && userText) {
       catalogSnapForTextOnly = await this.catalogService.getMatrixPricingSnapshot();
       const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
       if (!instantIntercept.skipInstantInterceptor) {
@@ -1751,7 +1791,10 @@ export class ChatService implements OnModuleDestroy {
       );
       if (catalogOnly?.length) {
         const analysis = inventoryItemsToVehicleAnalysis(catalogOnly, []);
-        const mockDraftQuote = await this.generateDraftQuote(analysis);
+        const mockDraftQuote = attachImageUrlToDraftQuote(
+          await this.generateDraftQuote(analysis),
+          [],
+        );
         return {
           assistantMessage: '',
           damageDetected: true,
@@ -1762,8 +1805,8 @@ export class ChatService implements OnModuleDestroy {
       }
     }
 
-    if (imageBase64) {
-      const urls = [imageBase64];
+    if (hasVisionImages) {
+      const urls = visionImageUrls;
       const clientHint = userText.trim() ? userText : '';
       visionItemsAfterImage = await this.analyzeDamageImage(urls, {
         systemPrompt: visionPrompt.trim() ? visionPrompt : undefined,
@@ -1775,7 +1818,10 @@ export class ChatService implements OnModuleDestroy {
           visionItemsAfterImage,
           urls,
         );
-        const mockDraftQuote = await this.generateDraftQuote(analysis);
+        const mockDraftQuote = attachImageUrlToDraftQuote(
+          await this.generateDraftQuote(analysis),
+          urls,
+        );
         return {
           assistantMessage: '',
           damageDetected: true,
@@ -1784,15 +1830,18 @@ export class ChatService implements OnModuleDestroy {
           isDraftPending: true,
         };
       } else {
+        const imgCount = urls.length;
         const note =
-          'No se detectaron daños en la imagen con el prompt de visión actual (o sin ítems válidos).';
+          imgCount > 1
+            ? `No se detectaron daños en las ${imgCount} imágenes con el prompt de visión actual (o sin ítems válidos).`
+            : 'No se detectaron daños en la imagen con el prompt de visión actual (o sin ítems válidos).';
         mergedUserForLlm = userText.trim()
           ? `${userText}\n\n--- Análisis visual ---\n${note}`
           : note;
       }
     }
 
-    const visionSystemAppend = imageBase64
+    const visionSystemAppend = hasVisionImages
       ? this.buildPlaygroundVisionSystemAppend(visionItemsAfterImage)
       : '';
 
@@ -1830,7 +1879,7 @@ export class ChatService implements OnModuleDestroy {
         '(La IA no devolvió texto.)';
     }
 
-    if (!imageBase64 && catalogSnapForTextOnly && !instantIntercept.skipInstantInterceptor) {
+    if (!hasVisionImages && catalogSnapForTextOnly && !instantIntercept.skipInstantInterceptor) {
       const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
       const gateMerged = tryBañoPinturaVehicleGateReply(
         userText,
@@ -1904,7 +1953,10 @@ ${catalogAppend}`;
     }
 
     const analysis = inventoryItemsToVehicleAnalysis(probeItems, []);
-    const quoteFromText = await this.generateDraftQuote(analysis);
+    const quoteFromText = attachImageUrlToDraftQuote(
+      await this.generateDraftQuote(analysis),
+      visionImageUrls,
+    );
     const summary = this.buildPlaygroundDamageSummary(quoteFromText, probeItems.length);
     return {
       assistantMessage: `${chatReply}\n\n—\n${summary}`,

@@ -166,6 +166,8 @@ export class ChatController {
       visionPrompt?: string;
       chatAppointmentPrompt?: string;
       userText?: string;
+      imagesBase64?: string[];
+      /** @deprecated Usar imagesBase64 */
       imageBase64?: string;
       history?: unknown;
     },
@@ -174,6 +176,7 @@ export class ChatController {
       visionPrompt: String(body.visionPrompt ?? ''),
       chatAppointmentPrompt: String(body.chatAppointmentPrompt ?? ''),
       userText: body.userText,
+      imagesBase64: body.imagesBase64,
       imageBase64: body.imageBase64,
       history: body.history,
     });
