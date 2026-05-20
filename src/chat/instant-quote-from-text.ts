@@ -164,10 +164,37 @@ const LATEST_REPLY_NON_MODEL_WORDS = new Set([
 
 function isLikelyStandaloneModelToken(w: string): boolean {
   const n = w.toLowerCase();
-  if (n.length < 3 || n.length > 22) return false;
   if (LATEST_REPLY_NON_MODEL_WORDS.has(n)) return false;
   if (/^\d+$/.test(n)) return false;
+  if (/^[a-z]{1,3}\d{1,2}$/i.test(n)) return true;
+  if (n.length < 3 || n.length > 22) return false;
   return /^[a-z][a-z0-9-]*$/i.test(n);
+}
+
+/** Quita muletillas del turno actual para dejar marca/modelo (p. ej. "Sería para un Figo" → "Figo"). */
+export function purifyVehicleModelUserReply(latestUserText: string): string {
+  let s = String(latestUserText ?? '').trim();
+  if (!s) return '';
+  const stripLeading = [
+    /^(?:ser[ií]a|es|son|tengo|manejo)\s+(?:para\s+)?(?:un|una|el|la)\s+/i,
+    /^(?:due[nñ]o\s+de\s+)?(?:un|una|el|la)\s+/i,
+    /^(?:para\s+)?(?:un|una|el|la)\s+/i,
+    /^(?:es|son)\s+(?:un|una)\s+/i,
+    /^(?:mi|el|la)\s+/i,
+  ];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const re of stripLeading) {
+      const next = s.replace(re, '').trim();
+      if (next !== s) {
+        s = next;
+        changed = true;
+      }
+    }
+  }
+  const out = s.trim();
+  return out.length > 0 ? out : String(latestUserText ?? '').trim();
 }
 
 /**
@@ -177,7 +204,8 @@ function isLikelyStandaloneModelToken(w: string): boolean {
 export function userLatestMessageLooksLikeVehicleModelReply(latestUserText: string): boolean {
   const raw = String(latestUserText ?? '').trim();
   if (!raw || raw.length > 120) return false;
-  const n = normalizeTextForMatch(raw);
+  const purified = purifyVehicleModelUserReply(raw);
+  const n = normalizeTextForMatch(purified);
   const words = n.split(/\s+/).filter(Boolean);
   if (words.length === 0) return false;
 
@@ -190,6 +218,17 @@ export function userLatestMessageLooksLikeVehicleModelReply(latestUserText: stri
     if (modelTokens.length >= 1) return true;
   }
   return false;
+}
+
+/** El asistente ya envió la pregunta fija de vehículo para baño de pintura. */
+export function assistantMessageIsBañoVehiclePrompt(text: string): boolean {
+  const n = normalizeTextForMatch(String(text ?? '').trim());
+  if (!n) return false;
+  if (n.includes(normalizeTextForMatch(BAÑO_PINTURA_VEHICLE_PROMPT_REPLY))) return true;
+  return (
+    /\bque\s+auto\b/.test(n) &&
+    (/\bcamioneta\b/.test(n) || /\bcoche\b/.test(n) || /\bvehiculo\b/.test(n))
+  );
 }
 
 function hasVehicleModelHint(normalizedBlob: string): boolean {
@@ -230,7 +269,8 @@ export function tryBañoPinturaVehicleGateReply(
   fullContextForBaño: string,
   snap: MatrixPricingSnapshot,
 ): string | null {
-  const latest = String(latestUserText ?? '').trim();
+  const latestRaw = String(latestUserText ?? '').trim();
+  const latest = purifyVehicleModelUserReply(latestRaw) || latestRaw;
   const full = String(fullContextForBaño ?? '').trim();
   const fullNorm = normalizeTextForMatch(full);
   if (!mentionsBañoDePinturaIntent(fullNorm)) return null;

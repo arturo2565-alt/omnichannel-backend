@@ -58,14 +58,18 @@ import {
   playgroundUserMessageMentionsWeekdayOnlyRough,
 } from './playground-instant-quote-interceptor';
 import {
+  assistantMessageIsBañoVehiclePrompt,
   formatInstantQuoteClientMessage,
   inferBañoTierSeveridad,
   isBañoDePinturaServicio,
   materializeInstantQuoteResolution,
+  mentionsBañoDePinturaIntent,
+  purifyVehicleModelUserReply,
   resolveInstantCanonicalLatestThenFull,
   shouldAskVehicleBeforeBañoQuote,
   tryBañoPinturaVehicleGateReply,
   tryResolveInstantQuoteFromUserText,
+  userLatestMessageLooksLikeVehicleModelReply,
 } from './instant-quote-from-text';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
@@ -580,6 +584,65 @@ export class ChatService implements OnModuleDestroy {
       segments.push(cur);
     }
     return segments.join('\n\n');
+  }
+
+  private static readonly BAÑO_VEHICLE_GATE_LOOKBACK_MESSAGES = 3;
+
+  /** Segmentos de texto limpios (cronológicos) para baño en autopilot: user + assistant. */
+  private buildAutopilotBañoContextFromHistory(
+    historyRows: readonly Message[],
+    currentUserText: string,
+  ): string {
+    const segments = historyRows
+      .map((m) => String(m.content ?? '').trim())
+      .filter((t) => t.length > 0 && !t.includes('cloudinary'))
+      .slice(-PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS);
+    const cur = String(currentUserText ?? '').trim();
+    if (cur && segments[segments.length - 1] !== cur) {
+      segments.push(cur);
+    }
+    return segments.join('\n\n');
+  }
+
+  /** En los últimos N mensajes del hilo, el asistente ya preguntó por el auto (gate de baño). */
+  private assistantAskedBañoVehicleInLastMessages(
+    historyRows: readonly Message[],
+    lookback = ChatService.BAÑO_VEHICLE_GATE_LOOKBACK_MESSAGES,
+  ): boolean {
+    const window = historyRows
+      .filter((m) => {
+        const t = String(m.content ?? '').trim();
+        return t.length > 0 && !t.includes('cloudinary');
+      })
+      .slice(-lookback);
+    for (const m of window) {
+      if (String(m.direction ?? '').toLowerCase() === 'inbound') continue;
+      if (assistantMessageIsBañoVehiclePrompt(String(m.content ?? ''))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * El asistente preguntó el auto en turnos recientes y el cliente responde con modelo:
+   * no volver a ejecutar tryBañoPinturaVehicleGateReply.
+   */
+  private shouldSkipBañoVehicleGateAfterModelReply(
+    historyRows: readonly Message[],
+    latestUserText: string,
+    fullBañoCtx: string,
+  ): boolean {
+    const latest = String(latestUserText ?? '').trim();
+    if (!latest || !userLatestMessageLooksLikeVehicleModelReply(latest)) {
+      return false;
+    }
+    const ctxNorm = normalizeTextForMatch(fullBañoCtx);
+    if (!mentionsBañoDePinturaIntent(ctxNorm)) return false;
+    return this.assistantAskedBañoVehicleInLastMessages(
+      historyRows,
+      ChatService.BAÑO_VEHICLE_GATE_LOOKBACK_MESSAGES,
+    );
   }
 
   /**
@@ -1522,9 +1585,14 @@ export class ChatService implements OnModuleDestroy {
     fullContextForBaño: string,
     snap: MatrixPricingSnapshot,
   ): Promise<string | null> {
-    const latest = String(latestUserText ?? '').trim();
+    const latestRaw = String(latestUserText ?? '').trim();
+    const latest =
+      purifyVehicleModelUserReply(latestRaw) || latestRaw;
     const full = String(fullContextForBaño ?? '').trim();
-    const tierSource = full || latest;
+    const tierSource =
+      full && latest && normalizeTextForMatch(full) !== normalizeTextForMatch(latest)
+        ? `${full}\n\n${latest}`
+        : full || latest;
     const tierNorm = normalizeTextForMatch(tierSource);
     if (shouldAskVehicleBeforeBañoQuote(tierNorm, latest)) return null;
 
@@ -3026,35 +3094,39 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         ? history.filter((m) => !batchIdSet.has(m.id))
         : history;
 
-      const priorInboundPieces = historySansBatch
-        .filter((m) => String(m.direction ?? '').toLowerCase() === 'inbound')
-        .map((m) => String(m.content ?? '').trim())
-        .filter((t) => t.length > 0 && !t.includes('cloudinary'))
-        .slice(-PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS);
-
-      const fullBañoCtx = [...priorInboundPieces, mergedForInstant]
-        .filter(Boolean)
-        .join('\n\n');
+      const fullBañoCtx = this.buildAutopilotBañoContextFromHistory(
+        historySansBatch,
+        mergedForInstant,
+      );
+      const purifiedLatest =
+        purifyVehicleModelUserReply(mergedForInstant) || mergedForInstant;
+      const skipBañoVehicleGate = this.shouldSkipBañoVehicleGateAfterModelReply(
+        historySansBatch,
+        mergedForInstant,
+        fullBañoCtx || mergedForInstant,
+      );
 
       if (mergedForInstant) {
         const snapInstant = await this.catalogService.getMatrixPricingSnapshot();
-        const gateReply = tryBañoPinturaVehicleGateReply(
-          mergedForInstant,
-          fullBañoCtx || mergedForInstant,
-          snapInstant,
-        );
-        if (gateReply) {
-          return gateReply;
+        if (!skipBañoVehicleGate) {
+          const gateReply = tryBañoPinturaVehicleGateReply(
+            purifiedLatest,
+            fullBañoCtx || mergedForInstant,
+            snapInstant,
+          );
+          if (gateReply) {
+            return gateReply;
+          }
         }
         const bañoNat = await this.tryBañoPinturaLlmInstantClientMessage(
-          mergedForInstant,
+          purifiedLatest,
           fullBañoCtx || mergedForInstant,
           snapInstant,
         );
         if (bañoNat) {
           return bañoNat;
         }
-        const instant = tryResolveInstantQuoteFromUserText(mergedForInstant, snapInstant, {
+        const instant = tryResolveInstantQuoteFromUserText(purifiedLatest, snapInstant, {
           fullContextForBaño: fullBañoCtx || mergedForInstant,
         });
         if (instant) {
