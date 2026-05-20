@@ -30,6 +30,8 @@ export type MatrixPricingSnapshot = {
   isInstantExact(parteLibre: string, severidadLiteral: string): boolean;
   /** Precio usando el nombre canónico exacto de BD (sin re-ejecutar match sobre texto libre). */
   getPriceForCanonical(canonicalServicio: string, severidadLiteral: string): number;
+  /** Días hábiles de entrega para celda canónica (catálogo). */
+  getDiasEntregaForCanonical(canonicalServicio: string, severidadLiteral: string): number;
   /** InstantQuote usando nombre canónico exacto de BD. */
   isInstantForCanonical(canonicalServicio: string, severidadLiteral: string): boolean;
   /** Severidades definidas en catálogo para un servicio canónico (p. ej. tamaños de baño de pintura). */
@@ -46,10 +48,13 @@ export function createMatrixPricingSnapshot(
   servicios.sort((a, b) => b.length - a.length);
 
   const priceByKey = new Map<string, number>();
+  const diasByKey = new Map<string, number>();
   const instantByKey = new Map<string, boolean>();
   for (const r of rows) {
     const k = `${r.servicio}|${r.severidad}`;
     priceByKey.set(k, r.precio);
+    const dias = Number(r.diasEntrega);
+    diasByKey.set(k, Number.isFinite(dias) && dias >= 0 ? Math.floor(dias) : 0);
     instantByKey.set(k, r.isInstantService === true);
   }
 
@@ -109,6 +114,17 @@ export function createMatrixPricingSnapshot(
     if (!c || !sev) return 0;
     const v = priceByKey.get(`${c}|${sev}`);
     return typeof v === 'number' && !Number.isNaN(v) && v > 0 ? v : 0;
+  };
+
+  const getDiasEntregaForCanonical = (
+    canonicalServicio: string,
+    severidadLiteral: string,
+  ): number => {
+    const c = String(canonicalServicio ?? '').trim();
+    const sev = String(severidadLiteral ?? '').trim();
+    if (!c || !sev) return 0;
+    const v = diasByKey.get(`${c}|${sev}`);
+    return typeof v === 'number' && !Number.isNaN(v) && v >= 0 ? v : 0;
   };
 
   const isInstantForCanonical = (
@@ -182,6 +198,7 @@ export function createMatrixPricingSnapshot(
     getPriceExact,
     isInstantExact,
     getPriceForCanonical,
+    getDiasEntregaForCanonical,
     isInstantForCanonical,
     listSeveridadesForCanonical,
     matrixInventoryMaxLines,

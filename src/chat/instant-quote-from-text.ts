@@ -12,6 +12,10 @@ export type InstantQuoteResolution = {
   extras: InstantQuoteLine[];
   subtotal: number;
   total: number;
+  /** Precio base de la celda en catálogo (MXN), sin suplementos. */
+  precioMx: number;
+  /** Días hábiles de entrega según catálogo. */
+  diasEntrega: number;
   currency: typeof AUTO_FIX_CURRENCY;
 };
 
@@ -446,11 +450,14 @@ export function materializeInstantQuoteResolution(
 
   const subtotal = base;
   const total = base + add;
+  const diasEntrega = snap.getDiasEntregaForCanonical(canonical, severidadLiteral);
   return {
     lines,
     extras,
     subtotal,
     total,
+    precioMx: base,
+    diasEntrega: diasEntrega > 0 ? diasEntrega : 3,
     currency: AUTO_FIX_CURRENCY,
   };
 }
