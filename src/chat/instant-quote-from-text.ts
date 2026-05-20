@@ -2,6 +2,7 @@ import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import {
   AUTO_FIX_CURRENCY,
   formatAutoFixMoney,
+  matchServicioFromCatalog,
   normalizeTextForMatch,
 } from './autofix-config';
 
@@ -44,6 +45,149 @@ export function mentionsBañoDePinturaIntent(text: string): boolean {
   return normalizeTextForMatch(text).includes(BAÑO_CANON_NORM);
 }
 
+/** Raíces de pintura / hojalatería (repintado, pintar, baño, etc.). */
+const PAINT_BODY_INTENT_RE =
+  /\b(repintad\w*|repintar|pintar\w*|pintura|pintor\w*|bano\s+de\s+pintura|bano\s+pintura|hojalater\w*|lijad\w*|lijar|barniz\w*|esmalte)\b/;
+
+/**
+ * Tokens de marketing del catálogo cerámico que NO deben disparar match
+ * sin "cerámico" / "tratamiento" explícito en el mensaje del usuario.
+ */
+const CERAMIC_MARKETING_ONLY_TOKENS = [
+  'maxima',
+  'maximo',
+  'brillo',
+  'proteccion',
+  'protecciones',
+] as const;
+
+const CAR_BRANDS_RE =
+  /\b(audi|bmw|mercedes|benz|nissan|infiniti|toyota|lexus|honda|acura|ford|lincoln|chevrolet|chevy|gmc|cadillac|buick|volkswagen|vw|mazda|hyundai|kia|genesis|suzuki|mitsubishi|subaru|fiat|jeep|ram|dodge|tesla|porsche|mini|seat|skoda|peugeot|renault|citroen|dacia|chery|byd|jac|isuzu|changan|geely|baic|alfa|romeo|iveco|maserati)\b/i;
+
+/** Modelos frecuentes sin marca (evita depender solo de "es un …"). */
+const COMMON_MODELS_RE =
+  /\b(march|versa|sentra|altima|maxima|micra|note|figo|fiesta|ikon|etios|attitude|gol|voyage|fox|\bup\b|uno|palio|siena|jetta|golf|passat|polo|vento|virtus|tiguan|taos|tcross|t-cross|civic|accord|fit|cr-v|hr-v|pilot|odyssey|corolla|camry|rav4|highlander|4runner|sequoia|sienna|frontier|titan|l200|hilux|ranger|f-150|f-250|f-350|silverado|sierra|traverse|explorer|escape|edge|bronco|patriot|cherokee|wrangler|compass|renegade|tracker|onix|prisma|aveo|spark|beat|mirage|outlander|asx|cx-3|cx-5|cx-9|mazda\s*2|mazda\s*3|mazda\s*6|rio|forte|optima|stinger|elantra|sonata|tucson|santa\s*fe|palisade|venue|kicks|rogue|murano|pathfinder|armada|sorento|telluride|sportage|soul|kwid|duster|sandero|argo|mobilio|city|wr-v)\b/i;
+
+const YEAR_RE = /\b(19[89][0-9]|20[0-3][0-9])\b/;
+
+export function mentionsPaintBodyIntent(text: string): boolean {
+  const n = normalizeTextForMatch(text);
+  return PAINT_BODY_INTENT_RE.test(n) || mentionsBañoDePinturaIntent(n);
+}
+
+export function threadHasBañoOrPaintIntent(text: string): boolean {
+  return mentionsBañoDePinturaIntent(text) || mentionsPaintBodyIntent(text);
+}
+
+function isCeramicoCanonical(canonical: string): boolean {
+  return normalizeTextForMatch(canonical).includes('ceramico');
+}
+
+function isEsteticaAutomotrizCanonical(canonical: string): boolean {
+  const k = normalizeTextForMatch(canonical);
+  return k.includes('estetica') && k.includes('automotriz');
+}
+
+/** Cerámico / estética solo si el usuario lo pide explícitamente (no por "máxima" sola). */
+export function userExplicitlyRequestsCeramicOrEstetica(text: string): boolean {
+  const n = normalizeTextForMatch(text);
+  if (/\b(ceramico|ceramica|nanoceramic|cera\s+ceramic)\b/.test(n)) return true;
+  if (/\b(estetica\s+automotriz|estetica\s+exterior)\b/.test(n)) return true;
+  if (/\bestetica\b/.test(n) && !mentionsPaintBodyIntent(n)) return true;
+  if (/\btratamiento\b/.test(n) && /\b(ceramic\w*|ceramico)\b/.test(n)) {
+    return true;
+  }
+  const hasMarketing = CERAMIC_MARKETING_ONLY_TOKENS.some((tok) =>
+    normalizedHaystackHasWholeToken(n, tok),
+  );
+  if (hasMarketing) {
+    return (
+      /\b(ceramico|ceramica|tratamiento)\b/.test(n) &&
+      (/\btratamiento\b/.test(n) || /\bceramic/.test(n))
+    );
+  }
+  return false;
+}
+
+function normalizedHaystackHasWholeToken(haystackNorm: string, token: string): boolean {
+  const t = String(token ?? '').trim();
+  if (!t) return false;
+  const re = new RegExp(`(?:^|[^a-z0-9]+)${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^a-z0-9]+|$)`, 'i');
+  return re.test(haystackNorm);
+}
+
+/**
+ * "máxima" como Nissan Maxima (carro + modelo), no como "máxima protección" cerámica.
+ */
+export function maximaUsedAsVehicleModel(text: string): boolean {
+  const n = normalizeTextForMatch(text);
+  if (!normalizedHaystackHasWholeToken(n, 'maxima')) return false;
+  if (/\bcarro\s+maxima\b/.test(n)) return true;
+  if (/\b(auto|coche|camioneta|vehiculo)\s+\w*\s*maxima\b/.test(n)) return true;
+  if (/\b(un|una|el|la|mi|tengo|es|seria)\s+\w*\s*maxima\b/.test(n)) return true;
+  if (YEAR_RE.test(n) && /\bmaxima\b/.test(n)) return true;
+  if (/\bnissan\b/.test(n) && /\bmaxima\b/.test(n)) return true;
+  if (COMMON_MODELS_RE.test(n)) return true;
+  return false;
+}
+
+function canonicalReliesOnMarketingTokenOnly(
+  userNorm: string,
+  canonical: string,
+): boolean {
+  const canon = normalizeTextForMatch(canonical);
+  if (!isCeramicoCanonical(canonical) && !isEsteticaAutomotrizCanonical(canonical)) {
+    return false;
+  }
+  if (userExplicitlyRequestsCeramicOrEstetica(userNorm)) return false;
+  return CERAMIC_MARKETING_ONLY_TOKENS.some(
+    (tok) =>
+      canon.includes(tok) &&
+      normalizedHaystackHasWholeToken(userNorm, tok),
+  );
+}
+
+function servicioMatchBlockedForInstant(userNorm: string, canonical: string): boolean {
+  if (maximaUsedAsVehicleModel(userNorm)) {
+    const canon = normalizeTextForMatch(canonical);
+    if (
+      isCeramicoCanonical(canonical) ||
+      canon.includes('maxima') ||
+      canon.includes('maximo')
+    ) {
+      return true;
+    }
+  }
+  if (mentionsPaintBodyIntent(userNorm)) {
+    if (isCeramicoCanonical(canonical) || isEsteticaAutomotrizCanonical(canonical)) {
+      return true;
+    }
+  }
+  if (canonicalReliesOnMarketingTokenOnly(userNorm, canonical)) {
+    return true;
+  }
+  if (
+    (isCeramicoCanonical(canonical) || isEsteticaAutomotrizCanonical(canonical)) &&
+    !userExplicitlyRequestsCeramicOrEstetica(userNorm)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function listServiciosForInstantUserMatch(
+  snap: MatrixPricingSnapshot,
+  userNorm: string,
+): readonly string[] {
+  const all = snap.serviciosOrderedLongestFirst;
+  if (mentionsPaintBodyIntent(userNorm) && !userExplicitlyRequestsCeramicOrEstetica(userNorm)) {
+    return all.filter(
+      (s) => !isCeramicoCanonical(s) && !isEsteticaAutomotrizCanonical(s),
+    );
+  }
+  return all;
+}
+
 function resolveBañoCanonicalFromSnap(snap: MatrixPricingSnapshot): string | null {
   for (const svc of snap.serviciosOrderedLongestFirst) {
     const ks = normalizeTextForMatch(svc);
@@ -63,17 +207,29 @@ export function resolveInstantCanonicalServicio(
   const t = String(userText ?? '').trim();
   if (!t) return null;
 
-  const direct = snap.matchServicio(t);
-  if (direct) return { canonical: direct, via: 'direct' };
+  const userNorm = normalizeTextForMatch(t);
 
-  if (!mentionsBañoDePinturaIntent(t)) return null;
-
-  for (const svc of snap.serviciosOrderedLongestFirst) {
-    const ks = normalizeTextForMatch(svc);
-    if (ks.includes(BAÑO_CANON_NORM)) {
-      return { canonical: svc, via: 'bano_pintura_synonym' };
+  if (
+    threadHasBañoOrPaintIntent(t) &&
+    !userExplicitlyRequestsCeramicOrEstetica(t)
+  ) {
+    const banoEarly = resolveBañoCanonicalFromSnap(snap);
+    if (banoEarly) {
+      return { canonical: banoEarly, via: 'bano_pintura_synonym' };
     }
   }
+
+  const candidates = listServiciosForInstantUserMatch(snap, userNorm);
+  const direct = matchServicioFromCatalog(t, candidates);
+  if (direct && !servicioMatchBlockedForInstant(userNorm, direct)) {
+    return { canonical: direct, via: 'direct' };
+  }
+
+  if (threadHasBañoOrPaintIntent(t)) {
+    const bano = resolveBañoCanonicalFromSnap(snap);
+    if (bano) return { canonical: bano, via: 'bano_pintura_synonym' };
+  }
+
   return null;
 }
 
@@ -94,15 +250,6 @@ export function resolveInstantCanonicalLatestThenFull(
 export function hasExplicitBañoTierInContext(normalizedBlob: string): boolean {
   return /\b(chico|mediano|grande|xl)(\s+premium)?\b/.test(normalizedBlob);
 }
-
-const CAR_BRANDS_RE =
-  /\b(audi|bmw|mercedes|benz|nissan|infiniti|toyota|lexus|honda|acura|ford|lincoln|chevrolet|chevy|gmc|cadillac|buick|volkswagen|vw|mazda|hyundai|kia|genesis|suzuki|mitsubishi|subaru|fiat|jeep|ram|dodge|tesla|porsche|mini|seat|skoda|peugeot|renault|citroen|dacia|chery|byd|jac|isuzu|changan|geely|baic|alfa|romeo|iveco|maserati)\b/i;
-
-/** Modelos frecuentes sin marca (evita depender solo de "es un …"). */
-const COMMON_MODELS_RE =
-  /\b(march|versa|sentra|altima|maxima|micra|note|figo|fiesta|ikon|etios|attitude|gol|voyage|fox|\bup\b|uno|palio|siena|jetta|golf|passat|polo|vento|virtus|tiguan|taos|tcross|t-cross|civic|accord|fit|cr-v|hr-v|pilot|odyssey|corolla|camry|rav4|highlander|4runner|sequoia|sienna|frontier|titan|l200|hilux|ranger|f-150|f-250|f-350|silverado|sierra|traverse|explorer|escape|edge|bronco|patriot|cherokee|wrangler|compass|renegade|tracker|onix|prisma|aveo|spark|beat|mirage|outlander|asx|cx-3|cx-5|cx-9|mazda\s*2|mazda\s*3|mazda\s*6|rio|forte|optima|stinger|elantra|sonata|tucson|santa\s*fe|palisade|venue|kicks|rogue|murano|pathfinder|armada|sorento|telluride|sportage|soul|kwid|duster|sandero|argo|mobilio|city|wr-v)\b/i;
-
-const YEAR_RE = /\b(19[89][0-9]|20[0-3][0-9])\b/;
 
 /** Palabras que no deben interpretarse como nombre de modelo en un mensaje muy corto. */
 const LATEST_REPLY_NON_MODEL_WORDS = new Set([
@@ -254,7 +401,7 @@ export function shouldAskVehicleBeforeBañoQuote(
   normalizedFullContext: string,
   latestUserText?: string,
 ): boolean {
-  if (!mentionsBañoDePinturaIntent(normalizedFullContext)) return false;
+  if (!threadHasBañoOrPaintIntent(normalizedFullContext)) return false;
   if (hasExplicitBañoTierInContext(normalizedFullContext)) return false;
   if (hasVehicleModelHint(normalizedFullContext)) return false;
   const latest = String(latestUserText ?? '').trim();
@@ -277,7 +424,7 @@ export function tryBañoPinturaVehicleGateReply(
   const latest = purifyVehicleModelUserReply(latestRaw) || latestRaw;
   const full = String(fullContextForBaño ?? '').trim();
   const fullNorm = normalizeTextForMatch(full);
-  if (!mentionsBañoDePinturaIntent(fullNorm)) return null;
+  if (!threadHasBañoOrPaintIntent(fullNorm)) return null;
 
   const resolved = resolveInstantCanonicalLatestThenFull(latest, full, snap);
   if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) return null;
@@ -334,7 +481,7 @@ export function inferBañoTierSeveridad(contextText: string): string {
   }
 
   if (
-    /\bmarch\b|\bversa\b|\bnote\b|\bmicra\b|\bspark\b|\bbeat\b|\bmirage\b|\bfigo\b|\bfiesta\b|\bikon\b|\betios\b|\batitude\b|\bi10\b|\bi20\b|\bagile\b|\bkwid\b|\bmazda\s*2\b|\byaris\b|\bfit\b|\brio\b|\baveo\b/.test(
+    /\bmarch\b|\bversa\b|\bnote\b|\bmicra\b|\bspark\b|\bbeat\b|\bmirage\b|\bfigo\b|\bfiesta\b|\bikon\b|\betios\b|\batitude\b|\bmaxima\b|\bi10\b|\bi20\b|\bagile\b|\bkwid\b|\bmazda\s*2\b|\byaris\b|\bfit\b|\brio\b|\baveo\b/.test(
       n,
     )
   ) {
