@@ -311,11 +311,34 @@ const LATEST_REPLY_NON_MODEL_WORDS = new Set([
   'ayer',
   'hoy',
   'ahora',
+  'informacion',
+  'información',
+  'dato',
+  'datos',
+  'acerca',
+  'sobre',
+  'duda',
+  'pregunta',
+  'ayuda',
+  'tema',
+  'busco',
+  'solicito',
+  'solicitud',
+]);
+
+/** Palabras del hilo que no perfilan vehículo (evita "información" → modelo). */
+const BAÑO_NON_VEHICLE_TOKENS = new Set([
+  ...LATEST_REPLY_NON_MODEL_WORDS,
+  'informacion',
+  'exterior',
+  'tratamiento',
+  'ceramico',
+  'estetica',
 ]);
 
 function isLikelyStandaloneModelToken(w: string): boolean {
   const n = w.toLowerCase();
-  if (LATEST_REPLY_NON_MODEL_WORDS.has(n)) return false;
+  if (BAÑO_NON_VEHICLE_TOKENS.has(n)) return false;
   if (/^\d+$/.test(n)) return false;
   if (/^[a-z]{1,3}\d{1,2}$/i.test(n)) return true;
   if (n.length < 3 || n.length > 22) return false;
@@ -364,10 +387,63 @@ export function userLatestMessageLooksLikeVehicleModelReply(latestUserText: stri
   if (CAR_BRANDS_RE.test(joined)) return true;
   if (COMMON_MODELS_RE.test(joined)) return true;
 
-  if (words.length <= 6) {
-    const modelTokens = words.filter(isLikelyStandaloneModelToken);
-    if (modelTokens.length >= 1) return true;
+  const modelTokens = words.filter(isLikelyStandaloneModelToken);
+  if (modelTokens.length === 0) return false;
+  if (words.length <= 4 && modelTokens.length === words.length) return true;
+  if (words.length <= 3 && modelTokens.length >= 1) return true;
+  return false;
+}
+
+/** Etiquetas de LLM/plantilla que NO cuentan como vehículo perfilado. */
+export function isPlaceholderBañoVehicleLabel(label: string): boolean {
+  const n = normalizeTextForMatch(String(label ?? '').trim());
+  if (!n || n.length < 2) return true;
+  if (/\bdesconocid/.test(n)) return true;
+  if (
+    /^(tu\s+vehiculo|vehiculo|auto|carro|camioneta|cliente|generico|sin\s+marca|no\s+identificado|no\s+especificado|sin\s+identificar|sin\s+datos|n\s*a|na|unknown)$/.test(
+      n,
+    )
+  ) {
+    return true;
   }
+  return false;
+}
+
+function contextHasIdentifiedVehicle(normalizedBlob: string): boolean {
+  if (CAR_BRANDS_RE.test(normalizedBlob)) return true;
+  if (COMMON_MODELS_RE.test(normalizedBlob)) return true;
+  if (YEAR_RE.test(normalizedBlob)) return true;
+
+  const ownerPatterns = [
+    /\b(es\s+un|es\s+una|tengo\s+un|tengo\s+una|seria\s+un|seria\s+una|manejo\s+un|manejo\s+una|dueño\s+de\s+un|dueno\s+de\s+un)\s+([a-z0-9][a-z0-9\s-]{1,36})/i,
+    /\bmi\s+([a-z][a-z0-9\s-]{2,36})\b/i,
+  ];
+  for (const re of ownerPatterns) {
+    const m = normalizedBlob.match(re);
+    if (!m) continue;
+    const tail = normalizeTextForMatch(m[2] ?? m[1] ?? '');
+    if (!tail) continue;
+    const head = tail.split(/\s+/)[0] ?? '';
+    if (BAÑO_NON_VEHICLE_TOKENS.has(head)) continue;
+    if (CAR_BRANDS_RE.test(tail) || COMMON_MODELS_RE.test(tail)) return true;
+    if (isLikelyStandaloneModelToken(head) && !mentionsPaintBodyIntent(tail)) return true;
+  }
+  return false;
+}
+
+/**
+ * Vehículo perfilado: marca/modelo/año, tamaño explícito, o respuesta breve válida al gate.
+ * Sin esto no se debe cotizar ni llamar al clasificador de severidad.
+ */
+export function isBañoVehicleProfiledForQuote(
+  normalizedContext: string,
+  latestUserText?: string,
+): boolean {
+  const ctx = normalizeTextForMatch(normalizedContext);
+  if (hasExplicitBañoTierInContext(ctx)) return true;
+  if (contextHasIdentifiedVehicle(ctx)) return true;
+  const latest = String(latestUserText ?? '').trim();
+  if (latest && userLatestMessageLooksLikeVehicleModelReply(latest)) return true;
   return false;
 }
 
@@ -382,30 +458,12 @@ export function assistantMessageIsBañoVehiclePrompt(text: string): boolean {
   );
 }
 
-function hasVehicleModelHint(normalizedBlob: string): boolean {
-  if (hasExplicitBañoTierInContext(normalizedBlob)) return true;
-  if (CAR_BRANDS_RE.test(normalizedBlob)) return true;
-  if (COMMON_MODELS_RE.test(normalizedBlob)) return true;
-  if (YEAR_RE.test(normalizedBlob)) return true;
-  if (
-    /\b(es\s+un|es\s+una|tengo\s+un|tengo\s+una|es\s+el|es\s+la|seria\s+un|sería\s+un|seria\s+una|sería\s+una|manejo\s+un|manejo\s+una|dueño\s+de\s+un|dueno\s+de\s+un|mi\s+[a-z0-9][a-z0-9\s-]{1,40})\b/i.test(
-      normalizedBlob,
-    )
-  ) {
-    return true;
-  }
-  return false;
-}
-
 export function shouldAskVehicleBeforeBañoQuote(
   normalizedFullContext: string,
   latestUserText?: string,
 ): boolean {
   if (!threadHasBañoOrPaintIntent(normalizedFullContext)) return false;
-  if (hasExplicitBañoTierInContext(normalizedFullContext)) return false;
-  if (hasVehicleModelHint(normalizedFullContext)) return false;
-  const latest = String(latestUserText ?? '').trim();
-  if (latest && userLatestMessageLooksLikeVehicleModelReply(latest)) {
+  if (isBañoVehicleProfiledForQuote(normalizedFullContext, latestUserText)) {
     return false;
   }
   return true;

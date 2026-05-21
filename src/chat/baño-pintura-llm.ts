@@ -1,5 +1,6 @@
 import type { OpenAI } from 'openai';
 import type { InstantQuoteResolution } from './instant-quote-from-text';
+import { isPlaceholderBañoVehicleLabel } from './instant-quote-from-text';
 import { AUTO_FIX_CURRENCY, formatAutoFixMoney } from './autofix-config';
 
 export type BañoLlmClassification = {
@@ -137,7 +138,12 @@ export type BañoInstantComposeFacts = {
  */
 export function buildBañoNaturalInstantReplyText(facts: BañoInstantComposeFacts): string {
   const { vehicleLabel, resolution } = facts;
-  const vl = vehicleLabel.trim() || 'tu vehículo';
+  const vl = vehicleLabel.trim();
+  if (!vl || isPlaceholderBañoVehicleLabel(vl)) {
+    throw new Error(
+      'buildBañoNaturalInstantReplyText: vehículo no perfilado (prohibido cotizar con placeholder)',
+    );
+  }
   const precioMx = Math.round(Number(resolution.precioMx));
   if (!Number.isFinite(precioMx) || precioMx <= 0) {
     throw new Error('buildBañoNaturalInstantReplyText: precioMx inválido');

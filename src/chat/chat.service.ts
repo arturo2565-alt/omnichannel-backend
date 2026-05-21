@@ -66,6 +66,8 @@ import {
   mentionsBañoDePinturaIntent,
   purifyVehicleModelUserReply,
   resolveInstantCanonicalLatestThenFull,
+  isBañoVehicleProfiledForQuote,
+  isPlaceholderBañoVehicleLabel,
   shouldAskVehicleBeforeBañoQuote,
   tryBañoPinturaVehicleGateReply,
   tryResolveInstantQuoteFromUserText,
@@ -668,7 +670,7 @@ export class ChatService implements OnModuleDestroy {
     fullBañoCtx: string,
   ): boolean {
     const latest = String(latestUserText ?? '').trim();
-    if (!latest || !userLatestMessageLooksLikeVehicleModelReply(latest)) {
+    if (!latest || !isBañoVehicleProfiledForQuote(normalizeTextForMatch(fullBañoCtx), latest)) {
       return false;
     }
     const ctxNorm = normalizeTextForMatch(fullBañoCtx);
@@ -1628,7 +1630,12 @@ export class ChatService implements OnModuleDestroy {
         ? `${full}\n\n${latest}`
         : full || latest;
     const tierNorm = normalizeTextForMatch(tierSource);
-    if (shouldAskVehicleBeforeBañoQuote(tierNorm, latest)) return null;
+    if (
+      shouldAskVehicleBeforeBañoQuote(tierNorm, latest) ||
+      !isBañoVehicleProfiledForQuote(tierNorm, latest)
+    ) {
+      return null;
+    }
 
     const resolved = resolveInstantCanonicalLatestThenFull(latest, full, snap);
     if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) return null;
@@ -1663,6 +1670,14 @@ export class ChatService implements OnModuleDestroy {
       coerceBañoSeveridadToCatalog(inferBañoTierSeveridad(tierSource), allowed) ??
       allowed[0]!;
 
+    if (isPlaceholderBañoVehicleLabel(vehicleLabel)) {
+      console.log(
+        '[BañoPinturaLlm] sin cotizar: vehicleLabel no perfilado:',
+        vehicleLabel.slice(0, 80),
+      );
+      return null;
+    }
+
     const resolution = materializeInstantQuoteResolution(snap, {
       canonical: resolved.canonical,
       severidadLiteral: sevFinal,
@@ -1673,7 +1688,10 @@ export class ChatService implements OnModuleDestroy {
     });
     if (!resolution) return null;
 
-    const vl = vehicleLabel.trim() || 'tu vehículo';
+    const vl = vehicleLabel.trim();
+    if (!vl || isPlaceholderBañoVehicleLabel(vl)) {
+      return null;
+    }
     const seg = segmentoEs.trim() || 'categoría de tamaño según nuestro catálogo';
 
     try {
@@ -1686,7 +1704,7 @@ export class ChatService implements OnModuleDestroy {
       });
     } catch (err) {
       console.warn('[BañoPinturaLlm] compose fallback plantilla:', err);
-      return formatInstantQuoteClientMessage(resolution);
+      return null;
     }
   }
 
