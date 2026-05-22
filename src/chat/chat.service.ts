@@ -60,9 +60,14 @@ import {
 } from './playground-instant-quote-interceptor';
 import {
   DRAFT_RESUME_BASE_AUTH_HINT,
+  buildClienteFormalNarrativeAgendado,
+  buildClienteFormalNarrativeSinCita,
+  buildDamagePhotoIntroForCliente,
   buildDraftResumeAgendadoCriticalContext,
   buildDraftResumeSinCitaSystemAppend,
+  draftQuoteLinesToClientePiezaRows,
   formatAppointmentHumanDate,
+  formatDraftAppointmentCitaLong,
   normalizeAuthorizedQuoteSummaryLines,
 } from './draft-quote-resume';
 import {
@@ -1798,6 +1803,73 @@ export class ChatService implements OnModuleDestroy {
     return rows[0] ?? null;
   }
 
+  /** Cita activa (pendiente o confirmada) para narrativa de borrador con lead agendado. */
+  private async loadActiveAppointmentForConversation(
+    conversationId: string,
+  ): Promise<AppointmentEntity | null> {
+    const rows = await this.appointmentRepository.find({
+      where: {
+        conversationId,
+        status: In(['confirmada', 'pendiente'] satisfies AppointmentStatus[]),
+      },
+      order: { scheduledAt: 'DESC' },
+      take: 1,
+    });
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Reemplaza `formalNarrative` del borrador por el mensaje al cliente (agendado vs sin cita).
+   */
+  private async applyClientFacingFormalNarrativeToDraft(
+    draft: DraftQuote,
+    analysis: VehicleDamageAnalysis,
+    conversationId: string,
+    imageCount: number,
+  ): Promise<void> {
+    const conv = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+    });
+    const contactName = conv?.contactName?.trim() || 'cliente';
+    const isAgendado =
+      String(conv?.status ?? '').toLowerCase().trim() === 'agendado';
+
+    let apt = await this.loadActiveAppointmentForConversation(conversationId);
+    if (!apt && isAgendado) {
+      apt = await this.loadLatestAppointmentForConversation(conversationId);
+    }
+
+    const hasActiveAppointment = isAgendado || apt != null;
+    const lineRows = draftQuoteLinesToClientePiezaRows(draft.lines);
+    const total = draft.total ?? draft.subtotal ?? 0;
+    const damageIntro = buildDamagePhotoIntroForCliente(analysis, imageCount);
+
+    if (hasActiveAppointment) {
+      const formattedDate = apt?.scheduledAt
+        ? formatDraftAppointmentCitaLong(apt.scheduledAt)
+        : 'el día acordado para tu visita';
+      draft.formalNarrative = buildClienteFormalNarrativeAgendado({
+        contactName,
+        lineRows,
+        total,
+        appointmentFormatted: formattedDate,
+        damageIntro,
+      });
+      return;
+    }
+
+    const mapsUrl = await this.aiConfigService.getValue(
+      AI_CONFIG_KEYS.BUSINESS_MAPS_URL,
+    );
+    draft.formalNarrative = buildClienteFormalNarrativeSinCita({
+      contactName,
+      lineRows,
+      total,
+      mapsUrl,
+      damageIntro,
+    });
+  }
+
   private async resolveDraftResumeSchedulingContext(
     conversationId: string | undefined,
     historyText: string,
@@ -3033,6 +3105,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const analysis = inventoryItemsToVehicleAnalysis(inventory, imageUrls);
     const estimateAmount = await this.computePrimaryMatrixEstimate(analysis);
     const draftQuoteDoc = await this.generateDraftQuote(analysis);
+    await this.applyClientFacingFormalNarrativeToDraft(
+      draftQuoteDoc,
+      analysis,
+      conversationId,
+      imageUrls.length,
+    );
 
     const persistedImageUrl =
       imageUrls.length === 1 ? imageUrls[0] : JSON.stringify(imageUrls);

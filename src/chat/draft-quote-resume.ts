@@ -1,4 +1,136 @@
+import type { DraftQuoteLine } from './autofix-config';
 import { WORKSHOP_TIMEZONE } from './appointment-intent';
+
+/** Narrativa legal del borrador (no es mensaje al cliente). */
+export function isFormalDocumentNarrative(text: string): boolean {
+  return String(text ?? '')
+    .trimStart()
+    .startsWith('Estimado cliente');
+}
+
+/** Etiqueta de pieza desde la descripción de línea del catálogo. */
+export function piezaLabelFromDraftLineDescription(description: string): string {
+  const d = String(description ?? '').trim();
+  const idx = d.indexOf('—');
+  return (idx >= 0 ? d.slice(0, idx) : d).trim() || 'Servicio';
+}
+
+export function formatDraftAppointmentCitaLong(scheduledAt: Date): string {
+  return scheduledAt.toLocaleString('es-MX', {
+    timeZone: WORKSHOP_TIMEZONE,
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+export function buildDamagePhotoIntroForCliente(
+  analysis: {
+    inventory?: { pieza: string }[];
+    partesAfectadas?: string[];
+    pieza?: string;
+  },
+  imageCount: number,
+): string {
+  const fromInv = (analysis.inventory ?? [])
+    .map((i) => String(i.pieza ?? '').trim())
+    .filter(Boolean);
+  const fromPartes = (analysis.partesAfectadas ?? [])
+    .map((p) => String(p).trim())
+    .filter(Boolean);
+  const unique = [...new Set([...fromInv, ...fromPartes])];
+  if (analysis.pieza?.trim() && !unique.includes(analysis.pieza.trim())) {
+    unique.unshift(analysis.pieza.trim());
+  }
+  if (unique.length === 1) {
+    const p = unique[0]!.toLowerCase();
+    return imageCount > 1
+      ? `Ya analizamos las fotografías de tu ${p}.`
+      : `Ya analizamos la fotografía de tu ${p}.`;
+  }
+  if (unique.length === 2) {
+    return `Ya analizamos las fotografías de ${unique[0]} y ${unique[1]}.`;
+  }
+  if (unique.length > 2) {
+    const tail = unique.slice(-1)[0];
+    const head = unique.slice(0, -1).join(', ');
+    return `Ya analizamos las fotografías de ${head} y ${tail}.`;
+  }
+  return imageCount > 1
+    ? 'Ya analizamos las fotografías que nos enviaste.'
+    : 'Ya analizamos la fotografía que nos enviaste.';
+}
+
+export function draftQuoteLinesToClientePiezaRows(
+  lines: readonly DraftQuoteLine[],
+): { pieza: string; precioMx: number }[] {
+  return lines
+    .filter((l) => l.subtotal > 0)
+    .map((l) => ({
+      pieza: piezaLabelFromDraftLineDescription(l.description),
+      precioMx: Math.round(l.subtotal),
+    }));
+}
+
+function formatClientePiezaLineExtra(pieza: string, precioMx: number): string {
+  const label = String(pieza ?? '').trim() || 'Servicio';
+  const amt = Math.max(0, Math.round(Number(precioMx) || 0));
+  return `🛠️ Reparación y Pintura de ${label}: $${amt.toLocaleString('es-MX')} MXN`;
+}
+
+/** Mensaje al cliente cuando ya tiene cita (preview / formalNarrative). */
+export function buildClienteFormalNarrativeAgendado(opts: {
+  contactName: string;
+  lineRows: readonly { pieza: string; precioMx: number }[];
+  total: number;
+  appointmentFormatted: string;
+  damageIntro: string;
+}): string {
+  const name = String(opts.contactName ?? '').trim() || 'cliente';
+  const linesText = opts.lineRows.map((r) => formatClientePiezaLineExtra(r.pieza, r.precioMx)).join('\n');
+  const total = Math.max(0, Math.round(Number(opts.total) || 0));
+  const when = String(opts.appointmentFormatted ?? '').trim() || 'el día acordado para tu visita';
+  return [
+    `👋 ¡Listo, ${name}! ${opts.damageIntro}`,
+    `Aquí tienes el desglose del costo extra para dejar esa zona impecable:`,
+    ``,
+    linesText,
+    `💰 **Inversión Extra Estimada: $${total.toLocaleString('es-MX')} MXN** *(Sujeto a revisión física. Incluye materiales premium Sikkens y garantía).*`,
+    ``,
+    `Anotamos estos conceptos como un extra en tu orden de servicio. **Los realizaremos este mismo ${when} que ingresas tu vehículo al taller.**`,
+    ``,
+    `¿Tienes alguna duda con las piezas o prefieres que lo sumemos al presupuesto inicial? 😊✨`,
+  ].join('\n');
+}
+
+/** Mensaje al cliente sin cita (ubicación + invitación a agendar). */
+export function buildClienteFormalNarrativeSinCita(opts: {
+  contactName: string;
+  lineRows: readonly { pieza: string; precioMx: number }[];
+  total: number;
+  mapsUrl: string;
+  damageIntro: string;
+}): string {
+  const name = String(opts.contactName ?? '').trim() || 'cliente';
+  const linesText = opts.lineRows
+    .map((r) => formatDraftQuoteLineToolEmoji(r.pieza, r.precioMx))
+    .join('\n');
+  const total = Math.max(0, Math.round(Number(opts.total) || 0));
+  const mapLink = String(opts.mapsUrl ?? '').trim() || 'https://goo.gl/maps/tu-ubicacion-real';
+  return [
+    `👋 ¡Listo, ${name}! ${opts.damageIntro}`,
+    `Aquí tienes el desglose de tu cotización:`,
+    ``,
+    linesText,
+    `💰 **Inversión Total Estimada: $${total.toLocaleString('es-MX')} MXN** *(Sujeto a revisión física. Incluye garantía y materiales premium Sikkens)*`,
+    ``,
+    `📍 Estamos aquí, fácil de llegar: ${mapLink}`,
+    ``,
+    `📅 Tenemos espacios esta semana. ¿Qué día te queda mejor para ingresar tu unidad?`,
+  ].join('\n');
+}
 
 /** Fecha/hora de cita en español (México). */
 export function formatAppointmentHumanDate(scheduledAt: Date): string {
