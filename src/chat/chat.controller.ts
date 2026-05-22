@@ -205,6 +205,7 @@ export class ChatController {
       authorizedQuoteSummary?: string;
       history?: unknown;
       visionItems?: unknown;
+      conversationId?: string;
     },
   ) {
     return await this.chatService.testAiPlaygroundResumeAfterDraft({
@@ -212,6 +213,28 @@ export class ChatController {
       userBatchText: body.userBatchText,
       authorizedQuoteSummary: String(body.authorizedQuoteSummary ?? ''),
       history: body.history,
+      visionItems: body.visionItems,
+      conversationId: body.conversationId,
+    });
+  }
+
+  /**
+   * Tras autorizar/enviar cotización en el panel de chat (DraftQuote), respuesta IA al cliente.
+   */
+  @Post('conversations/:conversationId/resume-after-draft')
+  @HttpCode(HttpStatus.OK)
+  async resumeConversationAfterDraft(
+    @Param('conversationId') conversationId: string,
+    @Body()
+    body: {
+      userBatchText?: string;
+      authorizedQuoteSummary?: string;
+      visionItems?: unknown;
+    },
+  ) {
+    return await this.chatService.resumeConversationAfterDraft(conversationId, {
+      userBatchText: body.userBatchText,
+      authorizedQuoteSummary: String(body.authorizedQuoteSummary ?? ''),
       visionItems: body.visionItems,
     });
   }

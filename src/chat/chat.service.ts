@@ -59,6 +59,13 @@ import {
   playgroundUserMessageMentionsWeekdayOnlyRough,
 } from './playground-instant-quote-interceptor';
 import {
+  DRAFT_RESUME_BASE_AUTH_HINT,
+  buildDraftResumeAgendadoCriticalContext,
+  buildDraftResumeSinCitaSystemAppend,
+  formatAppointmentHumanDate,
+  normalizeAuthorizedQuoteSummaryLines,
+} from './draft-quote-resume';
+import {
   assistantMessageIsBañoVehiclePrompt,
   type InstantQuoteResolution,
   formatInstantQuoteClientMessage,
@@ -1779,29 +1786,130 @@ export class ChatService implements OnModuleDestroy {
     return parseDetectedDamageItemsAllowEmpty(raw);
   }
 
+  /** Cita más reciente de la conversación (para reanudación tras borrador con lead agendado). */
+  private async loadLatestAppointmentForConversation(
+    conversationId: string,
+  ): Promise<AppointmentEntity | null> {
+    const rows = await this.appointmentRepository.find({
+      where: { conversationId },
+      order: { scheduledAt: 'DESC' },
+      take: 1,
+    });
+    return rows[0] ?? null;
+  }
+
+  private async resolveDraftResumeSchedulingContext(
+    conversationId: string | undefined,
+    historyText: string,
+  ): Promise<{
+    hasConfirmedAppointment: boolean;
+    appointmentHuman: string | null;
+    vehiclePhrase: string;
+  }> {
+    let status = '';
+    if (conversationId) {
+      const conv = await this.conversationRepository.findOne({
+        where: { id: conversationId },
+      });
+      status = String(conv?.status ?? '').toLowerCase().trim();
+    }
+
+    const vehicleFromHistory =
+      inferBañoVehicleDisplayLabel(historyText) || 'su vehículo';
+
+    if (status !== 'agendado') {
+      return {
+        hasConfirmedAppointment: false,
+        appointmentHuman: null,
+        vehiclePhrase: vehicleFromHistory,
+      };
+    }
+
+    if (!conversationId) {
+      return {
+        hasConfirmedAppointment: true,
+        appointmentHuman: null,
+        vehiclePhrase: vehicleFromHistory,
+      };
+    }
+
+    const apt = await this.loadLatestAppointmentForConversation(conversationId);
+    const human = apt?.scheduledAt
+      ? formatAppointmentHumanDate(apt.scheduledAt)
+      : null;
+    const vehiclePhrase =
+      pickFirstNonEmptyTrimmedString(apt?.vehicle, vehicleFromHistory) ||
+      'su vehículo';
+
+    return {
+      hasConfirmedAppointment: true,
+      appointmentHuman: human,
+      vehiclePhrase,
+    };
+  }
+
+  private async buildDraftResumeSystemAppend(
+    scheduling: {
+      hasConfirmedAppointment: boolean;
+      appointmentHuman: string | null;
+      vehiclePhrase: string;
+    },
+  ): Promise<string> {
+    if (scheduling.hasConfirmedAppointment) {
+      const when =
+        scheduling.appointmentHuman ?? 'la fecha acordada de su cita';
+      return `${DRAFT_RESUME_BASE_AUTH_HINT}${buildDraftResumeAgendadoCriticalContext(
+        when,
+        scheduling.vehiclePhrase,
+      )}`;
+    }
+    const mapsUrl = await this.aiConfigService.getValue(
+      AI_CONFIG_KEYS.BUSINESS_MAPS_URL,
+    );
+    return `${DRAFT_RESUME_BASE_AUTH_HINT}${buildDraftResumeSinCitaSystemAppend(mapsUrl)}`;
+  }
+
   /**
-   * Tras autorizar un borrador en el Playground (visión con ítems), genera la primera respuesta
-   * del asistente de chat usando el resumen autorizado y el historial previo al cierre del lote.
+   * Genera la primera respuesta del asistente tras autorizar un borrador (playground o producción).
    */
-  async testAiPlaygroundResumeAfterDraft(body: {
+  private async composeResumeAfterDraftAssistantMessage(body: {
     chatAppointmentPrompt: string;
     userBatchText?: string;
     authorizedQuoteSummary: string;
-    history?: unknown;
+    historyTurns: { role: 'user' | 'assistant'; text: string }[];
     visionItems?: unknown;
-  }): Promise<{ assistantMessage: string }> {
+    conversationId?: string;
+  }): Promise<string> {
     const chatAppointmentPrompt = String(body.chatAppointmentPrompt ?? '');
     if (!chatAppointmentPrompt.trim()) {
       throw new BadRequestException('chatAppointmentPrompt vacío');
     }
 
-    const historyTurns = this.normalizePlaygroundHistoryPayload(body.history);
-    const userBatchText = body.userBatchText != null ? String(body.userBatchText).trim() : '';
-    const authorizedQuoteSummary = String(body.authorizedQuoteSummary ?? '').trim();
-    const visionParsed = this.normalizePlaygroundResumeVisionItems(body.visionItems);
+    const userBatchText =
+      body.userBatchText != null ? String(body.userBatchText).trim() : '';
+    const authorizedRaw = String(body.authorizedQuoteSummary ?? '').trim();
+    const authorizedQuoteSummary = authorizedRaw
+      ? normalizeAuthorizedQuoteSummaryLines(authorizedRaw)
+      : '';
+    const visionParsed = this.normalizePlaygroundResumeVisionItems(
+      body.visionItems,
+    );
     const visionAppend = this.buildPlaygroundVisionSystemAppend(visionParsed);
-
     const catalogAppend = await this.loadCatalogPromptAppendForLlm();
+
+    const historyText = [
+      ...body.historyTurns.map((h) => h.text),
+      userBatchText,
+      authorizedQuoteSummary,
+    ]
+      .filter((t) => t.length > 0)
+      .join('\n\n');
+
+    const scheduling = await this.resolveDraftResumeSchedulingContext(
+      body.conversationId,
+      historyText,
+    );
+    const resumeAuthHint = await this.buildDraftResumeSystemAppend(scheduling);
 
     const batchCtx =
       userBatchText ||
@@ -1817,17 +1925,15 @@ export class ChatService implements OnModuleDestroy {
       authBlock,
       '',
       'Escribe un único mensaje en español dirigido al cliente final. No repitas el prefijo "SISTEMA:" ni instrucciones internas. No pidas fotos adicionales para cotizar este caso si la cotización ya está autorizada arriba.',
+      'En el desglose visible al cliente usa emoji 🛠️ en cada línea de pieza con su precio en MXN.',
     ].join('\n');
-
-    const resumePlaygroundAuthHint =
-      '\n\nCuando recibas un mensaje de usuario que comience por "SISTEMA:" con una autorización de cotización del operador, trátalo como aviso interno: no lo repitas al cliente. Presenta la cotización de forma clara pero conversacional, con los montos exactos que figuren en ese aviso, y cuando encaje en el tono menciona beneficios como la garantía por escrito. Si el historial o el contexto permiten inferir o recordar el vehículo del cliente, intégralo de forma natural y amigable.';
 
     const chatMessages: ChatCompletionMessageParam[] = [
       {
         role: 'system',
-        content: `${chatAppointmentPrompt}${visionAppend}${resumePlaygroundAuthHint}${catalogAppend}`,
+        content: `${chatAppointmentPrompt}${visionAppend}${resumeAuthHint}${catalogAppend}`,
       },
-      ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
+      ...body.historyTurns.map((h) => ({ role: h.role, content: h.text })),
       { role: 'user', content: mergedUserForLlm },
     ];
 
@@ -1836,10 +1942,80 @@ export class ChatService implements OnModuleDestroy {
       messages: chatMessages,
       max_tokens: 1200,
     });
-    const chatReply =
+    return (
       chatCompletion.choices[0]?.message?.content?.trim() ||
-      '(La IA no devolvió texto.)';
-    return { assistantMessage: chatReply };
+      '(La IA no devolvió texto.)'
+    );
+  }
+
+  /**
+   * Tras autorizar un borrador en el Playground (visión con ítems), genera la primera respuesta
+   * del asistente de chat usando el resumen autorizado y el historial previo al cierre del lote.
+   */
+  async testAiPlaygroundResumeAfterDraft(body: {
+    chatAppointmentPrompt: string;
+    userBatchText?: string;
+    authorizedQuoteSummary: string;
+    history?: unknown;
+    visionItems?: unknown;
+    /** Si se envía, se consulta status + cita en BD (prueba flujo agendado). */
+    conversationId?: string;
+  }): Promise<{ assistantMessage: string }> {
+    const historyTurns = this.normalizePlaygroundHistoryPayload(body.history);
+    const assistantMessage = await this.composeResumeAfterDraftAssistantMessage({
+      chatAppointmentPrompt: body.chatAppointmentPrompt,
+      userBatchText: body.userBatchText,
+      authorizedQuoteSummary: body.authorizedQuoteSummary,
+      historyTurns,
+      visionItems: body.visionItems,
+      conversationId: body.conversationId,
+    });
+    return { assistantMessage };
+  }
+
+  /**
+   * Producción: tras aprobar/enviar un DraftQuote, primera respuesta IA al cliente
+   * (misma lógica que playground, con historial y cita desde BD).
+   */
+  async resumeConversationAfterDraft(
+    conversationId: string,
+    body: {
+      userBatchText?: string;
+      authorizedQuoteSummary: string;
+      visionItems?: unknown;
+    },
+  ): Promise<{ assistantMessage: string }> {
+    const conv = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+    });
+    if (!conv) {
+      throw new NotFoundException(`Conversación no encontrada: ${conversationId}`);
+    }
+
+    const chatAppointmentPrompt = await this.aiConfigService.getValue(
+      AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
+    );
+    const recent = await this.loadRecentMessagesForLlm(conversationId);
+    const historyTurns = this.messagesToChatCompletionTurns(recent)
+      .filter(
+        (m): m is { role: 'user' | 'assistant'; content: string } =>
+          (m.role === 'user' || m.role === 'assistant') &&
+          typeof m.content === 'string',
+      )
+      .map((m) => ({
+        role: m.role,
+        text: String(m.content),
+      }));
+
+    const assistantMessage = await this.composeResumeAfterDraftAssistantMessage({
+      chatAppointmentPrompt,
+      userBatchText: body.userBatchText,
+      authorizedQuoteSummary: body.authorizedQuoteSummary,
+      historyTurns,
+      visionItems: body.visionItems,
+      conversationId,
+    });
+    return { assistantMessage };
   }
 
   /**
