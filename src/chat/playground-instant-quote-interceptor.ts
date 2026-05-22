@@ -44,17 +44,33 @@ export function playgroundAssistantLikelyDeliveredInstantCatalogQuote(
 
 /** Día de semana o intención de agendar / interés sin pedir explícitamente otra cotización. */
 export function playgroundUserSchedulingOrInterestIntent(userText: string): boolean {
-  const n = normalizeTextForMatch(userText);
+  const raw = String(userText ?? '');
+  const n = normalizeTextForMatch(raw);
   if (/\b(lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b/.test(n)) {
     return true;
   }
-  if (/\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b/.test(userText)) {
+  if (/\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b/.test(raw)) {
+    return true;
+  }
+  if (/\b\d{1,2}\s*(am|pm)\b/.test(n)) {
+    return true;
+  }
+  if (/\b(am|pm)\b/.test(n)) {
+    return true;
+  }
+  if (/\b\d{1,2}\s*:\s*\d{2}\b/.test(raw)) {
     return true;
   }
   if (
-    /\b(me interesa|me interesa mucho|quiero agendar|agendar|reservar|una cita|la cita|horario|disponibilidad|turno|que hora|a las \d|manana|mañana|pasado manana|pasado mañana|proxima semana|próxima semana|este fin|fin de semana)\b/.test(
+    /\b(me interesa|me interesa mucho|quiero agendar|gustaria agendar|agendar|reservar|cita|una cita|la cita|horario|hora|disponibilidad|turno|que hora|a las|manana|pasado manana|proxima semana|proximo|proxima|este fin|fin de semana|visita al taller|venir al taller|pasar al taller|ir al taller|me gustaria ir)\b/.test(
       n,
     )
+  ) {
+    return true;
+  }
+  if (
+    /\bir\b/.test(n) &&
+    /\b(taller|agendar|cita|visita|pasar|venir|proxim)\w*/.test(n)
   ) {
     return true;
   }
@@ -114,6 +130,8 @@ export function getPlaygroundInstantInterceptorDecision(args: {
 
 export function buildPlaygroundPostQuoteSchedulingSystemAppend(opts: {
   userMentionedWeekday: boolean;
+  /** Autopilot en Messenger/WhatsApp: la herramienta persiste la cita. */
+  forAutopilot?: boolean;
 }): string {
   const horario =
     'Lunes a viernes 9:00–18:00; sábados 9:00–14:00; domingo cerrado (zona horaria del taller).';
@@ -121,8 +139,16 @@ export function buildPlaygroundPostQuoteSchedulingSystemAppend(opts: {
     ? `Si el cliente mencionó un día de la semana **sin** hora exacta, responde en **máximo 2 frases**: confirma que ese día atendemos dentro de ${horario} y pide la **hora específica** que prefiera dentro de ese horario.`
     : `Si falta la hora exacta, pide una hora dentro de ${horario}`;
 
-  return `\n\n[Panel de pruebas — fase post-cotización o agendamiento]
+  const persistNote = opts.forAutopilot
+    ? '- **Prioridad absoluta de cierre:** si la cotización con montos ya salió en el historial, no vuelvas a imprimir plantillas ni totales; registra el turno con **createAppointment** en cuanto tengas fecha y hora válidas (ISO).'
+    : '- En este simulador, **createAppointment** no persiste en base de datos: la herramienta devuelve solo vista previa si el horario es válido.';
+
+  const channelLabel = opts.forAutopilot
+    ? 'Autopilot — fase post-cotización o agendamiento'
+    : 'Panel de pruebas — fase post-cotización o agendamiento';
+
+  return `\n\n[${channelLabel}]
 - Si el cliente **ya recibió precios** del catálogo en el historial y ahora muestra interés, propone día u hora, tu **única misión** es concretar la visita: usa **createAppointment** cuando tengas fecha y hora completas válidas en ISO. **No repitas** precios ni desgloses que ya enviaste, salvo que pida explícitamente otra cotización o servicio nuevo.
 - ${dosFrases}
-- En este simulador, **createAppointment** no persiste en base de datos: la herramienta devuelve solo vista previa si el horario es válido.`;
+${persistNote}`;
 }

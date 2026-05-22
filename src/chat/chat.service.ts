@@ -3254,9 +3254,19 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   private async buildAutopilotSystemSection(
     conversation: Conversation,
     baseChatPrompt: string,
+    options?: {
+      postQuoteScheduling?: boolean;
+      userMentionedWeekday?: boolean;
+    },
   ): Promise<string> {
     const catalogAppend = await this.loadCatalogPromptAppendForLlm();
-    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}`;
+    const schedulingAppend = options?.postQuoteScheduling
+      ? buildPlaygroundPostQuoteSchedulingSystemAppend({
+          userMentionedWeekday: options.userMentionedWeekday === true,
+          forAutopilot: true,
+        })
+      : '';
+    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}`;
     if (conversation.status !== 'agendado') {
       return head;
     }
@@ -3314,7 +3324,24 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         fullBañoCtx || mergedForInstant,
       );
 
-      if (mergedForInstant) {
+      const interceptorTurns = historySansBatch.map((m) => ({
+        role:
+          String(m.direction ?? '').toLowerCase() === 'outbound'
+            ? ('assistant' as const)
+            : ('user' as const),
+        text: String(m.content ?? ''),
+      }));
+      const instantDecision = getPlaygroundInstantInterceptorDecision({
+        historyTurns: interceptorTurns,
+        currentUserText: mergedForInstant,
+      });
+      const skipInstantQuoteInterceptors =
+        instantDecision.skipInstantInterceptor;
+      if (skipInstantQuoteInterceptors) {
+        console.log('[AutopilotInstantQuote]', JSON.stringify(instantDecision));
+      }
+
+      if (mergedForInstant && !skipInstantQuoteInterceptors) {
         const snapInstant = await this.catalogService.getMatrixPricingSnapshot();
         if (!skipBañoVehicleGate) {
           const gateReply = tryBañoPinturaVehicleGateReply(
@@ -3369,6 +3396,15 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         const systemContent = await this.buildAutopilotSystemSection(
           conversation,
           freshChatPrompt,
+          skipInstantQuoteInterceptors
+            ? {
+                postQuoteScheduling: true,
+                userMentionedWeekday:
+                  playgroundUserMessageMentionsWeekdayOnlyRough(
+                    mergedForInstant,
+                  ),
+              }
+            : undefined,
         );
         if (messages[0]?.role === 'system') {
           messages[0] = { role: 'system', content: systemContent };
