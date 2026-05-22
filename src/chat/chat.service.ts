@@ -537,6 +537,9 @@ export class ChatService implements OnModuleDestroy {
   /** Tras la última imagen: esperar tanto tiempo en silencio antes de lanzar GPT (reinicia con cada nueva foto). */
   private static readonly INBOUND_IMAGE_ANALYSIS_DEBOUNCE_MS = 30 * 1000;
 
+  /** Máximo de imágenes por llamada a visión (evita timeouts / TPM en ráfagas grandes). */
+  private static readonly VISION_IMAGE_CHUNK_SIZE = 3;
+
   /**
    * Tras el último mensaje de texto entrante (Messenger / WhatsApp): esperar antes de lanzar el autopilot.
    * Se reinicia con cada nuevo texto; al vencer, se responde en bloque a todos los textos aún sin contestar.
@@ -1773,6 +1776,93 @@ export class ChatService implements OnModuleDestroy {
       return parseDetectedDamageItemsAllowEmpty(parsed);
     }
     return normalizeDetectedDamagesJson(parsed);
+  }
+
+  /** Parte URLs en lotes de hasta {@link ChatService.VISION_IMAGE_CHUNK_SIZE}. */
+  private chunkImageUrlsForVision(
+    urls: readonly string[],
+    chunkSize = ChatService.VISION_IMAGE_CHUNK_SIZE,
+  ): string[][] {
+    const clean = [
+      ...new Set(urls.map((u) => String(u).trim()).filter(Boolean)),
+    ];
+    const size = Math.max(1, chunkSize);
+    const lotes: string[][] = [];
+    for (let i = 0; i < clean.length; i += size) {
+      lotes.push(clean.slice(i, i + size));
+    }
+    return lotes;
+  }
+
+  /**
+   * Analiza ráfagas grandes en lotes secuenciales (sin paralelismo) y fusiona inventario.
+   */
+  private async analyzeDamageImageInSequentialChunks(
+    imageUrls: readonly string[],
+    options?: {
+      systemPrompt?: string;
+      userSchemaHint?: string;
+      allowEmptyInventory?: boolean;
+      clientContextText?: string;
+    },
+  ): Promise<DetectedDamageItem[]> {
+    const lotes = this.chunkImageUrlsForVision(imageUrls);
+    if (!lotes.length) {
+      return [];
+    }
+
+    if (lotes.length === 1 && lotes[0]!.length === imageUrls.length) {
+      return this.analyzeDamageImage(lotes[0]!, options);
+    }
+
+    const snap = await this.catalogService.getMatrixPricingSnapshot();
+    let allDetectedDamages: DetectedDamageItem[] = [];
+
+    console.log(
+      `[VisionChunk] Procesando ${imageUrls.length} imagen(es) en ${lotes.length} lote(s) de hasta ${ChatService.VISION_IMAGE_CHUNK_SIZE}`,
+    );
+
+    for (let idx = 0; idx < lotes.length; idx++) {
+      const lote = lotes[idx]!;
+      console.log(
+        `[VisionChunk] Lote ${idx + 1}/${lotes.length} — ${lote.length} imagen(es)`,
+      );
+      const batchItems = await this.analyzeDamageImage(lote, {
+        ...options,
+        allowEmptyInventory: true,
+      });
+
+      if (!batchItems.length) {
+        continue;
+      }
+
+      if (!allDetectedDamages.length) {
+        allDetectedDamages = batchItems.map((it) => ({
+          pieza: it.pieza,
+          severidad: it.severidad,
+          descripcionTecnica: it.descripcionTecnica,
+          urls_origen: [...(it.urls_origen ?? [])],
+        }));
+      } else {
+        const merged = mergeDamageInventoryAccumulative(
+          allDetectedDamages,
+          batchItems,
+          (raw) => snap.matchServicio(raw),
+        );
+        allDetectedDamages = merged.merged;
+      }
+    }
+
+    if (!allDetectedDamages.length && options?.allowEmptyInventory !== false) {
+      return [];
+    }
+    if (!allDetectedDamages.length) {
+      throw new Error(
+        'OpenAI no devolvió daños detectados en ningún lote de imágenes',
+      );
+    }
+
+    return allDetectedDamages;
   }
 
   private sanitizeVisionItemsForPlaygroundPrompt(
@@ -3246,7 +3336,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       order: { createdAt: 'DESC' },
     });
 
-    const newInventory = await this.analyzeDamageImage(imageUrls);
+    const newInventory = await this.analyzeDamageImageInSequentialChunks(
+      imageUrls,
+      { allowEmptyInventory: true },
+    );
+
+    console.log(
+      `[VisionChunk] Inventario consolidado tras lotes: ${newInventory.length} pieza(s)`,
+    );
 
     let analysis: VehicleDamageAnalysis;
     let complementMeta: Pick<
