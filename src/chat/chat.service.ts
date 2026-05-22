@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import {
   DetectedDamageItem,
   Message,
@@ -1070,6 +1070,15 @@ export class ChatService implements OnModuleDestroy {
     return { processed: 1, lastMessageId: saved.id };
   }
 
+  /** Evita duplicados cuando Meta reenvía el mismo `mid`. */
+  private async findMessageByMetaMid(
+    metaMid: string,
+  ): Promise<Message | null> {
+    const mid = String(metaMid ?? '').trim();
+    if (!mid) return null;
+    return this.messageRepository.findOne({ where: { externalId: mid } });
+  }
+
   /**
    * Normaliza eventos `entry[].messaging[]` de Meta Messenger y delega en {@link saveMessage}.
    */
@@ -1093,6 +1102,8 @@ export class ChatService implements OnModuleDestroy {
         if (!msg || typeof msg !== 'object') continue;
 
         const isEcho = msg.is_echo === true;
+        const metaMid =
+          typeof msg.mid === 'string' ? String(msg.mid).trim() : '';
 
         /** PSID del cliente: en eco el remitente es la página → usar `recipient.id`. */
         let threadPsid = '';
@@ -1142,6 +1153,8 @@ export class ChatService implements OnModuleDestroy {
           platform: 'facebook',
           direction: isEcho ? 'outbound' : 'inbound',
           skipOutboundFacebookSend: isEcho,
+          suppressRealtimeNotify: isEcho,
+          suppressAutopilotAndSuggestions: isEcho,
           ...(isEcho
             ? { user: 'Asistente IA' }
             : contactHint
@@ -1152,27 +1165,62 @@ export class ChatService implements OnModuleDestroy {
         if (!text && imageUrls.length === 0) continue;
 
         if (text) {
-          const saved = await this.saveMessage({
-            ...basePayload,
-            message: text,
-          });
-          console.log(
-            `[Meta webhook] texto ${isEcho ? '(eco→outbound)' : '(inbound)'} | PSID hilo:`,
-            threadPsid,
-            '| message.externalId:',
-            saved.externalId,
-          );
-          lastMessageId = saved.id;
-          n++;
+          let skipText = false;
+          if (metaMid) {
+            const dup = await this.findMessageByMetaMid(metaMid);
+            if (dup) {
+              console.log(
+                `[Meta webhook] mid duplicado (texto), omitido:`,
+                metaMid,
+              );
+              skipText = true;
+            }
+          }
+          if (!skipText) {
+            const saved = await this.saveMessage({
+              ...basePayload,
+              message: text,
+              ...(metaMid ? { metaMessageId: metaMid } : {}),
+            });
+            console.log(
+              `[Meta webhook] texto ${isEcho ? '(eco→outbound)' : '(inbound)'} | PSID hilo:`,
+              threadPsid,
+              '| mid:',
+              metaMid || '(sin mid)',
+              '| message.externalId:',
+              saved.externalId,
+            );
+            lastMessageId = saved.id;
+            n++;
+          }
         }
-        for (const url of imageUrls) {
+        for (let imgIdx = 0; imgIdx < imageUrls.length; imgIdx += 1) {
+          const url = imageUrls[imgIdx]!;
+          const imageMid = metaMid
+            ? imageUrls.length > 1 || text
+              ? `${metaMid}:img:${imgIdx}`
+              : metaMid
+            : '';
+          if (imageMid) {
+            const dupImg = await this.findMessageByMetaMid(imageMid);
+            if (dupImg) {
+              console.log(
+                `[Meta webhook] mid duplicado (imagen), omitido:`,
+                imageMid,
+              );
+              continue;
+            }
+          }
           const saved = await this.saveMessage({
             ...basePayload,
             message: url,
+            ...(imageMid ? { metaMessageId: imageMid } : {}),
           });
           console.log(
             `[Meta webhook] imagen ${isEcho ? '(eco→outbound)' : '(inbound)'} | PSID hilo:`,
             threadPsid,
+            '| mid:',
+            imageMid || '(sin mid)',
             '| message.externalId:',
             saved.externalId,
           );
@@ -1318,21 +1366,30 @@ export class ChatService implements OnModuleDestroy {
       data.name,
     );
 
-    const messageExternalId =
-      threadExternalId ||
+    const messageRowExternalId =
+      pickFirstNonEmptyTrimmedString(
+        data.metaMessageId,
+        data.messageId,
+        data.mid,
+      ) ||
       pickFirstNonEmptyTrimmedString(
         data.externalId,
         data.id,
         data.from,
+        threadExternalId,
         conversation.externalId,
       );
+
+    const suppressRealtimeNotify = data.suppressRealtimeNotify === true;
+    const suppressAutopilotAndSuggestions =
+      data.suppressAutopilotAndSuggestions === true;
 
     const newMessage = this.messageRepository.create({
       content: contentToSave,
       channelType: data.platform || 'test',
       senderName: senderName || 'Cliente Desconocido',
       direction: resolvedDirection,
-      externalId: messageExternalId || conversation.externalId,
+      externalId: messageRowExternalId || conversation.externalId,
       conversation: conversation,
     });
     
@@ -1341,7 +1398,11 @@ export class ChatService implements OnModuleDestroy {
     const conversationIdForSockets =
       saved.conversationId ?? conversation.id;
 
-    if (saved.direction === 'inbound' && !isIncomingImage(saved.content)) {
+    if (
+      !suppressAutopilotAndSuggestions &&
+      saved.direction === 'inbound' &&
+      !isIncomingImage(saved.content)
+    ) {
       const convRow = await this.conversationRepository.findOne({
         where: { id: conversationIdForSockets },
       });
@@ -1359,6 +1420,7 @@ export class ChatService implements OnModuleDestroy {
     }
 
     if (
+      !suppressAutopilotAndSuggestions &&
       saved.direction === 'inbound' &&
       incomingIsImage &&
       isIncomingImage(saved.content)
@@ -1370,7 +1432,9 @@ export class ChatService implements OnModuleDestroy {
       );
     }
 
-    this.chatGateway.emitNewMessage(saved);
+    if (!suppressRealtimeNotify) {
+      this.chatGateway.emitNewMessage(saved);
+    }
 
     if (
       resolvedDirection === 'outbound' &&
@@ -3502,6 +3566,56 @@ ${closerPrompt}${catalogAppend}`,
       await this.conversationRepository.save(row);
     }
     return { id: row.id, isAutoPilotActive: Boolean(row.isAutoPilotActive) };
+  }
+
+  /** Cancela debounces / ráfagas de imagen asociados a la conversación (evita trabajo tras borrar). */
+  private clearPendingConversationJobs(conversationId: string): void {
+    const imgTimer = this.consolidatedImageTimers.get(conversationId);
+    if (imgTimer !== undefined) {
+      clearTimeout(imgTimer);
+      this.consolidatedImageTimers.delete(conversationId);
+    }
+    this.pendingBurstImageUrls.delete(conversationId);
+
+    const textTimer = this.autopilotTextDebounceTimers.get(conversationId);
+    if (textTimer !== undefined) {
+      clearTimeout(textTimer);
+      this.autopilotTextDebounceTimers.delete(conversationId);
+    }
+  }
+
+  /**
+   * Elimina la conversación y todo su historial (citas, borradores, líneas, mensajes).
+   */
+  async deleteConversation(id: string): Promise<void> {
+    const conversationId = String(id ?? '').trim();
+    if (!conversationId || !looksLikeConversationUuid(conversationId)) {
+      throw new BadRequestException('Id de conversación inválido (se espera UUID)');
+    }
+
+    const row = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+    });
+    if (!row) {
+      throw new NotFoundException(`Conversación no encontrada: ${conversationId}`);
+    }
+
+    this.clearPendingConversationJobs(conversationId);
+
+    const draftQuotes = await this.draftQuoteRepository.find({
+      where: { conversationId },
+      select: ['id'],
+    });
+    const draftQuoteIds = draftQuotes.map((q) => q.id);
+    if (draftQuoteIds.length > 0) {
+      await this.draftQuoteItemRepository.delete({
+        draftQuoteId: In(draftQuoteIds),
+      });
+    }
+    await this.draftQuoteRepository.delete({ conversationId });
+    await this.messageRepository.delete({ conversationId });
+    await this.appointmentRepository.delete({ conversationId });
+    await this.conversationRepository.delete({ id: conversationId });
   }
 
   async findAllAppointments(): Promise<

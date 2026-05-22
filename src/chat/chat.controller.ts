@@ -3,6 +3,7 @@ import {
   Get, 
   Post,
   Patch,
+  Delete,
   Body, 
   Query, 
   Param, 
@@ -20,7 +21,7 @@ import { ChatService } from './chat.service';
 import type { PatchDraftQuoteBody } from './chat.service';
 import { AiConfigService } from './ai-config.service';
 
-@Controller('webhook') 
+@Controller(['webhook', 'chat'])
 export class ChatController {
   constructor(
     private readonly chatService: ChatService,
@@ -79,12 +80,15 @@ export class ChatController {
 
   // --- RECEPCIÓN Y IA ---
 
+  /**
+   * Webhook POST de Meta Messenger (y payload legacy del panel).
+   * Meta exige ACK inmediato (200 + cuerpo) antes de OpenAI / persistencia.
+   */
   @Post()
-  @HttpCode(HttpStatus.OK)
-  receiveMessage(@Req() req: Request, @Body() body: any) {
-    console.log('--- NUEVO WEBHOOK ---', JSON.stringify(req.body, null, 2));
+  receiveMessage(@Req() req: Request, @Res() res: Response) {
+    const body = req.body;
+    console.log('--- NUEVO WEBHOOK ---', JSON.stringify(body, null, 2));
 
-    /** Meta exige 200 rápido; el trabajo pesado va en background (errores solo en log). */
     void this.chatService
       .ingestWebhookPayload(body ?? {})
       .then((result) => {
@@ -94,10 +98,7 @@ export class ChatController {
         console.error('[webhook] error en ingestWebhookPayload:', err);
       });
 
-    return {
-      status: 'EVENT_RECEIVED',
-      acknowledged: true,
-    };
+    res.status(HttpStatus.OK).type('text/plain').send('EVENT_RECEIVED');
   }
 
   @Post('ai-suggest/:id')
@@ -112,6 +113,15 @@ export class ChatController {
     @Body() body: { isAutoPilotActive?: boolean },
   ) {
     return await this.chatService.patchConversationSettings(id, body);
+  }
+
+  @Delete('conversations/:id')
+  async deleteConversation(@Param('id') id: string) {
+    await this.chatService.deleteConversation(id);
+    return {
+      success: true,
+      message: 'Conversación eliminada correctamente',
+    };
   }
 
   @Patch('quote/:id')
