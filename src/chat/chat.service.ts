@@ -74,12 +74,14 @@ import {
   piezaLabelFromDraftLineDescription,
   type DamageInventoryMergeResult,
 } from './draft-quote-resume';
+import { buildObtenerCotizacionExpressPayload } from './autopilot-cotizacion-express';
 import {
   assistantMessageIsBañoVehiclePrompt,
   type InstantQuoteResolution,
   formatInstantQuoteClientMessage,
   inferBañoTierSeveridad,
   inferBañoVehicleDisplayLabel,
+  isProhibitedVagueInstantQuoteText,
   isBañoDePinturaServicio,
   mentionsCambioDeColor,
   materializeInstantQuoteResolution,
@@ -95,9 +97,9 @@ import {
   shouldAskVehicleBeforeBañoQuote,
   extractBañoColorDetailHeuristic,
   tryBañoPinturaVehicleGateReply,
-  conversationBlocksInstantQuoteInterceptors,
   tryResolvePiezaPinturaInstantReply,
   tryResolveInstantQuoteFromUserText,
+  tryVagueGenericServiceProfilingReply,
   userLatestMessageLooksLikeVehicleModelReply,
 } from './instant-quote-from-text';
 
@@ -467,6 +469,31 @@ export interface PatchDraftQuoteBody {
 
 /** Herramientas del autopilot (Chat Completions `tools`). */
 const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'obtenerCotizacionExpress',
+      description:
+        'Úsala cuando el cliente solicite el precio de un baño de pintura o el repintado express de piezas específicas y ya conozcas el modelo del vehículo. Esta función consultará la base de datos real del taller y te devolverá los precios oficiales para que se los presentes al cliente.',
+      parameters: {
+        type: 'object',
+        properties: {
+          servicios: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Piezas a repintar (ej. Puerta, Fascia, Salpicadera) o "baño de pintura" / pintura exterior completa.',
+          },
+          modeloVehiculo: {
+            type: 'string',
+            description:
+              'Marca y modelo del vehículo del cliente (ej. Volkswagen Bora 2012, Nissan March 2018). Obligatorio antes de cotizar.',
+          },
+        },
+        required: ['servicios', 'modeloVehiculo'],
+      },
+    },
+  },
   {
     type: 'function',
     function: {
@@ -2289,8 +2316,11 @@ export class ChatService implements OnModuleDestroy {
     tierCtx: string,
     snap: MatrixPricingSnapshot,
   ): Promise<string | null> {
+    if (isProhibitedVagueInstantQuoteText(purifiedLatest)) {
+      return null;
+    }
     const tierFlat = flattenBañoTierSource(tierCtx);
-    if (!threadRequiresBañoStructuredQuote(tierFlat)) {
+    if (!threadRequiresBañoStructuredQuote(tierFlat, purifiedLatest)) {
       return null;
     }
 
@@ -2379,6 +2409,9 @@ export class ChatService implements OnModuleDestroy {
     snap: MatrixPricingSnapshot,
   ): Promise<string | null> {
     const latestRaw = String(latestUserText ?? '').trim();
+    if (isProhibitedVagueInstantQuoteText(latestRaw)) {
+      return null;
+    }
     const latest =
       purifyVehicleModelUserReply(latestRaw) ||
       flattenBañoTierSource(latestRaw);
@@ -2393,7 +2426,7 @@ export class ChatService implements OnModuleDestroy {
       (!shouldAskVehicleBeforeBañoQuote(tierNorm, tierFlat) &&
         isBañoVehicleProfiledForQuote(tierNorm, tierFlat));
 
-    if (!vehicleOk && !threadRequiresBañoStructuredQuote(tierFlat)) {
+    if (!vehicleOk && !threadRequiresBañoStructuredQuote(tierFlat, latest)) {
       console.log(
         '[LOG-PINTURA 3-pre] tryBañoPinturaLlm abortado: vehículo no perfilado. tierFlat:',
         tierFlat.slice(0, 500),
@@ -2606,6 +2639,13 @@ export class ChatService implements OnModuleDestroy {
       catalogSnapForTextOnly = await this.catalogService.getMatrixPricingSnapshot();
       const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
       if (!instantIntercept.skipInstantInterceptor) {
+        const vaguePlay = tryVagueGenericServiceProfilingReply(userText);
+        if (vaguePlay) {
+          return {
+            assistantMessage: vaguePlay,
+            damageDetected: false,
+          };
+        }
         const piezaPlay = tryResolvePiezaPinturaInstantReply(
           userText,
           playBañoCtx,
@@ -2755,6 +2795,13 @@ export class ChatService implements OnModuleDestroy {
 
     if (!hasVisionImages && catalogSnapForTextOnly && !instantIntercept.skipInstantInterceptor) {
       const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
+      const vaguePlayMerged = tryVagueGenericServiceProfilingReply(userText);
+      if (vaguePlayMerged) {
+        return {
+          assistantMessage: vaguePlayMerged,
+          damageDetected: false,
+        };
+      }
       const piezaPlayMerged = tryResolvePiezaPinturaInstantReply(
         userText,
         playBañoCtx,
@@ -3752,6 +3799,54 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   // --- LÓGICA DE IA ---
 
   /** Persiste cita tras llamada de herramienta createAppointment (validación de horario del taller). */
+  /** Playground: misma lógica que producción (sin persistir cotización). */
+  private async executeObtenerCotizacionExpressToolPlayground(
+    argsJson: string,
+  ): Promise<Record<string, unknown>> {
+    const stub = { status: 'nuevo' } as Conversation;
+    const result = await this.executeObtenerCotizacionExpressTool(argsJson, stub);
+    return { ...result, preview: true };
+  }
+
+  private async executeObtenerCotizacionExpressTool(
+    argsJson: string,
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+
+    const serviciosRaw = raw.servicios ?? raw.services ?? raw.piezas;
+    const servicios = Array.isArray(serviciosRaw)
+      ? serviciosRaw.map((s) => String(s ?? '').trim()).filter(Boolean)
+      : typeof serviciosRaw === 'string' && serviciosRaw.trim()
+        ? [serviciosRaw.trim()]
+        : [];
+
+    const modeloVehiculo = pickFirstNonEmptyTrimmedString(
+      raw.modeloVehiculo,
+      raw.modelo_vehiculo,
+      raw.vehicleModel,
+      raw.vehicleDescription,
+    );
+
+    const snap = await this.catalogService.getMatrixPricingSnapshot();
+    const isAgendado =
+      String(conversation.status ?? '').toLowerCase().trim() === 'agendado';
+
+    const result = buildObtenerCotizacionExpressPayload(
+      snap,
+      servicios,
+      modeloVehiculo,
+      { leadAgendado: isAgendado },
+    );
+
+    return result as Record<string, unknown>;
+  }
+
   private async executeCreateAppointmentTool(
     argsJson: string,
     conversation: Conversation,
@@ -3932,6 +4027,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             if (r.success && r.scheduledAt) {
               lastConfirmedIso = r.scheduledAt;
             }
+          } else if (name === 'obtenerCotizacionExpress') {
+            payload = await this.executeObtenerCotizacionExpressToolPlayground(
+              tc.function.arguments ?? '{}',
+            );
           } else {
             payload = { success: false, error: `Función no soportada: ${name}` };
           }
@@ -4059,7 +4158,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     if (conversation.status !== 'agendado') {
       return head;
     }
-    return `${head}\n\n[Estado del lead: AGENDADO — La cita ya está registrada. El autopilot permanece activo: si el cliente solo agradece, saluda o escribe algo breve sin una pregunta ni solicitud nueva, responde una sola frase cordial y cierra la interacción sin volver a agendar ni pedir datos. Si el mensaje plantea una duda razonable sobre la visita, el taller o el vehículo, respóndela en pocas frases.]`;
+    return `${head}\n\n[Estado del lead: AGENDADO — El cliente ya tiene cita confirmada. Prioriza responder sus dudas sobre la visita, el taller o el vehículo. Cualquier pieza o servicio extra que cotices con obtenerCotizacionExpress debe presentarse como complemento de su orden para el día acordado; no presiones nueva agenda, no envíes ubicación del taller ni cierres de venta genéricos salvo que lo pida. Si solo agradece o saluda sin pregunta nueva, responde una frase cordial y cierra.]`;
   }
 
   /** Autopilot con historial + tool `createAppointment`. */
@@ -4101,30 +4200,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         ? history.filter((m) => !batchIdSet.has(m.id))
         : history;
 
-      const batchRows = batchInbound ?? [];
-      const historyForBaño =
-        batchRows.length > 0
-          ? [...historySansBatch, ...batchRows]
-          : historySansBatch;
-      const tierCtx = this.buildUnifiedBañoTierContext(
-        historyForBaño,
-        mergedForInstant,
-      );
-      const fullBañoCtx =
-        tierCtx ||
-        this.buildAutopilotBañoContextFromHistory(
-          historySansBatch,
-          mergedForInstant,
-        ) ||
-        mergedForInstant;
-      const purifiedLatest =
-        purifyVehicleModelUserReply(mergedForInstant) || mergedForInstant;
-      const skipBañoVehicleGate = this.shouldSkipBañoVehicleGateAfterModelReply(
-        historySansBatch,
-        mergedForInstant,
-        fullBañoCtx,
-      );
-
       const interceptorTurns = historySansBatch.map((m) => ({
         role:
           String(m.direction ?? '').toLowerCase() === 'outbound'
@@ -4139,137 +4214,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const skipInstantQuoteInterceptors =
         instantDecision.skipInstantInterceptor;
       if (skipInstantQuoteInterceptors) {
-        console.log('[AutopilotInstantQuote]', JSON.stringify(instantDecision));
-      }
-
-      const isLeadAgendado = conversationBlocksInstantQuoteInterceptors(
-        conversation.status,
-      );
-
-      if (mergedForInstant && !skipInstantQuoteInterceptors && !isLeadAgendado) {
-        const snapInstant = await this.catalogService.getMatrixPricingSnapshot();
-
-        const piezaPinturaReply = tryResolvePiezaPinturaInstantReply(
-          purifiedLatest,
-          fullBañoCtx,
-          snapInstant,
-          { conversationStatus: conversation.status },
-        );
-        if (piezaPinturaReply) {
-          console.log(
-            '[PiezaPinturaInstant] Autopilot: cotización express por pieza (sin borrador)',
-          );
-          return piezaPinturaReply;
-        }
-
-        console.log(
-          '[LOG-PINTURA 1] Evaluando GateReply. mergedForInstant:',
-          mergedForInstant,
-          'fullBañoCtx:',
-          fullBañoCtx,
-        );
-        if (!skipBañoVehicleGate) {
-          const gateReply = tryBañoPinturaVehicleGateReply(
-            purifiedLatest,
-            fullBañoCtx,
-            snapInstant,
-          );
-          if (gateReply) {
-            return gateReply;
-          }
-        }
-
-        console.log(
-          '[LOG-PINTURA 2] Entrando a LLM Instant Message. ¿Es nulo el retorno anterior? Sí. Buscando en catálogo...',
-        );
-        const bañoNat = await this.tryBañoPinturaLlmInstantClientMessage(
-          purifiedLatest,
-          fullBañoCtx,
-          snapInstant,
-        );
-        console.log(
-          '[LOG-PINTURA 3] Resultado interno de la función Premium. Retorno:',
-          bañoNat,
-        );
-        if (bañoNat) {
-          return bañoNat;
-        }
-
-        console.log(
-          '[LOG-PINTURA 4] ¡ALERTA! El paso 2 falló o devolvió null. Cayendo en el fallback viejo de texto plano.',
-        );
-        const instant = tryResolveInstantQuoteFromUserText(purifiedLatest, snapInstant, {
-          fullContextForBaño: fullBañoCtx,
-        });
-        if (instant) {
-          console.log(
-            '[LOG-PINTURA 5] Objeto instant detectado por el fallback viejo:',
-            JSON.stringify(instant),
-          );
-          const resolvedInstant = resolveInstantCanonicalLatestThenFull(
-            purifiedLatest,
-            fullBañoCtx,
-            snapInstant,
-          );
-          if (
-            resolvedInstant &&
-            isBañoDePinturaServicio(resolvedInstant.canonical)
-          ) {
-            console.warn(
-              '[AutopilotInstantQuote] baño detectado sin plantilla premium; intentando tryFormatBañoPremiumInstantReply',
-            );
-            const allowed = snapInstant.listSeveridadesForCanonical(
-              resolvedInstant.canonical,
-            );
-            const fromLine = this.parseSeveridadFromInstantResolution(instant);
-            const sevFinal =
-              coerceBañoSeveridadToCatalog(fromLine ?? '', allowed) ??
-              coerceBañoSeveridadToCatalog(
-                inferBañoTierSeveridad(fullBañoCtx),
-                allowed,
-              ) ??
-              allowed[0]!;
-            const premiumFallback = await this.tryFormatBañoPremiumInstantReply(
-              instant,
-              fullBañoCtx,
-              resolvedInstant.canonical,
-              sevFinal,
-            );
-            if (premiumFallback) {
-              return premiumFallback;
-            }
-          } else {
-            return formatInstantQuoteClientMessage(instant);
-          }
-        }
-
-        const forcedAfterInstant = await this.forceBañoPremiumStructuredReply(
-          purifiedLatest,
-          fullBañoCtx,
-          snapInstant,
-        );
-        if (forcedAfterInstant) {
-          return forcedAfterInstant;
-        }
-      }
-
-      if (
-        threadRequiresBañoStructuredQuote(fullBañoCtx) &&
-        !skipInstantQuoteInterceptors &&
-        !isLeadAgendado
-      ) {
-        const snapBaño = await this.catalogService.getMatrixPricingSnapshot();
-        const forcedBaño = await this.forceBañoPremiumStructuredReply(
-          purifiedLatest,
-          fullBañoCtx,
-          snapBaño,
-        );
-        if (forcedBaño) {
-          console.log(
-            '[BañoBlindaje] Autopilot bloqueado: respuesta premium por código (sin GPT libre de precios)',
-          );
-          return forcedBaño;
-        }
+        console.log('[AutopilotAgent]', JSON.stringify(instantDecision));
       }
 
       const dialogue = this.messagesToChatCompletionTurns(historySansBatch);
@@ -4343,20 +4288,21 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             }
             const name = tc.function.name;
             const args = tc.function.arguments ?? '{}';
-            let payload: {
-              success: boolean;
-              appointmentId?: string;
-              scheduledAt?: string;
-              error?: string;
-            };
+            let payload: Record<string, unknown>;
             if (name === 'createAppointment') {
-              payload = await this.executeCreateAppointmentTool(
+              const aptPayload = await this.executeCreateAppointmentTool(
                 args,
                 conversation,
               );
-              if (payload.success && payload.scheduledAt) {
-                lastConfirmedIso = payload.scheduledAt;
+              payload = aptPayload as Record<string, unknown>;
+              if (aptPayload.success && aptPayload.scheduledAt) {
+                lastConfirmedIso = aptPayload.scheduledAt;
               }
+            } else if (name === 'obtenerCotizacionExpress') {
+              payload = await this.executeObtenerCotizacionExpressTool(
+                args,
+                conversation,
+              );
             } else {
               payload = {
                 success: false,
@@ -4513,6 +4459,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         if (turn?.role === 'user') {
           const lastUser = String(turn.content ?? '').trim();
           if (lastUser) {
+            const vagueSuggest = tryVagueGenericServiceProfilingReply(lastUser);
+            if (vagueSuggest) {
+              return vagueSuggest;
+            }
             const piezaSuggest = tryResolvePiezaPinturaInstantReply(
               lastUser,
               userBañoCtx || lastUser,

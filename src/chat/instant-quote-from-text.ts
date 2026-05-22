@@ -35,6 +35,10 @@ const BAÑO_CANON_NORM = 'bano de pintura';
 export const BAÑO_PINTURA_VEHICLE_PROMPT_REPLY =
   '¡Claro! Con gusto. Para darte el precio estimado, ¿qué auto o camioneta tienes?';
 
+/** Perfilamiento cuando el mensaje es demasiado genérico para cotizar por código. */
+export const VAGUE_GENERIC_SERVICE_PROFILING_REPLY =
+  '¡Hola! Con gusto te ayudamos a reparar tu vehículo. 🛠️ Para poder darte el precio exacto, ¿qué le pasó a tu auto? Si tienes fotografías del daño, puedes enviarlas por aquí mismo para que la IA lo valúe de inmediato.';
+
 export function isBañoDePinturaServicio(canonical: string): boolean {
   return normalizeTextForMatch(canonical).includes(BAÑO_CANON_NORM);
 }
@@ -55,18 +59,6 @@ export function flattenBañoTierSource(text: string): string {
     .replace(/\n+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-/** Hilo que debe responder solo con plantilla premium de baño (no precios libres del LLM general). */
-export function threadRequiresBañoStructuredQuote(text: string): boolean {
-  const flat = flattenBañoTierSource(text);
-  const n = normalizeTextForMatch(flat);
-  if (mentionsBañoDePinturaIntent(n)) return true;
-  if (mentionsCambioDeColor(flat)) return true;
-  if (threadHasBañoOrPaintIntent(n) && (contextHasIdentifiedVehicle(n) || /\bbora\b/.test(n))) {
-    return true;
-  }
-  return false;
 }
 
 export function tierSourceMentionsBora(text: string): boolean {
@@ -124,6 +116,107 @@ const PIEZA_PINTURA_ACTION_RE =
 /** Piezas de la matriz hojalatería (no baño/cerámico/estética integral). */
 const PIEZA_TEXT_HINT_RE =
   /\b(facia|fascia|defensa|parachoques|puerta|salpicadera|cofre|capo|toldo|espejo|estribo|cajuela|tapa\s*cajuela)\b/;
+
+/** Términos que solos no identifican servicio ni pieza (prohibido cotizar instantáneo). */
+const VAGUE_GENERIC_INSTANT_QUOTE_TERMS = new Set([
+  'reparacion',
+  'reparar',
+  'cotizacion',
+  'cotiz',
+  'cotiza',
+  'presupuesto',
+  'informacion',
+  'info',
+  'arreglar',
+  'arreglo',
+  'servicio',
+  'precio',
+  'cuanto',
+  'cuanta',
+  'presup',
+  'ayuda',
+  'duda',
+  'pregunta',
+  'dato',
+  'datos',
+]);
+
+function significantWordsFromNormalized(n: string): string[] {
+  return n.split(/\s+/).filter((w) => w.length > 0);
+}
+
+/** Señales concretas que sí permiten cotización instantánea aunque el mensaje sea corto. */
+export function hasConcreteInstantQuoteCue(normalizedBlob: string): boolean {
+  const n = String(normalizedBlob ?? '').trim();
+  if (!n) return false;
+  if (/\b(bano de pintura|bano pintura|bano completo|bano integral)\b/.test(n)) {
+    return true;
+  }
+  if (PIEZA_PINTURA_ACTION_RE.test(n) && PIEZA_TEXT_HINT_RE.test(n)) {
+    return true;
+  }
+  if (mentionsCambioDeColor(flattenBañoTierSource(n))) return true;
+  if (hasExplicitBañoTierInContext(n)) return true;
+  if (CAR_BRANDS_RE.test(n) || COMMON_MODELS_RE.test(n) || YEAR_RE.test(n)) {
+    return true;
+  }
+  if (userExplicitlyRequestsCeramicOrEstetica(n)) return true;
+  if (/\b(chico|mediano|grande|xl)(\s+premium)?\b/.test(n)) return true;
+  return false;
+}
+
+/**
+ * Mensaje demasiado vago para Baño / Pintura express / precios de catálogo.
+ * Regla: solo términos genéricos, o menos de 3 palabras sin señal concreta.
+ */
+export function isProhibitedVagueInstantQuoteText(text: string): boolean {
+  const flat = flattenBañoTierSource(text).trim();
+  if (!flat) return true;
+  const n = normalizeTextForMatch(flat);
+  const words = significantWordsFromNormalized(n);
+  if (words.length === 0) return true;
+
+  const allGeneric = words.every((w) => VAGUE_GENERIC_INSTANT_QUOTE_TERMS.has(w));
+  if (allGeneric) return true;
+
+  if (words.length < 3 && !hasConcreteInstantQuoteCue(n)) {
+    return true;
+  }
+
+  return false;
+}
+
+/** Gate de perfilamiento (sin precio) para mensajes genéricos tipo «Reparación». */
+export function tryVagueGenericServiceProfilingReply(
+  latestUserText: string,
+): string | null {
+  const latest = String(latestUserText ?? '').trim();
+  if (!latest || !isProhibitedVagueInstantQuoteText(latest)) {
+    return null;
+  }
+  return VAGUE_GENERIC_SERVICE_PROFILING_REPLY;
+}
+
+/** Hilo que debe responder solo con plantilla premium de baño (no precios libres del LLM general). */
+export function threadRequiresBañoStructuredQuote(
+  text: string,
+  latestUserText?: string,
+): boolean {
+  if (
+    latestUserText &&
+    isProhibitedVagueInstantQuoteText(latestUserText)
+  ) {
+    return false;
+  }
+  const flat = flattenBañoTierSource(text);
+  const n = normalizeTextForMatch(flat);
+  if (mentionsBañoDePinturaIntent(n)) return true;
+  if (mentionsCambioDeColor(flat)) return true;
+  if (threadHasBañoOrPaintIntent(n) && (contextHasIdentifiedVehicle(n) || /\bbora\b/.test(n))) {
+    return true;
+  }
+  return false;
+}
 
 const SPANISH_QTY_WORDS: Record<string, number> = {
   un: 1,
@@ -387,6 +480,10 @@ export function resolvePiezaPinturaInstant(
   fullContext: string,
   snap: MatrixPricingSnapshot,
 ): PiezaPinturaInstantResolution | null {
+  const latestOnly = String(userText ?? '').trim();
+  if (latestOnly && isProhibitedVagueInstantQuoteText(latestOnly)) {
+    return null;
+  }
   const tierFlat = flattenBañoTierSource(
     [fullContext, userText].filter(Boolean).join(' '),
   );
@@ -464,6 +561,8 @@ export function tryResolvePiezaPinturaInstantReply(
   snap: MatrixPricingSnapshot,
   options?: PiezaPinturaInstantOptions,
 ): string | null {
+  const vagueProfiling = tryVagueGenericServiceProfilingReply(userText);
+  if (vagueProfiling) return vagueProfiling;
   if (conversationBlocksInstantQuoteInterceptors(options?.conversationStatus)) {
     console.log(
       '[PiezaPinturaInstant] omitido: conversación agendada (flujo GPT normal)',
@@ -593,6 +692,7 @@ export function resolveInstantCanonicalServicio(
 ): CanonicalResolve | null {
   const t = String(userText ?? '').trim();
   if (!t) return null;
+  if (isProhibitedVagueInstantQuoteText(t)) return null;
 
   const userNorm = normalizeTextForMatch(t);
 
@@ -628,6 +728,9 @@ export function resolveInstantCanonicalLatestThenFull(
 ): CanonicalResolve | null {
   const latest = String(latestUserText ?? '').trim();
   const full = String(fullContextText ?? '').trim();
+  if (latest && isProhibitedVagueInstantQuoteText(latest)) {
+    return null;
+  }
   return (
     resolveInstantCanonicalServicio(latest, snap) ??
     resolveInstantCanonicalServicio(full, snap)
@@ -871,6 +974,9 @@ export function tryBañoPinturaVehicleGateReply(
   snap: MatrixPricingSnapshot,
 ): string | null {
   const latestRaw = String(latestUserText ?? '').trim();
+  if (isProhibitedVagueInstantQuoteText(latestRaw)) {
+    return null;
+  }
   const latest = purifyVehicleModelUserReply(latestRaw) || latestRaw;
   const full = String(fullContextForBaño ?? '').trim();
   const fullNorm = normalizeTextForMatch(full);
@@ -1168,6 +1274,9 @@ export function tryResolveInstantQuoteFromUserText(
   const tierNorm = normalizeTextForMatch(tierSource);
 
   if (!latest && !fullCtxRaw) return null;
+  if (latest && isProhibitedVagueInstantQuoteText(latest)) {
+    return null;
+  }
 
   const resolved = resolveInstantCanonicalLatestThenFull(latest, fullCtxRaw, snap);
   if (!resolved) {
