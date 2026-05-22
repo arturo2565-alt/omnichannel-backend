@@ -79,6 +79,7 @@ import {
   shouldAskVehicleBeforeBañoQuote,
   extractBañoColorDetailHeuristic,
   tryBañoPinturaVehicleGateReply,
+  tryResolvePiezaPinturaInstantReply,
   tryResolveInstantQuoteFromUserText,
   userLatestMessageLooksLikeVehicleModelReply,
 } from './instant-quote-from-text';
@@ -2258,6 +2259,17 @@ export class ChatService implements OnModuleDestroy {
       catalogSnapForTextOnly = await this.catalogService.getMatrixPricingSnapshot();
       const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
       if (!instantIntercept.skipInstantInterceptor) {
+        const piezaPlay = tryResolvePiezaPinturaInstantReply(
+          userText,
+          playBañoCtx,
+          catalogSnapForTextOnly,
+        );
+        if (piezaPlay) {
+          return {
+            assistantMessage: piezaPlay,
+            damageDetected: false,
+          };
+        }
         const gateReply = tryBañoPinturaVehicleGateReply(
           userText,
           playBañoCtx,
@@ -2396,6 +2408,17 @@ export class ChatService implements OnModuleDestroy {
 
     if (!hasVisionImages && catalogSnapForTextOnly && !instantIntercept.skipInstantInterceptor) {
       const playBañoCtx = this.buildPlaygroundUserBañoContext(historyTurns, userText);
+      const piezaPlayMerged = tryResolvePiezaPinturaInstantReply(
+        userText,
+        playBañoCtx,
+        catalogSnapForTextOnly,
+      );
+      if (piezaPlayMerged) {
+        return {
+          assistantMessage: piezaPlayMerged,
+          damageDetected: false,
+        };
+      }
       const gateMerged = tryBañoPinturaVehicleGateReply(
         userText,
         playBañoCtx,
@@ -3725,6 +3748,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       if (mergedForInstant && !skipInstantQuoteInterceptors) {
         const snapInstant = await this.catalogService.getMatrixPricingSnapshot();
 
+        const piezaPinturaReply = tryResolvePiezaPinturaInstantReply(
+          purifiedLatest,
+          fullBañoCtx,
+          snapInstant,
+        );
+        if (piezaPinturaReply) {
+          console.log(
+            '[PiezaPinturaInstant] Autopilot: cotización express por pieza (sin borrador)',
+          );
+          return piezaPinturaReply;
+        }
+
         console.log(
           '[LOG-PINTURA 1] Evaluando GateReply. mergedForInstant:',
           mergedForInstant,
@@ -4075,6 +4110,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         if (turn?.role === 'user') {
           const lastUser = String(turn.content ?? '').trim();
           if (lastUser) {
+            const piezaSuggest = tryResolvePiezaPinturaInstantReply(
+              lastUser,
+              userBañoCtx || lastUser,
+              snapM,
+            );
+            if (piezaSuggest) {
+              return piezaSuggest;
+            }
             const gateM = tryBañoPinturaVehicleGateReply(
               lastUser,
               userBañoCtx || lastUser,

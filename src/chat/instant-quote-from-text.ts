@@ -116,6 +116,252 @@ function isEsteticaAutomotrizCanonical(canonical: string): boolean {
   return k.includes('estetica') && k.includes('automotriz');
 }
 
+const PIEZA_PINTURA_SEVERIDAD_DL = 'DL' as const;
+
+const TALLER_MAPS_URL_PIEZA =
+  'https://maps.app.goo.gl/a3tEimJquzaJAwSD9?g_st=ipc';
+
+const PIEZA_PINTURA_ACTION_RE =
+  /\b(pintar|repintar|repintado|pintura|rayon|rayado|aranzazo|rozad|lijad)\w*/;
+
+/** Piezas de la matriz hojalatería (no baño/cerámico/estética integral). */
+const PIEZA_TEXT_HINT_RE =
+  /\b(facia|fascia|defensa|parachoques|puerta|salpicadera|cofre|capo|toldo|espejo|estribo|cajuela|tapa\s*cajuela)\b/;
+
+const SPANISH_QTY_WORDS: Record<string, number> = {
+  un: 1,
+  una: 1,
+  uno: 1,
+  dos: 2,
+  tres: 3,
+  cuatro: 4,
+  cinco: 5,
+  seis: 6,
+};
+
+export type PiezaPinturaInstantLine = {
+  canonicalPieza: string;
+  quantity: number;
+  unitPriceDl: number;
+  subtotal: number;
+};
+
+export type PiezaPinturaInstantResolution = {
+  lines: PiezaPinturaInstantLine[];
+  totalMx: number;
+  vehicleLabel: string | null;
+  summaryLabel: string;
+  /** Cotización express por texto: no borrador en pestaña ni pausa de autopilot por visión. */
+  isInstantService: true;
+};
+
+function isRepintadoPiezaCatalogServicio(canonical: string): boolean {
+  const k = normalizeTextForMatch(canonical);
+  if (isBañoDePinturaServicio(canonical)) return false;
+  if (isCeramicoCanonical(canonical)) return false;
+  if (isEsteticaAutomotrizCanonical(canonical)) return false;
+  if (k.includes('estetica')) return false;
+  return true;
+}
+
+function formatPiezaPinturaPriceMx(amount: number): string {
+  const v = Math.round(Number(amount) || 0);
+  return `$${v.toLocaleString('es-MX')} MXN`;
+}
+
+function parseSpanishQtyToken(tok: string): number {
+  const t = normalizeTextForMatch(tok);
+  if (SPANISH_QTY_WORDS[t] != null) return SPANISH_QTY_WORDS[t]!;
+  const d = Number.parseInt(tok, 10);
+  return Number.isFinite(d) && d > 0 ? d : 1;
+}
+
+/** Alias en texto → match catálogo (serviciosOrderedLongestFirst). */
+const PIEZA_EXTRA_NEEDLES: readonly { re: RegExp; needles: readonly string[] }[] = [
+  { re: /\bfacias?\b|\bdefensa\b/, needles: ['fascia', 'facia'] },
+  { re: /\bpuertas?\b/, needles: ['puerta'] },
+  { re: /\bsalpicaderas?\s*traseras?\b/, needles: ['salpicadera trasera'] },
+  { re: /\bsalpicaderas?\b/, needles: ['salpicadera'] },
+  { re: /\bcofre\b|\bcapo\b/, needles: ['cofre'] },
+  { re: /\btapa\s*cajuela\b|\bcajuela\b/, needles: ['tapa cajuela'] },
+  { re: /\btoldos?\b/, needles: ['toldo'] },
+  { re: /\bespejos?\b/, needles: ['espejo'] },
+  { re: /\bestribos?\b/, needles: ['estribo'] },
+];
+
+function piezaMentionedInNormalizedText(
+  n: string,
+  canonical: string,
+): boolean {
+  const cn = normalizeTextForMatch(canonical);
+  if (normalizedHaystackHasWholeToken(n, cn)) return true;
+  if (cn.includes(' ') && n.includes(cn.replace(/\s+/g, ' '))) return true;
+  for (const { re, needles } of PIEZA_EXTRA_NEEDLES) {
+    if (!re.test(n)) continue;
+    for (const needle of needles) {
+      if (normalizeTextForMatch(canonical).includes(normalizeTextForMatch(needle))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function extractQuantityForPieza(n: string, canonical: string): number {
+  const cn = normalizeTextForMatch(canonical);
+
+  if (cn === 'puerta' || cn.startsWith('puerta')) {
+    const m = n.match(
+      /\b(\d+|un|una|dos|tres|cuatro|cinco|seis)\s+puertas?\b/,
+    );
+    if (m) return parseSpanishQtyToken(m[1]);
+  }
+
+  if (cn.includes('salpicadera')) {
+    const m = n.match(
+      /\b(\d+|dos|tres|cuatro|cinco)\s+salpicaderas?\b/,
+    );
+    if (m) return parseSpanishQtyToken(m[1]);
+  }
+
+  const escaped = cn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const generic = n.match(
+    new RegExp(`\\b(\\d+|dos|tres|cuatro|cinco|seis)\\s+${escaped}s?\\b`),
+  );
+  if (generic) return parseSpanishQtyToken(generic[1]);
+
+  return 1;
+}
+
+function detectPiezaPinturaLineItems(
+  tierFlat: string,
+  snap: MatrixPricingSnapshot,
+): PiezaPinturaInstantLine[] {
+  const n = normalizeTextForMatch(tierFlat);
+  const items: PiezaPinturaInstantLine[] = [];
+  const usedCanonical = new Set<string>();
+
+  for (const canonical of snap.serviciosOrderedLongestFirst) {
+    if (!isRepintadoPiezaCatalogServicio(canonical)) continue;
+    const unit = snap.getPriceForCanonical(canonical, PIEZA_PINTURA_SEVERIDAD_DL);
+    if (unit <= 0) continue;
+    if (!piezaMentionedInNormalizedText(n, canonical)) continue;
+    if (usedCanonical.has(canonical)) continue;
+
+    const quantity = extractQuantityForPieza(n, canonical);
+    items.push({
+      canonicalPieza: canonical,
+      quantity,
+      unitPriceDl: unit,
+      subtotal: unit * quantity,
+    });
+    usedCanonical.add(canonical);
+  }
+
+  return items;
+}
+
+function buildPiezaPinturaSummaryLabel(lines: PiezaPinturaInstantLine[]): string {
+  if (lines.length === 1) {
+    const l = lines[0]!;
+    return `${l.quantity}x ${l.canonicalPieza} - Pintura Express`;
+  }
+  const parts = lines.map((l) => `${l.quantity}x ${l.canonicalPieza}`);
+  return `${parts.join(', ')} - Pintura Express`;
+}
+
+/** Texto sugiere repintado de pieza(s), no baño integral. */
+export function textLooksLikePiezaPinturaRepintadoRequest(text: string): boolean {
+  const flat = flattenBañoTierSource(text);
+  const n = normalizeTextForMatch(flat);
+  if (!PIEZA_PINTURA_ACTION_RE.test(n)) return false;
+  if (/\b(bano de pintura|bano pintura|bano completo|bano integral)\b/.test(n)) {
+    return false;
+  }
+  if (mentionsBañoDePinturaIntent(n) && !PIEZA_TEXT_HINT_RE.test(n)) {
+    return false;
+  }
+  return PIEZA_TEXT_HINT_RE.test(n);
+}
+
+export function resolvePiezaPinturaInstant(
+  userText: string,
+  fullContext: string,
+  snap: MatrixPricingSnapshot,
+): PiezaPinturaInstantResolution | null {
+  const tierFlat = flattenBañoTierSource(
+    [fullContext, userText].filter(Boolean).join(' '),
+  );
+  if (!textLooksLikePiezaPinturaRepintadoRequest(tierFlat)) {
+    return null;
+  }
+
+  const lines = detectPiezaPinturaLineItems(tierFlat, snap);
+  if (!lines.length) {
+    return null;
+  }
+
+  const totalMx = lines.reduce((s, l) => s + l.subtotal, 0);
+  if (totalMx <= 0) return null;
+
+  const vehicleLabel = inferBañoVehicleDisplayLabel(tierFlat);
+
+  console.log(
+    '[PiezaPinturaInstant]',
+    JSON.stringify({
+      tierPreview: tierFlat.slice(0, 400),
+      lines,
+      totalMx,
+      severidad: PIEZA_PINTURA_SEVERIDAD_DL,
+      isInstantService: true,
+    }),
+  );
+
+  return {
+    lines,
+    totalMx,
+    vehicleLabel,
+    summaryLabel: buildPiezaPinturaSummaryLabel(lines),
+    isInstantService: true,
+  };
+}
+
+export function formatPiezaPinturaInstantReplyText(
+  resolution: PiezaPinturaInstantResolution,
+): string {
+  const vehicle =
+    resolution.vehicleLabel?.trim() || 'tu vehículo';
+  const totalStr = formatPiezaPinturaPriceMx(resolution.totalMx);
+  const summary = resolution.summaryLabel;
+
+  return [
+    `🎨 **Servicio de Repintado Automotriz (${vehicle})**`,
+    `💰 **Total Estimado: ${totalStr}** (${summary})`,
+    `**Incluye:**`,
+    `🔧 Preparación de superficie y eliminación de rayones superficiales`,
+    `✨ Materiales gama alta (Pintura y Barniz Sikkens matching exacto de color)`,
+    `🛡️ Garantía por escrito en brillo y adherencia ante descascaramiento`,
+    `💎 Pulido y abrillantado de la pieza para igualar el resto del auto`,
+    `⏳ **Tiempo estimado:** 2 días hábiles`,
+    `📍 **Ubicación del taller:** ${TALLER_MAPS_URL_PIEZA}`,
+    ``,
+    `¿Te gustaría que te reserve fecha y hora para ingresar tu auto al área de pintura? 📆✨`,
+  ].join('\n');
+}
+
+/**
+ * Repintado de pieza(s) por texto (DL en catálogo). Ejecutar **antes** del baño de pintura completo.
+ */
+export function tryResolvePiezaPinturaInstantReply(
+  userText: string,
+  fullContext: string,
+  snap: MatrixPricingSnapshot,
+): string | null {
+  const resolution = resolvePiezaPinturaInstant(userText, fullContext, snap);
+  if (!resolution) return null;
+  return formatPiezaPinturaInstantReplyText(resolution);
+}
+
 /** Cerámico / estética solo si el usuario lo pide explícitamente (no por "máxima" sola). */
 export function userExplicitlyRequestsCeramicOrEstetica(text: string): boolean {
   const n = normalizeTextForMatch(text);
@@ -239,7 +485,8 @@ export function resolveInstantCanonicalServicio(
 
   if (
     threadHasBañoOrPaintIntent(t) &&
-    !userExplicitlyRequestsCeramicOrEstetica(t)
+    !userExplicitlyRequestsCeramicOrEstetica(t) &&
+    !textLooksLikePiezaPinturaRepintadoRequest(t)
   ) {
     const banoEarly = resolveBañoCanonicalFromSnap(snap);
     if (banoEarly) {
