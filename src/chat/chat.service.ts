@@ -61,6 +61,7 @@ import {
 import {
   DRAFT_RESUME_BASE_AUTH_HINT,
   buildClienteFormalNarrativeAgendado,
+  buildClienteFormalNarrativeComplement,
   buildClienteFormalNarrativeSinCita,
   buildDamagePhotoIntroForCliente,
   buildDraftResumeAgendadoCriticalContext,
@@ -68,7 +69,10 @@ import {
   draftQuoteLinesToClientePiezaRows,
   formatAppointmentHumanDate,
   formatDraftAppointmentCitaLong,
+  mergeDamageInventoryAccumulative,
   normalizeAuthorizedQuoteSummaryLines,
+  piezaLabelFromDraftLineDescription,
+  type DamageInventoryMergeResult,
 } from './draft-quote-resume';
 import {
   assistantMessageIsBañoVehiclePrompt,
@@ -1531,7 +1535,14 @@ export class ChatService implements OnModuleDestroy {
       resolvedDirection === 'outbound' &&
       String(data.conversationLeadStatus ?? '').trim() === 'cotizado'
     ) {
-      conversation.status = 'cotizado';
+      const activeApt = await this.loadActiveAppointmentForConversation(
+        conversation.id,
+      );
+      if (activeApt) {
+        conversation.status = 'agendado';
+      } else {
+        conversation.status = 'cotizado';
+      }
     }
 
     await this.conversationRepository.save(conversation);
@@ -1818,6 +1829,61 @@ export class ChatService implements OnModuleDestroy {
     return rows[0] ?? null;
   }
 
+  /** Inventario previo del borrador PENDING_APPROVAL (para acumular golpes). */
+  private extractPriorInventoryFromDraft(
+    existingDraft: DraftQuoteEntity,
+  ): DetectedDamageItem[] {
+    const fromAnalysis = existingDraft.damageAnalysis?.inventory;
+    if (Array.isArray(fromAnalysis) && fromAnalysis.length > 0) {
+      return fromAnalysis.map((it) => ({
+        pieza: it.pieza,
+        severidad: it.severidad,
+        descripcionTecnica: it.descripcionTecnica,
+        urls_origen: [...(it.urls_origen ?? [])],
+      }));
+    }
+    const fromBasis = existingDraft.quotePayload?.analysisBasis?.inventory;
+    if (Array.isArray(fromBasis) && fromBasis.length > 0) {
+      return fromBasis.map((it) => ({
+        pieza: it.pieza,
+        severidad: it.severidad,
+        descripcionTecnica: it.descripcionTecnica,
+        urls_origen: [...(it.urls_origen ?? [])],
+      }));
+    }
+    const lines = existingDraft.quotePayload?.lines ?? [];
+    if (lines.length > 0) {
+      return lines.map((line) => ({
+        pieza: piezaLabelFromDraftLineDescription(line.description),
+        severidad: 'DL',
+        descripcionTecnica: line.description,
+        urls_origen: [],
+      }));
+    }
+    return [];
+  }
+
+  /** Tras nuevo borrador: `por_cotizar` salvo lead con cita activa (permanece `agendado`). */
+  private async markConversationDraftPendingReview(
+    conversationId: string,
+  ): Promise<void> {
+    const conv = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+    });
+    const activeApt =
+      await this.loadActiveAppointmentForConversation(conversationId);
+    const keepAgendado =
+      String(conv?.status ?? '').toLowerCase().trim() === 'agendado' ||
+      activeApt != null;
+
+    await this.conversationRepository.update(
+      { id: conversationId },
+      keepAgendado
+        ? { isAutoPilotActive: false }
+        : { status: 'por_cotizar', isAutoPilotActive: false },
+    );
+  }
+
   /**
    * Reemplaza `formalNarrative` del borrador por el mensaje al cliente (agendado vs sin cita).
    */
@@ -1826,6 +1892,10 @@ export class ChatService implements OnModuleDestroy {
     analysis: VehicleDamageAnalysis,
     conversationId: string,
     imageCount: number,
+    complement?: Pick<
+      DamageInventoryMergeResult,
+      'previousPiezas' | 'newPiezas'
+    > | null,
   ): Promise<void> {
     const conv = await this.conversationRepository.findOne({
       where: { id: conversationId },
@@ -1843,6 +1913,34 @@ export class ChatService implements OnModuleDestroy {
     const lineRows = draftQuoteLinesToClientePiezaRows(draft.lines);
     const total = draft.total ?? draft.subtotal ?? 0;
     const damageIntro = buildDamagePhotoIntroForCliente(analysis, imageCount);
+
+    const isComplement =
+      complement != null &&
+      complement.previousPiezas.length > 0 &&
+      complement.newPiezas.length > 0;
+
+    if (isComplement) {
+      const newSet = new Set(complement!.newPiezas);
+      const newLineRows = lineRows.filter((r) => newSet.has(r.pieza));
+      const formattedDate = apt?.scheduledAt
+        ? formatDraftAppointmentCitaLong(apt.scheduledAt)
+        : undefined;
+      const mapsUrl = hasActiveAppointment
+        ? undefined
+        : await this.aiConfigService.getValue(AI_CONFIG_KEYS.BUSINESS_MAPS_URL);
+      draft.formalNarrative = buildClienteFormalNarrativeComplement({
+        contactName,
+        previousPiezas: complement!.previousPiezas,
+        newPiezas: complement!.newPiezas,
+        newLineRows,
+        total,
+        hasAppointment: hasActiveAppointment,
+        appointmentFormatted: formattedDate,
+        mapsUrl,
+        damageIntro,
+      });
+      return;
+    }
 
     if (hasActiveAppointment) {
       const formattedDate = apt?.scheduledAt
@@ -3101,19 +3199,69 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       order: { createdAt: 'DESC' },
     });
 
-    const inventory = await this.analyzeDamageImage(imageUrls);
-    const analysis = inventoryItemsToVehicleAnalysis(inventory, imageUrls);
+    const newInventory = await this.analyzeDamageImage(imageUrls);
+
+    let analysis: VehicleDamageAnalysis;
+    let complementMeta: Pick<
+      DamageInventoryMergeResult,
+      'previousPiezas' | 'newPiezas'
+    > | null = null;
+    let allImageUrls = imageUrls;
+
+    if (existingDraft) {
+      const priorInventory =
+        this.extractPriorInventoryFromDraft(existingDraft);
+      const priorUrls = parseDraftImageUrls(existingDraft.imageUrl ?? '');
+      allImageUrls = [
+        ...new Set([...priorUrls, ...imageUrls]),
+      ];
+
+      if (priorInventory.length > 0) {
+        const snapMerge =
+          await this.catalogService.getMatrixPricingSnapshot();
+        const mergedInv = mergeDamageInventoryAccumulative(
+          priorInventory,
+          newInventory,
+          (raw) => snapMerge.matchServicio(raw),
+        );
+        complementMeta = {
+          previousPiezas: mergedInv.previousPiezas,
+          newPiezas: mergedInv.newPiezas,
+        };
+        analysis = inventoryItemsToVehicleAnalysis(
+          mergedInv.merged,
+          allImageUrls,
+        );
+      } else {
+        analysis = inventoryItemsToVehicleAnalysis(
+          newInventory,
+          allImageUrls,
+        );
+      }
+    } else {
+      analysis = inventoryItemsToVehicleAnalysis(newInventory, imageUrls);
+    }
+
     const estimateAmount = await this.computePrimaryMatrixEstimate(analysis);
-    const draftQuoteDoc = await this.generateDraftQuote(analysis);
+    let draftQuoteDoc = await this.generateDraftQuote(analysis);
+
+    if (existingDraft?.quotePayload?.reference) {
+      draftQuoteDoc = {
+        ...draftQuoteDoc,
+        reference: existingDraft.quotePayload.reference,
+        generatedAt: existingDraft.quotePayload.generatedAt,
+      };
+    }
+
     await this.applyClientFacingFormalNarrativeToDraft(
       draftQuoteDoc,
       analysis,
       conversationId,
       imageUrls.length,
+      complementMeta,
     );
 
-    const persistedImageUrl =
-      imageUrls.length === 1 ? imageUrls[0] : JSON.stringify(imageUrls);
+    const persistedImageUrl = persistDraftImageUrlField(allImageUrls);
 
     const messageId = attachingMessageId;
 
@@ -3129,7 +3277,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         savedDraft.id,
         analysis,
         draftQuoteDoc,
-        imageUrls,
+        allImageUrls,
       );
 
       if (priorMessageId && priorMessageId !== messageId) {
@@ -3143,10 +3291,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         { damageAnalysis: analysis, draftQuote: draftQuoteDoc },
       );
 
-      await this.conversationRepository.update(
-        { id: conversationId },
-        { status: 'por_cotizar', isAutoPilotActive: false },
-      );
+      await this.markConversationDraftPendingReview(conversationId);
 
       this.chatGateway.emitDraftQuoteReady({
         draftQuoteId: savedDraft.id,
@@ -3174,7 +3319,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       savedDraft.id,
       analysis,
       draftQuoteDoc,
-      imageUrls,
+      allImageUrls,
     );
 
     await this.messageRepository.update(
@@ -3182,10 +3327,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       { damageAnalysis: analysis, draftQuote: draftQuoteDoc },
     );
 
-    await this.conversationRepository.update(
-      { id: conversationId },
-      { status: 'por_cotizar', isAutoPilotActive: false },
-    );
+    await this.markConversationDraftPendingReview(conversationId);
 
     this.chatGateway.emitDraftQuoteReady({
       draftQuoteId: savedDraft.id,

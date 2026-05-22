@@ -1,5 +1,91 @@
 import type { DraftQuoteLine } from './autofix-config';
+import { coerceDamageLevelCode, damageLevelRank } from './autofix-config';
+import type { DetectedDamageItem } from './entities/chat.entity';
 import { WORKSHOP_TIMEZONE } from './appointment-intent';
+
+export type DamageInventoryMergeResult = {
+  merged: DetectedDamageItem[];
+  /** Piezas que ya estaban en el borrador antes de esta ráfaga. */
+  previousPiezas: string[];
+  /** Piezas nuevas detectadas en esta ráfaga (no estaban en el borrador). */
+  newPiezas: string[];
+};
+
+/**
+ * Acumula inventario de daños: conserva piezas previas y agrega nuevas;
+ * si la misma pieza reaparece, toma la severidad más alta y fusiona URLs.
+ */
+export function mergeDamageInventoryAccumulative(
+  prior: readonly DetectedDamageItem[],
+  incoming: readonly DetectedDamageItem[],
+  matchServicio: (raw: string) => string | null,
+): DamageInventoryMergeResult {
+  const map = new Map<string, DetectedDamageItem>();
+  const previousCanonicals = new Set<string>();
+
+  for (const it of prior) {
+    const raw = String(it.pieza ?? '').trim();
+    if (!raw) continue;
+    const canon = matchServicio(raw) ?? raw;
+    previousCanonicals.add(canon);
+    map.set(canon, {
+      pieza: canon,
+      severidad: coerceDamageLevelCode(it.severidad),
+      descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
+      urls_origen: [...(it.urls_origen ?? [])],
+    });
+  }
+
+  const newPiezas: string[] = [];
+
+  for (const it of incoming) {
+    const raw = String(it.pieza ?? '').trim();
+    if (!raw) continue;
+    const canon = matchServicio(raw) ?? raw;
+    const existing = map.get(canon);
+    if (!existing) {
+      map.set(canon, {
+        pieza: canon,
+        severidad: coerceDamageLevelCode(it.severidad),
+        descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
+        urls_origen: [...(it.urls_origen ?? [])],
+      });
+      if (!previousCanonicals.has(canon)) {
+        newPiezas.push(canon);
+      }
+      continue;
+    }
+    const sevNew = coerceDamageLevelCode(it.severidad);
+    const sevOld = coerceDamageLevelCode(existing.severidad);
+    const worst =
+      damageLevelRank(sevNew) > damageLevelRank(sevOld) ? sevNew : sevOld;
+    const descParts = [existing.descripcionTecnica, it.descripcionTecnica]
+      .map((d) => String(d ?? '').trim())
+      .filter(Boolean);
+    map.set(canon, {
+      pieza: canon,
+      severidad: worst,
+      descripcionTecnica: [...new Set(descParts)].join(' | '),
+      urls_origen: [
+        ...new Set([...(existing.urls_origen ?? []), ...(it.urls_origen ?? [])]),
+      ],
+    });
+  }
+
+  return {
+    merged: [...map.values()],
+    previousPiezas: [...previousCanonicals],
+    newPiezas,
+  };
+}
+
+export function formatPiezasListForCliente(piezas: readonly string[]): string {
+  const list = piezas.map((p) => String(p).trim()).filter(Boolean);
+  if (list.length === 0) return '—';
+  if (list.length === 1) return list[0]!;
+  if (list.length === 2) return `${list[0]} y ${list[1]}`;
+  return `${list.slice(0, -1).join(', ')} y ${list[list.length - 1]}`;
+}
 
 /** Narrativa legal del borrador (no es mensaje al cliente). */
 export function isFormalDocumentNarrative(text: string): boolean {
@@ -130,6 +216,67 @@ export function buildClienteFormalNarrativeSinCita(opts: {
     ``,
     `📅 Tenemos espacios esta semana. ¿Qué día te queda mejor para ingresar tu unidad?`,
   ].join('\n');
+}
+
+/** Complemento sobre borrador acumulado (piezas previas + nuevas de esta ráfaga). */
+export function buildClienteFormalNarrativeComplement(opts: {
+  contactName: string;
+  previousPiezas: readonly string[];
+  newPiezas: readonly string[];
+  newLineRows: readonly { pieza: string; precioMx: number }[];
+  total: number;
+  hasAppointment: boolean;
+  appointmentFormatted?: string;
+  mapsUrl?: string;
+  damageIntro?: string;
+}): string {
+  const name = String(opts.contactName ?? '').trim() || 'cliente';
+  const prevLabel = formatPiezasListForCliente(opts.previousPiezas);
+  const newLabel = formatPiezasListForCliente(opts.newPiezas);
+  const total = Math.max(0, Math.round(Number(opts.total) || 0));
+  const newLinesText = opts.newLineRows
+    .map((r) => formatClientePiezaLineExtra(r.pieza, r.precioMx))
+    .join('\n');
+  const intro = opts.damageIntro?.trim()
+    ? `${opts.damageIntro} `
+    : '';
+
+  const blocks: string[] = [
+    `👋 ¡Hola, ${name}! ${intro}`.trim(),
+    `Además de tus piezas previas (${prevLabel}), detectamos este complemento: ${newLabel}.`,
+    ``,
+  ];
+
+  if (newLinesText) {
+    blocks.push(newLinesText, ``);
+  }
+
+  blocks.push(
+    `💰 **Tu Gran Total acumulado queda en: $${total.toLocaleString('es-MX')} MXN** *(Sujeto a revisión física. Incluye materiales premium Sikkens y garantía).*`,
+  );
+
+  if (opts.hasAppointment) {
+    const when =
+      String(opts.appointmentFormatted ?? '').trim() ||
+      'el día acordado para tu visita';
+    blocks.push(
+      ``,
+      `Anotamos estos conceptos como un extra en tu orden de servicio. **Los realizaremos este mismo ${when} que ingresas tu vehículo al taller.**`,
+      ``,
+      `¿Tienes alguna duda con las piezas nuevas o prefieres que lo sumemos al presupuesto inicial? 😊✨`,
+    );
+  } else {
+    const mapLink =
+      String(opts.mapsUrl ?? '').trim() || 'https://goo.gl/maps/tu-ubicacion-real';
+    blocks.push(
+      ``,
+      `📍 Estamos aquí, fácil de llegar: ${mapLink}`,
+      ``,
+      `📅 Tenemos espacios esta semana. ¿Qué día te queda mejor para ingresar tu unidad?`,
+    );
+  }
+
+  return blocks.join('\n');
 }
 
 /** Fecha/hora de cita en español (México). */
