@@ -1936,11 +1936,21 @@ export class ChatService implements OnModuleDestroy {
       shouldAskVehicleBeforeBañoQuote(tierNorm, tierSource) ||
       !isBañoVehicleProfiledForQuote(tierNorm, tierSource)
     ) {
+      console.log(
+        '[LOG-PINTURA 3-pre] tryBañoPinturaLlm abortado: vehículo no perfilado o gate. tierSource:',
+        tierSource.slice(0, 500),
+      );
       return null;
     }
 
     const resolved = resolveInstantCanonicalLatestThenFull(latest, full, snap);
-    if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) return null;
+    if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) {
+      console.log(
+        '[LOG-PINTURA 3-pre] tryBañoPinturaLlm abortado: sin canonical baño. resolved:',
+        resolved,
+      );
+      return null;
+    }
 
     const allowed = snap.listSeveridadesForCanonical(resolved.canonical);
     if (!allowed.length) return null;
@@ -1958,6 +1968,14 @@ export class ChatService implements OnModuleDestroy {
       vehicleLabel = cls.vehicleLabel;
       segmentoEs = cls.segmentoEs;
       severidadLiteral = cls.severidadLiteral;
+      console.log(
+        '[LOG-PINTURA 3-llm] OpenAI classifyBañoPinturaTier:',
+        JSON.stringify({
+          vehicleLabel,
+          segmentoEs,
+          severidadLiteral,
+        }),
+      );
     } catch (err) {
       console.warn('[BañoPinturaLlm] classify fallback:', err);
       const inferred = inferBañoTierSeveridad(tierSource);
@@ -1996,7 +2014,28 @@ export class ChatService implements OnModuleDestroy {
       latestPreview: latest,
       fullCtxPreview: full,
     });
-    if (!resolution) return null;
+    if (!resolution) {
+      console.log(
+        '[LOG-PINTURA 3-pre] materializeInstantQuoteResolution null. sevFinal:',
+        sevFinal,
+        'canonical:',
+        resolved.canonical,
+        'precioCelda:',
+        snap.getPriceForCanonical(resolved.canonical, sevFinal),
+      );
+      return null;
+    }
+
+    console.log(
+      '[LOG-PINTURA 3-catálogo] Precios leídos de BD (resolution):',
+      JSON.stringify({
+        precioMxBase: resolution.precioMx,
+        extras: resolution.extras,
+        total: resolution.total,
+        severidadLiteral: sevFinal,
+        canonical: resolved.canonical,
+      }),
+    );
 
     let vl = vehicleLabel.trim();
     if (!vl || isPlaceholderBañoVehicleLabel(vl)) {
@@ -2017,7 +2056,7 @@ export class ChatService implements OnModuleDestroy {
     }
 
     try {
-      return await composeBañoNaturalInstantReply(this.openai, {
+      const premiumText = await composeBañoNaturalInstantReply(this.openai, {
         vehicleLabel: vl,
         segmentoEs: seg,
         servicioDb: resolved.canonical,
@@ -2025,6 +2064,11 @@ export class ChatService implements OnModuleDestroy {
         resolution,
         personalizedColorDetail,
       });
+      console.log(
+        '[LOG-PINTURA 3-final] String plantilla premium ensamblado (primeros 400 chars):',
+        premiumText.slice(0, 400),
+      );
+      return premiumText;
     } catch (err) {
       console.warn('[BañoPinturaLlm] compose fallback plantilla:', err);
       return null;
@@ -3560,6 +3604,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
       if (mergedForInstant && !skipInstantQuoteInterceptors) {
         const snapInstant = await this.catalogService.getMatrixPricingSnapshot();
+
+        console.log(
+          '[LOG-PINTURA 1] Evaluando GateReply. mergedForInstant:',
+          mergedForInstant,
+          'fullBañoCtx:',
+          fullBañoCtx,
+        );
         if (!skipBañoVehicleGate) {
           const gateReply = tryBañoPinturaVehicleGateReply(
             purifiedLatest,
@@ -3571,19 +3622,33 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           }
         }
 
-        const bañoPremium = await this.resolveBañoInstantPremiumMessage(
+        console.log(
+          '[LOG-PINTURA 2] Entrando a LLM Instant Message. ¿Es nulo el retorno anterior? Sí. Buscando en catálogo...',
+        );
+        const bañoNat = await this.tryBañoPinturaLlmInstantClientMessage(
           purifiedLatest,
           fullBañoCtx,
           snapInstant,
         );
-        if (bañoPremium) {
-          return bañoPremium;
+        console.log(
+          '[LOG-PINTURA 3] Resultado interno de la función Premium. Retorno:',
+          bañoNat,
+        );
+        if (bañoNat) {
+          return bañoNat;
         }
 
+        console.log(
+          '[LOG-PINTURA 4] ¡ALERTA! El paso 2 falló o devolvió null. Cayendo en el fallback viejo de texto plano.',
+        );
         const instant = tryResolveInstantQuoteFromUserText(purifiedLatest, snapInstant, {
           fullContextForBaño: fullBañoCtx,
         });
         if (instant) {
+          console.log(
+            '[LOG-PINTURA 5] Objeto instant detectado por el fallback viejo:',
+            JSON.stringify(instant),
+          );
           const resolvedInstant = resolveInstantCanonicalLatestThenFull(
             purifiedLatest,
             fullBañoCtx,
@@ -3594,8 +3659,28 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             isBañoDePinturaServicio(resolvedInstant.canonical)
           ) {
             console.warn(
-              '[AutopilotInstantQuote] baño detectado sin plantilla premium; no se usa formato plano',
+              '[AutopilotInstantQuote] baño detectado sin plantilla premium; intentando tryFormatBañoPremiumInstantReply',
             );
+            const allowed = snapInstant.listSeveridadesForCanonical(
+              resolvedInstant.canonical,
+            );
+            const fromLine = this.parseSeveridadFromInstantResolution(instant);
+            const sevFinal =
+              coerceBañoSeveridadToCatalog(fromLine ?? '', allowed) ??
+              coerceBañoSeveridadToCatalog(
+                inferBañoTierSeveridad(fullBañoCtx),
+                allowed,
+              ) ??
+              allowed[0]!;
+            const premiumFallback = await this.tryFormatBañoPremiumInstantReply(
+              instant,
+              fullBañoCtx,
+              resolvedInstant.canonical,
+              sevFinal,
+            );
+            if (premiumFallback) {
+              return premiumFallback;
+            }
           } else {
             return formatInstantQuoteClientMessage(instant);
           }

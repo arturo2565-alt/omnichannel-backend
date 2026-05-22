@@ -799,7 +799,7 @@ export function tryResolveInstantQuoteFromUserText(
     severidadLiteral = 'N/A';
   }
 
-  return materializeInstantQuoteResolution(snap, {
+  const resolution = materializeInstantQuoteResolution(snap, {
     canonical,
     severidadLiteral,
     tierSourceForCambioColor: tierSource,
@@ -807,6 +807,23 @@ export function tryResolveInstantQuoteFromUserText(
     latestPreview: latest,
     fullCtxPreview: fullCtxRaw,
   });
+
+  if (resolution && isBañoDePinturaServicio(canonical)) {
+    console.log(
+      '[LOG-PINTURA 5] Objeto instant detectado por el fallback viejo:',
+      JSON.stringify({
+        canonical,
+        severidadLiteral,
+        precioMx: resolution.precioMx,
+        extras: resolution.extras,
+        total: resolution.total,
+        diasEntrega: resolution.diasEntrega,
+        lines: resolution.lines,
+      }),
+    );
+  }
+
+  return resolution;
 }
 
 /** Formato amigable tipo WhatsApp / panel (negritas con *). */
