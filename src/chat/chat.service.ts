@@ -79,6 +79,7 @@ import {
   shouldAskVehicleBeforeBañoQuote,
   extractBañoColorDetailHeuristic,
   tryBañoPinturaVehicleGateReply,
+  conversationBlocksInstantQuoteInterceptors,
   tryResolvePiezaPinturaInstantReply,
   tryResolveInstantQuoteFromUserText,
   userLatestMessageLooksLikeVehicleModelReply,
@@ -3745,13 +3746,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         console.log('[AutopilotInstantQuote]', JSON.stringify(instantDecision));
       }
 
-      if (mergedForInstant && !skipInstantQuoteInterceptors) {
+      const isLeadAgendado = conversationBlocksInstantQuoteInterceptors(
+        conversation.status,
+      );
+
+      if (mergedForInstant && !skipInstantQuoteInterceptors && !isLeadAgendado) {
         const snapInstant = await this.catalogService.getMatrixPricingSnapshot();
 
         const piezaPinturaReply = tryResolvePiezaPinturaInstantReply(
           purifiedLatest,
           fullBañoCtx,
           snapInstant,
+          { conversationStatus: conversation.status },
         );
         if (piezaPinturaReply) {
           console.log(
@@ -3853,7 +3859,8 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
       if (
         threadRequiresBañoStructuredQuote(fullBañoCtx) &&
-        !skipInstantQuoteInterceptors
+        !skipInstantQuoteInterceptors &&
+        !isLeadAgendado
       ) {
         const snapBaño = await this.catalogService.getMatrixPricingSnapshot();
         const forcedBaño = await this.forceBañoPremiumStructuredReply(

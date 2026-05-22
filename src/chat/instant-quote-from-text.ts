@@ -118,9 +118,6 @@ function isEsteticaAutomotrizCanonical(canonical: string): boolean {
 
 const PIEZA_PINTURA_SEVERIDAD_DL = 'DL' as const;
 
-const TALLER_MAPS_URL_PIEZA =
-  'https://maps.app.goo.gl/a3tEimJquzaJAwSD9?g_st=ipc';
-
 const PIEZA_PINTURA_ACTION_RE =
   /\b(pintar|repintar|repintado|pintura|rayon|rayado|aranzazo|rozad|lijad)\w*/;
 
@@ -141,19 +138,36 @@ const SPANISH_QTY_WORDS: Record<string, number> = {
 
 export type PiezaPinturaInstantLine = {
   canonicalPieza: string;
+  /** Etiqueta visible en la plantilla (p. ej. "2x Puerta"). */
+  servicio: string;
   quantity: number;
   unitPriceDl: number;
+  /** Importe de la línea (qty × DL); va en la plantilla como precioMx. */
+  precioMx: number;
   subtotal: number;
 };
 
 export type PiezaPinturaInstantResolution = {
   lines: PiezaPinturaInstantLine[];
   totalMx: number;
+  vehicleDisplayLabel: string | null;
+  /** @deprecated Usar vehicleDisplayLabel */
   vehicleLabel: string | null;
   summaryLabel: string;
   /** Cotización express por texto: no borrador en pestaña ni pausa de autopilot por visión. */
   isInstantService: true;
 };
+
+export type PiezaPinturaInstantOptions = {
+  conversationStatus?: string | null;
+};
+
+/** Tras agendar cita: no repetir cotizaciones instantáneas (dudas → GPT normal). */
+export function conversationBlocksInstantQuoteInterceptors(
+  conversationStatus: string | null | undefined,
+): boolean {
+  return String(conversationStatus ?? '').toLowerCase().trim() === 'agendado';
+}
 
 function isRepintadoPiezaCatalogServicio(canonical: string): boolean {
   const k = normalizeTextForMatch(canonical);
@@ -249,11 +263,16 @@ function detectPiezaPinturaLineItems(
     if (usedCanonical.has(canonical)) continue;
 
     const quantity = extractQuantityForPieza(n, canonical);
+    const subtotal = unit * quantity;
+    const servicio =
+      quantity > 1 ? `${quantity}x ${canonical}` : canonical;
     items.push({
       canonicalPieza: canonical,
+      servicio,
       quantity,
       unitPriceDl: unit,
-      subtotal: unit * quantity,
+      precioMx: subtotal,
+      subtotal,
     });
     usedCanonical.add(canonical);
   }
@@ -284,6 +303,85 @@ export function textLooksLikePiezaPinturaRepintadoRequest(text: string): boolean
   return PIEZA_TEXT_HINT_RE.test(n);
 }
 
+const PIEZA_VEHICLE_OWNER_RE =
+  /\b(?:para\s+un|para\s+una|es\s+un|es\s+una|tengo\s+un|tengo\s+una|seria\s+un|seria\s+una|manejo\s+un|mi)\s+([a-záéíóúñ0-9][a-záéíóúñ0-9\s.-]{0,42})(?:\s+((?:19|20)[0-9]{2}))?\b/i;
+
+function titleCaseVehicleWords(phrase: string): string {
+  return phrase
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function sanitizePiezaVehicleDisplayLabel(label: string | null): string | null {
+  const l = String(label ?? '').trim();
+  if (l.length < 3 || l.length > 48) return null;
+  if (isPlaceholderBañoVehicleLabel(l)) return null;
+  const n = normalizeTextForMatch(l);
+  if (PIEZA_TEXT_HINT_RE.test(n)) return null;
+  if (
+    /\b(pintar|repintar|repintado|pintura|garantia|incluye|precio|cotiz|facia|fascia|puerta|salpicadera|cofre)\b/.test(
+      n,
+    )
+  ) {
+    return null;
+  }
+  if (/\?/.test(l)) return null;
+  return l;
+}
+
+/**
+ * Solo marca/modelo/año cortos — nunca el hilo completo de la conversación.
+ */
+export function extractPiezaPinturaVehicleDisplayLabel(
+  latestUserText: string,
+  fullContext?: string,
+): string | null {
+  const sources: string[] = [];
+  const latest = flattenBañoTierSource(latestUserText);
+  if (latest && latest.length <= 90) {
+    sources.push(latest);
+  }
+
+  for (const line of String(fullContext ?? '').split(/\n+/)) {
+    const t = line.trim();
+    if (t.length < 5 || t.length > 72) continue;
+    const flat = flattenBañoTierSource(t);
+    const n = normalizeTextForMatch(flat);
+    if (PIEZA_PINTURA_ACTION_RE.test(n) && flat.length > 40) continue;
+    if (
+      /\b(fascia|facia|puerta|salpicadera|cofre|garantia|cotiz|agendar)\b/.test(
+        n,
+      ) &&
+      !CAR_BRANDS_RE.test(flat)
+    ) {
+      continue;
+    }
+    if (CAR_BRANDS_RE.test(flat) || YEAR_RE.test(flat) || COMMON_MODELS_RE.test(flat)) {
+      sources.push(flat);
+    }
+  }
+
+  for (const src of sources) {
+    const owner = src.match(PIEZA_VEHICLE_OWNER_RE);
+    if (owner?.[1]) {
+      let phrase = owner[1].replace(/\s+/g, ' ').trim();
+      if (owner[2]) {
+        phrase = `${phrase} ${owner[2].trim()}`;
+      }
+      const titled = titleCaseVehicleWords(phrase);
+      const clean = sanitizePiezaVehicleDisplayLabel(titled);
+      if (clean) return clean;
+    }
+    const inferred = inferBañoVehicleDisplayLabel(src);
+    const clean = sanitizePiezaVehicleDisplayLabel(inferred);
+    if (clean) return clean;
+  }
+
+  return null;
+}
+
 export function resolvePiezaPinturaInstant(
   userText: string,
   fullContext: string,
@@ -304,7 +402,10 @@ export function resolvePiezaPinturaInstant(
   const totalMx = lines.reduce((s, l) => s + l.subtotal, 0);
   if (totalMx <= 0) return null;
 
-  const vehicleLabel = inferBañoVehicleDisplayLabel(tierFlat);
+  const vehicleDisplayLabel = extractPiezaPinturaVehicleDisplayLabel(
+    userText,
+    fullContext,
+  );
 
   console.log(
     '[PiezaPinturaInstant]',
@@ -312,6 +413,7 @@ export function resolvePiezaPinturaInstant(
       tierPreview: tierFlat.slice(0, 400),
       lines,
       totalMx,
+      vehicleDisplayLabel,
       severidad: PIEZA_PINTURA_SEVERIDAD_DL,
       isInstantService: true,
     }),
@@ -320,7 +422,8 @@ export function resolvePiezaPinturaInstant(
   return {
     lines,
     totalMx,
-    vehicleLabel,
+    vehicleDisplayLabel,
+    vehicleLabel: vehicleDisplayLabel,
     summaryLabel: buildPiezaPinturaSummaryLabel(lines),
     isInstantService: true,
   };
@@ -329,23 +432,26 @@ export function resolvePiezaPinturaInstant(
 export function formatPiezaPinturaInstantReplyText(
   resolution: PiezaPinturaInstantResolution,
 ): string {
+  const total = Math.round(resolution.totalMx);
+  const linesText = resolution.lines
+    .map(
+      (l) =>
+        `🛠️ ${l.servicio}: $${Math.round(l.precioMx).toLocaleString('es-MX')} MXN`,
+    )
+    .join('\n');
   const vehicle =
-    resolution.vehicleLabel?.trim() || 'tu vehículo';
-  const totalStr = formatPiezaPinturaPriceMx(resolution.totalMx);
-  const summary = resolution.summaryLabel;
+    resolution.vehicleDisplayLabel?.trim() ||
+    resolution.vehicleLabel?.trim() ||
+    'tu vehículo';
 
   return [
-    `🎨 **Servicio de Repintado Automotriz (${vehicle})**`,
-    `💰 **Total Estimado: ${totalStr}** (${summary})`,
-    `**Incluye:**`,
-    `🔧 Preparación de superficie y eliminación de rayones superficiales`,
-    `✨ Materiales gama alta (Pintura y Barniz Sikkens matching exacto de color)`,
-    `🛡️ Garantía por escrito en brillo y adherencia ante descascaramiento`,
-    `💎 Pulido y abrillantado de la pieza para igualar el resto del auto`,
-    `⏳ **Tiempo estimado:** 2 días hábiles`,
-    `📍 **Ubicación del taller:** ${TALLER_MAPS_URL_PIEZA}`,
+    `🚗💨 ¡Todo listo para renovar tu ${vehicle}!`,
+    `Aquí tienes el desglose de tu cotización:`,
     ``,
-    `¿Te gustaría que te reserve fecha y hora para ingresar tu auto al área de pintura? 📆✨`,
+    linesText,
+    `💰 **Total Estimado: $${total.toLocaleString('es-MX')} MXN** *(Garantía total y materiales premium incluidos. Sujeto a revisión en taller).*`,
+    ``,
+    `⏳ Tenemos espacios esta semana. ¿Qué día te queda mejor para ingresar tu unidad?`,
   ].join('\n');
 }
 
@@ -356,7 +462,14 @@ export function tryResolvePiezaPinturaInstantReply(
   userText: string,
   fullContext: string,
   snap: MatrixPricingSnapshot,
+  options?: PiezaPinturaInstantOptions,
 ): string | null {
+  if (conversationBlocksInstantQuoteInterceptors(options?.conversationStatus)) {
+    console.log(
+      '[PiezaPinturaInstant] omitido: conversación agendada (flujo GPT normal)',
+    );
+    return null;
+  }
   const resolution = resolvePiezaPinturaInstant(userText, fullContext, snap);
   if (!resolution) return null;
   return formatPiezaPinturaInstantReplyText(resolution);
