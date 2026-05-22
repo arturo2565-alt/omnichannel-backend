@@ -1080,6 +1080,29 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Eco Meta / reenvío del panel: el taller ya guardó un outbound con el mismo texto
+   * hace pocos segundos → no insertar fila duplicada al recargar el historial.
+   */
+  private async findRecentDuplicateOutboundMessage(
+    conversationId: string,
+    content: string,
+    windowMs = 5000,
+  ): Promise<Message | null> {
+    const convId = String(conversationId ?? '').trim();
+    const trimmed = String(content ?? '').trim();
+    if (!convId || !trimmed) return null;
+    const since = new Date(Date.now() - windowMs);
+    return this.messageRepository
+      .createQueryBuilder('m')
+      .where('m.conversationId = :conversationId', { conversationId: convId })
+      .andWhere('m.direction = :direction', { direction: 'outbound' })
+      .andWhere('m.content = :content', { content: trimmed })
+      .andWhere('m.createdAt >= :since', { since })
+      .orderBy('m.createdAt', 'DESC')
+      .getOne();
+  }
+
+  /**
    * Normaliza eventos `entry[].messaging[]` de Meta Messenger y delega en {@link saveMessage}.
    */
   private async processMetaMessengerWebhook(body: any): Promise<{
@@ -1176,6 +1199,25 @@ export class ChatService implements OnModuleDestroy {
               skipText = true;
             }
           }
+          if (!skipText && isEcho) {
+            const echoConv = await this.conversationRepository.findOne({
+              where: { externalId: threadPsid },
+            });
+            if (echoConv) {
+              const panelDup =
+                await this.findRecentDuplicateOutboundMessage(
+                  echoConv.id,
+                  text,
+                );
+              if (panelDup) {
+                console.log(
+                  '[Meta webhook] eco outbound ya guardado por el panel (ventana 5s), omitido | PSID:',
+                  threadPsid,
+                );
+                skipText = true;
+              }
+            }
+          }
           if (!skipText) {
             const saved = await this.saveMessage({
               ...basePayload,
@@ -1209,6 +1251,25 @@ export class ChatService implements OnModuleDestroy {
                 imageMid,
               );
               continue;
+            }
+          }
+          if (isEcho) {
+            const echoConv = await this.conversationRepository.findOne({
+              where: { externalId: threadPsid },
+            });
+            if (echoConv) {
+              const panelImgDup =
+                await this.findRecentDuplicateOutboundMessage(
+                  echoConv.id,
+                  url,
+                );
+              if (panelImgDup) {
+                console.log(
+                  '[Meta webhook] eco imagen outbound ya en panel (ventana 5s), omitido | PSID:',
+                  threadPsid,
+                );
+                continue;
+              }
             }
           }
           const saved = await this.saveMessage({
@@ -1342,6 +1403,19 @@ export class ChatService implements OnModuleDestroy {
         contentToSave = await this.ensureImageOnCloudinary(contentToSave);
       } catch (err) {
         console.error('ensureImageOnCloudinary (recepción):', err);
+      }
+    }
+
+    if (resolvedDirection === 'outbound') {
+      const dupOutbound = await this.findRecentDuplicateOutboundMessage(
+        conversation.id,
+        contentToSave,
+      );
+      if (dupOutbound) {
+        console.log(
+          `[saveMessage] outbound duplicado omitido (ventana 5s, p. ej. eco Meta) | conv=${conversation.id}`,
+        );
+        return dupOutbound;
       }
     }
 
