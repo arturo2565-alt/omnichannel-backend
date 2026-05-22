@@ -2,8 +2,10 @@ import type { OpenAI } from 'openai';
 import type { InstantQuoteResolution } from './instant-quote-from-text';
 import {
   extractBañoColorDetailHeuristic,
+  flattenBañoTierSource,
   isPlaceholderBañoVehicleLabel,
   mentionsCambioDeColor,
+  tierSourceMentionsBora,
 } from './instant-quote-from-text';
 
 export type BañoLlmClassification = {
@@ -238,6 +240,17 @@ export async function classifyBañoPinturaTierWithLlm(
     throw new Error('classifyBañoPinturaTierWithLlm: lista de severidades vacía');
   }
 
+  const contextFlat = flattenBañoTierSource(userContextText);
+  if (tierSourceMentionsBora(contextFlat)) {
+    const coercedBora =
+      coerceBañoSeveridadToCatalog('Mediano', allowed) ?? allowed[0]!;
+    return {
+      vehicleLabel: 'Volkswagen Bora',
+      segmentoEs: 'sedán compacto mediano',
+      severidadLiteral: coercedBora,
+    };
+  }
+
   const completion = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
     temperature: 0.15,
@@ -247,7 +260,7 @@ export async function classifyBañoPinturaTierWithLlm(
       { role: 'system', content: CLASSIFY_SYSTEM },
       {
         role: 'user',
-        content: `Valores permitidos para severidadLiteral (elige uno, copia exacto):\n${allowed.map((s) => `- ${s}`).join('\n')}\n\nTexto del cliente:\n${String(userContextText ?? '').trim().slice(0, 8000)}`,
+        content: `Valores permitidos para severidadLiteral (elige uno, copia exacto):\n${allowed.map((s) => `- ${s}`).join('\n')}\n\nTexto del cliente:\n${contextFlat.slice(0, 8000)}`,
       },
     ],
   });

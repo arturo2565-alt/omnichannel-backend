@@ -45,6 +45,34 @@ export function mentionsBañoDePinturaIntent(text: string): boolean {
   return normalizeTextForMatch(text).includes(BAÑO_CANON_NORM);
 }
 
+/**
+ * Unifica mensajes multilínea del hilo (toldo + modelo en turnos distintos) en una sola línea
+ * para clasificador, inferencia de tamaño y perfilado de vehículo.
+ */
+export function flattenBañoTierSource(text: string): string {
+  return String(text ?? '')
+    .replace(/\r\n/g, ' ')
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Hilo que debe responder solo con plantilla premium de baño (no precios libres del LLM general). */
+export function threadRequiresBañoStructuredQuote(text: string): boolean {
+  const flat = flattenBañoTierSource(text);
+  const n = normalizeTextForMatch(flat);
+  if (mentionsBañoDePinturaIntent(n)) return true;
+  if (mentionsCambioDeColor(flat)) return true;
+  if (threadHasBañoOrPaintIntent(n) && (contextHasIdentifiedVehicle(n) || /\bbora\b/.test(n))) {
+    return true;
+  }
+  return false;
+}
+
+export function tierSourceMentionsBora(text: string): boolean {
+  return /\bbora\b/.test(normalizeTextForMatch(flattenBañoTierSource(text)));
+}
+
 /** Raíces de pintura / hojalatería (repintado, pintar, baño, etc.). */
 const PAINT_BODY_INTENT_RE =
   /\b(repintad\w*|repintar|pintar\w*|pintura|pintor\w*|bano\s+de\s+pintura|bano\s+pintura|hojalater\w*|lijad\w*|lijar|barniz\w*|esmalte)\b/;
@@ -188,7 +216,7 @@ function listServiciosForInstantUserMatch(
   return all;
 }
 
-function resolveBañoCanonicalFromSnap(snap: MatrixPricingSnapshot): string | null {
+export function resolveBañoCanonicalFromSnap(snap: MatrixPricingSnapshot): string | null {
   for (const svc of snap.serviciosOrderedLongestFirst) {
     const ks = normalizeTextForMatch(svc);
     if (ks.includes(BAÑO_CANON_NORM)) return svc;
@@ -439,11 +467,15 @@ export function isBañoVehicleProfiledForQuote(
   normalizedContext: string,
   latestUserText?: string,
 ): boolean {
-  const ctx = normalizeTextForMatch(normalizedContext);
+  const ctx = normalizeTextForMatch(
+    flattenBañoTierSource(normalizedContext),
+  );
   if (hasExplicitBañoTierInContext(ctx)) return true;
   if (contextHasIdentifiedVehicle(ctx)) return true;
-  const latest = String(latestUserText ?? '').trim();
+  if (/\bbora\b/.test(ctx)) return true;
+  const latest = flattenBañoTierSource(String(latestUserText ?? ''));
   if (latest && userLatestMessageLooksLikeVehicleModelReply(latest)) return true;
+  if (/\bbora\b/.test(normalizeTextForMatch(latest))) return true;
   return false;
 }
 
@@ -497,7 +529,14 @@ export function tryBañoPinturaVehicleGateReply(
 
 /** Severidad en BD para filas de Baño de Pintura Exterior (tamaño / variante). Fallback si falla la IA. */
 export function inferBañoTierSeveridad(contextText: string): string {
-  const n = normalizeTextForMatch(contextText);
+  const n = normalizeTextForMatch(flattenBañoTierSource(contextText));
+
+  if (
+    /\b(vw\s+bora|volkswagen\s+bora|bora)\b/.test(n) ||
+    /\b(es\s+un|tengo\s+un|mi)\s+\w*\s*bora\b/.test(n)
+  ) {
+    return 'Mediano';
+  }
 
   const explicitTierRules: { re: RegExp; sev: string }[] = [
     { re: /\bxl\s*premium\b/, sev: 'XL Premium' },
@@ -762,8 +801,10 @@ export function tryResolveInstantQuoteFromUserText(
   opts?: InstantQuoteFromTextOptions,
 ): InstantQuoteResolution | null {
   const latest = String(userText ?? '').trim();
-  const fullCtxRaw = String(opts?.fullContextForBaño ?? latest).trim();
-  const tierSource = fullCtxRaw || latest;
+  const fullCtxRaw = flattenBañoTierSource(
+    String(opts?.fullContextForBaño ?? latest).trim(),
+  );
+  const tierSource = fullCtxRaw || flattenBañoTierSource(latest);
   const tierNorm = normalizeTextForMatch(tierSource);
 
   if (!latest && !fullCtxRaw) return null;

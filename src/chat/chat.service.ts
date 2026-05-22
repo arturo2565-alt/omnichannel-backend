@@ -69,10 +69,15 @@ import {
   materializeInstantQuoteResolution,
   mentionsBañoDePinturaIntent,
   purifyVehicleModelUserReply,
+  flattenBañoTierSource,
+  resolveBañoCanonicalFromSnap,
+  threadRequiresBañoStructuredQuote,
+  tierSourceMentionsBora,
   resolveInstantCanonicalLatestThenFull,
   isBañoVehicleProfiledForQuote,
   isPlaceholderBañoVehicleLabel,
   shouldAskVehicleBeforeBañoQuote,
+  extractBañoColorDetailHeuristic,
   tryBañoPinturaVehicleGateReply,
   tryResolveInstantQuoteFromUserText,
   userLatestMessageLooksLikeVehicleModelReply,
@@ -1878,17 +1883,27 @@ export class ChatService implements OnModuleDestroy {
     tierCtx: string,
     snap: MatrixPricingSnapshot,
   ): Promise<string | null> {
+    const tierFlat = flattenBañoTierSource(tierCtx);
     const bañoNat = await this.tryBañoPinturaLlmInstantClientMessage(
       purifiedLatest,
-      tierCtx,
+      tierFlat,
       snap,
     );
     if (bañoNat) {
       return bañoNat;
     }
 
+    const forced = await this.forceBañoPremiumStructuredReply(
+      purifiedLatest,
+      tierFlat,
+      snap,
+    );
+    if (forced) {
+      return forced;
+    }
+
     const instant = tryResolveInstantQuoteFromUserText(purifiedLatest, snap, {
-      fullContextForBaño: tierCtx,
+      fullContextForBaño: tierFlat,
     });
     if (!instant) {
       return null;
@@ -1919,6 +1934,95 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Fallback por código: precios de PriceMatrix + plantilla premium (sin null si hay intención baño/color).
+   */
+  private async forceBañoPremiumStructuredReply(
+    purifiedLatest: string,
+    tierCtx: string,
+    snap: MatrixPricingSnapshot,
+  ): Promise<string | null> {
+    const tierFlat = flattenBañoTierSource(tierCtx);
+    if (!threadRequiresBañoStructuredQuote(tierFlat)) {
+      return null;
+    }
+
+    const latest =
+      purifyVehicleModelUserReply(purifiedLatest) ||
+      flattenBañoTierSource(purifiedLatest);
+    const full = tierFlat;
+
+    let resolved = resolveInstantCanonicalLatestThenFull(latest, full, snap);
+    if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) {
+      const forcedCanonical = resolveBañoCanonicalFromSnap(snap);
+      if (!forcedCanonical) return null;
+      resolved = { canonical: forcedCanonical, via: 'bano_pintura_synonym' as const };
+    }
+
+    const allowed = snap.listSeveridadesForCanonical(resolved.canonical);
+    if (!allowed.length) return null;
+
+    let sevFinal =
+      coerceBañoSeveridadToCatalog(inferBañoTierSeveridad(tierFlat), allowed) ??
+      allowed[0]!;
+    if (tierSourceMentionsBora(tierFlat)) {
+      sevFinal =
+        coerceBañoSeveridadToCatalog('Mediano', allowed) ?? sevFinal;
+    }
+
+    let vehicleLabel =
+      this.resolveBañoVehicleLabelFromTierContext(tierFlat) ??
+      (tierSourceMentionsBora(tierFlat) ? 'Volkswagen Bora' : '');
+    if (isPlaceholderBañoVehicleLabel(vehicleLabel)) {
+      vehicleLabel = tierSourceMentionsBora(tierFlat) ? 'Volkswagen Bora' : '';
+    }
+    if (!vehicleLabel) {
+      return null;
+    }
+
+    const resolution = materializeInstantQuoteResolution(snap, {
+      canonical: resolved.canonical,
+      severidadLiteral: sevFinal,
+      tierSourceForCambioColor: tierFlat,
+      resolveVia: resolved.via,
+      latestPreview: latest,
+      fullCtxPreview: full,
+    });
+    if (!resolution) {
+      console.warn(
+        '[BañoControlledFallback] materialize falló',
+        { sevFinal, canonical: resolved.canonical },
+      );
+      return null;
+    }
+
+    let personalizedColorDetail: string | null = null;
+    if (mentionsCambioDeColor(tierFlat)) {
+      personalizedColorDetail =
+        (await extractBañoPersonalizedColorDetail(this.openai, tierFlat)) ??
+        extractBañoColorDetailHeuristic(tierFlat);
+    }
+
+    console.log(
+      '[BañoControlledFallback] Plantilla obligatoria',
+      JSON.stringify({
+        vehicleLabel,
+        sevFinal,
+        precioMx: resolution.precioMx,
+        total: resolution.total,
+      }),
+    );
+
+    return composeBañoNaturalInstantReply(this.openai, {
+      vehicleLabel,
+      segmentoEs: 'sedán compacto mediano',
+      servicioDb: resolved.canonical,
+      severidadLiteral: sevFinal,
+      resolution,
+      personalizedColorDetail,
+    });
+  }
+
+  /**
    * Baño de Pintura Exterior: clasifica severidad (tamaño) con LLM y redacta el mensaje con cifras exactas del catálogo.
    */
   private async tryBañoPinturaLlmInstantClientMessage(
@@ -1928,32 +2032,40 @@ export class ChatService implements OnModuleDestroy {
   ): Promise<string | null> {
     const latestRaw = String(latestUserText ?? '').trim();
     const latest =
-      purifyVehicleModelUserReply(latestRaw) || latestRaw;
-    const full = String(fullContextForBaño ?? '').trim();
-    const tierSource = full.trim() || latest;
-    const tierNorm = normalizeTextForMatch(tierSource);
-    if (
-      shouldAskVehicleBeforeBañoQuote(tierNorm, tierSource) ||
-      !isBañoVehicleProfiledForQuote(tierNorm, tierSource)
-    ) {
+      purifyVehicleModelUserReply(latestRaw) ||
+      flattenBañoTierSource(latestRaw);
+    const full = flattenBañoTierSource(String(fullContextForBaño ?? ''));
+    const tierSource = full || latest;
+    const tierFlat = flattenBañoTierSource(tierSource);
+    const tierNorm = normalizeTextForMatch(tierFlat);
+
+    const boraThread = tierSourceMentionsBora(tierFlat);
+    const vehicleOk =
+      boraThread ||
+      (!shouldAskVehicleBeforeBañoQuote(tierNorm, tierFlat) &&
+        isBañoVehicleProfiledForQuote(tierNorm, tierFlat));
+
+    if (!vehicleOk && !threadRequiresBañoStructuredQuote(tierFlat)) {
       console.log(
-        '[LOG-PINTURA 3-pre] tryBañoPinturaLlm abortado: vehículo no perfilado o gate. tierSource:',
-        tierSource.slice(0, 500),
+        '[LOG-PINTURA 3-pre] tryBañoPinturaLlm abortado: vehículo no perfilado. tierFlat:',
+        tierFlat.slice(0, 500),
       );
-      return null;
+      return this.forceBañoPremiumStructuredReply(latest, tierFlat, snap);
     }
 
-    const resolved = resolveInstantCanonicalLatestThenFull(latest, full, snap);
+    let resolved = resolveInstantCanonicalLatestThenFull(latest, full, snap);
     if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) {
-      console.log(
-        '[LOG-PINTURA 3-pre] tryBañoPinturaLlm abortado: sin canonical baño. resolved:',
-        resolved,
-      );
-      return null;
+      const forcedCanonical = resolveBañoCanonicalFromSnap(snap);
+      if (!forcedCanonical) {
+        return this.forceBañoPremiumStructuredReply(latest, tierFlat, snap);
+      }
+      resolved = { canonical: forcedCanonical, via: 'bano_pintura_synonym' };
     }
 
     const allowed = snap.listSeveridadesForCanonical(resolved.canonical);
-    if (!allowed.length) return null;
+    if (!allowed.length) {
+      return this.forceBañoPremiumStructuredReply(latest, tierFlat, snap);
+    }
 
     let vehicleLabel = '';
     let segmentoEs = '';
@@ -1962,7 +2074,7 @@ export class ChatService implements OnModuleDestroy {
     try {
       const cls = await classifyBañoPinturaTierWithLlm(
         this.openai,
-        tierSource,
+        tierFlat,
         allowed,
       );
       vehicleLabel = cls.vehicleLabel;
@@ -1978,38 +2090,44 @@ export class ChatService implements OnModuleDestroy {
       );
     } catch (err) {
       console.warn('[BañoPinturaLlm] classify fallback:', err);
-      const inferred = inferBañoTierSeveridad(tierSource);
+      const inferred = inferBañoTierSeveridad(tierFlat);
       severidadLiteral =
         coerceBañoSeveridadToCatalog(inferred, allowed) ??
         coerceBañoSeveridadToCatalog('Mediano', allowed) ??
         allowed[0]!;
       vehicleLabel =
-        this.resolveBañoVehicleLabelFromTierContext(tierSource) ?? '';
+        this.resolveBañoVehicleLabelFromTierContext(tierFlat) ??
+        (boraThread ? 'Volkswagen Bora' : '');
     }
 
-    const sevFinal =
+    let sevFinal =
       coerceBañoSeveridadToCatalog(severidadLiteral, allowed) ??
-      coerceBañoSeveridadToCatalog(inferBañoTierSeveridad(tierSource), allowed) ??
+      coerceBañoSeveridadToCatalog(inferBañoTierSeveridad(tierFlat), allowed) ??
       allowed[0]!;
+    if (boraThread) {
+      sevFinal =
+        coerceBañoSeveridadToCatalog('Mediano', allowed) ?? sevFinal;
+    }
 
     if (isPlaceholderBañoVehicleLabel(vehicleLabel)) {
       const inferredLabel =
-        this.resolveBañoVehicleLabelFromTierContext(tierSource);
+        this.resolveBañoVehicleLabelFromTierContext(tierFlat) ??
+        (boraThread ? 'Volkswagen Bora' : null);
       if (inferredLabel) {
         vehicleLabel = inferredLabel;
       } else {
         console.log(
-          '[BañoPinturaLlm] sin cotizar: vehicleLabel no perfilado:',
+          '[BañoPinturaLlm] vehicleLabel no perfilado; fallback controlado',
           vehicleLabel.slice(0, 80),
         );
-        return null;
+        return this.forceBañoPremiumStructuredReply(latest, tierFlat, snap);
       }
     }
 
     const resolution = materializeInstantQuoteResolution(snap, {
       canonical: resolved.canonical,
       severidadLiteral: sevFinal,
-      tierSourceForCambioColor: tierSource,
+      tierSourceForCambioColor: tierFlat,
       resolveVia: resolved.via,
       latestPreview: latest,
       fullCtxPreview: full,
@@ -2023,7 +2141,7 @@ export class ChatService implements OnModuleDestroy {
         'precioCelda:',
         snap.getPriceForCanonical(resolved.canonical, sevFinal),
       );
-      return null;
+      return this.forceBañoPremiumStructuredReply(latest, tierFlat, snap);
     }
 
     console.log(
@@ -2039,19 +2157,21 @@ export class ChatService implements OnModuleDestroy {
 
     let vl = vehicleLabel.trim();
     if (!vl || isPlaceholderBañoVehicleLabel(vl)) {
-      const inferredVl = this.resolveBañoVehicleLabelFromTierContext(tierSource);
+      const inferredVl =
+        this.resolveBañoVehicleLabelFromTierContext(tierFlat) ??
+        (boraThread ? 'Volkswagen Bora' : null);
       if (!inferredVl) {
-        return null;
+        return this.forceBañoPremiumStructuredReply(latest, tierFlat, snap);
       }
       vl = inferredVl;
     }
     const seg = segmentoEs.trim() || 'categoría de tamaño según nuestro catálogo';
 
     let personalizedColorDetail: string | null = null;
-    if (mentionsCambioDeColor(tierSource)) {
+    if (mentionsCambioDeColor(tierFlat)) {
       personalizedColorDetail = await extractBañoPersonalizedColorDetail(
         this.openai,
-        tierSource,
+        tierFlat,
       );
     }
 
@@ -2071,7 +2191,7 @@ export class ChatService implements OnModuleDestroy {
       return premiumText;
     } catch (err) {
       console.warn('[BañoPinturaLlm] compose fallback plantilla:', err);
-      return null;
+      return this.forceBañoPremiumStructuredReply(latest, tierFlat, snap);
     }
   }
 
@@ -3684,6 +3804,33 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           } else {
             return formatInstantQuoteClientMessage(instant);
           }
+        }
+
+        const forcedAfterInstant = await this.forceBañoPremiumStructuredReply(
+          purifiedLatest,
+          fullBañoCtx,
+          snapInstant,
+        );
+        if (forcedAfterInstant) {
+          return forcedAfterInstant;
+        }
+      }
+
+      if (
+        threadRequiresBañoStructuredQuote(fullBañoCtx) &&
+        !skipInstantQuoteInterceptors
+      ) {
+        const snapBaño = await this.catalogService.getMatrixPricingSnapshot();
+        const forcedBaño = await this.forceBañoPremiumStructuredReply(
+          purifiedLatest,
+          fullBañoCtx,
+          snapBaño,
+        );
+        if (forcedBaño) {
+          console.log(
+            '[BañoBlindaje] Autopilot bloqueado: respuesta premium por código (sin GPT libre de precios)',
+          );
+          return forcedBaño;
         }
       }
 
