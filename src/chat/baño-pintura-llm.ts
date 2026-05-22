@@ -1,7 +1,11 @@
 import type { OpenAI } from 'openai';
 import type { InstantQuoteResolution } from './instant-quote-from-text';
-import { isPlaceholderBañoVehicleLabel } from './instant-quote-from-text';
-import { AUTO_FIX_CURRENCY, formatAutoFixMoney } from './autofix-config';
+import {
+  extractBañoColorDetailHeuristic,
+  isPlaceholderBañoVehicleLabel,
+  mentionsCambioDeColor,
+} from './instant-quote-from-text';
+import { formatAutoFixMoney } from './autofix-config';
 
 export type BañoLlmClassification = {
   vehicleLabel: string;
@@ -12,39 +16,7 @@ export type BañoLlmClassification = {
 const TALLER_MAPS_URL =
   'https://maps.app.goo.gl/a3tEimJquzaJAwSD9?g_st=ipc';
 
-/**
- * Especificación contractual del mensaje instantáneo de Baño de Pintura.
- * La redacción final se genera con plantilla determinística para no alterar `resolution.precioMx`.
- */
-const COMPOSE_SYSTEM = `Eres el redactor de cotizaciones instantáneas de un taller de hojalatería y pintura en México (WhatsApp).
-
-Debes reproducir EXACTAMENTE esta estructura (mismos emojis, orden y viñetas; sin líneas extra al inicio ni despedidas genéricas largas):
-
-🎨 Baño de pintura exterior ([Marca y Modelo del Auto])
-💰 Estimado: [PRECIO_EXACTO] MXN
-Incluye:
-🔧 Hojalatería ligera y corrección de imperfecciones
-✨ Materiales gama alta (Pintura y Barniz Sikkens)
-🛡️ Garantía por escrito en brillo y adherencia
-💎 Acabado espejo (Lijado y pulido nivel exposición)
-⏳ Tiempo estimado: [DIAS_DB] días hábiles
-📍 Ubicación del taller: ${TALLER_MAPS_URL}
-
-REGLAS:
-- [PRECIO_EXACTO] es el literal que te damos; cópialo carácter por carácter (no redondees ni recalcules).
-- [DIAS_DB] es el entero de catálogo que te damos.
-- [Marca y Modelo del Auto] usa el vehicleLabel proporcionado.
-
-CIERRE si el vehículo ES convertible o descapotable (BMW Z4, Mazda MX-5, Mustang Convertible, etc.):
-Añade OBLIGATORIAMENTE al final (después de la ubicación), una línea en blanco y:
-📅 El [Modelo] requiere una inspección de cortesía para evaluar las gomas del toldo retráctil. ¿Te gustaría que te reserve fecha y hora para valoración?
-
-CIERRE si el vehículo NO es convertible:
-Tras la ubicación, una línea en blanco y una sola frase breve invitando a agendar fecha y hora en el taller.
-
-Si hay suplemento de cambio de color, añade después del Estimado una línea: "Suplemento cambio de color: [MONTO_SUPLEMENTO] MXN" usando el monto exacto dado.
-
-No uses negritas con asteriscos. No inventes otros precios ni servicios.`;
+const BAÑO_COLOR_EXTRA_DIAS = 2;
 
 function parseClassificationJson(raw: string): Partial<BañoLlmClassification> | null {
   try {
@@ -84,7 +56,7 @@ Responde SOLO con un JSON válido con estas claves exactas:
 
 REGLAS DE TAMAÑO (elige UNA severidad base: Chico, Mediano, Grande o XL):
 1) Hatch/sedán muy compacto o entrada (Spark, Beat, March, Mirage, Versa, Aveo, Rio, **Ford Figo**, Chevy Beat, etc.) → Chico.
-2) Sedán compacto/mediano común (Jetta, Civic, Corolla, Sentra, Elantra, Mazda 3, etc.) → Mediano.
+2) Sedán compacto/mediano común (Jetta, Civic, Corolla, Sentra, Elantra, Mazda 3, **Volkswagen Bora**, etc.) → Mediano.
 3) SUV mediana/grande, minivan mediana, pick-up mediana (CR-V, RAV4, Explorer, Pathfinder, Pilot, Highlander, Tacoma, Hilux, Ranger, etc.) → Grande o XL según tamaño real: pick-ups y SUVs de 3 filas o muy grandes → XL; SUV mediana de 2 filas tipo CR-V, Q5, X3, GLC → Grande.
 4) SUVs enormes o pick-ups full size (Suburban, Tahoe, Expedition, F-250+, RAM 2500+, etc.) → XL.
 
@@ -119,10 +91,25 @@ export function isConvertibleVehicleLabel(vehicleLabel: string): boolean {
   return false;
 }
 
-/** Nombre corto del modelo para la nota de convertible (p. ej. "BMW Z4"). */
-function modelNameForConvertibleNote(vehicleLabel: string): string {
-  const v = String(vehicleLabel ?? '').trim();
-  return v || 'vehículo';
+/** Nombre corto del modelo para cierre (p. ej. "Bora"). */
+function shortModelNameForClosing(vehicleLabel: string): string {
+  const parts = String(vehicleLabel ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length === 0) return 'vehículo';
+  return parts[parts.length - 1] ?? parts[0]!;
+}
+
+function cambioColorAddonFromResolution(resolution: InstantQuoteResolution): number {
+  return resolution.extras.reduce(
+    (sum, line) => sum + Math.round(Number(line.amount) || 0),
+    0,
+  );
+}
+
+function hasCambioColorInResolution(resolution: InstantQuoteResolution): boolean {
+  return cambioColorAddonFromResolution(resolution) > 0;
 }
 
 export type BañoInstantComposeFacts = {
@@ -131,63 +118,84 @@ export type BañoInstantComposeFacts = {
   servicioDb: string;
   severidadLiteral: string;
   resolution: InstantQuoteResolution;
+  /** Colores / toldo / perla pedidos por el cliente (línea Detalle personalizado). */
+  personalizedColorDetail?: string | null;
 };
 
 /**
- * Plantilla determinística: cifras tomadas de `resolution.precioMx` y `resolution.diasEntrega` sin alterar.
+ * Plantilla determinística premium: suma base + suplementos en backend antes de redactar.
  */
 export function buildBañoNaturalInstantReplyText(facts: BañoInstantComposeFacts): string {
-  const { vehicleLabel, resolution } = facts;
+  const { vehicleLabel, resolution, personalizedColorDetail } = facts;
   const vl = vehicleLabel.trim();
   if (!vl || isPlaceholderBañoVehicleLabel(vl)) {
     throw new Error(
       'buildBañoNaturalInstantReplyText: vehículo no perfilado (prohibido cotizar con placeholder)',
     );
   }
-  const precioMx = Math.round(Number(resolution.precioMx));
-  if (!Number.isFinite(precioMx) || precioMx <= 0) {
-    throw new Error('buildBañoNaturalInstantReplyText: precioMx inválido');
+
+  const baseMx = Math.round(Number(resolution.precioMx));
+  const addonMx = cambioColorAddonFromResolution(resolution);
+  const totalMx = Math.round(Number(resolution.total) || baseMx + addonMx);
+  if (!Number.isFinite(baseMx) || baseMx <= 0 || !Number.isFinite(totalMx) || totalMx <= 0) {
+    throw new Error('buildBañoNaturalInstantReplyText: precios inválidos');
   }
-  const precioStr = formatAutoFixMoney(precioMx);
-  const dias = Math.max(
+
+  const hasColorChange = hasCambioColorInResolution(resolution);
+  const diasBase = Math.max(
     1,
     Math.floor(Number(resolution.diasEntrega) || 0) || 3,
   );
+  const diasShown = hasColorChange ? diasBase + BAÑO_COLOR_EXTRA_DIAS : diasBase;
 
-  const blocks: string[] = [
-    `🎨 Baño de pintura exterior (${vl})`,
-    `💰 Estimado: ${precioStr} MXN`,
-  ];
+  const title = hasColorChange
+    ? `🎨 Baño de Pintura + Cambio de Color (${vl})`
+    : `🎨 Baño de pintura exterior (${vl})`;
 
-  for (const extra of resolution.extras) {
-    const amt = Math.round(Number(extra.amount));
-    if (Number.isFinite(amt) && amt > 0) {
-      blocks.push(
-        `Suplemento ${extra.label}: ${formatAutoFixMoney(amt)} MXN`,
-      );
-    }
-  }
+  const priceLine = hasColorChange && addonMx > 0
+    ? `💰 Total Estimado: ${formatAutoFixMoney(totalMx)} MXN (Base: ${formatAutoFixMoney(baseMx)} + Cambio de color: ${formatAutoFixMoney(addonMx)})`
+    : `💰 Total Estimado: ${formatAutoFixMoney(totalMx)} MXN`;
+
+  const blocks: string[] = [title, priceLine, 'Incluye:'];
 
   blocks.push(
-    'Incluye:',
     '🔧 Hojalatería ligera y corrección de imperfecciones',
     '✨ Materiales gama alta (Pintura y Barniz Sikkens)',
     '🛡️ Garantía por escrito en brillo y adherencia',
     '💎 Acabado espejo (Lijado y pulido nivel exposición)',
-    `⏳ Tiempo estimado: ${dias} días hábiles`,
-    `📍 Ubicación del taller: ${TALLER_MAPS_URL}`,
   );
 
+  const detailFinal = String(personalizedColorDetail ?? '').trim();
+  if (detailFinal) {
+    blocks.push(`🎨 Detalle personalizado: ${detailFinal}`);
+  }
+
+  if (hasColorChange) {
+    blocks.push(
+      `⏳ Tiempo estimado: ${diasShown} días hábiles (Añade ${BAÑO_COLOR_EXTRA_DIAS} días extras si hay cambio de color)`,
+    );
+  } else {
+    blocks.push(`⏳ Tiempo estimado: ${diasShown} días hábiles`);
+  }
+
+  blocks.push(`📍 Ubicación del taller: ${TALLER_MAPS_URL}`);
+
+  const modeloCorto = shortModelNameForClosing(vl);
+
   if (isConvertibleVehicleLabel(vl)) {
-    const modelo = modelNameForConvertibleNote(vl);
     blocks.push(
       '',
-      `📅 El ${modelo} requiere una inspección de cortesía para evaluar las gomas del toldo retráctil. ¿Te gustaría que te reserve fecha y hora para valoración?`,
+      `📅 El ${modeloCorto} requiere una inspección de cortesía para evaluar las gomas del toldo retráctil. ¿Te gustaría que te reserve fecha y hora para valoración?`,
+    );
+  } else if (hasColorChange) {
+    blocks.push(
+      '',
+      `¿Te gustaría que te reserve fecha y hora para la transformación de tu ${modeloCorto}? 📆✨`,
     );
   } else {
     blocks.push(
       '',
-      '¿Te gustaría que te reserve fecha y hora para tu baño de pintura en el taller?',
+      `¿Te gustaría que te reserve fecha y hora para tu baño de pintura en el taller? 📆✨`,
     );
   }
 
@@ -252,58 +260,59 @@ export async function classifyBañoPinturaTierWithLlm(
   return out;
 }
 
+function parseColorDetailJson(raw: string): string | null {
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const d = typeof o['detail'] === 'string' ? o['detail'].trim() : '';
+    return d.length >= 8 ? d : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Redacción del mensaje instantáneo al cliente (plantilla fija + cifras de catálogo).
- * Usa OpenAI solo si la plantilla falla; el prompt {@link COMPOSE_SYSTEM} define la estructura contractual.
+ * Extrae descripción estética del cambio de color (toldo, dos tonos, perla, etc.).
+ */
+export async function extractBañoPersonalizedColorDetail(
+  openai: OpenAI,
+  userContextText: string,
+): Promise<string | null> {
+  const ctx = String(userContextText ?? '').trim();
+  if (!ctx || !mentionsCambioDeColor(ctx)) return null;
+
+  const heuristic = extractBañoColorDetailHeuristic(ctx);
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0.15,
+      max_tokens: 140,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: `Extrae SOLO la descripción estética del cambio de color que pidió el cliente en el hilo (colores, toldo/techo, perla, dos tonos, arriba/abajo).
+Responde JSON: {"detail":"..."} en español, máximo 120 caracteres, tono elegante y concreto (ej. "Toldo negro y carrocería blanco con perla violeta").
+Sin precios, sin saludos, sin preguntas. Si no hay detalle concreto de color, {"detail":""}.`,
+        },
+        { role: 'user', content: ctx.slice(0, 8000) },
+      ],
+    });
+    const raw = completion.choices[0]?.message?.content?.trim() ?? '';
+    const fromLlm = parseColorDetailJson(raw);
+    return fromLlm ?? heuristic;
+  } catch (err) {
+    console.warn('[BañoColorDetail] LLM fallback heurística:', err);
+    return heuristic;
+  }
+}
+
+/**
+ * Mensaje instantáneo al cliente: siempre plantilla premium determinística (cifras de catálogo).
  */
 export async function composeBañoNaturalInstantReply(
-  openai: OpenAI,
+  _openai: OpenAI,
   facts: BañoInstantComposeFacts,
 ): Promise<string> {
-  const deterministic = buildBañoNaturalInstantReplyText(facts);
-  const precioLiteral = formatAutoFixMoney(Math.round(facts.resolution.precioMx));
-  if (deterministic.includes(precioLiteral)) {
-    return deterministic;
-  }
-
-  const { vehicleLabel, segmentoEs, servicioDb, severidadLiteral, resolution } =
-    facts;
-  const precioStr = formatAutoFixMoney(Math.round(resolution.precioMx));
-  const dias = Math.max(1, Math.floor(Number(resolution.diasEntrega) || 0) || 3);
-  const extrasDesc =
-    resolution.extras.length > 0
-      ? resolution.extras
-          .map((l) => `${l.label}: ${formatAutoFixMoney(Math.round(l.amount))}`)
-          .join(' | ')
-      : '';
-  const esConvertible = isConvertibleVehicleLabel(vehicleLabel);
-
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    temperature: 0.2,
-    max_tokens: 520,
-    messages: [
-      { role: 'system', content: COMPOSE_SYSTEM },
-      {
-        role: 'user',
-        content: `Datos (obligatorio respetar precio y días):
-- Vehículo (vehicleLabel): ${vehicleLabel}
-- Categoría interna: ${segmentoEs}
-- Servicio catálogo: ${servicioDb}
-- Severidad: ${severidadLiteral}
-- PRECIO_EXACTO (resolution.precioMx, no modificar): ${precioStr}
-- DIAS_DB (resolution.diasEntrega): ${dias}
-- Moneda: ${AUTO_FIX_CURRENCY}
-- Es convertible/descapotable: ${esConvertible ? 'sí' : 'no'}
-${extrasDesc ? `- Suplementos: ${extrasDesc}\n` : ''}
-Escribe el mensaje al cliente siguiendo la estructura del system.`,
-      },
-    ],
-  });
-
-  const text = completion.choices[0]?.message?.content?.trim();
-  if (!text || !text.includes(precioStr)) {
-    return deterministic;
-  }
-  return text;
+  return buildBañoNaturalInstantReplyText(facts);
 }

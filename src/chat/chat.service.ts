@@ -50,6 +50,7 @@ import {
   classifyBañoPinturaTierWithLlm,
   coerceBañoSeveridadToCatalog,
   composeBañoNaturalInstantReply,
+  extractBañoPersonalizedColorDetail,
 } from './baño-pintura-llm';
 import {
   buildPlaygroundPostQuoteSchedulingSystemAppend,
@@ -59,9 +60,12 @@ import {
 } from './playground-instant-quote-interceptor';
 import {
   assistantMessageIsBañoVehiclePrompt,
+  type InstantQuoteResolution,
   formatInstantQuoteClientMessage,
   inferBañoTierSeveridad,
+  inferBañoVehicleDisplayLabel,
   isBañoDePinturaServicio,
+  mentionsCambioDeColor,
   materializeInstantQuoteResolution,
   mentionsBañoDePinturaIntent,
   purifyVehicleModelUserReply,
@@ -1752,6 +1756,40 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Plantilla premium de baño cuando ya hay resolución de catálogo (fallback si el LLM de clasificación falló).
+   */
+  private async tryFormatBañoPremiumInstantReply(
+    resolution: InstantQuoteResolution,
+    tierSource: string,
+    canonical: string,
+    severidadLiteral: string,
+  ): Promise<string | null> {
+    if (!isBañoDePinturaServicio(canonical)) return null;
+    const vl = inferBañoVehicleDisplayLabel(tierSource);
+    if (!vl) return null;
+    let personalizedColorDetail: string | null = null;
+    if (mentionsCambioDeColor(tierSource)) {
+      personalizedColorDetail = await extractBañoPersonalizedColorDetail(
+        this.openai,
+        tierSource,
+      );
+    }
+    try {
+      return await composeBañoNaturalInstantReply(this.openai, {
+        vehicleLabel: vl,
+        segmentoEs: '',
+        servicioDb: canonical,
+        severidadLiteral,
+        resolution,
+        personalizedColorDetail,
+      });
+    } catch (err) {
+      console.warn('[BañoPremiumInstant] plantilla no aplicable:', err);
+      return null;
+    }
+  }
+
+  /**
    * Baño de Pintura Exterior: clasifica severidad (tamaño) con LLM y redacta el mensaje con cifras exactas del catálogo.
    */
   private async tryBañoPinturaLlmInstantClientMessage(
@@ -1809,11 +1847,16 @@ export class ChatService implements OnModuleDestroy {
       allowed[0]!;
 
     if (isPlaceholderBañoVehicleLabel(vehicleLabel)) {
-      console.log(
-        '[BañoPinturaLlm] sin cotizar: vehicleLabel no perfilado:',
-        vehicleLabel.slice(0, 80),
-      );
-      return null;
+      const inferredLabel = inferBañoVehicleDisplayLabel(tierSource);
+      if (inferredLabel) {
+        vehicleLabel = inferredLabel;
+      } else {
+        console.log(
+          '[BañoPinturaLlm] sin cotizar: vehicleLabel no perfilado:',
+          vehicleLabel.slice(0, 80),
+        );
+        return null;
+      }
     }
 
     const resolution = materializeInstantQuoteResolution(snap, {
@@ -1832,6 +1875,14 @@ export class ChatService implements OnModuleDestroy {
     }
     const seg = segmentoEs.trim() || 'categoría de tamaño según nuestro catálogo';
 
+    let personalizedColorDetail: string | null = null;
+    if (mentionsCambioDeColor(tierSource)) {
+      personalizedColorDetail = await extractBañoPersonalizedColorDetail(
+        this.openai,
+        tierSource,
+      );
+    }
+
     try {
       return await composeBañoNaturalInstantReply(this.openai, {
         vehicleLabel: vl,
@@ -1839,6 +1890,7 @@ export class ChatService implements OnModuleDestroy {
         servicioDb: resolved.canonical,
         severidadLiteral: sevFinal,
         resolution,
+        personalizedColorDetail,
       });
     } catch (err) {
       console.warn('[BañoPinturaLlm] compose fallback plantilla:', err);
@@ -3365,6 +3417,22 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           fullContextForBaño: fullBañoCtx || mergedForInstant,
         });
         if (instant) {
+          const tierCtx = fullBañoCtx || mergedForInstant;
+          const resolvedInstant = resolveInstantCanonicalLatestThenFull(
+            purifiedLatest,
+            tierCtx,
+            snapInstant,
+          );
+          if (resolvedInstant && isBañoDePinturaServicio(resolvedInstant.canonical)) {
+            const sevInstant = inferBañoTierSeveridad(tierCtx);
+            const premium = await this.tryFormatBañoPremiumInstantReply(
+              instant,
+              tierCtx,
+              resolvedInstant.canonical,
+              sevInstant,
+            );
+            if (premium) return premium;
+          }
           return formatInstantQuoteClientMessage(instant);
         }
       }

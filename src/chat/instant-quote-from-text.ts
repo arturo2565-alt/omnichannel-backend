@@ -66,7 +66,7 @@ const CAR_BRANDS_RE =
 
 /** Modelos frecuentes sin marca (evita depender solo de "es un …"). */
 const COMMON_MODELS_RE =
-  /\b(march|versa|sentra|altima|maxima|micra|note|figo|fiesta|ikon|etios|attitude|gol|voyage|fox|\bup\b|uno|palio|siena|jetta|golf|passat|polo|vento|virtus|tiguan|taos|tcross|t-cross|civic|accord|fit|cr-v|hr-v|pilot|odyssey|corolla|camry|rav4|highlander|4runner|sequoia|sienna|frontier|titan|l200|hilux|ranger|f-150|f-250|f-350|silverado|sierra|traverse|explorer|escape|edge|bronco|patriot|cherokee|wrangler|compass|renegade|tracker|onix|prisma|aveo|spark|beat|mirage|outlander|asx|cx-3|cx-5|cx-9|mazda\s*2|mazda\s*3|mazda\s*6|rio|forte|optima|stinger|elantra|sonata|tucson|santa\s*fe|palisade|venue|kicks|rogue|murano|pathfinder|armada|sorento|telluride|sportage|soul|kwid|duster|sandero|argo|mobilio|city|wr-v)\b/i;
+  /\b(march|versa|sentra|altima|maxima|micra|note|figo|fiesta|ikon|etios|attitude|gol|voyage|fox|\bup\b|uno|palio|siena|jetta|golf|passat|polo|vento|virtus|bora|tiguan|taos|tcross|t-cross|civic|accord|fit|cr-v|hr-v|pilot|odyssey|corolla|camry|rav4|highlander|4runner|sequoia|sienna|frontier|titan|l200|hilux|ranger|f-150|f-250|f-350|silverado|sierra|traverse|explorer|escape|edge|bronco|patriot|cherokee|wrangler|compass|renegade|tracker|onix|prisma|aveo|spark|beat|mirage|outlander|asx|cx-3|cx-5|cx-9|mazda\s*2|mazda\s*3|mazda\s*6|rio|forte|optima|stinger|elantra|sonata|tucson|santa\s*fe|palisade|venue|kicks|rogue|murano|pathfinder|armada|sorento|telluride|sportage|soul|kwid|duster|sandero|argo|mobilio|city|wr-v)\b/i;
 
 const YEAR_RE = /\b(19[89][0-9]|20[0-3][0-9])\b/;
 
@@ -565,15 +565,100 @@ export function inferBañoTierSeveridad(contextText: string): string {
   return 'Mediano';
 }
 
+const COLOR_NAME_TOKENS =
+  /\b(negro|blanco|rojo|azul|gris|plateado|dorado|beige|amarillo|verde|naranja|morado|violeta|perla|metalizado|mate|bicolor|vinotinto|guinda|champagne|plata|negro|azul\s*marino)\b/;
+
 export function mentionsCambioDeColor(userText: string): boolean {
   const n = normalizeTextForMatch(userText);
-  return (
+  if (
     /\bcambio\s+de\s+color\b/.test(n) ||
     /\bcambio\s+color\b/.test(n) ||
     /\bcambio\s+de\s+pintura\s+.*color\b/.test(n) ||
     /\bcolor\s+diferente\b/.test(n) ||
-    /\bcambiar\s+(el\s+)?color\b/.test(n)
+    /\bcambiar\s+(el\s+)?color\b/.test(n) ||
+    /\bdos\s*(colores|tonos)\b/.test(n) ||
+    /\bcombinacion\s+de\s+colores\b/.test(n)
+  ) {
+    return true;
+  }
+  if (/\b(toldo|techo|capota)\b/.test(n) && COLOR_NAME_TOKENS.test(n)) {
+    return true;
+  }
+  if (
+    /\b(arriba|abajo|parte\s+de\s+arriba|parte\s+de\s+abajo|superior|inferior)\b/.test(
+      n,
+    ) &&
+    COLOR_NAME_TOKENS.test(n)
+  ) {
+    return true;
+  }
+  if (/\bperla\b/.test(n) && COLOR_NAME_TOKENS.test(n)) {
+    return true;
+  }
+  if (/\b(pintar|pintura)\b/.test(n) && /\b(toldo|techo|otro\s+color|color\s+distinto)\b/.test(n)) {
+    return true;
+  }
+  return false;
+}
+
+/** Etiqueta legible del vehículo cuando el clasificador devolvió placeholder. */
+export function inferBañoVehicleDisplayLabel(text: string): string | null {
+  const raw = String(text ?? '').trim();
+  if (!raw) return null;
+  const owner = raw.match(
+    /\b(?:es\s+un|es\s+una|tengo\s+un|tengo\s+una|seria\s+un|mi)\s+([a-záéíóúñ0-9][a-záéíóúñ0-9\s.-]{1,48})/i,
   );
+  if (owner?.[1]) {
+    const phrase = owner[1].replace(/\s+/g, ' ').trim();
+    const titled = phrase
+      .split(/\s+/)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(' ');
+    if (!isPlaceholderBañoVehicleLabel(titled)) return titled;
+  }
+  const purified = purifyVehicleModelUserReply(raw) || raw;
+  const n = normalizeTextForMatch(`${raw}\n${purified}`);
+  const hints: [RegExp, string][] = [
+    [/\bvolkswagen\b.*\bbora\b|\bvw\b.*\bbora\b|\bbora\b/, 'Volkswagen Bora'],
+    [/\bford\b.*\bfigo\b|\bfigo\b/, 'Ford Figo'],
+    [/\bnissan\b.*\bmarch\b|\bmarch\b/, 'Nissan March'],
+    [/\bjetta\b/, 'Volkswagen Jetta'],
+    [/\bgolf\b/, 'Volkswagen Golf'],
+  ];
+  for (const [re, label] of hints) {
+    if (re.test(n)) return label;
+  }
+  if (COMMON_MODELS_RE.test(purified) || CAR_BRANDS_RE.test(purified)) {
+    const titled = purified
+      .split(/\s+/)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(' ');
+    if (!isPlaceholderBañoVehicleLabel(titled)) return titled;
+  }
+  return null;
+}
+
+/** Detalle estético del cambio de color (heurística sin LLM). */
+export function extractBañoColorDetailHeuristic(userText: string): string | null {
+  const raw = String(userText ?? '').trim();
+  if (!raw || !mentionsCambioDeColor(raw)) return null;
+  const chunks = raw
+    .split(/[\n.!?]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 8);
+  const colorChunk = chunks.find((c) => {
+    const n = normalizeTextForMatch(c);
+    return (
+      COLOR_NAME_TOKENS.test(n) ||
+      /\b(toldo|techo|arriba|abajo|perla|bicolor)\b/.test(n)
+    );
+  });
+  if (!colorChunk) return null;
+  let detail = colorChunk
+    .replace(/^(si[, ]+|me gustaria[, ]+|quisiera[, ]+)/i, '')
+    .trim();
+  if (detail.length > 160) detail = `${detail.slice(0, 157)}…`;
+  return detail.length >= 8 ? detail : null;
 }
 
 /** Suplemento MXN por cambio de color con baño de pintura (según tamaño). */
@@ -648,7 +733,7 @@ export function materializeInstantQuoteResolution(
   if (isBañoDePinturaServicio(canonical) && mentionsCambioDeColor(tierSourceForCambioColor)) {
     add = cambioDeColorAddonMx(severidadLiteral);
     extras.push({
-      label: 'Cambio de color (suplemento)',
+      label: 'Cambio de color',
       amount: add,
     });
   }
