@@ -644,6 +644,86 @@ export class ChatService implements OnModuleDestroy {
     return segments.join('\n\n');
   }
 
+  /**
+   * Hilo unificado solo con mensajes del cliente (historial + lote actual sin duplicar),
+   * para enlazar p. ej. "toldo negro…" en un turno y "es un Bora" en el siguiente.
+   */
+  private buildUnifiedBañoTierContext(
+    historyRows: readonly Message[],
+    mergedCurrentUserText: string,
+  ): string {
+    const segments: string[] = [];
+    const seen = new Set<string>();
+
+    const pushSegment = (raw: string) => {
+      const t = String(raw ?? '').trim();
+      if (!t || t.includes('cloudinary')) return;
+      const key = normalizeTextForMatch(t);
+      if (seen.has(key)) return;
+      seen.add(key);
+      segments.push(t);
+    };
+
+    for (const m of historyRows) {
+      if (String(m.direction ?? '').toLowerCase() !== 'inbound') continue;
+      pushSegment(String(m.content ?? ''));
+    }
+
+    const cur = String(mergedCurrentUserText ?? '').trim();
+    if (cur) {
+      const parts = cur.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
+      if (parts.length > 1) {
+        for (const p of parts) {
+          pushSegment(p);
+        }
+      } else {
+        pushSegment(cur);
+      }
+    }
+
+    return segments
+      .slice(-PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS)
+      .join('\n\n');
+  }
+
+  private parseSeveridadFromInstantResolution(
+    resolution: InstantQuoteResolution,
+  ): string | null {
+    const label = resolution.lines[0]?.label ?? '';
+    const m = label.match(/\(([^)]+)\)\s*$/);
+    return m?.[1]?.trim() || null;
+  }
+
+  private resolveBañoVehicleLabelFromTierContext(tierSource: string): string | null {
+    const direct = inferBañoVehicleDisplayLabel(tierSource);
+    if (direct && !isPlaceholderBañoVehicleLabel(direct)) {
+      return direct;
+    }
+    const chunks = tierSource
+      .split(/\n\n+/)
+      .map((c) => c.trim())
+      .filter(Boolean)
+      .reverse();
+    for (const chunk of chunks) {
+      const fromChunk = inferBañoVehicleDisplayLabel(chunk);
+      if (fromChunk && !isPlaceholderBañoVehicleLabel(fromChunk)) {
+        return fromChunk;
+      }
+      const purified = purifyVehicleModelUserReply(chunk);
+      if (
+        purified &&
+        userLatestMessageLooksLikeVehicleModelReply(purified) &&
+        !isPlaceholderBañoVehicleLabel(purified)
+      ) {
+        return purified
+          .split(/\s+/)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+          .join(' ');
+      }
+    }
+    return null;
+  }
+
   /** En los últimos N mensajes del hilo, el asistente ya preguntó por el auto (gate de baño). */
   private assistantAskedBañoVehicleInLastMessages(
     historyRows: readonly Message[],
@@ -1765,7 +1845,7 @@ export class ChatService implements OnModuleDestroy {
     severidadLiteral: string,
   ): Promise<string | null> {
     if (!isBañoDePinturaServicio(canonical)) return null;
-    const vl = inferBañoVehicleDisplayLabel(tierSource);
+    const vl = this.resolveBañoVehicleLabelFromTierContext(tierSource);
     if (!vl) return null;
     let personalizedColorDetail: string | null = null;
     if (mentionsCambioDeColor(tierSource)) {
@@ -1790,6 +1870,55 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Baño de pintura: LLM + plantilla premium; si el LLM falla, misma plantilla con resolución de catálogo.
+   * Nunca devuelve el formato plano de {@link formatInstantQuoteClientMessage}.
+   */
+  private async resolveBañoInstantPremiumMessage(
+    purifiedLatest: string,
+    tierCtx: string,
+    snap: MatrixPricingSnapshot,
+  ): Promise<string | null> {
+    const bañoNat = await this.tryBañoPinturaLlmInstantClientMessage(
+      purifiedLatest,
+      tierCtx,
+      snap,
+    );
+    if (bañoNat) {
+      return bañoNat;
+    }
+
+    const instant = tryResolveInstantQuoteFromUserText(purifiedLatest, snap, {
+      fullContextForBaño: tierCtx,
+    });
+    if (!instant) {
+      return null;
+    }
+
+    const resolved = resolveInstantCanonicalLatestThenFull(
+      purifiedLatest,
+      tierCtx,
+      snap,
+    );
+    if (!resolved || !isBañoDePinturaServicio(resolved.canonical)) {
+      return null;
+    }
+
+    const allowed = snap.listSeveridadesForCanonical(resolved.canonical);
+    const fromLine = this.parseSeveridadFromInstantResolution(instant);
+    const sevFinal =
+      coerceBañoSeveridadToCatalog(fromLine ?? '', allowed) ??
+      coerceBañoSeveridadToCatalog(inferBañoTierSeveridad(tierCtx), allowed) ??
+      allowed[0]!;
+
+    return this.tryFormatBañoPremiumInstantReply(
+      instant,
+      tierCtx,
+      resolved.canonical,
+      sevFinal,
+    );
+  }
+
+  /**
    * Baño de Pintura Exterior: clasifica severidad (tamaño) con LLM y redacta el mensaje con cifras exactas del catálogo.
    */
   private async tryBañoPinturaLlmInstantClientMessage(
@@ -1801,14 +1930,11 @@ export class ChatService implements OnModuleDestroy {
     const latest =
       purifyVehicleModelUserReply(latestRaw) || latestRaw;
     const full = String(fullContextForBaño ?? '').trim();
-    const tierSource =
-      full && latest && normalizeTextForMatch(full) !== normalizeTextForMatch(latest)
-        ? `${full}\n\n${latest}`
-        : full || latest;
+    const tierSource = full.trim() || latest;
     const tierNorm = normalizeTextForMatch(tierSource);
     if (
-      shouldAskVehicleBeforeBañoQuote(tierNorm, latest) ||
-      !isBañoVehicleProfiledForQuote(tierNorm, latest)
+      shouldAskVehicleBeforeBañoQuote(tierNorm, tierSource) ||
+      !isBañoVehicleProfiledForQuote(tierNorm, tierSource)
     ) {
       return null;
     }
@@ -1839,6 +1965,8 @@ export class ChatService implements OnModuleDestroy {
         coerceBañoSeveridadToCatalog(inferred, allowed) ??
         coerceBañoSeveridadToCatalog('Mediano', allowed) ??
         allowed[0]!;
+      vehicleLabel =
+        this.resolveBañoVehicleLabelFromTierContext(tierSource) ?? '';
     }
 
     const sevFinal =
@@ -1847,7 +1975,8 @@ export class ChatService implements OnModuleDestroy {
       allowed[0]!;
 
     if (isPlaceholderBañoVehicleLabel(vehicleLabel)) {
-      const inferredLabel = inferBañoVehicleDisplayLabel(tierSource);
+      const inferredLabel =
+        this.resolveBañoVehicleLabelFromTierContext(tierSource);
       if (inferredLabel) {
         vehicleLabel = inferredLabel;
       } else {
@@ -1869,9 +1998,13 @@ export class ChatService implements OnModuleDestroy {
     });
     if (!resolution) return null;
 
-    const vl = vehicleLabel.trim();
+    let vl = vehicleLabel.trim();
     if (!vl || isPlaceholderBañoVehicleLabel(vl)) {
-      return null;
+      const inferredVl = this.resolveBañoVehicleLabelFromTierContext(tierSource);
+      if (!inferredVl) {
+        return null;
+      }
+      vl = inferredVl;
     }
     const seg = segmentoEs.trim() || 'categoría de tamaño según nuestro catálogo';
 
@@ -1972,14 +2105,14 @@ export class ChatService implements OnModuleDestroy {
             damageDetected: false,
           };
         }
-        const bañoNatural = await this.tryBañoPinturaLlmInstantClientMessage(
+        const bañoPremium = await this.resolveBañoInstantPremiumMessage(
           userText,
           playBañoCtx,
           catalogSnapForTextOnly,
         );
-        if (bañoNatural) {
+        if (bañoPremium) {
           return {
-            assistantMessage: bañoNatural,
+            assistantMessage: bañoPremium,
             damageDetected: false,
           };
         }
@@ -1987,10 +2120,20 @@ export class ChatService implements OnModuleDestroy {
           fullContextForBaño: playBañoCtx,
         });
         if (instant) {
-          return {
-            assistantMessage: formatInstantQuoteClientMessage(instant),
-            damageDetected: false,
-          };
+          const resolvedPlay = resolveInstantCanonicalLatestThenFull(
+            userText,
+            playBañoCtx,
+            catalogSnapForTextOnly,
+          );
+          if (
+            !resolvedPlay ||
+            !isBañoDePinturaServicio(resolvedPlay.canonical)
+          ) {
+            return {
+              assistantMessage: formatInstantQuoteClientMessage(instant),
+              damageDetected: false,
+            };
+          }
         }
       }
       const catalogOnly = this.tryCatalogOnlyDamageItemsFromUserText(
@@ -2100,14 +2243,14 @@ export class ChatService implements OnModuleDestroy {
           damageDetected: false,
         };
       }
-      const bañoNaturalMerged = await this.tryBañoPinturaLlmInstantClientMessage(
+      const bañoPremiumMerged = await this.resolveBañoInstantPremiumMessage(
         userText,
         playBañoCtx,
         catalogSnapForTextOnly,
       );
-      if (bañoNaturalMerged) {
+      if (bañoPremiumMerged) {
         return {
-          assistantMessage: bañoNaturalMerged,
+          assistantMessage: bañoPremiumMerged,
           damageDetected: false,
         };
       }
@@ -2115,10 +2258,20 @@ export class ChatService implements OnModuleDestroy {
         fullContextForBaño: playBañoCtx,
       });
       if (instantMerged) {
-        return {
-          assistantMessage: formatInstantQuoteClientMessage(instantMerged),
-          damageDetected: false,
-        };
+        const resolvedMerged = resolveInstantCanonicalLatestThenFull(
+          userText,
+          playBañoCtx,
+          catalogSnapForTextOnly,
+        );
+        if (
+          !resolvedMerged ||
+          !isBañoDePinturaServicio(resolvedMerged.canonical)
+        ) {
+          return {
+            assistantMessage: formatInstantQuoteClientMessage(instantMerged),
+            damageDetected: false,
+          };
+        }
       }
     }
 
@@ -3364,16 +3517,28 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         ? history.filter((m) => !batchIdSet.has(m.id))
         : history;
 
-      const fullBañoCtx = this.buildAutopilotBañoContextFromHistory(
-        historySansBatch,
+      const batchRows = batchInbound ?? [];
+      const historyForBaño =
+        batchRows.length > 0
+          ? [...historySansBatch, ...batchRows]
+          : historySansBatch;
+      const tierCtx = this.buildUnifiedBañoTierContext(
+        historyForBaño,
         mergedForInstant,
       );
+      const fullBañoCtx =
+        tierCtx ||
+        this.buildAutopilotBañoContextFromHistory(
+          historySansBatch,
+          mergedForInstant,
+        ) ||
+        mergedForInstant;
       const purifiedLatest =
         purifyVehicleModelUserReply(mergedForInstant) || mergedForInstant;
       const skipBañoVehicleGate = this.shouldSkipBañoVehicleGateAfterModelReply(
         historySansBatch,
         mergedForInstant,
-        fullBañoCtx || mergedForInstant,
+        fullBañoCtx,
       );
 
       const interceptorTurns = historySansBatch.map((m) => ({
@@ -3398,42 +3563,42 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         if (!skipBañoVehicleGate) {
           const gateReply = tryBañoPinturaVehicleGateReply(
             purifiedLatest,
-            fullBañoCtx || mergedForInstant,
+            fullBañoCtx,
             snapInstant,
           );
           if (gateReply) {
             return gateReply;
           }
         }
-        const bañoNat = await this.tryBañoPinturaLlmInstantClientMessage(
+
+        const bañoPremium = await this.resolveBañoInstantPremiumMessage(
           purifiedLatest,
-          fullBañoCtx || mergedForInstant,
+          fullBañoCtx,
           snapInstant,
         );
-        if (bañoNat) {
-          return bañoNat;
+        if (bañoPremium) {
+          return bañoPremium;
         }
+
         const instant = tryResolveInstantQuoteFromUserText(purifiedLatest, snapInstant, {
-          fullContextForBaño: fullBañoCtx || mergedForInstant,
+          fullContextForBaño: fullBañoCtx,
         });
         if (instant) {
-          const tierCtx = fullBañoCtx || mergedForInstant;
           const resolvedInstant = resolveInstantCanonicalLatestThenFull(
             purifiedLatest,
-            tierCtx,
+            fullBañoCtx,
             snapInstant,
           );
-          if (resolvedInstant && isBañoDePinturaServicio(resolvedInstant.canonical)) {
-            const sevInstant = inferBañoTierSeveridad(tierCtx);
-            const premium = await this.tryFormatBañoPremiumInstantReply(
-              instant,
-              tierCtx,
-              resolvedInstant.canonical,
-              sevInstant,
+          if (
+            resolvedInstant &&
+            isBañoDePinturaServicio(resolvedInstant.canonical)
+          ) {
+            console.warn(
+              '[AutopilotInstantQuote] baño detectado sin plantilla premium; no se usa formato plano',
             );
-            if (premium) return premium;
+          } else {
+            return formatInstantQuoteClientMessage(instant);
           }
-          return formatInstantQuoteClientMessage(instant);
         }
       }
 
@@ -3686,19 +3851,29 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             if (gateM) {
               return gateM;
             }
-            const bañoNat = await this.tryBañoPinturaLlmInstantClientMessage(
+            const bañoPremiumM = await this.resolveBañoInstantPremiumMessage(
               lastUser,
               userBañoCtx || lastUser,
               snapM,
             );
-            if (bañoNat) {
-              return bañoNat;
+            if (bañoPremiumM) {
+              return bañoPremiumM;
             }
             const instantM = tryResolveInstantQuoteFromUserText(lastUser, snapM, {
               fullContextForBaño: userBañoCtx || lastUser,
             });
             if (instantM) {
-              return formatInstantQuoteClientMessage(instantM);
+              const resolvedM = resolveInstantCanonicalLatestThenFull(
+                lastUser,
+                userBañoCtx || lastUser,
+                snapM,
+              );
+              if (
+                !resolvedM ||
+                !isBañoDePinturaServicio(resolvedM.canonical)
+              ) {
+                return formatInstantQuoteClientMessage(instantM);
+              }
             }
           }
           break;
