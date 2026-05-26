@@ -1,4 +1,5 @@
 import type { OpenAI } from 'openai';
+import { OPENAI_MODEL } from './openai-models';
 import type { InstantQuoteResolution } from './instant-quote-from-text';
 import {
   extractBañoColorDetailHeuristic,
@@ -252,7 +253,7 @@ export async function classifyBañoPinturaTierWithLlm(
   }
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: OPENAI_MODEL,
     temperature: 0.15,
     max_tokens: 220,
     response_format: { type: 'json_object' },
@@ -320,7 +321,7 @@ export async function extractBañoPersonalizedColorDetail(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: OPENAI_MODEL,
       temperature: 0.15,
       max_tokens: 140,
       response_format: { type: 'json_object' },
