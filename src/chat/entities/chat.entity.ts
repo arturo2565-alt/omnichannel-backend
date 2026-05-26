@@ -1,5 +1,14 @@
-import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import {
+  Entity,
+  Column,
+  PrimaryGeneratedColumn,
+  CreateDateColumn,
+  ManyToOne,
+  JoinColumn,
+  Index,
+} from 'typeorm';
 import { Conversation } from './conversation.entity';
+import { Taller } from '../../taller/entities/taller.entity';
 import type { DraftQuote } from '../autofix-config';
 
 /**
@@ -61,6 +70,14 @@ export class Message {
 
   @Column({ nullable: true })
   conversationId: string;
+
+  @ManyToOne(() => Taller, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'tallerId' })
+  taller: Taller | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  @Index()
+  tallerId: string | null;
 
   /** Análisis IA de daños (hojalatería / pintura) cuando el mensaje es una imagen */
   @Column({ type: 'jsonb', nullable: true })

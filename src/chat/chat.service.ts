@@ -13,6 +13,7 @@ import {
   VehicleDamageAnalysis,
 } from './entities/chat.entity';
 import { Conversation } from './entities/conversation.entity';
+import { Contact } from './entities/contact.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import {
@@ -39,6 +40,7 @@ import {
   sumQuoteRowsSubtotal,
   type QuoteRowInput,
 } from './draft-quote-inventory-pricing';
+import { TallerService } from '../taller/taller.service';
 import type {
   ChatCompletionMessageParam,
   ChatCompletionTool,
@@ -642,6 +644,9 @@ export class ChatService implements OnModuleDestroy {
     @InjectRepository(Conversation)
     private readonly conversationRepository: Repository<Conversation>,
 
+    @InjectRepository(Contact)
+    private readonly contactRepository: Repository<Contact>,
+
     @InjectRepository(DraftQuoteEntity)
     private readonly draftQuoteRepository: Repository<DraftQuoteEntity>,
 
@@ -656,6 +661,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly aiConfigService: AiConfigService,
 
     private readonly catalogService: CatalogService,
+
+    private readonly tallerService: TallerService,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -676,6 +683,67 @@ export class ChatService implements OnModuleDestroy {
     this.conversationFindOrCreateInflight.clear();
   }
 
+  private async tallerIdForConversation(conversationId: string): Promise<string> {
+    const row = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+      select: ['id', 'tallerId'],
+    });
+    return row?.tallerId ?? (await this.tallerService.findDefaultTallerId());
+  }
+
+  private async assertConversationForTaller(
+    conversationId: string,
+    tallerId: string,
+  ): Promise<Conversation> {
+    const row = await this.conversationRepository.findOne({
+      where: { id: conversationId, tallerId },
+    });
+    if (!row) {
+      throw new NotFoundException(
+        `Conversación no encontrada o no pertenece a tu taller: ${conversationId}`,
+      );
+    }
+    return row;
+  }
+
+  private async findOrCreateContactForTaller(
+    tallerId: string,
+    externalId: string,
+    contactName: string,
+    avatarUrl: string | null,
+    platform: string | null,
+  ): Promise<Contact> {
+    const key = externalId.trim();
+    let contact = await this.contactRepository.findOne({
+      where: { tallerId, externalId: key },
+    });
+    if (contact) {
+      let dirty = false;
+      if (contactName && contact.contactName !== contactName) {
+        contact.contactName = contactName;
+        dirty = true;
+      }
+      if (avatarUrl && contact.avatarUrl !== avatarUrl) {
+        contact.avatarUrl = avatarUrl;
+        dirty = true;
+      }
+      if (platform && contact.platform !== platform) {
+        contact.platform = platform;
+        dirty = true;
+      }
+      if (dirty) await this.contactRepository.save(contact);
+      return contact;
+    }
+    contact = this.contactRepository.create({
+      tallerId,
+      externalId: key,
+      contactName: contactName || 'Cliente Desconocido',
+      avatarUrl,
+      platform,
+    });
+    return this.contactRepository.save(contact);
+  }
+
   private isUniqueConstraintError(err: unknown): boolean {
     if (!(err instanceof QueryFailedError)) return false;
     const driver = err.driverError as { code?: string } | undefined;
@@ -693,21 +761,30 @@ export class ChatService implements OnModuleDestroy {
    * aunque lleguen webhooks concurrentes.
    */
   private async findOrCreateConversationByExternalId(
+    tallerId: string,
     threadExternalId: string,
     createDraft: () => Promise<Conversation>,
   ): Promise<Conversation> {
+    const tid = String(tallerId ?? '').trim();
+    if (!tid) {
+      throw new BadRequestException('tallerId es obligatorio para la conversación.');
+    }
     const key = threadExternalId.trim();
     if (!key) {
       throw new BadRequestException('externalId del contacto vacío.');
     }
 
+    const inflightKey = `${tid}:${key}`;
+
     const loadExisting = async (): Promise<Conversation | null> =>
-      this.conversationRepository.findOne({ where: { externalId: key } });
+      this.conversationRepository.findOne({
+        where: { tallerId: tid, externalId: key },
+      });
 
     let row = await loadExisting();
     if (row) return row;
 
-    let inflight = this.conversationFindOrCreateInflight.get(key);
+    let inflight = this.conversationFindOrCreateInflight.get(inflightKey);
     if (inflight) {
       try {
         return await inflight;
@@ -733,12 +810,12 @@ export class ChatService implements OnModuleDestroy {
       }
     })();
 
-    this.conversationFindOrCreateInflight.set(key, task);
+    this.conversationFindOrCreateInflight.set(inflightKey, task);
     try {
       return await task;
     } finally {
-      if (this.conversationFindOrCreateInflight.get(key) === task) {
-        this.conversationFindOrCreateInflight.delete(key);
+      if (this.conversationFindOrCreateInflight.get(inflightKey) === task) {
+        this.conversationFindOrCreateInflight.delete(inflightKey);
       }
     }
   }
@@ -996,8 +1073,9 @@ export class ChatService implements OnModuleDestroy {
     analysis: VehicleDamageAnalysis,
     doc: DraftQuote,
     fallbackUrls: string[],
+    tallerId?: string | null,
   ): Promise<Omit<DraftQuoteItem, 'id' | 'draftQuote' | 'draftQuoteId'>[]> {
-    const snap = await this.catalogService.getMatrixPricingSnapshot();
+    const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
     const lines = doc.lines ?? [];
     if (!lines.length) return [];
 
@@ -1102,12 +1180,14 @@ export class ChatService implements OnModuleDestroy {
     analysis: VehicleDamageAnalysis,
     doc: DraftQuote,
     fallbackUrls: string[],
+    tallerId?: string | null,
   ): Promise<void> {
     await this.draftQuoteItemRepository.delete({ draftQuoteId });
     const rows = await this.buildDraftQuoteLineRowsForPersist(
       analysis,
       doc,
       fallbackUrls,
+      tallerId,
     );
     if (!rows.length) return;
     await this.draftQuoteItemRepository.insert(
@@ -1115,9 +1195,14 @@ export class ChatService implements OnModuleDestroy {
     );
   }
 
-  private async loadDraftQuoteWithItemsOrThrow(id: string): Promise<DraftQuoteEntity> {
+  private async loadDraftQuoteWithItemsOrThrow(
+    id: string,
+    tallerId?: string,
+  ): Promise<DraftQuoteEntity> {
+    const where: { id: string; tallerId?: string } = { id };
+    if (tallerId) where.tallerId = tallerId;
     const row = await this.draftQuoteRepository.findOne({
-      where: { id },
+      where,
       relations: { items: true },
     });
     if (!row) {
@@ -1238,8 +1323,9 @@ export class ChatService implements OnModuleDestroy {
    */
   private async computePrimaryMatrixEstimate(
     analysis: VehicleDamageAnalysis,
+    tallerId?: string | null,
   ): Promise<number> {
-    const snap = await this.catalogService.getMatrixPricingSnapshot();
+    const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
     if (analysis.inventory?.length) {
       const matrixItems = matrixServicioInputsWithCatalogResolve(
         analysis.inventory,
@@ -1392,6 +1478,8 @@ export class ChatService implements OnModuleDestroy {
 
     for (const entry of entries) {
       const pageId = entry?.id != null ? String(entry.id) : '';
+      const tallerId =
+        await this.tallerService.resolveTallerIdForWebhook(pageId);
       const messaging = Array.isArray(entry?.messaging)
         ? entry.messaging
         : [];
@@ -1448,6 +1536,8 @@ export class ChatService implements OnModuleDestroy {
 
         const basePayload: Record<string, unknown> = {
           externalId: threadPsid,
+          tallerId,
+          metaPageId: pageId,
           platform: 'facebook',
           direction: isEcho ? 'outbound' : 'inbound',
           skipOutboundFacebookSend: isEcho,
@@ -1476,7 +1566,7 @@ export class ChatService implements OnModuleDestroy {
           }
           if (!skipText && isEcho) {
             const echoConv = await this.conversationRepository.findOne({
-              where: { externalId: threadPsid },
+              where: { externalId: threadPsid, tallerId },
             });
             if (echoConv) {
               const panelDup =
@@ -1530,7 +1620,7 @@ export class ChatService implements OnModuleDestroy {
           }
           if (isEcho) {
             const echoConv = await this.conversationRepository.findOne({
-              where: { externalId: threadPsid },
+              where: { externalId: threadPsid, tallerId },
             });
             if (echoConv) {
               const panelImgDup =
@@ -1586,19 +1676,37 @@ export class ChatService implements OnModuleDestroy {
         ? 'outbound'
         : 'inbound';
 
+    let tenantId = pickFirstNonEmptyTrimmedString(data.tallerId);
+    if (!tenantId) {
+      const pageHint = pickFirstNonEmptyTrimmedString(
+        data.metaPageId,
+        data.pageId,
+      );
+      if (pageHint) {
+        tenantId = await this.tallerService.resolveTallerIdForWebhook(
+          pageHint,
+        );
+      }
+    }
+
     let conversation: Conversation | null = null;
 
     const rawConversationId = pickFirstNonEmptyTrimmedString(
       data.conversationId,
     );
     if (rawConversationId && looksLikeConversationUuid(rawConversationId)) {
-      conversation = await this.conversationRepository.findOne({
-        where: { id: rawConversationId },
-      });
+      const where: { id: string; tallerId?: string } = {
+        id: rawConversationId,
+      };
+      if (tenantId) where.tallerId = tenantId;
+      conversation = await this.conversationRepository.findOne({ where });
       if (!conversation) {
         throw new BadRequestException(
           `No existe conversación con id (UUID): ${rawConversationId}`,
         );
+      }
+      if (!tenantId && conversation.tallerId) {
+        tenantId = conversation.tallerId;
       }
     }
 
@@ -1617,8 +1725,12 @@ export class ChatService implements OnModuleDestroy {
         );
       }
 
+      if (!tenantId) {
+        tenantId = await this.tallerService.findDefaultTallerId();
+      }
+
       conversation = await this.conversationRepository.findOne({
-        where: { externalId: threadExternalId },
+        where: { externalId: threadExternalId, tallerId: tenantId },
       });
 
       const contactName = pickFirstNonEmptyTrimmedString(
@@ -1630,6 +1742,7 @@ export class ChatService implements OnModuleDestroy {
 
       if (!conversation) {
         conversation = await this.findOrCreateConversationByExternalId(
+          tenantId,
           threadExternalId,
           async () => {
             let displayName = contactName;
@@ -1649,19 +1762,34 @@ export class ChatService implements OnModuleDestroy {
                 if (prof.profile_pic) avatarUrl = prof.profile_pic;
               }
             }
+            const platformVal = shouldPersistPlatformOnConversation(
+              data.platform,
+            )
+              ? String(data.platform).trim()
+              : null;
+            const contact = await this.findOrCreateContactForTaller(
+              tenantId,
+              threadExternalId,
+              displayName || 'Cliente Desconocido',
+              avatarUrl,
+              platformVal,
+            );
             return this.conversationRepository.create({
               externalId: threadExternalId,
+              tallerId: tenantId,
+              contactId: contact.id,
               contactName: displayName || 'Cliente Desconocido',
               avatarUrl,
-              platform: shouldPersistPlatformOnConversation(data.platform)
-                ? String(data.platform).trim()
-                : null,
+              platform: platformVal,
               status: 'nuevo',
               isAutoPilotActive: true,
             });
           },
         );
       } else {
+        if (!conversation.tallerId) {
+          conversation.tallerId = tenantId;
+        }
         if (contactName && conversation.contactName !== contactName) {
           conversation.contactName = contactName;
         }
@@ -1745,6 +1873,12 @@ export class ChatService implements OnModuleDestroy {
     const suppressAutopilotAndSuggestions =
       data.suppressAutopilotAndSuggestions === true;
 
+    const msgTallerId =
+      conversation.tallerId ?? tenantId ?? (await this.tallerService.findDefaultTallerId());
+    if (!conversation.tallerId) {
+      conversation.tallerId = msgTallerId;
+    }
+
     const newMessage = this.messageRepository.create({
       content: contentToSave,
       channelType: data.platform || 'test',
@@ -1752,6 +1886,7 @@ export class ChatService implements OnModuleDestroy {
       direction: resolvedDirection,
       externalId: messageRowExternalId || conversation.externalId,
       conversation: conversation,
+      tallerId: msgTallerId,
     });
     
     const saved = await this.messageRepository.save(newMessage);
@@ -1840,6 +1975,7 @@ export class ChatService implements OnModuleDestroy {
       allowEmptyInventory?: boolean;
       /** Texto del cliente (p. ej. pieza/vehículo) — se inyecta en el turno de usuario de visión. */
       clientContextText?: string;
+      tallerId?: string | null;
     },
   ): Promise<DetectedDamageItem[]> {
     const urls = [
@@ -1959,6 +2095,7 @@ export class ChatService implements OnModuleDestroy {
       userSchemaHint?: string;
       allowEmptyInventory?: boolean;
       clientContextText?: string;
+      tallerId?: string | null;
     },
   ): Promise<DetectedDamageItem[]> {
     const lotes = this.chunkImageUrlsForVision(imageUrls);
@@ -1970,7 +2107,9 @@ export class ChatService implements OnModuleDestroy {
       return this.analyzeDamageImage(lotes[0]!, options);
     }
 
-    const snap = await this.catalogService.getMatrixPricingSnapshot();
+    const snap = await this.catalogService.getMatrixPricingSnapshot(
+      options?.tallerId,
+    );
     let allDetectedDamages: DetectedDamageItem[] = [];
 
     console.log(
@@ -2388,6 +2527,7 @@ export class ChatService implements OnModuleDestroy {
    */
   async regenerateDraftQuoteClientNarrative(
     draftQuoteId: string,
+    tallerId: string,
     body?: { inventoryLines?: PatchInventoryLineDto[] },
   ): Promise<{
     narrative: string;
@@ -2397,9 +2537,11 @@ export class ChatService implements OnModuleDestroy {
     let row: DraftQuoteEntity;
 
     if (body?.inventoryLines?.length) {
-      row = await this.patchDraftQuote(draftQuoteId, {
-        inventoryLines: body.inventoryLines,
-      });
+      row = await this.patchDraftQuote(
+        draftQuoteId,
+        { inventoryLines: body.inventoryLines },
+        tallerId,
+      );
       return {
         narrative: row.quotePayload.formalNarrative,
         messageId: row.messageId,
@@ -2408,7 +2550,7 @@ export class ChatService implements OnModuleDestroy {
     }
 
     const existing = await this.draftQuoteRepository.findOne({
-      where: { id: draftQuoteId },
+      where: { id: draftQuoteId, tallerId },
     });
     if (!existing) {
       throw new NotFoundException(`DraftQuote no encontrada: ${draftQuoteId}`);
@@ -2707,13 +2849,12 @@ export class ChatService implements OnModuleDestroy {
       authorizedQuoteSummary: string;
       visionItems?: unknown;
     },
+    tallerId: string,
   ): Promise<{ assistantMessage: string }> {
-    const conv = await this.conversationRepository.findOne({
-      where: { id: conversationId },
-    });
-    if (!conv) {
-      throw new NotFoundException(`Conversación no encontrada: ${conversationId}`);
-    }
+    const conv = await this.assertConversationForTaller(
+      conversationId,
+      tallerId,
+    );
 
     await this.approvePendingDraftQuotesForConversation(conversationId);
 
@@ -3461,9 +3602,12 @@ ${catalogAppend}`;
   /**
    * Lista de piezas/servicios en BD para inyectar en prompts de texto (playground, autopilot, sugerencias).
    */
-  private async loadCatalogPromptAppendForLlm(): Promise<string> {
+  private async loadCatalogPromptAppendForLlm(
+    tallerId?: string | null,
+  ): Promise<string> {
     try {
-      const names = await this.catalogService.getDistinctServicioNamesForPrompt();
+      const names =
+        await this.catalogService.getDistinctServicioNamesForPrompt(tallerId);
       if (!names.length) {
         return '\n\n[Catálogo de piezas/servicios aún sin datos en base de datos.]';
       }
@@ -3511,8 +3655,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
    * Arma una cotización formal en estado PENDING_APPROVAL a partir del peritaje
    * y precios del catálogo `price_matrix` en base de datos.
    */
-  async generateDraftQuote(analysis: VehicleDamageAnalysis): Promise<DraftQuote> {
-    const snap = await this.catalogService.getMatrixPricingSnapshot();
+  async generateDraftQuote(
+    analysis: VehicleDamageAnalysis,
+    tallerId?: string | null,
+  ): Promise<DraftQuote> {
+    const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
     const lines: DraftQuoteLine[] = [];
     let resolvedLevel: DamageLevel;
 
@@ -3783,6 +3930,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       }
     }
 
+    const convRow = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+      select: ['id', 'tallerId'],
+    });
+    const visionTallerId =
+      convRow?.tallerId ?? (await this.tallerService.findDefaultTallerId());
+
     const existingDraft = await this.draftQuoteRepository.findOne({
       where: { conversationId, status: 'PENDING_APPROVAL' },
       order: { createdAt: 'DESC' },
@@ -3790,7 +3944,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     const newInventory = await this.analyzeDamageImageInSequentialChunks(
       imageUrls,
-      { allowEmptyInventory: true },
+      { allowEmptyInventory: true, tallerId: visionTallerId },
     );
 
     console.log(
@@ -3814,7 +3968,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
       if (priorInventory.length > 0) {
         const snapMerge =
-          await this.catalogService.getMatrixPricingSnapshot();
+          await this.catalogService.getMatrixPricingSnapshot(visionTallerId);
         const mergedInv = mergeDamageInventoryAccumulative(
           priorInventory,
           newInventory,
@@ -3840,8 +3994,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       analysis = inventoryItemsToVehicleAnalysis(newInventory, imageUrls);
     }
 
-    const estimateAmount = await this.computePrimaryMatrixEstimate(analysis);
-    let draftQuoteDoc = await this.generateDraftQuote(analysis);
+    const estimateAmount = await this.computePrimaryMatrixEstimate(
+      analysis,
+      visionTallerId,
+    );
+    let draftQuoteDoc = await this.generateDraftQuote(analysis, visionTallerId);
 
     if (existingDraft?.quotePayload?.reference) {
       draftQuoteDoc = {
@@ -3870,12 +4027,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       existingDraft.damageAnalysis = analysis;
       existingDraft.estimateAmount = estimateAmount;
       existingDraft.quotePayload = draftQuoteDoc;
+      existingDraft.tallerId = visionTallerId;
       const savedDraft = await this.draftQuoteRepository.save(existingDraft);
       await this.syncDraftQuoteLineItems(
         savedDraft.id,
         analysis,
         draftQuoteDoc,
         allImageUrls,
+        visionTallerId,
       );
 
       if (priorMessageId && priorMessageId !== messageId) {
@@ -3905,6 +4064,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     const row = this.draftQuoteRepository.create({
       conversationId,
+      tallerId: visionTallerId,
       messageId,
       imageUrl: persistedImageUrl,
       damageAnalysis: analysis,
@@ -3918,6 +4078,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       analysis,
       draftQuoteDoc,
       allImageUrls,
+      visionTallerId,
     );
 
     await this.messageRepository.update(
@@ -3938,9 +4099,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     });
   }
 
-  async findDraftQuotesByConversation(conversationId: string) {
+  async findDraftQuotesByConversation(
+    conversationId: string,
+    tallerId: string,
+  ) {
+    await this.assertConversationForTaller(conversationId, tallerId);
     const rows = await this.draftQuoteRepository.find({
-      where: { conversationId },
+      where: { conversationId, tallerId },
       order: { createdAt: 'DESC' },
       relations: { items: true },
     });
@@ -3953,8 +4118,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   /**
    * Actualiza pieza / severidad / precio final de un borrador, recalcula totales y persiste.
    */
-  async patchDraftQuote(id: string, body: PatchDraftQuoteBody): Promise<DraftQuoteEntity> {
-    const row = await this.draftQuoteRepository.findOne({ where: { id } });
+  async patchDraftQuote(
+    id: string,
+    body: PatchDraftQuoteBody,
+    tallerId: string,
+  ): Promise<DraftQuoteEntity> {
+    const row = await this.draftQuoteRepository.findOne({
+      where: { id, tallerId },
+    });
     if (!row) {
       throw new NotFoundException(`DraftQuote no encontrada: ${id}`);
     }
@@ -4075,7 +4246,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         sourceUrls.length ? sourceUrls : fallbackUrls,
       );
 
-      const snap = await this.catalogService.getMatrixPricingSnapshot();
+      const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
 
       const manualLines: DraftQuoteLine[] = linesDto.map((L, idx) =>
         buildDraftQuoteLineFromQuoteRow(L, idx, snap),
@@ -4083,7 +4254,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const total = sumQuoteRowsSubtotal(linesDto);
       const estimateAmount = total;
 
-      let quotePayload = await this.generateDraftQuote(analysisMerged);
+      let quotePayload = await this.generateDraftQuote(
+        analysisMerged,
+        tallerId,
+      );
       quotePayload = {
         ...quotePayload,
         reference: row.quotePayload.reference,
@@ -4125,6 +4299,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         analysisMerged,
         quotePayload,
         sourceUrls.length ? sourceUrls : parseDraftImageUrls(row.imageUrl),
+        tallerId,
       );
 
       if (row.messageId) {
@@ -4134,7 +4309,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         );
       }
 
-      return this.loadDraftQuoteWithItemsOrThrow(saved.id);
+      return this.loadDraftQuoteWithItemsOrThrow(saved.id, tallerId);
     }
 
     const analysis: VehicleDamageAnalysis = {
@@ -4155,8 +4330,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       analysis.severidadDelDano = s;
     }
 
-    let estimateAmount = await this.computePrimaryMatrixEstimate(analysis);
-    let quotePayload = await this.generateDraftQuote(analysis);
+    let estimateAmount = await this.computePrimaryMatrixEstimate(
+      analysis,
+      tallerId,
+    );
+    let quotePayload = await this.generateDraftQuote(analysis, tallerId);
     quotePayload = {
       ...quotePayload,
       reference: row.quotePayload.reference,
@@ -4218,6 +4396,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       analysis,
       quotePayload,
       parseDraftImageUrls(row.imageUrl),
+      tallerId,
     );
 
     if (row.messageId) {
@@ -4227,20 +4406,28 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       );
     }
 
-    return this.loadDraftQuoteWithItemsOrThrow(saved.id);
+    return this.loadDraftQuoteWithItemsOrThrow(saved.id, tallerId);
   }
 
   // --- OPTIMIZACIÓN DE CARGA ---
 
-  async findMessagesByConversation(conversationId: string, limit = 50) {
+  async findMessagesByConversation(
+    conversationId: string,
+    tallerId: string,
+    limit = 50,
+  ) {
+    await this.assertConversationForTaller(conversationId, tallerId);
     let rows = await this.messageRepository.find({
-      where: { conversationId },
+      where: { conversationId, tallerId },
       order: { createdAt: 'DESC' },
       take: limit,
     });
     if (!rows.length) {
       rows = await this.messageRepository.find({
-        where: { conversation: { id: conversationId } as any },
+        where: {
+          conversation: { id: conversationId, tallerId } as object,
+          tallerId,
+        },
         order: { createdAt: 'DESC' },
         take: limit,
       });
@@ -4260,8 +4447,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     }));
   }
 
-  async findAllConversations() {
+  async findAllConversations(tallerId: string) {
     const conversations = await this.conversationRepository.find({
+      where: { tallerId },
       order: { lastMessageAt: 'DESC' },
     });
 
@@ -4385,7 +4573,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       };
     }
 
-    const snap = await this.catalogService.getMatrixPricingSnapshot();
+    const snap = await this.catalogService.getMatrixPricingSnapshot(
+      conversation.tallerId ?? undefined,
+    );
     const isAgendado =
       String(conversation.status ?? '').toLowerCase().trim() === 'agendado';
 
@@ -5102,14 +5292,15 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     }
   }
 
-  async getManualAiSuggestion(conversationId: string) {
+  async getManualAiSuggestion(conversationId: string, tallerId: string) {
     try {
+      await this.assertConversationForTaller(conversationId, tallerId);
       const recent = await this.loadRecentMessagesForLlm(conversationId);
       const contextMessages = this.messagesToChatCompletionTurns(recent);
 
       if (!contextMessages.length) return 'No hay historial para analizar.';
 
-      const snapM = await this.catalogService.getMatrixPricingSnapshot();
+      const snapM = await this.catalogService.getMatrixPricingSnapshot(tallerId);
       const convoWindow = contextMessages.slice(-PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS);
       const userBañoCtx = convoWindow
         .map((m) => String(m.content ?? '').trim())
@@ -5199,11 +5390,9 @@ ${closerPrompt}${catalogAppend}`,
   async patchConversationSettings(
     id: string,
     body: { isAutoPilotActive?: boolean },
+    tallerId: string,
   ): Promise<{ id: string; isAutoPilotActive: boolean }> {
-    const row = await this.conversationRepository.findOne({ where: { id } });
-    if (!row) {
-      throw new NotFoundException(`Conversación no encontrada: ${id}`);
-    }
+    const row = await this.assertConversationForTaller(id, tallerId);
     if (typeof body.isAutoPilotActive === 'boolean') {
       row.isAutoPilotActive = body.isAutoPilotActive;
       await this.conversationRepository.save(row);
@@ -5230,23 +5419,18 @@ ${closerPrompt}${catalogAppend}`,
   /**
    * Elimina la conversación y todo su historial (citas, borradores, líneas, mensajes).
    */
-  async deleteConversation(id: string): Promise<void> {
+  async deleteConversation(id: string, tallerId: string): Promise<void> {
     const conversationId = String(id ?? '').trim();
     if (!conversationId || !looksLikeConversationUuid(conversationId)) {
       throw new BadRequestException('Id de conversación inválido (se espera UUID)');
     }
 
-    const row = await this.conversationRepository.findOne({
-      where: { id: conversationId },
-    });
-    if (!row) {
-      throw new NotFoundException(`Conversación no encontrada: ${conversationId}`);
-    }
+    const row = await this.assertConversationForTaller(conversationId, tallerId);
 
     this.clearPendingConversationJobs(conversationId);
 
     const draftQuotes = await this.draftQuoteRepository.find({
-      where: { conversationId },
+      where: { conversationId, tallerId },
       select: ['id'],
     });
     const draftQuoteIds = draftQuotes.map((q) => q.id);
@@ -5255,13 +5439,13 @@ ${closerPrompt}${catalogAppend}`,
         draftQuoteId: In(draftQuoteIds),
       });
     }
-    await this.draftQuoteRepository.delete({ conversationId });
-    await this.messageRepository.delete({ conversationId });
+    await this.draftQuoteRepository.delete({ conversationId, tallerId });
+    await this.messageRepository.delete({ conversationId, tallerId });
     await this.appointmentRepository.delete({ conversationId });
     await this.conversationRepository.delete({ id: conversationId });
   }
 
-  async findAllAppointments(): Promise<
+  async findAllAppointments(tallerId: string): Promise<
     {
       id: string;
       clientName: string;
@@ -5272,9 +5456,12 @@ ${closerPrompt}${catalogAppend}`,
       conversationId: string | null;
     }[]
   > {
-    const rows = await this.appointmentRepository.find({
-      order: { scheduledAt: 'ASC' },
-    });
+    const rows = await this.appointmentRepository
+      .createQueryBuilder('a')
+      .innerJoin('a.conversation', 'c')
+      .where('c.tallerId = :tallerId', { tallerId })
+      .orderBy('a.scheduledAt', 'ASC')
+      .getMany();
     return rows.map((a) => ({
       id: a.id,
       clientName: a.clientName,
@@ -5289,14 +5476,18 @@ ${closerPrompt}${catalogAppend}`,
   async patchAppointmentStatus(
     id: string,
     body: { status?: string },
+    tallerId: string,
   ): Promise<{ id: string; status: AppointmentStatus }> {
     const allowed: AppointmentStatus[] = [
       'pendiente',
       'confirmada',
       'finalizada',
     ];
-    const row = await this.appointmentRepository.findOne({ where: { id } });
-    if (!row) {
+    const row = await this.appointmentRepository.findOne({
+      where: { id },
+      relations: ['conversation'],
+    });
+    if (!row || row.conversation?.tallerId !== tallerId) {
       throw new NotFoundException(`Cita no encontrada: ${id}`);
     }
     const raw = String(body.status ?? '').toLowerCase().trim();

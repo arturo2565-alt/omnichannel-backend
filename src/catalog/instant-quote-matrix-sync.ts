@@ -9,8 +9,10 @@ const SEV_MAX = 32;
  */
 export async function upsertInstantQuoteMatrixRows(
   repo: Repository<PriceMatrix>,
+  tallerId: string,
 ): Promise<number> {
   const rows = INSTANT_QUOTE_MATRIX_SEED_ROWS.map((r) => ({
+    tallerId,
     servicio: r.servicio.slice(0, 120),
     severidad: r.severidad.slice(0, SEV_MAX),
     precio: r.precio,
@@ -19,7 +21,7 @@ export async function upsertInstantQuoteMatrixRows(
   }));
   if (rows.length === 0) return 0;
   await repo.upsert(rows, {
-    conflictPaths: ['servicio', 'severidad'],
+    conflictPaths: ['tallerId', 'servicio', 'severidad'],
     skipUpdateIfNoValuesChanged: false,
   });
   return rows.length;
@@ -27,15 +29,26 @@ export async function upsertInstantQuoteMatrixRows(
 
 /**
  * `true` solo para Baño de Pintura*, Cerámico*, Estética Automotriz; el resto `false` (hojalatería).
- * Usa la columna física `pieza` (propiedad TypeORM `servicio`).
  */
-export async function syncInstantServiceFlags(em: EntityManager): Promise<void> {
-  await em.query(`UPDATE price_matrix SET is_instant_service = false`);
-  await em.query(`
+export async function syncInstantServiceFlags(
+  em: EntityManager,
+  tallerId: string,
+): Promise<void> {
+  await em.query(
+    `UPDATE price_matrix SET is_instant_service = false WHERE "tallerId" = $1`,
+    [tallerId],
+  );
+  await em.query(
+    `
     UPDATE price_matrix SET is_instant_service = true
-    WHERE LOWER(pieza) LIKE 'baño de pintura%'
-       OR LOWER(pieza) LIKE '%cerámico%'
-       OR LOWER(pieza) LIKE '%ceramico%'
-       OR pieza = 'Estética Automotriz'
-  `);
+    WHERE "tallerId" = $1
+      AND (
+        LOWER(pieza) LIKE 'baño de pintura%'
+        OR LOWER(pieza) LIKE '%cerámico%'
+        OR LOWER(pieza) LIKE '%ceramico%'
+        OR pieza = 'Estética Automotriz'
+      )
+  `,
+    [tallerId],
+  );
 }

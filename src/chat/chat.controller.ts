@@ -1,19 +1,20 @@
-import { 
-  Controller, 
-  Get, 
+import {
+  Controller,
+  Get,
   Post,
   Patch,
   Delete,
-  Body, 
-  Query, 
-  Param, 
-  HttpCode, 
-  HttpStatus, 
-  UseInterceptors, 
+  Body,
+  Query,
+  Param,
+  HttpCode,
+  HttpStatus,
+  UseInterceptors,
   UploadedFile,
   ForbiddenException,
   Res,
   Req,
+  UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -23,6 +24,10 @@ import type {
   PreviewDraftQuoteNarrativeBody,
 } from './chat.service';
 import { AiConfigService } from './ai-config.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { Public } from '../auth/decorators/public.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 
 @Controller(['webhook', 'chat'])
 export class ChatController {
@@ -31,7 +36,7 @@ export class ChatController {
     private readonly aiConfigService: AiConfigService,
   ) {}
 
-  // Verificación GET de Meta (WhatsApp / webhooks): debe devolver el challenge en texto plano.
+  @Public()
   @Get()
   verifyWebhook(
     @Query('hub.mode') mode: string,
@@ -50,29 +55,37 @@ export class ChatController {
     throw new ForbiddenException('Validación fallida');
   }
 
-  // --- RUTAS DE OPTIMIZACIÓN ---
-
+  @UseGuards(JwtAuthGuard)
   @Get('conversations')
-  async getConversations() {
-    return await this.chatService.findAllConversations();
+  async getConversations(@CurrentUser() user: AuthenticatedUser) {
+    return await this.chatService.findAllConversations(user.tallerId);
   }
 
+  @UseGuards(JwtAuthGuard)
   @Get('messages/:conversationId')
-  async getMessages(@Param('conversationId') conversationId: string) {
-    return await this.chatService.findMessagesByConversation(conversationId);
+  async getMessages(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('conversationId') conversationId: string,
+  ) {
+    return await this.chatService.findMessagesByConversation(
+      conversationId,
+      user.tallerId,
+    );
   }
 
+  @UseGuards(JwtAuthGuard)
   @Get('conversations/:conversationId/draft-quotes')
-  async getDraftQuotes(@Param('conversationId') conversationId: string) {
-    return await this.chatService.findDraftQuotesByConversation(conversationId);
+  async getDraftQuotes(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('conversationId') conversationId: string,
+  ) {
+    return await this.chatService.findDraftQuotesByConversation(
+      conversationId,
+      user.tallerId,
+    );
   }
 
-  // --- MULTIMEDIA (NUEVO) ---
-
-  /**
-   * 2. Subida de archivos a Cloudinary
-   * El interceptor 'file' debe coincidir con el nombre del campo en el FormData del frontend.
-   */
+  @UseGuards(JwtAuthGuard)
   @Post('upload')
   @UseInterceptors(FileInterceptor('file'))
   async uploadFile(@UploadedFile() file: Express.Multer.File) {
@@ -81,12 +94,8 @@ export class ChatController {
     return { url };
   }
 
-  // --- RECEPCIÓN Y IA ---
-
-  /**
-   * Webhook POST de Meta Messenger (y payload legacy del panel).
-   * Meta exige ACK inmediato (200 + cuerpo) antes de OpenAI / persistencia.
-   */
+  /** Webhook Meta + envío legacy del panel (sin JWT). */
+  @Public()
   @Post()
   receiveMessage(@Req() req: Request, @Res() res: Response) {
     const body = req.body;
@@ -104,40 +113,57 @@ export class ChatController {
     res.status(HttpStatus.OK).type('text/plain').send('EVENT_RECEIVED');
   }
 
+  @UseGuards(JwtAuthGuard)
   @Post('ai-suggest/:id')
-  async getSuggestion(@Param('id') id: string) {
-    const suggestion = await this.chatService.getManualAiSuggestion(id);
+  async getSuggestion(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    const suggestion = await this.chatService.getManualAiSuggestion(
+      id,
+      user.tallerId,
+    );
     return { suggestion };
   }
 
+  @UseGuards(JwtAuthGuard)
   @Patch('conversations/:id')
   async patchConversation(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() body: { isAutoPilotActive?: boolean },
   ) {
-    return await this.chatService.patchConversationSettings(id, body);
+    return await this.chatService.patchConversationSettings(
+      id,
+      body,
+      user.tallerId,
+    );
   }
 
+  @UseGuards(JwtAuthGuard)
   @Delete('conversations/:id')
-  async deleteConversation(@Param('id') id: string) {
-    await this.chatService.deleteConversation(id);
+  async deleteConversation(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    await this.chatService.deleteConversation(id, user.tallerId);
     return {
       success: true,
       message: 'Conversación eliminada correctamente',
     };
   }
 
+  @UseGuards(JwtAuthGuard)
   @Patch('quote/:id')
   async patchDraftQuote(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() body: PatchDraftQuoteBody,
   ) {
-    return await this.chatService.patchDraftQuote(id, body);
+    return await this.chatService.patchDraftQuote(id, body, user.tallerId);
   }
 
-  /**
-   * Vista previa de narrativa al cliente (IA, variante A/B/C). No persiste en BD.
-   */
+  @UseGuards(JwtAuthGuard)
   @Post('draft-quote/preview-narrative')
   @HttpCode(HttpStatus.OK)
   async previewDraftQuoteNarrative(
@@ -148,40 +174,48 @@ export class ChatController {
     return { narrative };
   }
 
-  /**
-   * Regenera únicamente la narrativa al cliente (formalNarrative) con variante A/B/C vía IA,
-   * persiste el borrador y sincroniza el mensaje vinculado.
-   */
+  @UseGuards(JwtAuthGuard)
   @Post('draft-quote/:id/regenerate-narrative')
   @HttpCode(HttpStatus.OK)
   async regenerateDraftQuoteNarrative(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() body: { inventoryLines?: PatchDraftQuoteBody['inventoryLines'] },
   ) {
     return await this.chatService.regenerateDraftQuoteClientNarrative(
       id,
+      user.tallerId,
       body,
     );
   }
 
+  @UseGuards(JwtAuthGuard)
   @Get('appointments')
-  async getAppointments() {
-    return await this.chatService.findAllAppointments();
+  async getAppointments(@CurrentUser() user: AuthenticatedUser) {
+    return await this.chatService.findAllAppointments(user.tallerId);
   }
 
+  @UseGuards(JwtAuthGuard)
   @Patch('appointments/:id')
   async patchAppointment(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() body: { status?: string },
   ) {
-    return await this.chatService.patchAppointmentStatus(id, body);
+    return await this.chatService.patchAppointmentStatus(
+      id,
+      body,
+      user.tallerId,
+    );
   }
 
+  @UseGuards(JwtAuthGuard)
   @Get('ai-config')
   async getAiConfig() {
     return await this.aiConfigService.getAdminAiSettings();
   }
 
+  @UseGuards(JwtAuthGuard)
   @Patch('ai-config')
   async patchAiConfig(
     @Body()
@@ -197,9 +231,7 @@ export class ChatController {
     return { ok: true };
   }
 
-  /**
-   * Prueba de IA para el panel (prompts en borrador). No persiste conversaciones ni borradores en BD.
-   */
+  @UseGuards(JwtAuthGuard)
   @Post('ai-playground/test')
   @HttpCode(HttpStatus.OK)
   async testAiPlayground(
@@ -209,7 +241,6 @@ export class ChatController {
       chatAppointmentPrompt?: string;
       userText?: string;
       imagesBase64?: string[];
-      /** @deprecated Usar imagesBase64 */
       imageBase64?: string;
       history?: unknown;
     },
@@ -224,9 +255,7 @@ export class ChatController {
     });
   }
 
-  /**
-   * Playground: tras autorizar borrador (lote con imagen), primera respuesta del asistente de chat.
-   */
+  @UseGuards(JwtAuthGuard)
   @Post('ai-playground/resume-after-draft')
   @HttpCode(HttpStatus.OK)
   async testAiPlaygroundResumeAfterDraft(
@@ -250,12 +279,11 @@ export class ChatController {
     });
   }
 
-  /**
-   * Tras autorizar/enviar cotización en el panel de chat (DraftQuote), respuesta IA al cliente.
-   */
+  @UseGuards(JwtAuthGuard)
   @Post('conversations/:conversationId/resume-after-draft')
   @HttpCode(HttpStatus.OK)
   async resumeConversationAfterDraft(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('conversationId') conversationId: string,
     @Body()
     body: {
@@ -264,10 +292,14 @@ export class ChatController {
       visionItems?: unknown;
     },
   ) {
-    return await this.chatService.resumeConversationAfterDraft(conversationId, {
-      userBatchText: body.userBatchText,
-      authorizedQuoteSummary: String(body.authorizedQuoteSummary ?? ''),
-      visionItems: body.visionItems,
-    });
+    return await this.chatService.resumeConversationAfterDraft(
+      conversationId,
+      {
+        userBatchText: body.userBatchText,
+        authorizedQuoteSummary: String(body.authorizedQuoteSummary ?? ''),
+        visionItems: body.visionItems,
+      },
+      user.tallerId,
+    );
   }
 }

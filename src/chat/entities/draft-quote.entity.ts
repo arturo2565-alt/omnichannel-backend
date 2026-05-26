@@ -12,6 +12,7 @@ import { Message } from './chat.entity';
 import type { VehicleDamageAnalysis } from './chat.entity';
 import type { DraftQuote as DraftQuotePayload } from '../autofix-config';
 import { DraftQuoteItem } from './draft-quote-item.entity';
+import { Taller } from '../../taller/entities/taller.entity';
 
 @Entity('draft_quotes')
 export class DraftQuoteEntity {
@@ -24,6 +25,13 @@ export class DraftQuoteEntity {
 
   @Column({ type: 'uuid' })
   conversationId: string;
+
+  @ManyToOne(() => Taller, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'tallerId' })
+  taller: Taller | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  tallerId: string | null;
 
   @ManyToOne(() => Message, { onDelete: 'SET NULL', nullable: true })
   @JoinColumn({ name: 'messageId' })

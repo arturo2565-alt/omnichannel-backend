@@ -11,45 +11,58 @@ import {
   syncInstantServiceFlags,
   upsertInstantQuoteMatrixRows,
 } from './instant-quote-matrix-sync';
+import { TallerService } from '../taller/taller.service';
 
 @Injectable()
 export class CatalogService {
   constructor(
     @InjectRepository(PriceMatrix)
     private readonly priceMatrixRepository: Repository<PriceMatrix>,
+    private readonly tallerService: TallerService,
   ) {}
 
-  async findAllPriceMatrixRows(): Promise<PriceMatrix[]> {
+  private async resolveTallerId(tallerId?: string | null): Promise<string> {
+    if (tallerId?.trim()) return tallerId.trim();
+    return this.tallerService.findDefaultTallerId();
+  }
+
+  async findAllPriceMatrixRows(tallerId?: string | null): Promise<PriceMatrix[]> {
+    const tid = await this.resolveTallerId(tallerId);
     return this.priceMatrixRepository.find({
+      where: { tallerId: tid },
       order: { servicio: 'ASC', severidad: 'ASC' },
     });
   }
 
-  /** Nombres únicos de servicio/pieza (orden alfabético) para inyectar en prompts de texto. */
-  async getDistinctServicioNamesForPrompt(): Promise<string[]> {
+  async getDistinctServicioNamesForPrompt(
+    tallerId?: string | null,
+  ): Promise<string[]> {
+    const tid = await this.resolveTallerId(tallerId);
     const raw = await this.priceMatrixRepository
       .createQueryBuilder('p')
       .select('p.servicio', 'servicio')
+      .where('p.tallerId = :tallerId', { tallerId: tid })
       .distinct(true)
       .orderBy('p.servicio', 'ASC')
       .getRawMany<{ servicio: string }>();
     return raw.map((r) => String(r.servicio ?? '').trim()).filter(Boolean);
   }
 
-  /** @deprecated usar {@link CatalogService.getDistinctServicioNamesForPrompt} */
-  async getDistinctPiezaNamesForPrompt(): Promise<string[]> {
-    return this.getDistinctServicioNamesForPrompt();
+  async getDistinctPiezaNamesForPrompt(
+    tallerId?: string | null,
+  ): Promise<string[]> {
+    return this.getDistinctServicioNamesForPrompt(tallerId);
   }
 
-  /** Lectura única de `price_matrix` para armar líneas de cotización (sin N queries por celda). */
-  async getMatrixPricingSnapshot(): Promise<MatrixPricingSnapshot> {
-    const rows = await this.priceMatrixRepository.find({
-      order: { servicio: 'ASC', severidad: 'ASC' },
-    });
+  async getMatrixPricingSnapshot(
+    tallerId?: string | null,
+  ): Promise<MatrixPricingSnapshot> {
+    const rows = await this.findAllPriceMatrixRows(tallerId);
     return createMatrixPricingSnapshot(rows);
   }
 
   async bulkUpdatePrecioDias(
+    tallerId: string,
     updates: Array<{
       id: string;
       precio: number;
@@ -57,9 +70,10 @@ export class CatalogService {
       isInstantService?: boolean;
     }>,
   ): Promise<PriceMatrix[]> {
+    const tid = await this.resolveTallerId(tallerId);
     const ids = updates.map((u) => u.id);
     const existing = await this.priceMatrixRepository.find({
-      where: { id: In(ids) },
+      where: { id: In(ids), tallerId: tid },
     });
     const idSet = new Set(existing.map((r) => r.id));
     for (const u of updates) {
@@ -76,20 +90,25 @@ export class CatalogService {
         if (typeof u.isInstantService === 'boolean') {
           patch.isInstantService = u.isInstantService;
         }
-        await em.update(PriceMatrix, { id: u.id }, patch);
+        await em.update(PriceMatrix, { id: u.id, tallerId: tid }, patch);
       }
     });
-    return this.findAllPriceMatrixRows();
+    return this.findAllPriceMatrixRows(tid);
   }
 
-  async createRow(dto: {
-    servicio: string;
-    severidad: string;
-    precio: number;
-    diasEntrega: number;
-    isInstantService?: boolean;
-  }): Promise<PriceMatrix> {
+  async createRow(
+    tallerId: string,
+    dto: {
+      servicio: string;
+      severidad: string;
+      precio: number;
+      diasEntrega: number;
+      isInstantService?: boolean;
+    },
+  ): Promise<PriceMatrix> {
+    const tid = await this.resolveTallerId(tallerId);
     const row = this.priceMatrixRepository.create({
+      tallerId: tid,
       servicio: dto.servicio.slice(0, 120),
       severidad: dto.severidad.slice(0, 32),
       precio: dto.precio,
@@ -97,33 +116,42 @@ export class CatalogService {
       isInstantService: dto.isInstantService ?? false,
     });
     const saved = await this.priceMatrixRepository.save(row);
-    await syncInstantServiceFlags(this.priceMatrixRepository.manager);
+    await syncInstantServiceFlags(this.priceMatrixRepository.manager, tid);
     return saved;
   }
 
-  /**
-   * Carga / actualiza filas InstantQuote y re-calcula banderas en toda la tabla.
-   */
-  async seedInstantQuoteMatrixRows(): Promise<{ upserted: number; totalInDb: number }> {
-    const upserted = await upsertInstantQuoteMatrixRows(this.priceMatrixRepository);
-    await syncInstantServiceFlags(this.priceMatrixRepository.manager);
-    const totalInDb = await this.priceMatrixRepository.count();
+  async seedInstantQuoteMatrixRows(
+    tallerId?: string | null,
+  ): Promise<{ upserted: number; totalInDb: number }> {
+    const tid = await this.resolveTallerId(tallerId);
+    const upserted = await upsertInstantQuoteMatrixRows(
+      this.priceMatrixRepository,
+      tid,
+    );
+    await syncInstantServiceFlags(this.priceMatrixRepository.manager, tid);
+    const totalInDb = await this.priceMatrixRepository.count({
+      where: { tallerId: tid },
+    });
     return { upserted, totalInDb };
   }
 
-  /**
-   * Importa la matriz ancha réplica de `autofix-pricing.js` (servicio × severidad).
-   * Upsert por (servicio, severidad): no duplica; actualiza precio y días si ya existía.
-   */
   async importFromLegacyFrontendMirror(
+    tallerId: string | null | undefined,
     diasEntregaDefault = 3,
   ): Promise<{ upserted: number; totalInDb: number }> {
+    const tid = await this.resolveTallerId(tallerId);
     const flat = buildFlatRowsFromLegacyFrontendMatrix(diasEntregaDefault);
     if (flat.length === 0) {
-      return { upserted: 0, totalInDb: await this.priceMatrixRepository.count() };
+      return {
+        upserted: 0,
+        totalInDb: await this.priceMatrixRepository.count({
+          where: { tallerId: tid },
+        }),
+      };
     }
     await this.priceMatrixRepository.upsert(
       flat.map((r) => ({
+        tallerId: tid,
         servicio: r.servicio.slice(0, 120),
         severidad: r.severidad.slice(0, 32),
         precio: r.precio,
@@ -131,12 +159,14 @@ export class CatalogService {
         isInstantService: false,
       })),
       {
-        conflictPaths: ['servicio', 'severidad'],
+        conflictPaths: ['tallerId', 'servicio', 'severidad'],
         skipUpdateIfNoValuesChanged: false,
       },
     );
-    const totalInDb = await this.priceMatrixRepository.count();
-    await syncInstantServiceFlags(this.priceMatrixRepository.manager);
+    const totalInDb = await this.priceMatrixRepository.count({
+      where: { tallerId: tid },
+    });
+    await syncInstantServiceFlags(this.priceMatrixRepository.manager, tid);
     return { upserted: flat.length, totalInDb };
   }
 }

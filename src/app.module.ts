@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatModule } from './chat/chat.module';
 import { CatalogModule } from './catalog/catalog.module';
+import { AuthModule } from './auth/auth.module';
+import { TallerModule } from './taller/taller.module';
 
 @Module({
   imports: [
@@ -17,6 +19,8 @@ import { CatalogModule } from './catalog/catalog.module';
       // Solo activamos SSL si existe DATABASE_URL (estamos en la nube)
       ssl: false,
     }),
+    AuthModule,
+    TallerModule,
     ChatModule,
     CatalogModule,
   ],

@@ -1,6 +1,18 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  UpdateDateColumn,
+  OneToMany,
+  ManyToOne,
+  JoinColumn,
+  Index,
+  Unique,
+} from 'typeorm';
 import { Message } from './chat.entity';
 import { DraftQuoteEntity } from './draft-quote.entity';
+import { Taller } from '../../taller/entities/taller.entity';
+import { Contact } from './contact.entity';
 
 /** Estados de lead admitidos para `Conversation.status`. */
 export const CONVERSATION_LEAD_STATUSES = [
@@ -14,12 +26,28 @@ export type ConversationLeadStatus =
   (typeof CONVERSATION_LEAD_STATUSES)[number];
 
 @Entity()
+@Unique(['tallerId', 'externalId'])
 export class Conversation {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  /** ID estable del contacto en el canal (PSID, wa_id, etc.). Único para evitar chats duplicados en webhooks paralelos. */
-  @Column({ unique: true })
+  @ManyToOne(() => Taller, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'tallerId' })
+  taller: Taller | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  @Index()
+  tallerId: string | null;
+
+  @ManyToOne(() => Contact, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({ name: 'contactId' })
+  contact: Contact | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  contactId: string | null;
+
+  /** ID estable del contacto en el canal (PSID, wa_id, etc.). Único por taller. */
+  @Column()
   externalId: string;
 
   @Column()
