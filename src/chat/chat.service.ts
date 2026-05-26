@@ -45,8 +45,9 @@ import type {
 } from 'openai/resources/chat/completions';
 import {
   WORKSHOP_TIMEZONE,
-  validateWorkshopSlotUtc,
   buildLlmServerTimeSystemPrefix,
+  parseWorkshopScheduledAtIso,
+  validateWorkshopSlotUtcDetailed,
 } from './appointment-intent';
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { AiConfigService } from './ai-config.service';
@@ -560,7 +561,7 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
           scheduledAtIso: {
             type: 'string',
             description:
-              'Fecha y hora del turno en ISO 8601 (ej. 2026-05-08T15:00:00-06:00). Debe corresponder al acuerdo con el cliente.',
+              'Fecha y hora del turno en America/Mexico_City. Preferido: YYYY-MM-DDTHH:mm sin sufijo Z (ej. 2026-05-26T14:00:00 = 2:00 PM CDMX). También acepta offset -06:00. Horario: lun–vie 09:00–18:00, sáb 09:00–14:00. No uses 14:00Z si el cliente dijo las 2 PM en CDMX.',
           },
           clientName: {
             type: 'string',
@@ -4399,6 +4400,37 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     return result as Record<string, unknown>;
   }
 
+  private resolveCreateAppointmentScheduledAt(raw: Record<string, unknown>): {
+    ok: true;
+    date: Date;
+  } | {
+    ok: false;
+    error: string;
+  } {
+    const iso = pickFirstNonEmptyTrimmedString(
+      raw.scheduledAtIso,
+      raw.scheduled_at_iso,
+      raw.scheduledAt,
+      raw.scheduled_at,
+    );
+    if (!iso) {
+      return {
+        ok: false,
+        error:
+          'Falta scheduledAtIso. Ejemplo cita 14:00 en CDMX: 2026-05-26T14:00:00 (hora del taller, sin Z).',
+      };
+    }
+    const parsed = parseWorkshopScheduledAtIso(iso);
+    if (!parsed.ok) {
+      return { ok: false, error: parsed.error };
+    }
+    const slot = validateWorkshopSlotUtcDetailed(parsed.date);
+    if (!slot.valid) {
+      return { ok: false, error: slot.error };
+    }
+    return { ok: true, date: parsed.date };
+  }
+
   private async executeCreateAppointmentTool(
     argsJson: string,
     conversation: Conversation,
@@ -4412,29 +4444,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     try {
       raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
     } catch {
-      return { success: false, error: 'Argumentos inválidos (JSON).' };
-    }
-
-    const iso = pickFirstNonEmptyTrimmedString(
-      raw.scheduledAtIso,
-      raw.scheduled_at_iso,
-    );
-    if (!iso) {
-      return { success: false, error: 'Falta scheduledAtIso.' };
-    }
-
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) {
-      return { success: false, error: 'Fecha u hora no válida.' };
-    }
-
-    if (!validateWorkshopSlotUtc(d)) {
       return {
         success: false,
         error:
-          'Fuera del horario del taller (lun–vie 9–18, sáb 9–14) o día cerrado.',
+          'Argumentos inválidos (JSON). scheduledAtIso debe ir en el objeto de la herramienta.',
       };
     }
+
+    const resolved = this.resolveCreateAppointmentScheduledAt(raw);
+    if (!resolved.ok) {
+      return { success: false, error: resolved.error };
+    }
+    const d = resolved.date;
 
     const clientName =
       pickFirstNonEmptyTrimmedString(
@@ -4497,29 +4518,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     try {
       raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
     } catch {
-      return { success: false, error: 'Argumentos inválidos (JSON).' };
-    }
-
-    const iso = pickFirstNonEmptyTrimmedString(
-      raw.scheduledAtIso,
-      raw.scheduled_at_iso,
-    );
-    if (!iso) {
-      return { success: false, error: 'Falta scheduledAtIso.' };
-    }
-
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) {
-      return { success: false, error: 'Fecha u hora no válida.' };
-    }
-
-    if (!validateWorkshopSlotUtc(d)) {
       return {
         success: false,
         error:
-          'Fuera del horario del taller (lun–vie 9–18, sáb 9–14) o día cerrado.',
+          'Argumentos inválidos (JSON). Incluye scheduledAtIso en el objeto de la herramienta.',
       };
     }
+
+    const resolved = this.resolveCreateAppointmentScheduledAt(raw);
+    if (!resolved.ok) {
+      return { success: false, error: resolved.error };
+    }
+    const d = resolved.date;
 
     return {
       success: true,

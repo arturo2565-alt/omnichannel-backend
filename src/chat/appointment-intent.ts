@@ -87,6 +87,34 @@ function mexicoCityLocalToUtc(
   return new Date(Date.UTC(y, m - 1, d, utcH, utcMin, 0, 0));
 }
 
+/** Hora y minuto en {@link WORKSHOP_TIMEZONE} (24 h). */
+export function workshopLocalHourMinute(
+  instant: Date,
+): { hour: number; minute: number } | null {
+  if (Number.isNaN(instant.getTime())) return null;
+  const formatted = new Intl.DateTimeFormat('en-GB', {
+    timeZone: WORKSHOP_TIMEZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(instant);
+  const m = /^(\d{1,2}):(\d{2})$/.exec(formatted);
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  if (
+    !Number.isFinite(hour) ||
+    !Number.isFinite(minute) ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+  return { hour, minute };
+}
+
 function isWithinBusinessHours(
   ymd: string,
   hour: number,
@@ -106,10 +134,102 @@ function isWithinBusinessHours(
   if (dow === 6) {
     const open = 9 * 60;
     const close = 14 * 60;
-    return mins >= open && mins < close;
+    return mins >= open && mins <= close;
   }
 
   return false;
+}
+
+const NAIVE_WORKSHOP_ISO_RE =
+  /^(\d{4}-\d{2}-\d{2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d{1,3})?$/;
+
+function hasExplicitTimezoneInIso(iso: string): boolean {
+  const s = iso.trim();
+  return /(?:Z|z|[+-]\d{2}:?\d{2})$/.test(s);
+}
+
+function formatHm(hour: number, minute: number): string {
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+const WEEKDAY_NAMES_ES = [
+  'domingo',
+  'lunes',
+  'martes',
+  'miércoles',
+  'jueves',
+  'viernes',
+  'sábado',
+] as const;
+
+/**
+ * Interpreta `scheduledAtIso` para createAppointment.
+ * Sin zona horaria explícita → hora civil en {@link WORKSHOP_TIMEZONE} (evita que un servidor UTC trate 14:00 como UTC).
+ */
+export function parseWorkshopScheduledAtIso(
+  iso: string,
+):
+  | { ok: true; date: Date }
+  | { ok: false; error: string } {
+  const s = String(iso ?? '').trim();
+  if (!s) {
+    return {
+      ok: false,
+      error:
+        'Falta scheduledAtIso. Ejemplo para cita a las 14:00 en CDMX: 2026-05-26T14:00:00 (sin sufijo Z) o 2026-05-26T20:00:00.000Z.',
+    };
+  }
+
+  if (!hasExplicitTimezoneInIso(s)) {
+    const m = NAIVE_WORKSHOP_ISO_RE.exec(s);
+    if (!m) {
+      return {
+        ok: false,
+        error:
+          'Formato no reconocido. Usa YYYY-MM-DDTHH:mm interpretado en America/Mexico_City sin Z (ej. 2026-05-26T14:00:00), o ISO con offset -06:00.',
+      };
+    }
+    const ymd = m[1];
+    const hour = Number(m[2]);
+    const minute = Number(m[3]);
+    const second = m[4] != null ? Number(m[4]) : 0;
+    if (
+      !Number.isFinite(hour) ||
+      hour < 0 ||
+      hour > 23 ||
+      !Number.isFinite(minute) ||
+      minute < 0 ||
+      minute > 59 ||
+      !Number.isFinite(second) ||
+      second < 0 ||
+      second > 59
+    ) {
+      return {
+        ok: false,
+        error: `Hora inválida en scheduledAtIso (${m[2]}:${m[3]}). Use hora 24 h entre 00:00 y 23:59.`,
+      };
+    }
+    const utc = mexicoCityLocalToUtc(ymd, hour, minute);
+    if (!utc || Number.isNaN(utc.getTime())) {
+      return {
+        ok: false,
+        error: `Fecha civil inválida en scheduledAtIso: ${ymd}.`,
+      };
+    }
+    if (second > 0) {
+      utc.setUTCSeconds(second, 0);
+    }
+    return { ok: true, date: utc };
+  }
+
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) {
+    return {
+      ok: false,
+      error: `No se pudo interpretar scheduledAtIso "${s}". Verifica ISO 8601; para 14:00 en CDMX sin offset: 2026-05-26T14:00:00.`,
+    };
+  }
+  return { ok: true, date: d };
 }
 
 function parseLlmJson(content: string): LlmExtract {
@@ -280,21 +400,68 @@ Reglas:
   };
 }
 
+export type WorkshopSlotValidation =
+  | { valid: true; ymd: string; hour: number; minute: number }
+  | { valid: false; error: string };
+
 /**
  * Valida que un instante UTC cae dentro del horario del taller en {@link WORKSHOP_TIMEZONE}
- * (misma regla que {@link parseAppointmentIntent}: L–V 9–18, Sáb 9–14, Dom cerrado).
+ * (L–V 09:00–18:00, Sáb 09:00–14:00 inclusive, Dom cerrado).
+ */
+export function validateWorkshopSlotUtcDetailed(
+  instant: Date,
+): WorkshopSlotValidation {
+  if (Number.isNaN(instant.getTime())) {
+    return {
+      valid: false,
+      error: 'Fecha u hora no válida (instante NaN).',
+    };
+  }
+  const ymd = ymdInTimezone(instant, WORKSHOP_TIMEZONE);
+  const hm = workshopLocalHourMinute(instant);
+  if (!hm) {
+    return {
+      valid: false,
+      error: `No se pudo leer la hora en ${WORKSHOP_TIMEZONE} para validar el turno.`,
+    };
+  }
+  const { hour, minute } = hm;
+  if (isWithinBusinessHours(ymd, hour, minute)) {
+    return { valid: true, ymd, hour, minute };
+  }
+
+  const dow = civilWeekdaySun0(ymd);
+  const hmLabel = formatHm(hour, minute);
+  const dayLabel = WEEKDAY_NAMES_ES[dow] ?? 'día';
+
+  if (dow === 0) {
+    return {
+      valid: false,
+      error: `Domingo ${ymd} (${WORKSHOP_TIMEZONE}): el taller está cerrado. Propón lunes a viernes 09:00–18:00 o sábado 09:00–14:00.`,
+    };
+  }
+
+  if (dow === 6) {
+    return {
+      valid: false,
+      error: `Sábado ${ymd} a las ${hmLabel} (${WORKSHOP_TIMEZONE}) está fuera de horario. Sábados solo 09:00–14:00 (la cita de las 14:00 sí es válida).`,
+    };
+  }
+
+  const hintUtcMisread =
+    hour < 9
+      ? ` Si enviaste scheduledAtIso con sufijo Z, recuerda que 14:00Z son las ${hmLabel} en CDMX, no las 14:00 locales. Para cita a las 14:00 en CDMX usa 2026-05-26T14:00:00 sin Z o el equivalente UTC.`
+      : '';
+
+  return {
+    valid: false,
+    error: `${dayLabel} ${ymd} a las ${hmLabel} (${WORKSHOP_TIMEZONE}) está fuera de horario. Lunes a viernes: 09:00–18:00 (última cita antes de las 18:00).${hintUtcMisread}`,
+  };
+}
+
+/**
+ * @deprecated preferir {@link validateWorkshopSlotUtcDetailed}
  */
 export function validateWorkshopSlotUtc(instant: Date): boolean {
-  if (Number.isNaN(instant.getTime())) return false;
-  const ymd = ymdInTimezone(instant, WORKSHOP_TIMEZONE);
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: WORKSHOP_TIMEZONE,
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: false,
-  }).formatToParts(instant);
-  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
-  const minute = Number(parts.find((p) => p.type === 'minute')?.value);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
-  return isWithinBusinessHours(ymd, hour, minute);
+  return validateWorkshopSlotUtcDetailed(instant).valid;
 }

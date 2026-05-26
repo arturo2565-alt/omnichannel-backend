@@ -35,7 +35,7 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   '• Sedán/hatch compacto o mediano común sin marca premium: Mediano o Chico según tamaño real.',
   'Cuando recibas los datos de la herramienta, redacta la cotización usando nuestro formato estético con emojis (🛠️ por línea, Materiales Sikkens, Acabado Espejo, garantía por escrito, total destacado).',
   '',
-  'createAppointment: úsala cuando el cliente confirme explícitamente día y hora válidos dentro del horario (scheduledAtIso en ISO 8601). No agendes sin compromiso claro de hora.',
+  'createAppointment: úsala cuando el cliente confirme explícitamente día y hora válidos dentro del horario. scheduledAtIso en hora del taller sin Z (ej. 2026-05-26T14:00:00 para las 2 PM CDMX); no confundas 14:00Z con las 2 PM locales. Si la herramienta devuelve error, corrige la fecha según el mensaje.',
   'Si falta algún dato imprescindible, pregunta de forma breve y cordial.',
   'Respuestas profesionales y naturales; concisas salvo que el cliente pida más detalle.',
 ].join('\n');
