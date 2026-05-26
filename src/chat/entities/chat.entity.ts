@@ -64,7 +64,9 @@ export class Message {
   // Aquí luego conectaremos con el "Contacto"
   @Column({ nullable: true })
   senderName: string;
-  @ManyToOne(() => Conversation, (conversation) => conversation.messages)
+  @ManyToOne(() => Conversation, (conversation) => conversation.messages, {
+    onDelete: 'CASCADE',
+  })
   @JoinColumn({ name: 'conversationId' })
   conversation: Conversation;
 

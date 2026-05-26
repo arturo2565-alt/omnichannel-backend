@@ -68,10 +68,16 @@ export class Conversation {
   @Column({ type: 'boolean', default: true })
   isAutoPilotActive: boolean;
 
-  @OneToMany(() => Message, (message) => message.conversation)
+  @OneToMany(() => Message, (message) => message.conversation, {
+    cascade: true,
+    onDelete: 'CASCADE',
+  })
   messages: Message[];
 
-  @OneToMany(() => DraftQuoteEntity, (q) => q.conversation)
+  @OneToMany(() => DraftQuoteEntity, (q) => q.conversation, {
+    cascade: true,
+    onDelete: 'CASCADE',
+  })
   draftQuotes: DraftQuoteEntity[];
 
   @UpdateDateColumn()
