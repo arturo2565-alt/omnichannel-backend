@@ -2,7 +2,6 @@ import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import { AUTO_FIX_CURRENCY, normalizeTextForMatch } from './autofix-config';
 import { coerceBañoSeveridadToCatalog } from './baño-pintura-llm';
 import {
-  inferBañoTierSeveridad,
   inferBañoVehicleDisplayLabel,
   isBañoDePinturaServicio,
   materializeInstantQuoteResolution,
@@ -11,6 +10,76 @@ import {
 } from './instant-quote-from-text';
 
 const PIEZA_DL = 'DL';
+
+/** Tamaño de carrocería que define la fila de PriceMatrix (lo envía OpenAI). */
+export type CategoriaTamanoExpress = 'Chico' | 'Mediano' | 'Grande' | 'Premium';
+
+const CATEGORIA_TAMANO_VALUES: readonly CategoriaTamanoExpress[] = [
+  'Chico',
+  'Mediano',
+  'Grande',
+  'Premium',
+];
+
+export function normalizeCategoriaTamanoExpress(
+  raw: unknown,
+): CategoriaTamanoExpress | null {
+  const t = String(raw ?? '').trim();
+  if (CATEGORIA_TAMANO_VALUES.includes(t as CategoriaTamanoExpress)) {
+    return t as CategoriaTamanoExpress;
+  }
+  const key = normalizeTextForMatch(t);
+  const byNorm: Record<string, CategoriaTamanoExpress> = {
+    chico: 'Chico',
+    mediano: 'Mediano',
+    grande: 'Grande',
+    premium: 'Premium',
+  };
+  return byNorm[key] ?? null;
+}
+
+/**
+ * Mapea categoriaTamaño del modelo → severidad literal en catálogo (sin heurística de texto).
+ */
+export function resolveCategoriaTamanoToBañoSeveridad(
+  categoria: CategoriaTamanoExpress,
+  allowed: readonly string[],
+): string | null {
+  const candidates: string[] = [];
+  switch (categoria) {
+    case 'Chico':
+      candidates.push('Chico', 'Chico Premium');
+      break;
+    case 'Mediano':
+      candidates.push('Mediano', 'Mediano Premium');
+      break;
+    case 'Grande':
+      candidates.push('Grande', 'XL', 'Grande Premium', 'XL Premium');
+      break;
+    case 'Premium':
+      candidates.push(
+        'Grande Premium',
+        'XL Premium',
+        'Mediano Premium',
+        'Chico Premium',
+        'Premium',
+      );
+      break;
+    default:
+      break;
+  }
+  for (const c of candidates) {
+    const hit = coerceBañoSeveridadToCatalog(c, allowed);
+    if (hit) return hit;
+  }
+  const needle = normalizeTextForMatch(categoria);
+  for (const a of allowed) {
+    if (normalizeTextForMatch(a).includes(needle)) {
+      return a;
+    }
+  }
+  return allowed[0] ?? null;
+}
 
 export type CotizacionExpressLineDto = {
   servicio: string;
@@ -25,6 +94,8 @@ export type CotizacionExpressLineDto = {
 export type ObtenerCotizacionExpressResult = {
   success: boolean;
   error?: string;
+  categoriaTamaño?: CategoriaTamanoExpress;
+  severidadCatalogo?: string;
   modeloVehiculo?: string;
   vehicleDisplayLabel?: string;
   moneda?: typeof AUTO_FIX_CURRENCY;
@@ -55,11 +126,20 @@ export function buildObtenerCotizacionExpressPayload(
   snap: MatrixPricingSnapshot,
   servicios: readonly string[],
   modeloVehiculo: string,
+  categoriaTamaño: CategoriaTamanoExpress,
   options?: { leadAgendado?: boolean },
 ): ObtenerCotizacionExpressResult {
   const modelo = String(modeloVehiculo ?? '').trim();
   if (!modelo) {
     return { success: false, error: 'Falta modeloVehiculo (marca y modelo del auto).' };
+  }
+
+  if (!normalizeCategoriaTamanoExpress(categoriaTamaño)) {
+    return {
+      success: false,
+      error:
+        'categoriaTamaño inválida. Debe ser Chico, Mediano, Grande o Premium.',
+    };
   }
 
   const servicioList = servicios
@@ -100,9 +180,9 @@ export function buildObtenerCotizacionExpressPayload(
         error: 'Sin severidades de catálogo para baño de pintura.',
       };
     }
-    const sevRaw = inferBañoTierSeveridad(tierCtx) || inferBañoTierSeveridad(modelo);
     const sevFinal =
-      coerceBañoSeveridadToCatalog(sevRaw, allowed) ?? allowed[0]!;
+      resolveCategoriaTamanoToBañoSeveridad(categoriaTamaño, allowed) ??
+      allowed[0]!;
 
     const resolution = materializeInstantQuoteResolution(snap, {
       canonical: banoCanonical,
@@ -183,6 +263,8 @@ export function buildObtenerCotizacionExpressPayload(
   const leadAgendado = options?.leadAgendado === true;
   const result: ObtenerCotizacionExpressResult = {
     success: true,
+    categoriaTamaño,
+    severidadCatalogo: lines.find((l) => l.tipo === 'bano_pintura')?.severidad,
     modeloVehiculo: modelo,
     vehicleDisplayLabel,
     moneda: AUTO_FIX_CURRENCY,

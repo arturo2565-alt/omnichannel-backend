@@ -74,7 +74,10 @@ import {
   piezaLabelFromDraftLineDescription,
   type DamageInventoryMergeResult,
 } from './draft-quote-resume';
-import { buildObtenerCotizacionExpressPayload } from './autopilot-cotizacion-express';
+import {
+  buildObtenerCotizacionExpressPayload,
+  normalizeCategoriaTamanoExpress,
+} from './autopilot-cotizacion-express';
 import {
   assistantMessageIsBañoVehiclePrompt,
   type InstantQuoteResolution,
@@ -489,8 +492,14 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
             description:
               'Marca y modelo del vehículo del cliente (ej. Volkswagen Bora 2012, Nissan March 2018). Obligatorio antes de cotizar.',
           },
+          categoriaTamaño: {
+            type: 'string',
+            enum: ['Chico', 'Mediano', 'Grande', 'Premium'],
+            description:
+              'Tamaño de carrocería para la fila de PriceMatrix del baño de pintura. Pick-up/SUV grande/camioneta de carga (F-150, F-250, Silverado, Ram, Lobo, Suburban) → Grande. Marcas de lujo (BMW, Audi, Mercedes, etc.) → Premium. Sedán compacto → Mediano. Muy chico → Chico.',
+          },
         },
-        required: ['servicios', 'modeloVehiculo'],
+        required: ['servicios', 'modeloVehiculo', 'categoriaTamaño'],
       },
     },
   },
@@ -3930,6 +3939,20 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       raw.vehicleDescription,
     );
 
+    const categoriaRaw = pickFirstNonEmptyTrimmedString(
+      raw.categoriaTamaño,
+      raw.categoriaTamano,
+      raw.categoria_tamano,
+    );
+    const categoriaTamaño = normalizeCategoriaTamanoExpress(categoriaRaw);
+    if (!categoriaTamaño) {
+      return {
+        success: false,
+        error:
+          'Falta categoriaTamaño válida (Chico, Mediano, Grande o Premium).',
+      };
+    }
+
     const snap = await this.catalogService.getMatrixPricingSnapshot();
     const isAgendado =
       String(conversation.status ?? '').toLowerCase().trim() === 'agendado';
@@ -3938,6 +3961,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       snap,
       servicios,
       modeloVehiculo,
+      categoriaTamaño,
       { leadAgendado: isAgendado },
     );
 
