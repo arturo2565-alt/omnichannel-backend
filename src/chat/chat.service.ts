@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { In, Repository } from 'typeorm';
+import { In, QueryFailedError, Repository } from 'typeorm';
 import {
   DetectedDamageItem,
   Message,
@@ -608,6 +608,14 @@ export class ChatService implements OnModuleDestroy {
   /** conversationId con análisis de visión en curso (entre debounce de imagen y borrador guardado). */
   private readonly consolidatedVisionInFlight = new Set<string>();
 
+  /**
+   * Una sola creación de conversación por `externalId` a la vez (webhooks Meta en ráfaga).
+   */
+  private readonly conversationFindOrCreateInflight = new Map<
+    string,
+    Promise<Conversation>
+  >();
+
   constructor(
     @InjectRepository(Message)
     private readonly messageRepository: Repository<Message>,
@@ -646,6 +654,74 @@ export class ChatService implements OnModuleDestroy {
     }
     this.autopilotTextDebounceTimers.clear();
     this.consolidatedVisionInFlight.clear();
+    this.conversationFindOrCreateInflight.clear();
+  }
+
+  private isUniqueConstraintError(err: unknown): boolean {
+    if (!(err instanceof QueryFailedError)) return false;
+    const driver = err.driverError as { code?: string } | undefined;
+    if (driver?.code === '23505') return true;
+    const msg = String(err.message ?? '').toLowerCase();
+    return (
+      msg.includes('unique constraint') ||
+      msg.includes('duplicate key') ||
+      msg.includes('duplicate entry')
+    );
+  }
+
+  /**
+   * Busca conversación por `externalId` (contactUid del canal) o la crea una sola vez
+   * aunque lleguen webhooks concurrentes.
+   */
+  private async findOrCreateConversationByExternalId(
+    threadExternalId: string,
+    createDraft: () => Promise<Conversation>,
+  ): Promise<Conversation> {
+    const key = threadExternalId.trim();
+    if (!key) {
+      throw new BadRequestException('externalId del contacto vacío.');
+    }
+
+    const loadExisting = async (): Promise<Conversation | null> =>
+      this.conversationRepository.findOne({ where: { externalId: key } });
+
+    let row = await loadExisting();
+    if (row) return row;
+
+    let inflight = this.conversationFindOrCreateInflight.get(key);
+    if (inflight) {
+      try {
+        return await inflight;
+      } catch {
+        row = await loadExisting();
+        if (row) return row;
+      }
+    }
+
+    const task = (async (): Promise<Conversation> => {
+      row = await loadExisting();
+      if (row) return row;
+
+      const draft = await createDraft();
+      try {
+        return await this.conversationRepository.save(draft);
+      } catch (err) {
+        if (this.isUniqueConstraintError(err)) {
+          const winner = await loadExisting();
+          if (winner) return winner;
+        }
+        throw err;
+      }
+    })();
+
+    this.conversationFindOrCreateInflight.set(key, task);
+    try {
+      return await task;
+    } finally {
+      if (this.conversationFindOrCreateInflight.get(key) === task) {
+        this.conversationFindOrCreateInflight.delete(key);
+      }
+    }
   }
 
   /**
@@ -1530,34 +1606,38 @@ export class ChatService implements OnModuleDestroy {
       );
 
       if (!conversation) {
-        let displayName = contactName;
-        let avatarUrl: string | null = null;
-        if (
-          shouldPersistPlatformOnConversation(data.platform) &&
-          isFacebookMessengerPlatform(data.platform)
-        ) {
-          const prof = await this.getFacebookProfile(threadExternalId);
-          if (prof) {
-            const full = [prof.first_name, prof.last_name]
-              .filter((x) => typeof x === 'string' && x.trim())
-              .map((x) => String(x).trim())
-              .join(' ')
-              .trim();
-            if (full) displayName = full;
-            if (prof.profile_pic) avatarUrl = prof.profile_pic;
-          }
-        }
-        conversation = this.conversationRepository.create({
-          externalId: threadExternalId,
-          contactName: displayName || 'Cliente Desconocido',
-          avatarUrl,
-          platform: shouldPersistPlatformOnConversation(data.platform)
-            ? String(data.platform).trim()
-            : null,
-          status: 'nuevo',
-          isAutoPilotActive: true,
-        });
-        conversation = await this.conversationRepository.save(conversation);
+        conversation = await this.findOrCreateConversationByExternalId(
+          threadExternalId,
+          async () => {
+            let displayName = contactName;
+            let avatarUrl: string | null = null;
+            if (
+              shouldPersistPlatformOnConversation(data.platform) &&
+              isFacebookMessengerPlatform(data.platform)
+            ) {
+              const prof = await this.getFacebookProfile(threadExternalId);
+              if (prof) {
+                const full = [prof.first_name, prof.last_name]
+                  .filter((x) => typeof x === 'string' && x.trim())
+                  .map((x) => String(x).trim())
+                  .join(' ')
+                  .trim();
+                if (full) displayName = full;
+                if (prof.profile_pic) avatarUrl = prof.profile_pic;
+              }
+            }
+            return this.conversationRepository.create({
+              externalId: threadExternalId,
+              contactName: displayName || 'Cliente Desconocido',
+              avatarUrl,
+              platform: shouldPersistPlatformOnConversation(data.platform)
+                ? String(data.platform).trim()
+                : null,
+              status: 'nuevo',
+              isAutoPilotActive: true,
+            });
+          },
+        );
       } else {
         if (contactName && conversation.contactName !== contactName) {
           conversation.contactName = contactName;

@@ -18,8 +18,9 @@ export class Conversation {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column()
-  externalId: string; // El ID que viene de WhatsApp o Instagram
+  /** ID estable del contacto en el canal (PSID, wa_id, etc.). Único para evitar chats duplicados en webhooks paralelos. */
+  @Column({ unique: true })
+  externalId: string;
 
   @Column()
   contactName: string;
