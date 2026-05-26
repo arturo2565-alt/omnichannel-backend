@@ -32,6 +32,13 @@ import {
   normalizeTextForMatch,
   type DamageLevel,
 } from './autofix-config';
+import { resolveMatrixServicioRaw } from '../catalog/panel-pieza-catalog';
+import {
+  buildDraftQuoteLineFromQuoteRow,
+  matrixServicioInputsWithCatalogResolve,
+  sumQuoteRowsSubtotal,
+  type QuoteRowInput,
+} from './draft-quote-inventory-pricing';
 import type {
   ChatCompletionMessageParam,
   ChatCompletionTool,
@@ -455,10 +462,17 @@ function normalizePlaygroundImagesBase64Input(body: {
   return [...new Set(urls)];
 }
 
-export interface PatchInventoryLineDto {
+/** Fila de cotización del panel (QuoteRow) enviada en PATCH / inventario. */
+export interface PatchInventoryLineDto extends QuoteRowInput {
   pieza: string;
   severidad: string;
   precioMx: number;
+  /** Rango superior para posibles daños internos (panel). */
+  precioMaximo?: number;
+  /** @deprecated alias de precioMaximo */
+  precioMaxMx?: number;
+  /** Nombre de refacción cuando `pieza` es REFACCION o "Refacción: …". */
+  detallesRefaccion?: string;
   /** @deprecated usar descripcionTecnica */
   descripcion?: string;
   descripcionTecnica?: string;
@@ -484,6 +498,10 @@ export interface PatchDraftQuoteBody {
 export type PreviewNarrativePieceDto = {
   pieza: string;
   precioMx: number;
+  precioMaximo?: number;
+  /** @deprecated alias de precioMaximo */
+  precioMaxMx?: number;
+  detallesRefaccion?: string;
   severidad?: string;
 };
 
@@ -988,7 +1006,7 @@ export class ChatService implements OnModuleDestroy {
       return lines.map((line, idx) => {
         const row = inv[idx];
         const canonical =
-          snap.matchServicio(row.pieza.trim()) ??
+          snap.matchServicio(resolveMatrixServicioRaw(row.pieza.trim())) ??
           row.pieza.trim();
         return {
           sortOrder: idx,
@@ -1036,7 +1054,9 @@ export class ChatService implements OnModuleDestroy {
         const g = grouped[idx];
         const line = lines[idx];
         const related = inv.filter(
-          (it) => snap.matchServicio(it.pieza) === g.canonical,
+          (it) =>
+            snap.matchServicio(resolveMatrixServicioRaw(it.pieza)) ===
+            g.canonical,
         );
         const descParts = [...new Set(related.map((r) => r.descripcionTecnica))]
           .filter(Boolean)
@@ -1220,18 +1240,20 @@ export class ChatService implements OnModuleDestroy {
   ): Promise<number> {
     const snap = await this.catalogService.getMatrixPricingSnapshot();
     if (analysis.inventory?.length) {
-      const sum = snap.inventoryMaxTotal(
-        analysis.inventory.map((i) => ({
-          servicio: i.pieza,
-          severidad: i.severidad,
-        })),
+      const matrixItems = matrixServicioInputsWithCatalogResolve(
+        analysis.inventory,
       );
-      if (sum > 0) return sum;
+      if (matrixItems.length > 0) {
+        const sum = snap.inventoryMaxTotal(matrixItems);
+        if (sum > 0) return sum;
+      }
     }
     const level = coerceDamageLevelCode(analysis.severidad);
     const piezaMatriz =
-      snap.matchServicio(analysis.pieza) ??
-      snap.matchServicio(analysis.partesAfectadas?.[0] ?? '') ??
+      snap.matchServicio(resolveMatrixServicioRaw(analysis.pieza)) ??
+      snap.matchServicio(
+        resolveMatrixServicioRaw(analysis.partesAfectadas?.[0] ?? ''),
+      ) ??
       analysis.pieza;
     return snap.getAmount(piezaMatriz, level);
   }
@@ -2258,6 +2280,13 @@ export class ChatService implements OnModuleDestroy {
       .map((p) => ({
         pieza: String(p.pieza ?? '').trim(),
         precioMx: Math.max(0, Math.round(Number(p.precioMx) || 0)),
+        precioMaximo:
+          p.precioMaximo != null
+            ? Math.max(0, Math.round(Number(p.precioMaximo) || 0))
+            : p.precioMaxMx != null
+              ? Math.max(0, Math.round(Number(p.precioMaxMx) || 0))
+              : undefined,
+        detallesRefaccion: String(p.detallesRefaccion ?? '').trim() || undefined,
       }))
       .filter((p) => p.pieza);
     if (!pieces.length) {
@@ -2270,7 +2299,15 @@ export class ChatService implements OnModuleDestroy {
       pieza: p.pieza,
       precioMx: p.precioMx,
     }));
-    const total = lineRows.reduce((s, l) => s + l.precioMx, 0);
+    const total = sumQuoteRowsSubtotal(
+      pieces.map((p) => ({
+        pieza: p.pieza,
+        severidad: 'N/A',
+        precioMx: p.precioMx,
+        precioMaximo: p.precioMaximo,
+        detallesRefaccion: p.detallesRefaccion,
+      })),
+    );
     const status = String(body.conversationStatus ?? '')
       .toLowerCase()
       .trim();
@@ -3483,10 +3520,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         analysis.inventory.map((i) => i.severidad),
       );
       const grouped = snap.matrixInventoryMaxLines(
-        analysis.inventory.map((i) => ({
-          servicio: i.pieza,
-          severidad: i.severidad,
-        })),
+        matrixServicioInputsWithCatalogResolve(analysis.inventory),
       );
       for (const g of grouped) {
         if (g.unitPrice <= 0) continue;
@@ -3783,7 +3817,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         const mergedInv = mergeDamageInventoryAccumulative(
           priorInventory,
           newInventory,
-          (raw) => snapMerge.matchServicio(raw),
+          (raw) =>
+            snapMerge.matchServicio(resolveMatrixServicioRaw(raw)) ??
+            snapMerge.matchServicio(raw),
         );
         complementMeta = {
           previousPiezas: mergedInv.previousPiezas,
@@ -3966,6 +4002,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             `inventoryLines[${i}]: precioMx debe ser un número >= 0`,
           );
         }
+        const pmax =
+          L.precioMaximo != null
+            ? Number(L.precioMaximo)
+            : L.precioMaxMx != null
+              ? Number(L.precioMaxMx)
+              : null;
+        if (pmax != null && (!Number.isFinite(pmax) || pmax < pm)) {
+          throw new BadRequestException(
+            `inventoryLines[${i}]: precioMaximo debe ser un número >= precioMx`,
+          );
+        }
       }
 
       const items: DetectedDamageItem[] = linesDto.map((L, i) => {
@@ -3973,13 +4020,15 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           descripcion?: string;
           urls_asociadas?: string[];
         };
+        const refaccionDetalle = String(L.detallesRefaccion ?? '').trim();
         const descFromDto =
-          typeof L.descripcionTecnica === 'string' &&
+          refaccionDetalle ||
+          (typeof L.descripcionTecnica === 'string' &&
           L.descripcionTecnica.trim()
             ? L.descripcionTecnica.trim()
             : typeof L.descripcion === 'string' && L.descripcion.trim()
               ? L.descripcion.trim()
-              : '';
+              : '');
         const desc =
           descFromDto ||
           prev?.descripcionTecnica ||
@@ -4027,20 +4076,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
       const snap = await this.catalogService.getMatrixPricingSnapshot();
 
-      const manualLines: DraftQuoteLine[] = linesDto.map((L, idx) => {
-        const u = Math.round(Number(L.precioMx));
-        const canonical =
-          snap.matchServicio(String(L.pieza).trim()) ?? String(L.pieza).trim();
-        const lev = coerceDamageLevelCode(String(L.severidad));
-        return {
-          priceItemId: `panel:${idx}:${canonical}:${lev}`,
-          description: `${canonical} — nivel ${lev} (panel)`,
-          quantity: 1,
-          unitPrice: u,
-          subtotal: u,
-        };
-      });
-      const total = manualLines.reduce((acc, l) => acc + l.subtotal, 0);
+      const manualLines: DraftQuoteLine[] = linesDto.map((L, idx) =>
+        buildDraftQuoteLineFromQuoteRow(L, idx, snap),
+      );
+      const total = sumQuoteRowsSubtotal(linesDto);
       const estimateAmount = total;
 
       let quotePayload = await this.generateDraftQuote(analysisMerged);

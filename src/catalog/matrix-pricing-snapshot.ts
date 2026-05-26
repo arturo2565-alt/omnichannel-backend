@@ -5,6 +5,7 @@ import {
   matchServicioFromCatalog,
   resolveDamageLevelFromText,
 } from '../chat/autofix-config';
+import { resolveMatrixServicioRaw } from './panel-pieza-catalog';
 
 export type ServicioSeveridadInput = { servicio: string; severidad: string };
 
@@ -74,9 +75,10 @@ export function createMatrixPricingSnapshot(
       return typeof x === 'number' && !Number.isNaN(x) ? x : null;
     };
 
-    let v = read(servicioRaw, level);
+    const servicioForMatch = resolveMatrixServicioRaw(servicioRaw);
+    let v = read(servicioForMatch, level);
     if (v != null && v > 0) return v;
-    const canonical = matchServicio(servicioRaw);
+    const canonical = matchServicio(servicioForMatch);
     if (canonical) {
       v = read(canonical, level);
       if (v != null && v > 0) return v;
@@ -159,7 +161,7 @@ export function createMatrixPricingSnapshot(
     const byCanonical = new Map<string, Best>();
 
     for (const it of items) {
-      const canonical = matchServicio(it.servicio);
+      const canonical = matchServicio(resolveMatrixServicioRaw(it.servicio));
       const level = resolveDamageLevelFromText(it.severidad);
       if (!canonical || !level) continue;
 
