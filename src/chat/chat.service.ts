@@ -2,11 +2,12 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
   OnModuleDestroy,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { In, QueryFailedError, Repository } from 'typeorm';
+import { In, IsNull, QueryFailedError, Repository } from 'typeorm';
 import {
   DetectedDamageItem,
   Message,
@@ -586,6 +587,18 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     },
   },
 ];
+
+/** Cuerpo del panel para enviar mensaje outbound con JWT (`tallerId` viene del token). */
+export type SendAgentMessageBody = {
+  conversationId: string;
+  message: string;
+  platform?: string;
+  user?: string;
+  conversationLeadStatus?: 'cotizado';
+  suppressOutboundFacebookSend?: boolean;
+  /** Opcional en body; debe coincidir con el JWT si se envía. */
+  tallerId?: string;
+};
 
 @Injectable()
 export class ChatService implements OnModuleDestroy {
@@ -1412,6 +1425,47 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Mensaje outbound del agente autenticado: exige `tallerId` del JWT y lo persiste en la fila.
+   */
+  async sendAgentMessage(
+    body: SendAgentMessageBody,
+    tallerId: string,
+  ): Promise<Message> {
+    const tid = String(tallerId ?? '').trim();
+    if (!tid) {
+      throw new BadRequestException('tallerId del agente no válido');
+    }
+    const bodyTallerId = String(body.tallerId ?? '').trim();
+    if (bodyTallerId && bodyTallerId !== tid) {
+      throw new ForbiddenException(
+        'El tallerId del cuerpo no coincide con tu sesión.',
+      );
+    }
+    const conversationId = String(body.conversationId ?? '').trim();
+    if (!looksLikeConversationUuid(conversationId)) {
+      throw new BadRequestException(
+        'conversationId inválido (se espera UUID de conversación)',
+      );
+    }
+    const text = String(body.message ?? '').trim();
+    if (!text) {
+      throw new BadRequestException('El mensaje no puede estar vacío');
+    }
+    await this.assertConversationForTaller(conversationId, tid);
+    return this.saveMessage({
+      conversationId,
+      message: text,
+      direction: 'outbound',
+      tallerId: tid,
+      platform: body.platform,
+      user: body.user,
+      contactName: body.user,
+      conversationLeadStatus: body.conversationLeadStatus,
+      skipOutboundFacebookSend: body.suppressOutboundFacebookSend === true,
+    });
+  }
+
+  /**
    * POST `/webhook`: payload del panel (legacy) o webhook Meta (`object: page`).
    */
   async ingestWebhookPayload(body: any): Promise<{
@@ -1803,6 +1857,18 @@ export class ChatService implements OnModuleDestroy {
       await this.conversationRepository.save(conversation);
     }
 
+    if (resolvedDirection === 'outbound' && tenantId) {
+      if (conversation.tallerId && conversation.tallerId !== tenantId) {
+        throw new ForbiddenException(
+          'Esta conversación pertenece a otro taller.',
+        );
+      }
+      if (!conversation.tallerId) {
+        conversation.tallerId = tenantId;
+        await this.conversationRepository.save(conversation);
+      }
+    }
+
     let contentToSave = data.message || 'Sin contenido';
     const incomingIsImage = isIncomingImage(contentToSave);
     if (incomingIsImage) {
@@ -1874,7 +1940,16 @@ export class ChatService implements OnModuleDestroy {
       data.suppressAutopilotAndSuggestions === true;
 
     const msgTallerId =
-      conversation.tallerId ?? tenantId ?? (await this.tallerService.findDefaultTallerId());
+      resolvedDirection === 'outbound' && tenantId
+        ? tenantId
+        : (conversation.tallerId ??
+          tenantId ??
+          (await this.tallerService.findDefaultTallerId()));
+    if (!msgTallerId) {
+      throw new BadRequestException(
+        'No se pudo determinar el taller del mensaje.',
+      );
+    }
     if (!conversation.tallerId) {
       conversation.tallerId = msgTallerId;
     }
@@ -1885,7 +1960,8 @@ export class ChatService implements OnModuleDestroy {
       senderName: senderName || 'Cliente Desconocido',
       direction: resolvedDirection,
       externalId: messageRowExternalId || conversation.externalId,
-      conversation: conversation,
+      conversationId: conversation.id,
+      conversation,
       tallerId: msgTallerId,
     });
     
@@ -4432,6 +4508,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         take: limit,
       });
     }
+    /** Mensajes outbound legacy del panel (sin `tallerId` antes del fix JWT). */
+    if (!rows.length) {
+      rows = await this.messageRepository.find({
+        where: { conversationId, tallerId: IsNull() },
+        order: { createdAt: 'DESC' },
+        take: limit,
+      });
+    }
     // Objeto plano: evita referencias circulares al serializar JSON (conversation ↔ messages)
     return rows.map((m) => ({
       id: m.id,
@@ -5238,13 +5322,19 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
     if (!text) return;
 
+    const autopilotTallerId =
+      conversation.tallerId ??
+      inboundMsg.tallerId ??
+      (await this.tallerService.findDefaultTallerId());
     const outbound = this.messageRepository.create({
       content: text,
       channelType: inboundMsg.channelType || conversation.platform || 'test',
       senderName: 'Asistente IA',
       direction: 'outbound',
       externalId: conversation.externalId,
+      conversationId: conversation.id,
       conversation,
+      tallerId: autopilotTallerId,
     });
     const savedOut = await this.messageRepository.save(outbound);
 

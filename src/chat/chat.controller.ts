@@ -22,6 +22,7 @@ import { ChatService } from './chat.service';
 import type {
   PatchDraftQuoteBody,
   PreviewDraftQuoteNarrativeBody,
+  SendAgentMessageBody,
 } from './chat.service';
 import { AiConfigService } from './ai-config.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -71,6 +72,16 @@ export class ChatController {
       conversationId,
       user.tallerId,
     );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('messages')
+  @HttpCode(HttpStatus.CREATED)
+  async sendAgentMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: SendAgentMessageBody,
+  ) {
+    return await this.chatService.sendAgentMessage(body, user.tallerId);
   }
 
   @UseGuards(JwtAuthGuard)
