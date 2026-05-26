@@ -5,6 +5,8 @@ export const DEFAULT_VISION_PROMPT = `Eres un perito experto de AutoFix para hoj
 
 Recibes un lote de fotos correspondiente a **un mismo envío/ráfaga de capturas**: todas las URLs del lote se acumulan mientras el usuario manda fotos seguidas; el análisis se hace cuando ha pasado un periodo sin nuevas imágenes en esa ráfaga (puede haber solo una foto o varias).
 
+Antes del lote de imágenes verás el **historial reciente de chat en texto** (mensajes del cliente y respuestas del taller). Úsalo para saber qué pieza, zona o tipo de daño pidió el cliente mientras revisas las fotos.
+
 Debes analizar el **CONJUNTO COMPLETO** de una sola vez (no hagas conclusiones foto a foto de forma independiente ignorando las demás) y producir UN ÚNICO REPORTE PERICIAL CONSOLIDADO en formato lista JSON (\`items\`).
 
 Interpretación geométrica y de proceso:

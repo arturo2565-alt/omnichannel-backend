@@ -619,6 +619,9 @@ export class ChatService implements OnModuleDestroy {
   /** Mensajes recientes (cliente + IA/sistema) que recibe el modelo en cada llamada de chat. */
   private static readonly LLM_CONVERSATION_HISTORY_LIMIT = 15;
 
+  /** Mensajes de texto recientes que se inyectan antes del lote de imágenes en visión. */
+  private static readonly VISION_TEXT_HISTORY_LIMIT = 6;
+
   /** Ventana histórica (p. ej. fallback / consultas) para imágenes entrantes recientes en la conversación. */
   static readonly RECENT_IMAGE_LOOKBACK_MS = 5 * 60 * 1000;
 
@@ -846,6 +849,31 @@ export class ChatService implements OnModuleDestroy {
       take: ChatService.LLM_CONVERSATION_HISTORY_LIMIT,
     });
     return rows.reverse();
+  }
+
+  /**
+   * Últimos mensajes de **solo texto** de la conversación para contexto de visión
+   * (cliente = `user`, taller/IA = `assistant`), en orden cronológico.
+   */
+  private async buildVisionTextHistoryForConversation(
+    conversationId: string,
+  ): Promise<ChatCompletionMessageParam[]> {
+    const cid = String(conversationId ?? '').trim();
+    if (!cid) return [];
+
+    const rows = await this.loadRecentMessagesForLlm(cid);
+    const textOnly = rows.filter((m) => {
+      const t = String(m.content ?? '').trim();
+      return t.length > 0 && !isIncomingImage(m.content);
+    });
+    const recent = textOnly.slice(-ChatService.VISION_TEXT_HISTORY_LIMIT);
+    const turns = this.messagesToChatCompletionTurns(recent);
+    if (turns.length) {
+      console.log(
+        `[Vision] Historial textual (${turns.length} turno(s)) conv=${cid}`,
+      );
+    }
+    return turns;
   }
 
   /** Convierte filas persistidas a turnos `user` / `assistant` (omite vacíos e imágenes). */
@@ -2051,6 +2079,8 @@ export class ChatService implements OnModuleDestroy {
       allowEmptyInventory?: boolean;
       /** Texto del cliente (p. ej. pieza/vehículo) — se inyecta en el turno de usuario de visión. */
       clientContextText?: string;
+      /** Turnos recientes de chat (texto) antes del bloque con imágenes. */
+      conversationTextHistory?: ChatCompletionMessageParam[];
       tallerId?: string | null;
     },
   ): Promise<DetectedDamageItem[]> {
@@ -2116,16 +2146,26 @@ export class ChatService implements OnModuleDestroy {
       })),
     ];
 
+    const historyTurns = (options?.conversationTextHistory ?? []).filter(
+      (m): m is ChatCompletionMessageParam =>
+        m != null &&
+        (m.role === 'user' ||
+          m.role === 'assistant' ||
+          m.role === 'system') &&
+        (typeof m.content === 'string' ||
+          (Array.isArray(m.content) && m.content.length > 0)),
+    );
+
+    const visionMessages: ChatCompletionMessageParam[] = [
+      { role: 'system', content: systemPrompt },
+      ...historyTurns,
+      { role: 'user', content: userContent },
+    ];
+
     const completion = await this.openai.chat.completions.create({
       model: VISION_DAMAGE_MODEL,
       response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: systemPrompt },
-        {
-          role: 'user',
-          content: userContent,
-        },
-      ],
+      messages: visionMessages,
       max_completion_tokens: 3000,
     });
 
@@ -2171,6 +2211,7 @@ export class ChatService implements OnModuleDestroy {
       userSchemaHint?: string;
       allowEmptyInventory?: boolean;
       clientContextText?: string;
+      conversationTextHistory?: ChatCompletionMessageParam[];
       tallerId?: string | null;
     },
   ): Promise<DetectedDamageItem[]> {
@@ -3467,10 +3508,14 @@ export class ChatService implements OnModuleDestroy {
     if (hasVisionImages) {
       const urls = visionImageUrls;
       const clientHint = userText.trim() ? userText : '';
+      const playgroundVisionHistory: ChatCompletionMessageParam[] = historyTurns
+        .slice(-ChatService.VISION_TEXT_HISTORY_LIMIT)
+        .map((h) => ({ role: h.role, content: h.text }));
       visionItemsAfterImage = await this.analyzeDamageImage(urls, {
         systemPrompt: visionPrompt.trim() ? visionPrompt : undefined,
         allowEmptyInventory: true,
         clientContextText: clientHint || undefined,
+        conversationTextHistory: playgroundVisionHistory,
       });
       if (visionItemsAfterImage.length) {
         const analysis = inventoryItemsToVehicleAnalysis(
@@ -4013,6 +4058,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const visionTallerId =
       convRow?.tallerId ?? (await this.tallerService.findDefaultTallerId());
 
+    const conversationTextHistory =
+      await this.buildVisionTextHistoryForConversation(conversationId);
+
     const existingDraft = await this.draftQuoteRepository.findOne({
       where: { conversationId, status: 'PENDING_APPROVAL' },
       order: { createdAt: 'DESC' },
@@ -4020,7 +4068,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     const newInventory = await this.analyzeDamageImageInSequentialChunks(
       imageUrls,
-      { allowEmptyInventory: true, tallerId: visionTallerId },
+      {
+        allowEmptyInventory: true,
+        tallerId: visionTallerId,
+        conversationTextHistory,
+      },
     );
 
     console.log(
