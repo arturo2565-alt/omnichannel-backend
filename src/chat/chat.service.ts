@@ -578,6 +578,9 @@ export class ChatService implements OnModuleDestroy {
    */
   private readonly pendingBurstImageUrls = new Map<string, string[]>();
 
+  /** conversationId con análisis de visión en curso (entre debounce de imagen y borrador guardado). */
+  private readonly consolidatedVisionInFlight = new Set<string>();
+
   constructor(
     @InjectRepository(Message)
     private readonly messageRepository: Repository<Message>,
@@ -615,6 +618,7 @@ export class ChatService implements OnModuleDestroy {
       clearTimeout(t);
     }
     this.autopilotTextDebounceTimers.clear();
+    this.consolidatedVisionInFlight.clear();
   }
 
   /**
@@ -1636,7 +1640,12 @@ export class ChatService implements OnModuleDestroy {
       if (convRow?.isAutoPilotActive) {
         if (shouldDebounceAutopilotInboundText(convRow.platform)) {
           this.scheduleDebouncedAutopilotTextReply(conversationIdForSockets);
-        } else {
+        } else if (
+          !(await this.shouldSuppressAutopilotForVisionPipeline(
+            conversationIdForSockets,
+            saved,
+          ))
+        ) {
           void this.autoPilotSendTextReply(saved, convRow).catch((err) =>
             console.error('autoPilotSendTextReply:', err),
           );
@@ -1652,6 +1661,13 @@ export class ChatService implements OnModuleDestroy {
       incomingIsImage &&
       isIncomingImage(saved.content)
     ) {
+      const aptTimer = this.autopilotTextDebounceTimers.get(
+        conversationIdForSockets,
+      );
+      if (aptTimer !== undefined) {
+        clearTimeout(aptTimer);
+        this.autopilotTextDebounceTimers.delete(conversationIdForSockets);
+      }
       this.scheduleConsolidatedInboundImageAnalysis(
         conversationIdForSockets,
         saved.id,
@@ -3308,6 +3324,23 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     attachingMessageId: string,
     burstUrls: readonly string[],
   ): Promise<void> {
+    this.consolidatedVisionInFlight.add(conversationId);
+    try {
+      await this.processConsolidatedInboundImagesCore(
+        conversationId,
+        attachingMessageId,
+        burstUrls,
+      );
+    } finally {
+      this.consolidatedVisionInFlight.delete(conversationId);
+    }
+  }
+
+  private async processConsolidatedInboundImagesCore(
+    conversationId: string,
+    attachingMessageId: string,
+    burstUrls: readonly string[],
+  ): Promise<void> {
     const fromBurst = [
       ...new Set(
         burstUrls.map((u) => String(u).trim()).filter((u) => u && isIncomingImage(u)),
@@ -4189,6 +4222,85 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   }
 
   /**
+   * Imágenes entrantes del cliente posteriores al último **outbound** (ráfaga aún sin cotización formal).
+   */
+  private async findUnansweredInboundImageMessages(
+    conversationId: string,
+  ): Promise<Message[]> {
+    const all = await this.messageRepository.find({
+      where: { conversationId },
+      order: { createdAt: 'ASC' },
+    });
+    let lastOutboundIdx = -1;
+    for (let i = 0; i < all.length; i++) {
+      if (String(all[i].direction ?? '').toLowerCase() === 'outbound') {
+        lastOutboundIdx = i;
+      }
+    }
+    const tail = lastOutboundIdx < 0 ? all : all.slice(lastOutboundIdx + 1);
+    return tail.filter(
+      (m) =>
+        String(m.direction ?? '').toLowerCase() === 'inbound' &&
+        isIncomingImage(m.content),
+    );
+  }
+
+  /** Sincrónicas: ráfaga, debounce de imagen o mensaje entrante con foto. */
+  private hasInboundVisionWorkInFlightSync(
+    conversationId: string,
+    inboundMsg: Message,
+    inboundTextBatch?: Message[],
+  ): boolean {
+    if (this.consolidatedVisionInFlight.has(conversationId)) {
+      return true;
+    }
+    if (this.consolidatedImageTimers.has(conversationId)) {
+      return true;
+    }
+    const burst = this.pendingBurstImageUrls.get(conversationId);
+    if (burst && burst.length > 0) {
+      return true;
+    }
+    if (isIncomingImage(inboundMsg.content)) {
+      return true;
+    }
+    if (inboundTextBatch?.some((m) => isIncomingImage(m.content))) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * El autopilot de texto no debe competir con valuación por imagen ni con borrador pendiente.
+   */
+  private async shouldSuppressAutopilotForVisionPipeline(
+    conversationId: string,
+    inboundMsg: Message,
+    inboundTextBatch?: Message[],
+  ): Promise<boolean> {
+    const hasPendingDraft = await this.draftQuoteRepository.findOne({
+      where: { conversationId, status: 'PENDING_APPROVAL' },
+    });
+    if (hasPendingDraft) {
+      return true;
+    }
+
+    if (
+      this.hasInboundVisionWorkInFlightSync(
+        conversationId,
+        inboundMsg,
+        inboundTextBatch,
+      )
+    ) {
+      return true;
+    }
+
+    const unansweredImages =
+      await this.findUnansweredInboundImageMessages(conversationId);
+    return unansweredImages.length > 0;
+  }
+
+  /**
    * Textos entrantes del cliente posteriores al último mensaje **outbound** (aún sin respuesta del taller/IA).
    */
   private async findUnansweredInboundTextMessages(
@@ -4245,6 +4357,16 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     }
 
     const anchor = batch[batch.length - 1]!;
+    if (
+      await this.shouldSuppressAutopilotForVisionPipeline(
+        conversationId,
+        anchor,
+        batch,
+      )
+    ) {
+      return;
+    }
+
     await this.autoPilotSendTextReply(anchor, conv, {
       inboundTextBatch: batch,
     });
@@ -4297,6 +4419,16 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         conversation.isAutoPilotActive = convFresh.isAutoPilotActive;
       }
       if (!conversation.isAutoPilotActive) {
+        return null;
+      }
+
+      if (
+        await this.shouldSuppressAutopilotForVisionPipeline(
+          conversation.id,
+          inboundMsg,
+          options?.inboundTextBatch,
+        )
+      ) {
         return null;
       }
 
