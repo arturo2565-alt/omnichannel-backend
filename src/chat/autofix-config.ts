@@ -198,7 +198,12 @@ export interface DraftQuote {
   lines: DraftQuoteLine[];
   subtotal: number;
   total: number;
+  /** Mensaje al cliente (plantilla premium / variante A-B-C). */
   formalNarrative: string;
+  /** Alias de `formalNarrative` para el panel y sockets. */
+  generatedMessage?: string;
+  /** Alias de `formalNarrative` para el panel y sockets. */
+  clientMessage?: string;
   analysisBasis: {
     pieza: string;
     severidad: string;

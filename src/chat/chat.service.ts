@@ -61,6 +61,7 @@ import {
   classifyBañoPinturaTierWithLlm,
   coerceBañoSeveridadToCatalog,
   composeBañoNaturalInstantReply,
+  buildBañoNaturalInstantReplyText,
   extractBañoPersonalizedColorDetail,
 } from './baño-pintura-llm';
 import {
@@ -69,6 +70,7 @@ import {
   isBanioPinturaCompletoVisionInventory,
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
+import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import {
   buildPlaygroundPostQuoteSchedulingSystemAppend,
   getPlaygroundInstantInterceptorDecision,
@@ -106,6 +108,7 @@ import {
   isBañoDePinturaServicio,
   mentionsCambioDeColor,
   materializeInstantQuoteResolution,
+  cambioDeColorAddonMx,
   mentionsBañoDePinturaIntent,
   purifyVehicleModelUserReply,
   flattenBañoTierSource,
@@ -1278,6 +1281,10 @@ export class ChatService implements OnModuleDestroy {
       throw new NotFoundException(`DraftQuote no encontrada: ${id}`);
     }
     row.items?.sort((a, b) => a.sortOrder - b.sortOrder);
+    if (row.quotePayload) {
+      row.quotePayload =
+        normalizeDraftQuoteForClient(row.quotePayload) ?? row.quotePayload;
+    }
     return row;
   }
 
@@ -2477,6 +2484,59 @@ export class ChatService implements OnModuleDestroy {
     );
   }
 
+  private async buildBanioTierContextForDraft(
+    analysis: VehicleDamageAnalysis,
+    conversationId: string,
+  ): Promise<string> {
+    const visionContext =
+      await this.buildVisionTextContextForConversation(conversationId);
+    return flattenBañoTierSource(
+      [visionContext, analysis.descripcionTecnica, analysis.justificacion]
+        .filter(Boolean)
+        .join('\n'),
+    );
+  }
+
+  /**
+   * Fallback si la celda no está marcada instant: arma plantilla baño desde totales del borrador.
+   */
+  private buildBanioClientMessageFromDraftLines(
+    draft: DraftQuote,
+    tierFlat: string,
+  ): string | null {
+    const total = Math.round(Number(draft.total ?? draft.subtotal ?? 0));
+    const subtotal = Math.round(Number(draft.subtotal ?? total));
+    if (total <= 0 || !draft.lines?.length) return null;
+    const severidadLiteral = inferBañoTierSeveridad(tierFlat);
+    const vehicleLabel =
+      inferBañoVehicleDisplayLabel(tierFlat) || 'su vehículo';
+    try {
+      return buildBañoNaturalInstantReplyText({
+        vehicleLabel,
+        segmentoEs: severidadLiteral,
+        servicioDb: 'Baño de Pintura Exterior',
+        severidadLiteral,
+        resolution: {
+          lines: draft.lines.map((l) => ({
+            label: l.description,
+            amount: l.subtotal,
+          })),
+          extras: total > subtotal ?
+            [{ label: 'Complementos', amount: total - subtotal }]
+          : [],
+          subtotal,
+          total,
+          precioMx: subtotal,
+          diasEntrega: 5,
+          currency: AUTO_FIX_CURRENCY,
+        },
+      });
+    } catch (err) {
+      console.warn('[VisionBPC] buildBanioClientMessageFromDraftLines:', err);
+      return null;
+    }
+  }
+
   /**
    * Narrativa premium de baño de pintura cuando visión devolvió BPC (una sola línea en cotización).
    */
@@ -2504,7 +2564,7 @@ export class ChatService implements OnModuleDestroy {
         String(bpc.severidad ?? '').trim() ||
         inferBañoTierSeveridad(tierFlat);
 
-      const resolution = materializeInstantQuoteResolution(snap, {
+      let resolution = materializeInstantQuoteResolution(snap, {
         canonical,
         severidadLiteral,
         tierSourceForCambioColor: tierFlat,
@@ -2513,11 +2573,41 @@ export class ChatService implements OnModuleDestroy {
         fullCtxPreview: tierFlat.slice(0, 800),
       });
       if (!resolution) {
-        console.warn(
-          '[VisionBPC] materializeInstantQuoteResolution sin celda instantánea',
-          { canonical, severidadLiteral },
-        );
-        return null;
+        const base = snap.getPriceForCanonical(canonical, severidadLiteral);
+        if (base > 0) {
+          const add =
+            mentionsCambioDeColor(tierFlat) ?
+              cambioDeColorAddonMx(severidadLiteral)
+            : 0;
+          const dias = snap.getDiasEntregaForCanonical(
+            canonical,
+            severidadLiteral,
+          );
+          resolution = {
+            lines: [
+              { label: `${canonical} (${severidadLiteral})`, amount: base },
+            ],
+            extras:
+              add > 0 ?
+                [{ label: 'Cambio de color', amount: add }]
+              : [],
+            subtotal: base,
+            total: base + add,
+            precioMx: base,
+            diasEntrega: dias > 0 ? dias : 3,
+            currency: AUTO_FIX_CURRENCY,
+          };
+          console.log(
+            '[VisionBPC] Resolución de borrador desde precio de matriz (sin flag instant)',
+            { canonical, severidadLiteral, base },
+          );
+        } else {
+          console.warn(
+            '[VisionBPC] materializeInstantQuoteResolution sin celda en catálogo',
+            { canonical, severidadLiteral },
+          );
+          return null;
+        }
       }
 
       const vehicleLabel =
@@ -2574,14 +2664,30 @@ export class ChatService implements OnModuleDestroy {
     const tallerId = conv?.tallerId ?? null;
 
     if (isBanioPinturaCompletoVisionInventory(analysis.inventory)) {
-      const bañoNarrative = await this.composeVisionBpcFormalNarrative(
+      let bañoNarrative = await this.composeVisionBpcFormalNarrative(
         draft,
         analysis,
         conversationId,
         tallerId,
       );
+      if (!bañoNarrative) {
+        const tierFlat = await this.buildBanioTierContextForDraft(
+          analysis,
+          conversationId,
+        );
+        bañoNarrative = this.buildBanioClientMessageFromDraftLines(
+          draft,
+          tierFlat,
+        );
+      }
       if (bañoNarrative) {
-        draft.formalNarrative = bañoNarrative;
+        const normalized = normalizeDraftQuoteForClient({
+          ...draft,
+          formalNarrative: bañoNarrative,
+        });
+        if (normalized) {
+          Object.assign(draft, normalized);
+        }
         return;
       }
     }
@@ -2682,6 +2788,10 @@ export class ChatService implements OnModuleDestroy {
         ) || '',
     });
     draft.formalNarrative = llmNarrative || fallbackNarrative;
+    const normalized = normalizeDraftQuoteForClient(draft);
+    if (normalized) {
+      Object.assign(draft, normalized);
+    }
   }
 
   /**
@@ -2808,6 +2918,8 @@ export class ChatService implements OnModuleDestroy {
     narrative: string;
     messageId: string | null;
     quotePayload: DraftQuote;
+    generatedMessage?: string;
+    clientMessage?: string;
   }> {
     let row: DraftQuoteEntity;
 
@@ -2817,10 +2929,14 @@ export class ChatService implements OnModuleDestroy {
         { inventoryLines: body.inventoryLines },
         tallerId,
       );
+      const qp = row.quotePayload;
       return {
-        narrative: row.quotePayload.formalNarrative,
+        narrative:
+          qp.clientMessage ?? qp.generatedMessage ?? qp.formalNarrative,
         messageId: row.messageId,
-        quotePayload: row.quotePayload,
+        quotePayload: qp,
+        generatedMessage: qp.generatedMessage,
+        clientMessage: qp.clientMessage,
       };
     }
 
@@ -2845,20 +2961,26 @@ export class ChatService implements OnModuleDestroy {
       null,
     );
 
-    row.quotePayload = draft;
+    const draftForClient = normalizeDraftQuoteForClient(draft) ?? draft;
+    row.quotePayload = draftForClient;
     await this.draftQuoteRepository.save(row);
 
     if (row.messageId) {
       await this.messageRepository.update(
         { id: row.messageId },
-        { draftQuote: draft },
+        { draftQuote: draftForClient },
       );
     }
 
     return {
-      narrative: draft.formalNarrative,
+      narrative:
+        draftForClient.clientMessage ??
+        draftForClient.generatedMessage ??
+        draftForClient.formalNarrative,
       messageId: row.messageId,
-      quotePayload: draft,
+      quotePayload: draftForClient,
+      generatedMessage: draftForClient.generatedMessage,
+      clientMessage: draftForClient.clientMessage,
     };
   }
 
@@ -4328,6 +4450,8 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       imageUrls.length,
       complementMeta,
     );
+    const draftQuoteForClient =
+      normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
 
     const persistedImageUrl = persistDraftImageUrlField(allImageUrls);
 
@@ -4339,13 +4463,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       existingDraft.imageUrl = persistedImageUrl;
       existingDraft.damageAnalysis = analysis;
       existingDraft.estimateAmount = estimateAmount;
-      existingDraft.quotePayload = draftQuoteDoc;
+      existingDraft.quotePayload = draftQuoteForClient;
       existingDraft.tallerId = visionTallerId;
       const savedDraft = await this.draftQuoteRepository.save(existingDraft);
       await this.syncDraftQuoteLineItems(
         savedDraft.id,
         analysis,
-        draftQuoteDoc,
+        draftQuoteForClient,
         allImageUrls,
         visionTallerId,
       );
@@ -4358,7 +4482,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       }
       await this.messageRepository.update(
         { id: messageId },
-        { damageAnalysis: analysis, draftQuote: draftQuoteDoc },
+        { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
       );
 
       await this.markConversationDraftPendingReview(conversationId);
@@ -4368,7 +4492,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         conversationId,
         messageId,
         damageAnalysis: analysis,
-        draftQuote: draftQuoteDoc,
+        draftQuote: draftQuoteForClient,
         estimateAmount,
         isAutoPilotActive: false,
       });
@@ -4382,21 +4506,21 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       imageUrl: persistedImageUrl,
       damageAnalysis: analysis,
       estimateAmount,
-      quotePayload: draftQuoteDoc,
+      quotePayload: draftQuoteForClient,
       status: 'PENDING_APPROVAL',
     });
     const savedDraft = await this.draftQuoteRepository.save(row);
     await this.syncDraftQuoteLineItems(
       savedDraft.id,
       analysis,
-      draftQuoteDoc,
+      draftQuoteForClient,
       allImageUrls,
       visionTallerId,
     );
 
     await this.messageRepository.update(
       { id: messageId },
-      { damageAnalysis: analysis, draftQuote: draftQuoteDoc },
+      { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
     );
 
     await this.markConversationDraftPendingReview(conversationId);
@@ -4406,7 +4530,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       conversationId,
       messageId,
       damageAnalysis: analysis,
-      draftQuote: draftQuoteDoc,
+      draftQuote: draftQuoteForClient,
       estimateAmount,
       isAutoPilotActive: false,
     });
@@ -4424,6 +4548,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     });
     for (const r of rows) {
       r.items?.sort((a, b) => a.sortOrder - b.sortOrder);
+      if (r.quotePayload) {
+        r.quotePayload =
+          normalizeDraftQuoteForClient(r.quotePayload) ?? r.quotePayload;
+      }
     }
     return rows;
   }
@@ -4601,16 +4729,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         imageCount,
         null,
       );
+      const quotePayloadForClient =
+        normalizeDraftQuoteForClient(quotePayload) ?? quotePayload;
 
       row.damageAnalysis = analysisMerged;
       row.estimateAmount = estimateAmount;
-      row.quotePayload = quotePayload;
+      row.quotePayload = quotePayloadForClient;
 
       const saved = await this.draftQuoteRepository.save(row);
       await this.syncDraftQuoteLineItems(
         saved.id,
         analysisMerged,
-        quotePayload,
+        quotePayloadForClient,
         sourceUrls.length ? sourceUrls : parseDraftImageUrls(row.imageUrl),
         tallerId,
       );
@@ -4618,7 +4748,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       if (row.messageId) {
         await this.messageRepository.update(
           { id: row.messageId },
-          { damageAnalysis: analysisMerged, draftQuote: quotePayload },
+          {
+            damageAnalysis: analysisMerged,
+            draftQuote: quotePayloadForClient,
+          },
         );
       }
 
@@ -4764,7 +4897,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       senderName: m.senderName,
       conversationId: m.conversationId,
       damageAnalysis: m.damageAnalysis ?? null,
-      draftQuote: m.draftQuote ?? null,
+      draftQuote: normalizeDraftQuoteForClient(m.draftQuote),
     }));
   }
 
