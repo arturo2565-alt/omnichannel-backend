@@ -350,5 +350,10 @@ export async function composeBañoNaturalInstantReply(
   _openai: OpenAI,
   facts: BañoInstantComposeFacts,
 ): Promise<string> {
+  console.log('--- [DEBUG ENTRÓ A VARIANTES DE BAÑO] ---');
+  console.log('Vehículo:', facts.vehicleLabel);
+  console.log('Servicio DB:', facts.servicioDb);
+  console.log('Severidad / tier:', facts.severidadLiteral);
+  console.log('Total resolución:', facts.resolution?.total);
   return buildBañoNaturalInstantReplyText(facts);
 }

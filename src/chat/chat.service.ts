@@ -68,6 +68,7 @@ import {
   banioCompletoNeedsHeavyBodyworkDisclaimer,
   collapseVisionItemsToBpcIfNeeded,
   isBanioPinturaCompletoVisionInventory,
+  visionItemsIndicateBanioCompleto,
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
@@ -1394,6 +1395,33 @@ export class ChatService implements OnModuleDestroy {
     });
   }
 
+  /** Logs de depuración BPC (precio matriz). */
+  private logDebugBpcPrecio(
+    analysis: VehicleDamageAnalysis,
+    canonicalPiece: string,
+    tier: string,
+    precioCalculado: number,
+  ): void {
+    const vehicleModel =
+      inferBañoVehicleDisplayLabel(
+        [analysis.descripcionTecnica, analysis.justificacion]
+          .filter(Boolean)
+          .join(' '),
+      ) ??
+      inferBañoVehicleDisplayLabel(
+        (analysis.inventory ?? [])
+          .map((i) => `${i.pieza} ${i.descripcionTecnica ?? ''}`)
+          .join(' '),
+      ) ??
+      analysis.pieza ??
+      '(sin modelo)';
+    console.log('--- [DEBUG BPC PRECIO] ---');
+    console.log('Vehículo detectado:', vehicleModel);
+    console.log('Código de pieza evaluado:', canonicalPiece);
+    console.log('Tier / severidad (matriz):', tier);
+    console.log('Precio obtenido de la Matrix:', precioCalculado);
+  }
+
   /**
    * Suma de matriz por piezas del inventario (o una sola pieza si no hay inventario).
    */
@@ -1415,6 +1443,7 @@ export class ChatService implements OnModuleDestroy {
           .join(' '),
       );
       const unit = snap.getPriceForCanonical(canonical, tier);
+      this.logDebugBpcPrecio(analysis, canonical, tier, unit);
       if (unit > 0) return unit;
     }
     if (analysis.inventory?.length) {
@@ -2547,6 +2576,16 @@ export class ChatService implements OnModuleDestroy {
     tallerId: string | null,
   ): Promise<string | null> {
     try {
+      console.log('--- [DEBUG BPC NARRATIVA] (composeVisionBpcFormalNarrative) ---');
+      console.log(
+        '¿Se detectó intención de baño completo?:',
+        visionItemsIndicateBanioCompleto(analysis.inventory ?? []),
+      );
+      console.log(
+        '¿El inventario final colapsado es BPC?:',
+        isBanioPinturaCompletoVisionInventory(analysis.inventory),
+      );
+
       const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
       const canonical =
         resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
@@ -2574,6 +2613,12 @@ export class ChatService implements OnModuleDestroy {
       });
       if (!resolution) {
         const base = snap.getPriceForCanonical(canonical, severidadLiteral);
+        this.logDebugBpcPrecio(
+          analysis,
+          canonical,
+          severidadLiteral,
+          base,
+        );
         if (base > 0) {
           const add =
             mentionsCambioDeColor(tierFlat) ?
@@ -2663,7 +2708,28 @@ export class ChatService implements OnModuleDestroy {
     });
     const tallerId = conv?.tallerId ?? null;
 
-    if (isBanioPinturaCompletoVisionInventory(analysis.inventory)) {
+    const intencion_banio_completo_detectada = visionItemsIndicateBanioCompleto(
+      analysis.inventory ?? [],
+    );
+    const esInventarioBPC = isBanioPinturaCompletoVisionInventory(
+      analysis.inventory,
+    );
+    console.log('--- [DEBUG BPC NARRATIVA] ---');
+    console.log(
+      '¿Se detectó intención de baño completo?:',
+      intencion_banio_completo_detectada,
+    );
+    console.log('¿El inventario final colapsado es BPC?:', esInventarioBPC);
+    console.log(
+      'Piezas en inventario:',
+      (analysis.inventory ?? []).map((i) => i.pieza),
+    );
+    console.log(
+      'Rama narrativa:',
+      esInventarioBPC ? 'plantilla baño (BPC)' : 'plantilla piezas / legal',
+    );
+
+    if (esInventarioBPC) {
       let bañoNarrative = await this.composeVisionBpcFormalNarrative(
         draft,
         analysis,
@@ -4064,10 +4130,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const lines: DraftQuoteLine[] = [];
     let resolvedLevel: DamageLevel;
 
-    if (
-      analysis.inventory?.length &&
-      isBanioPinturaCompletoVisionInventory(analysis.inventory)
-    ) {
+    const esInventarioBPCGen = isBanioPinturaCompletoVisionInventory(
+      analysis.inventory,
+    );
+    const intencionBanioGen = visionItemsIndicateBanioCompleto(
+      analysis.inventory ?? [],
+    );
+    console.log('--- [DEBUG BPC NARRATIVA] (generateDraftQuote) ---');
+    console.log('¿Se detectó intención de baño completo?:', intencionBanioGen);
+    console.log('¿El inventario final colapsado es BPC?:', esInventarioBPCGen);
+
+    if (analysis.inventory?.length && esInventarioBPCGen) {
       const bpc = analysis.inventory[0]!;
       const canonical =
         resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
@@ -4079,6 +4152,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             .join(' '),
         );
       const unit = snap.getPriceForCanonical(canonical, tierLiteral);
+      this.logDebugBpcPrecio(analysis, canonical, tierLiteral, unit);
       resolvedLevel = 'N/A';
       if (unit > 0) {
         lines.push({
@@ -4090,6 +4164,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         });
       }
     } else if (analysis.inventory?.length) {
+      console.log(
+        '[DEBUG BPC] generateDraftQuote → rama PIEZAS INDIVIDUALES (no BPC)',
+        (analysis.inventory ?? []).map((i) => i.pieza),
+      );
       resolvedLevel = pickWorstDamageLevel(
         analysis.inventory.map((i) => i.severidad),
       );
@@ -4382,6 +4460,19 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     console.log(
       `[VisionChunk] Inventario consolidado tras lotes: ${newInventory.length} pieza(s)`,
+    );
+    console.log('--- [DEBUG BPC NARRATIVA] (post-visión, pre-borrador) ---');
+    console.log(
+      '¿Se detectó intención de baño completo?:',
+      visionItemsIndicateBanioCompleto(newInventory),
+    );
+    console.log(
+      '¿El inventario final colapsado es BPC?:',
+      isBanioPinturaCompletoVisionInventory(newInventory),
+    );
+    console.log(
+      'Piezas en inventario:',
+      newInventory.map((i) => i.pieza),
     );
 
     let analysis: VehicleDamageAnalysis;
