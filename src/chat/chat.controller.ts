@@ -18,7 +18,10 @@ import {
 import type { Request, Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
-import type { PatchDraftQuoteBody } from './chat.service';
+import type {
+  PatchDraftQuoteBody,
+  PreviewDraftQuoteNarrativeBody,
+} from './chat.service';
 import { AiConfigService } from './ai-config.service';
 
 @Controller(['webhook', 'chat'])
@@ -133,13 +136,32 @@ export class ChatController {
   }
 
   /**
+   * Vista previa de narrativa al cliente (IA, variante A/B/C). No persiste en BD.
+   */
+  @Post('draft-quote/preview-narrative')
+  @HttpCode(HttpStatus.OK)
+  async previewDraftQuoteNarrative(
+    @Body() body: PreviewDraftQuoteNarrativeBody,
+  ) {
+    const narrative =
+      await this.chatService.previewDraftQuoteClientNarrative(body);
+    return { narrative };
+  }
+
+  /**
    * Regenera únicamente la narrativa al cliente (formalNarrative) con variante A/B/C vía IA,
    * persiste el borrador y sincroniza el mensaje vinculado.
    */
   @Post('draft-quote/:id/regenerate-narrative')
   @HttpCode(HttpStatus.OK)
-  async regenerateDraftQuoteNarrative(@Param('id') id: string) {
-    return await this.chatService.regenerateDraftQuoteClientNarrative(id);
+  async regenerateDraftQuoteNarrative(
+    @Param('id') id: string,
+    @Body() body: { inventoryLines?: PatchDraftQuoteBody['inventoryLines'] },
+  ) {
+    return await this.chatService.regenerateDraftQuoteClientNarrative(
+      id,
+      body,
+    );
   }
 
   @Get('appointments')

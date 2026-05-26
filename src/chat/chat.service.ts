@@ -480,6 +480,23 @@ export interface PatchDraftQuoteBody {
   inventoryLines?: PatchInventoryLineDto[];
 }
 
+/** Pieza para vista previa de narrativa (sin persistir borrador). */
+export type PreviewNarrativePieceDto = {
+  pieza: string;
+  precioMx: number;
+  severidad?: string;
+};
+
+export interface PreviewDraftQuoteNarrativeBody {
+  pieces: PreviewNarrativePieceDto[];
+  modeloVehiculo?: string;
+  conversationStatus?: string;
+  /** Nombre del contacto para el saludo (opcional). */
+  contactName?: string;
+  /** Si está agendado, opcional para formatear día de cita. */
+  conversationId?: string;
+}
+
 /** Herramientas del autopilot (Chat Completions `tools`). */
 const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
   {
@@ -2150,20 +2167,134 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Vista previa en tiempo real: narrativa al cliente vía IA (variante A/B/C al azar).
+   * No escribe en base de datos.
+   */
+  async previewDraftQuoteClientNarrative(
+    body: PreviewDraftQuoteNarrativeBody,
+  ): Promise<string> {
+    const pieces = (body.pieces ?? [])
+      .map((p) => ({
+        pieza: String(p.pieza ?? '').trim(),
+        precioMx: Math.max(0, Math.round(Number(p.precioMx) || 0)),
+      }))
+      .filter((p) => p.pieza);
+    if (!pieces.length) {
+      throw new BadRequestException(
+        'pieces debe incluir al menos una pieza con nombre y precio.',
+      );
+    }
+
+    const lineRows = pieces.map((p) => ({
+      pieza: p.pieza,
+      precioMx: p.precioMx,
+    }));
+    const total = lineRows.reduce((s, l) => s + l.precioMx, 0);
+    const status = String(body.conversationStatus ?? '')
+      .toLowerCase()
+      .trim();
+    const hasActiveAppointment = status === 'agendado';
+
+    let appointmentFormatted = 'el día acordado para tu visita';
+    const convId = String(body.conversationId ?? '').trim();
+    if (hasActiveAppointment && convId) {
+      let apt = await this.loadActiveAppointmentForConversation(convId);
+      if (!apt) {
+        apt = await this.loadLatestAppointmentForConversation(convId);
+      }
+      if (apt?.scheduledAt) {
+        appointmentFormatted = formatDraftAppointmentCitaLong(apt.scheduledAt);
+      }
+    }
+
+    const mapsUrl = hasActiveAppointment
+      ? ''
+      : await this.aiConfigService.getValue(AI_CONFIG_KEYS.BUSINESS_MAPS_URL);
+
+    const vehicleModel =
+      String(body.modeloVehiculo ?? '').trim() ||
+      inferBañoVehicleDisplayLabel(pieces.map((p) => p.pieza).join(' ')) ||
+      '';
+
+    const piezaLabels = pieces.map((p) => p.pieza);
+    const damageIntro = buildDamagePhotoIntroForCliente(
+      {
+        inventory: piezaLabels.map((pieza) => ({ pieza })),
+        partesAfectadas: piezaLabels,
+      },
+      1,
+    );
+
+    const contactName =
+      sanitizeClienteDisplayName(body.contactName ?? '') ||
+      'Estimado cliente';
+
+    const fallbackNarrative = hasActiveAppointment
+      ? buildClienteFormalNarrativeAgendado({
+          contactName,
+          lineRows,
+          total,
+          appointmentFormatted,
+          damageIntro,
+        })
+      : buildClienteFormalNarrativeSinCita({
+          contactName,
+          lineRows,
+          total,
+          mapsUrl,
+          damageIntro,
+        });
+
+    const llmNarrative = await this.generateDraftFormalNarrativeWithLlm({
+      fallbackNarrative,
+      contactName,
+      lineRows,
+      total,
+      hasActiveAppointment,
+      appointmentFormatted,
+      mapsUrl,
+      damageIntro,
+      isComplement: false,
+      previousPiezas: [],
+      newPiezas: piezaLabels,
+      vehicleModel,
+    });
+
+    return llmNarrative || fallbackNarrative;
+  }
+
+  /**
    * Panel: vuelve a generar el mensaje al cliente (`formalNarrative`) con variante IA A/B/C,
    * persiste `draft_quotes` y actualiza el mensaje vinculado.
    */
-  async regenerateDraftQuoteClientNarrative(draftQuoteId: string): Promise<{
+  async regenerateDraftQuoteClientNarrative(
+    draftQuoteId: string,
+    body?: { inventoryLines?: PatchInventoryLineDto[] },
+  ): Promise<{
     narrative: string;
     messageId: string | null;
     quotePayload: DraftQuote;
   }> {
-    const row = await this.draftQuoteRepository.findOne({
+    let row: DraftQuoteEntity;
+
+    if (body?.inventoryLines?.length) {
+      row = await this.patchDraftQuote(draftQuoteId, {
+        inventoryLines: body.inventoryLines,
+      });
+      return {
+        narrative: row.quotePayload.formalNarrative,
+        messageId: row.messageId,
+        quotePayload: row.quotePayload,
+      };
+    }
+
+    const existing = await this.draftQuoteRepository.findOne({
       where: { id: draftQuoteId },
     });
-    if (!row) {
+    if (!existing) {
       throw new NotFoundException(`DraftQuote no encontrada: ${draftQuoteId}`);
     }
+    row = existing;
 
     const draft = row.quotePayload;
     const analysis = row.damageAnalysis;
@@ -3829,33 +3960,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         },
       };
 
-      const marker = 'Detalle económico propuesto';
-      const lineText = manualLines
-        .map(
-          (l, i) =>
-            `${i + 1}. ${l.description} — ${l.quantity} × ${formatAutoFixMoney(l.unitPrice)} = ${formatAutoFixMoney(l.subtotal)}`,
-        )
-        .join('\n');
-      const idxM = quotePayload.formalNarrative.indexOf(marker);
-      const head =
-        idxM >= 0
-          ? quotePayload.formalNarrative.slice(0, idxM).trimEnd()
-          : quotePayload.formalNarrative;
-      quotePayload = {
-        ...quotePayload,
-        formalNarrative: [
-          head,
-          '',
-          marker + ' (antes de impuestos):',
-          lineText,
-          '',
-          `Subtotal propuesto: ${formatAutoFixMoney(total)} ${AUTO_FIX_CURRENCY}.`,
-          `Referencia interna: ${quotePayload.reference}. Fecha de emisión (UTC): ${quotePayload.generatedAt}.`,
-          '',
-          'Atentamente,',
-          'Área de cotizaciones — Taller (borrador automático)',
-        ].join('\n'),
-      };
+      const imageCount = Math.max(
+        1,
+        sourceUrls.length || parseDraftImageUrls(row.imageUrl).length,
+      );
+      await this.applyClientFacingFormalNarrativeToDraft(
+        quotePayload,
+        analysisMerged,
+        row.conversationId,
+        imageCount,
+        null,
+      );
 
       row.damageAnalysis = analysisMerged;
       row.estimateAmount = estimateAmount;
