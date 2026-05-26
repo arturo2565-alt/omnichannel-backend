@@ -3,6 +3,34 @@ import { coerceDamageLevelCode, damageLevelRank } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { WORKSHOP_TIMEZONE } from './appointment-intent';
 
+function dedupeStringListCaseInsensitive(values: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const v = String(raw ?? '').trim();
+    if (!v) continue;
+    const key = v.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+  return out;
+}
+
+export function sanitizeClienteDisplayName(raw: string): string {
+  const t = String(raw ?? '').trim();
+  if (!t) return '';
+  const lower = t.toLowerCase();
+  const onlyDigits = /^[0-9]{6,}$/.test(t);
+  const messengerLike =
+    /^messenger\s*[#:.-]?\s*[0-9]{4,}$/i.test(t) ||
+    lower.includes('messenger id');
+  const uuidLike =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t);
+  if (onlyDigits || messengerLike || uuidLike) return '';
+  return t;
+}
+
 export type DamageInventoryMergeResult = {
   merged: DetectedDamageItem[];
   /** Piezas que ya estaban en el borrador antes de esta ráfaga. */
@@ -80,7 +108,7 @@ export function mergeDamageInventoryAccumulative(
 }
 
 export function formatPiezasListForCliente(piezas: readonly string[]): string {
-  const list = piezas.map((p) => String(p).trim()).filter(Boolean);
+  const list = dedupeStringListCaseInsensitive(piezas);
   if (list.length === 0) return '—';
   if (list.length === 1) return list[0]!;
   if (list.length === 2) return `${list[0]} y ${list[1]}`;
@@ -126,9 +154,13 @@ export function buildDamagePhotoIntroForCliente(
   const fromPartes = (analysis.partesAfectadas ?? [])
     .map((p) => String(p).trim())
     .filter(Boolean);
-  const unique = [...new Set([...fromInv, ...fromPartes])];
-  if (analysis.pieza?.trim() && !unique.includes(analysis.pieza.trim())) {
-    unique.unshift(analysis.pieza.trim());
+  const unique = dedupeStringListCaseInsensitive([...fromInv, ...fromPartes]);
+  const piezaTop = String(analysis.pieza ?? '').trim();
+  if (
+    piezaTop &&
+    !unique.some((p) => p.toLowerCase() === piezaTop.toLowerCase())
+  ) {
+    unique.unshift(piezaTop);
   }
   if (unique.length === 1) {
     const p = unique[0]!.toLowerCase();
@@ -174,7 +206,7 @@ export function buildClienteFormalNarrativeAgendado(opts: {
   appointmentFormatted: string;
   damageIntro: string;
 }): string {
-  const name = String(opts.contactName ?? '').trim() || 'cliente';
+  const name = sanitizeClienteDisplayName(opts.contactName) || 'cliente';
   const linesText = opts.lineRows.map((r) => formatClientePiezaLineExtra(r.pieza, r.precioMx)).join('\n');
   const total = Math.max(0, Math.round(Number(opts.total) || 0));
   const when = String(opts.appointmentFormatted ?? '').trim() || 'el día acordado para tu visita';
@@ -199,7 +231,7 @@ export function buildClienteFormalNarrativeSinCita(opts: {
   mapsUrl: string;
   damageIntro: string;
 }): string {
-  const name = String(opts.contactName ?? '').trim() || 'cliente';
+  const name = sanitizeClienteDisplayName(opts.contactName) || 'cliente';
   const linesText = opts.lineRows
     .map((r) => formatDraftQuoteLineToolEmoji(r.pieza, r.precioMx))
     .join('\n');
@@ -230,9 +262,14 @@ export function buildClienteFormalNarrativeComplement(opts: {
   mapsUrl?: string;
   damageIntro?: string;
 }): string {
-  const name = String(opts.contactName ?? '').trim() || 'cliente';
-  const prevLabel = formatPiezasListForCliente(opts.previousPiezas);
-  const newLabel = formatPiezasListForCliente(opts.newPiezas);
+  const name = sanitizeClienteDisplayName(opts.contactName) || 'cliente';
+  const previousUnique = dedupeStringListCaseInsensitive(opts.previousPiezas);
+  const newUniqueRaw = dedupeStringListCaseInsensitive(opts.newPiezas);
+  const newUnique = newUniqueRaw.filter(
+    (p) => !previousUnique.some((x) => x.toLowerCase() === p.toLowerCase()),
+  );
+  const prevLabel = formatPiezasListForCliente(previousUnique);
+  const newLabel = formatPiezasListForCliente(newUnique);
   const total = Math.max(0, Math.round(Number(opts.total) || 0));
   const newLinesText = opts.newLineRows
     .map((r) => formatClientePiezaLineExtra(r.pieza, r.precioMx))

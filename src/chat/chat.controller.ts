@@ -132,6 +132,16 @@ export class ChatController {
     return await this.chatService.patchDraftQuote(id, body);
   }
 
+  /**
+   * Regenera únicamente la narrativa al cliente (formalNarrative) con variante A/B/C vía IA,
+   * persiste el borrador y sincroniza el mensaje vinculado.
+   */
+  @Post('draft-quote/:id/regenerate-narrative')
+  @HttpCode(HttpStatus.OK)
+  async regenerateDraftQuoteNarrative(@Param('id') id: string) {
+    return await this.chatService.regenerateDraftQuoteClientNarrative(id);
+  }
+
   @Get('appointments')
   async getAppointments() {
     return await this.chatService.findAllAppointments();

@@ -72,6 +72,7 @@ import {
   mergeDamageInventoryAccumulative,
   normalizeAuthorizedQuoteSummaryLines,
   piezaLabelFromDraftLineDescription,
+  sanitizeClienteDisplayName,
   type DamageInventoryMergeResult,
 } from './draft-quote-resume';
 import {
@@ -144,6 +145,15 @@ function pickFirstNonEmptyTrimmedString(...values: unknown[]): string {
     if (s.length > 0) return s;
   }
   return '';
+}
+
+function containsClientFacingNumericId(text: string): boolean {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  return (
+    /messenger\s*[#:.-]?\s*\d{4,}/i.test(t) ||
+    /\b(?:uid|psid|id)\s*[:#-]?\s*\d{6,}\b/i.test(t)
+  );
 }
 
 /** UUID de conversación interna (panel / API). */
@@ -1318,7 +1328,6 @@ export class ChatService implements OnModuleDestroy {
           ? ''
           : pickFirstNonEmptyTrimmedString(
               (evt.sender as { name?: string })?.name,
-              `Messenger ${threadPsid.slice(0, 8)}`,
             );
 
         const basePayload: Record<string, unknown> = {
@@ -2042,7 +2051,9 @@ export class ChatService implements OnModuleDestroy {
     const conv = await this.conversationRepository.findOne({
       where: { id: conversationId },
     });
-    const contactName = conv?.contactName?.trim() || 'cliente';
+    const contactName =
+      sanitizeClienteDisplayName(conv?.contactName ?? '') ||
+      'Estimado cliente';
     const isAgendado =
       String(conv?.status ?? '').toLowerCase().trim() === 'agendado';
 
@@ -2055,25 +2066,38 @@ export class ChatService implements OnModuleDestroy {
     const lineRows = draftQuoteLinesToClientePiezaRows(draft.lines);
     const total = draft.total ?? draft.subtotal ?? 0;
     const damageIntro = buildDamagePhotoIntroForCliente(analysis, imageCount);
+    const mapsUrl = hasActiveAppointment
+      ? ''
+      : await this.aiConfigService.getValue(AI_CONFIG_KEYS.BUSINESS_MAPS_URL);
+    const formattedDate = apt?.scheduledAt
+      ? formatDraftAppointmentCitaLong(apt.scheduledAt)
+      : hasActiveAppointment
+        ? 'el día acordado para tu visita'
+        : '';
 
+    const previousCanon = new Set(
+      (complement?.previousPiezas ?? [])
+        .map((p) => String(p ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    );
+    const newDistinct = (complement?.newPiezas ?? []).filter((p) => {
+      const k = String(p ?? '').trim().toLowerCase();
+      return !!k && !previousCanon.has(k);
+    });
     const isComplement =
       complement != null &&
-      complement.previousPiezas.length > 0 &&
-      complement.newPiezas.length > 0;
+      previousCanon.size > 0 &&
+      newDistinct.length > 0;
+
+    let fallbackNarrative = '';
 
     if (isComplement) {
-      const newSet = new Set(complement!.newPiezas);
+      const newSet = new Set(newDistinct);
       const newLineRows = lineRows.filter((r) => newSet.has(r.pieza));
-      const formattedDate = apt?.scheduledAt
-        ? formatDraftAppointmentCitaLong(apt.scheduledAt)
-        : undefined;
-      const mapsUrl = hasActiveAppointment
-        ? undefined
-        : await this.aiConfigService.getValue(AI_CONFIG_KEYS.BUSINESS_MAPS_URL);
-      draft.formalNarrative = buildClienteFormalNarrativeComplement({
+      fallbackNarrative = buildClienteFormalNarrativeComplement({
         contactName,
         previousPiezas: complement!.previousPiezas,
-        newPiezas: complement!.newPiezas,
+        newPiezas: newDistinct,
         newLineRows,
         total,
         hasAppointment: hasActiveAppointment,
@@ -2081,33 +2105,150 @@ export class ChatService implements OnModuleDestroy {
         mapsUrl,
         damageIntro,
       });
-      return;
-    }
-
-    if (hasActiveAppointment) {
-      const formattedDate = apt?.scheduledAt
-        ? formatDraftAppointmentCitaLong(apt.scheduledAt)
-        : 'el día acordado para tu visita';
-      draft.formalNarrative = buildClienteFormalNarrativeAgendado({
+    } else if (hasActiveAppointment) {
+      fallbackNarrative = buildClienteFormalNarrativeAgendado({
         contactName,
         lineRows,
         total,
         appointmentFormatted: formattedDate,
         damageIntro,
       });
-      return;
+    } else {
+      fallbackNarrative = buildClienteFormalNarrativeSinCita({
+        contactName,
+        lineRows,
+        total,
+        mapsUrl,
+        damageIntro,
+      });
     }
 
-    const mapsUrl = await this.aiConfigService.getValue(
-      AI_CONFIG_KEYS.BUSINESS_MAPS_URL,
-    );
-    draft.formalNarrative = buildClienteFormalNarrativeSinCita({
+    const llmNarrative = await this.generateDraftFormalNarrativeWithLlm({
+      fallbackNarrative,
       contactName,
       lineRows,
       total,
+      hasActiveAppointment,
+      appointmentFormatted: formattedDate,
       mapsUrl,
       damageIntro,
+      isComplement,
+      previousPiezas: complement?.previousPiezas ?? [],
+      newPiezas: newDistinct,
+      vehicleModel:
+        inferBañoVehicleDisplayLabel(
+          [
+            analysis.pieza,
+            ...(analysis.partesAfectadas ?? []),
+            analysis.descripcionTecnica,
+          ]
+            .filter(Boolean)
+            .join(' '),
+        ) || '',
     });
+    draft.formalNarrative = llmNarrative || fallbackNarrative;
+  }
+
+  /**
+   * Panel: vuelve a generar el mensaje al cliente (`formalNarrative`) con variante IA A/B/C,
+   * persiste `draft_quotes` y actualiza el mensaje vinculado.
+   */
+  async regenerateDraftQuoteClientNarrative(draftQuoteId: string): Promise<{
+    narrative: string;
+    messageId: string | null;
+    quotePayload: DraftQuote;
+  }> {
+    const row = await this.draftQuoteRepository.findOne({
+      where: { id: draftQuoteId },
+    });
+    if (!row) {
+      throw new NotFoundException(`DraftQuote no encontrada: ${draftQuoteId}`);
+    }
+
+    const draft = row.quotePayload;
+    const analysis = row.damageAnalysis;
+    const urls = parseDraftImageUrls(row.imageUrl ?? '');
+    const imageCount = Math.max(1, urls.length);
+
+    await this.applyClientFacingFormalNarrativeToDraft(
+      draft,
+      analysis,
+      row.conversationId,
+      imageCount,
+      null,
+    );
+
+    row.quotePayload = draft;
+    await this.draftQuoteRepository.save(row);
+
+    if (row.messageId) {
+      await this.messageRepository.update(
+        { id: row.messageId },
+        { draftQuote: draft },
+      );
+    }
+
+    return {
+      narrative: draft.formalNarrative,
+      messageId: row.messageId,
+      quotePayload: draft,
+    };
+  }
+
+  private async generateDraftFormalNarrativeWithLlm(input: {
+    fallbackNarrative: string;
+    contactName: string;
+    lineRows: { pieza: string; precioMx: number }[];
+    total: number;
+    hasActiveAppointment: boolean;
+    appointmentFormatted: string;
+    mapsUrl: string;
+    damageIntro: string;
+    isComplement: boolean;
+    previousPiezas: string[];
+    newPiezas: string[];
+    vehicleModel: string;
+  }): Promise<string | null> {
+    const chatPrompt = await this.aiConfigService.getValue(
+      AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
+    );
+    const variant = (['A', 'B', 'C'] as const)[
+      Math.floor(Math.random() * 3)
+    ]!;
+
+    const system = [
+      chatPrompt,
+      '',
+      'Genera SOLO el texto final para el cliente (sin JSON, sin explicación).',
+      'OBLIGATORIO: elegir y aplicar UNA variante premium de reparación entre A/B/C.',
+      `Variante fija para esta respuesta: ${variant}.`,
+      'OBLIGATORIO: reemplaza placeholders [Modelo], [PrecioTotal], [Nombre], [DiaCita] con valores reales provistos.',
+      'OBLIGATORIO: usar emoji 🛠️ por cada línea de pieza y una línea de total con 💰.',
+      "Si hasActiveAppointment=true, indica que se suma como extra a su orden de servicio de cita confirmada.",
+      'Si hasActiveAppointment=false, cierra invitando a elegir día de la semana para ingresar su unidad.',
+      'PROHIBIDO incluir IDs numéricos de plataforma (UID/PSID/Messenger ID).',
+      'Si no hay nombre válido, usa saludo premium genérico sin inventar identificadores.',
+    ].join('\n');
+    const user = JSON.stringify(input);
+
+    try {
+      const completion = await this.openai.chat.completions.create({
+        model: 'gpt-4o',
+        temperature: 0.7,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      });
+      const out = String(completion.choices[0]?.message?.content ?? '').trim();
+      if (!out) return null;
+      if (containsClientFacingNumericId(out)) return null;
+      if (!out.includes('🛠️') || !out.includes('💰')) return null;
+      return out;
+    } catch (err) {
+      console.error('generateDraftFormalNarrativeWithLlm:', err);
+      return null;
+    }
   }
 
   private async resolveDraftResumeSchedulingContext(
