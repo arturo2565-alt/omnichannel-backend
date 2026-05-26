@@ -1692,6 +1692,7 @@ export class ChatService implements OnModuleDestroy {
       } else {
         conversation.status = 'cotizado';
       }
+      await this.approvePendingDraftQuotesForConversation(conversation.id);
     }
 
     await this.conversationRepository.save(conversation);
@@ -2638,6 +2639,26 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Marca borradores pendientes como aprobados para que el autopilot no quede silenciado.
+   */
+  private async approvePendingDraftQuotesForConversation(
+    conversationId: string,
+  ): Promise<void> {
+    const pending = await this.draftQuoteRepository.find({
+      where: { conversationId, status: 'PENDING_APPROVAL' },
+    });
+    for (const row of pending) {
+      const quotePayload = row.quotePayload
+        ? { ...row.quotePayload, status: 'APPROVED' as const }
+        : row.quotePayload;
+      await this.draftQuoteRepository.update(row.id, {
+        status: 'APPROVED',
+        quotePayload,
+      });
+    }
+  }
+
+  /**
    * Producción: tras aprobar/enviar un DraftQuote, primera respuesta IA al cliente
    * (misma lógica que playground, con historial y cita desde BD).
    */
@@ -2655,6 +2676,8 @@ export class ChatService implements OnModuleDestroy {
     if (!conv) {
       throw new NotFoundException(`Conversación no encontrada: ${conversationId}`);
     }
+
+    await this.approvePendingDraftQuotesForConversation(conversationId);
 
     const chatAppointmentPrompt = await this.aiConfigService.getValue(
       AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
@@ -4607,17 +4630,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   }
 
   /**
-   * El autopilot de texto no debe competir con valuación por imagen ni con borrador pendiente.
+   * El autopilot de texto no debe competir con valuación por imagen ni con borrador
+   * aún en revisión humana (solo `PENDING_APPROVAL`; `APPROVED`/`SENT` no bloquean).
    */
   private async shouldSuppressAutopilotForVisionPipeline(
     conversationId: string,
     inboundMsg: Message,
     inboundTextBatch?: Message[],
   ): Promise<boolean> {
-    const hasPendingDraft = await this.draftQuoteRepository.findOne({
+    const pendingHumanReviewDraft = await this.draftQuoteRepository.findOne({
       where: { conversationId, status: 'PENDING_APPROVAL' },
     });
-    if (hasPendingDraft) {
+    if (pendingHumanReviewDraft) {
       return true;
     }
 

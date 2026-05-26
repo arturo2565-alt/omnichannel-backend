@@ -185,7 +185,10 @@ export interface DraftQuoteLine {
   subtotal: number;
 }
 
-export type DraftQuoteStatus = 'PENDING_APPROVAL';
+export type DraftQuoteStatus =
+  | 'PENDING_APPROVAL'
+  | 'APPROVED'
+  | 'SENT';
 
 export interface DraftQuote {
   status: DraftQuoteStatus;
