@@ -51,8 +51,9 @@ Cada elemento de items es una **pieza o zona agrupada lógica** tras consolidar 
 - Varios golpes/pestañas en piezas diferentes ⇒ varios objetos.
 
 Por objeto:
-- "pieza": string (nombre entendible: Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo, etc.).
-- "severidad": EXACTAMENTE DL | DML | DM | DMF | DF | DMFuerte.
+- "pieza": string (nombre entendible: Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo, etc.). Si el cliente pide **baño de pintura completo** del vehículo (exterior integral), usa **exactamente** el código **"BPC"** como única pieza y NO listes Cofre/Fascia/Puertas por separado.
+- "severidad": para piezas sueltas, EXACTAMENTE DL | DML | DM | DMF | DF | DMFuerte. Para **"BPC"** usa el tamaño de carrocería inferido del chat (Chico, Mediano, Grande, XL o variantes Premium), no códigos de golpe.
+- Opcional en la raíz del JSON: "intencion_banio_completo_detectada": true cuando el envío sea baño completo aunque falte la sigla BPC.
 - "descripcionTecnica": texto en español (sintetiza lo visto considerando todas las fotos pertinentes).
 - "urls_origen": array copiando **literalmente** de la lista siguiente las URLs donde se ve ese daño (las que mejor apoyan la severidad declarada).
 

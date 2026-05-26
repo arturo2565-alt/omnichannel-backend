@@ -55,6 +55,11 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
     fullName: 'Estética exterior',
     catalogPieza: 'Estetica Exterior',
   },
+  {
+    code: 'BPC',
+    fullName: 'Baño de Pintura Completo',
+    catalogPieza: 'Baño de Pintura Exterior',
+  },
 ];
 
 const byCode = new Map(PANEL_PIEZA_OPTIONS.map((o) => [o.code, o]));

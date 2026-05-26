@@ -1067,6 +1067,10 @@ export function inferBañoTierSeveridad(contextText: string): string {
     return 'Grande';
   }
 
+  if (/\bpassat\b/.test(n) || /\bvolkswagen\s+passat\b/.test(n)) {
+    return 'Grande';
+  }
+
   return 'Mediano';
 }
 

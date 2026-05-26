@@ -64,6 +64,12 @@ import {
   extractBañoPersonalizedColorDetail,
 } from './baño-pintura-llm';
 import {
+  banioCompletoNeedsHeavyBodyworkDisclaimer,
+  collapseVisionItemsToBpcIfNeeded,
+  isBanioPinturaCompletoVisionInventory,
+  VISION_BPC_PIEZA_CODE,
+} from './vision-bpc-inventory';
+import {
   buildPlaygroundPostQuoteSchedulingSystemAppend,
   getPlaygroundInstantInterceptorDecision,
   PLAYGROUND_INSTANT_INTERCEPTOR_HISTORY_TURNS,
@@ -855,6 +861,28 @@ export class ChatService implements OnModuleDestroy {
    * Últimos mensajes de **solo texto** de la conversación para contexto de visión
    * (cliente = `user`, taller/IA = `assistant`), en orden cronológico.
    */
+  private visionContextFromChatHistory(
+    turns: readonly ChatCompletionMessageParam[],
+  ): string {
+    return turns
+      .map((t) => {
+        if (typeof t.content !== 'string') return '';
+        const label = t.role === 'assistant' ? 'Taller' : 'Cliente';
+        return `${label}: ${t.content.trim()}`;
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  private async buildVisionTextContextForConversation(
+    conversationId: string,
+  ): Promise<string> {
+    const turns = await this.buildVisionTextHistoryForConversation(
+      conversationId,
+    );
+    return this.visionContextFromChatHistory(turns);
+  }
+
   private async buildVisionTextHistoryForConversation(
     conversationId: string,
   ): Promise<ChatCompletionMessageParam[]> {
@@ -1367,6 +1395,21 @@ export class ChatService implements OnModuleDestroy {
     tallerId?: string | null,
   ): Promise<number> {
     const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
+    if (
+      analysis.inventory?.length &&
+      isBanioPinturaCompletoVisionInventory(analysis.inventory)
+    ) {
+      const bpc = analysis.inventory[0]!;
+      const canonical =
+        resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
+      const tier = String(bpc.severidad ?? '').trim() || inferBañoTierSeveridad(
+        [analysis.descripcionTecnica, analysis.justificacion]
+          .filter(Boolean)
+          .join(' '),
+      );
+      const unit = snap.getPriceForCanonical(canonical, tier);
+      if (unit > 0) return unit;
+    }
     if (analysis.inventory?.length) {
       const matrixItems = matrixServicioInputsWithCatalogResolve(
         analysis.inventory,
@@ -2179,10 +2222,21 @@ export class ChatService implements OnModuleDestroy {
       throw new Error('OpenAI no devolvió contenido para el análisis de daños');
     }
     const parsed = parseVisionModelJsonResponse(visionResponse, 'analyzeDamageImage');
+    const tierContext = [
+      options?.clientContextText ?? '',
+      this.visionContextFromChatHistory(
+        options?.conversationTextHistory ?? [],
+      ),
+    ]
+      .filter(Boolean)
+      .join('\n');
+
     if (options?.allowEmptyInventory) {
-      return parseDetectedDamageItemsAllowEmpty(parsed);
+      const items = parseDetectedDamageItemsAllowEmpty(parsed);
+      return collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
     }
-    return normalizeDetectedDamagesJson(parsed);
+    const items = normalizeDetectedDamagesJson(parsed);
+    return collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
   }
 
   /** Parte URLs en lotes de hasta {@link ChatService.VISION_IMAGE_CHUNK_SIZE}. */
@@ -2273,7 +2327,18 @@ export class ChatService implements OnModuleDestroy {
       );
     }
 
-    return allDetectedDamages;
+    const tierContext = [
+      options?.clientContextText ?? '',
+      this.visionContextFromChatHistory(
+        options?.conversationTextHistory ?? [],
+      ),
+    ]
+      .filter(Boolean)
+      .join('\n');
+    return collapseVisionItemsToBpcIfNeeded(
+      allDetectedDamages,
+      tierContext,
+    );
   }
 
   private sanitizeVisionItemsForPlaygroundPrompt(
@@ -2413,6 +2478,84 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Narrativa premium de baño de pintura cuando visión devolvió BPC (una sola línea en cotización).
+   */
+  private async composeVisionBpcFormalNarrative(
+    draft: DraftQuote,
+    analysis: VehicleDamageAnalysis,
+    conversationId: string,
+    tallerId: string | null,
+  ): Promise<string | null> {
+    try {
+      const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
+      const canonical =
+        resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
+      const bpc = analysis.inventory?.[0];
+      if (!bpc) return null;
+
+      const visionContext =
+        await this.buildVisionTextContextForConversation(conversationId);
+      const tierFlat = flattenBañoTierSource(
+        [visionContext, analysis.descripcionTecnica, analysis.justificacion]
+          .filter(Boolean)
+          .join('\n'),
+      );
+      const severidadLiteral =
+        String(bpc.severidad ?? '').trim() ||
+        inferBañoTierSeveridad(tierFlat);
+
+      const resolution = materializeInstantQuoteResolution(snap, {
+        canonical,
+        severidadLiteral,
+        tierSourceForCambioColor: tierFlat,
+        resolveVia: 'bano_pintura_synonym',
+        latestPreview: tierFlat.slice(0, 400),
+        fullCtxPreview: tierFlat.slice(0, 800),
+      });
+      if (!resolution) {
+        console.warn(
+          '[VisionBPC] materializeInstantQuoteResolution sin celda instantánea',
+          { canonical, severidadLiteral },
+        );
+        return null;
+      }
+
+      const vehicleLabel =
+        this.resolveBañoVehicleLabelFromTierContext(tierFlat) ??
+        inferBañoVehicleDisplayLabel(tierFlat) ??
+        'su vehículo';
+
+      let personalizedColorDetail: string | null = null;
+      if (mentionsCambioDeColor(tierFlat)) {
+        personalizedColorDetail =
+          (await extractBañoPersonalizedColorDetail(this.openai, tierFlat)) ??
+          extractBañoColorDetailHeuristic(tierFlat);
+      }
+
+      let text = await composeBañoNaturalInstantReply(this.openai, {
+        vehicleLabel,
+        segmentoEs: severidadLiteral,
+        servicioDb: canonical,
+        severidadLiteral,
+        resolution,
+        personalizedColorDetail,
+      });
+
+      if (banioCompletoNeedsHeavyBodyworkDisclaimer(analysis.inventory ?? [])) {
+        text = text.replace(
+          '🔧 Hojalatería ligera y corrección de imperfecciones',
+          '🔧 Hojalatería media/pesada: puede requerir refacciones o trabajo extra tras desarme (no incluido en el baño de pintura exterior cotizado)',
+        );
+      }
+
+      return text;
+    } catch (err) {
+      console.warn('[VisionBPC] composeVisionBpcFormalNarrative:', err);
+      return null;
+    }
+  }
+
+  /**
    * Reemplaza `formalNarrative` del borrador por el mensaje al cliente (agendado vs sin cita).
    */
   private async applyClientFacingFormalNarrativeToDraft(
@@ -2428,6 +2571,21 @@ export class ChatService implements OnModuleDestroy {
     const conv = await this.conversationRepository.findOne({
       where: { id: conversationId },
     });
+    const tallerId = conv?.tallerId ?? null;
+
+    if (isBanioPinturaCompletoVisionInventory(analysis.inventory)) {
+      const bañoNarrative = await this.composeVisionBpcFormalNarrative(
+        draft,
+        analysis,
+        conversationId,
+        tallerId,
+      );
+      if (bañoNarrative) {
+        draft.formalNarrative = bañoNarrative;
+        return;
+      }
+    }
+
     const contactName =
       sanitizeClienteDisplayName(conv?.contactName ?? '') ||
       'Estimado cliente';
@@ -3784,7 +3942,32 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const lines: DraftQuoteLine[] = [];
     let resolvedLevel: DamageLevel;
 
-    if (analysis.inventory?.length) {
+    if (
+      analysis.inventory?.length &&
+      isBanioPinturaCompletoVisionInventory(analysis.inventory)
+    ) {
+      const bpc = analysis.inventory[0]!;
+      const canonical =
+        resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
+      const tierLiteral =
+        String(bpc.severidad ?? '').trim() ||
+        inferBañoTierSeveridad(
+          [analysis.descripcionTecnica, analysis.justificacion]
+            .filter(Boolean)
+            .join(' '),
+        );
+      const unit = snap.getPriceForCanonical(canonical, tierLiteral);
+      resolvedLevel = 'N/A';
+      if (unit > 0) {
+        lines.push({
+          priceItemId: `matrix:${canonical}:${tierLiteral}:bpc`,
+          description: `${canonical} (${VISION_BPC_PIEZA_CODE}) — tamaño ${tierLiteral}`,
+          quantity: 1,
+          unitPrice: unit,
+          subtotal: unit,
+        });
+      }
+    } else if (analysis.inventory?.length) {
       resolvedLevel = pickWorstDamageLevel(
         analysis.inventory.map((i) => i.severidad),
       );
@@ -4094,7 +4277,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         ...new Set([...priorUrls, ...imageUrls]),
       ];
 
-      if (priorInventory.length > 0) {
+      if (isBanioPinturaCompletoVisionInventory(newInventory)) {
+        analysis = inventoryItemsToVehicleAnalysis(newInventory, allImageUrls);
+      } else if (priorInventory.length > 0) {
         const snapMerge =
           await this.catalogService.getMatrixPricingSnapshot(visionTallerId);
         const mergedInv = mergeDamageInventoryAccumulative(
