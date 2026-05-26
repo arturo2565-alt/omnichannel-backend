@@ -45,7 +45,6 @@ import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { AiConfigService } from './ai-config.service';
 import axios from 'axios';
 import { CatalogService } from '../catalog/catalog.service';
-import { OPENAI_MODEL, OPENAI_VISION_MODEL } from './openai-models';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import {
   classifyBañoPinturaTierWithLlm,
@@ -115,6 +114,9 @@ function isAgentOnlyPlatform(platform: string | undefined | null): boolean {
   if (platform == null || typeof platform !== 'string') return false;
   return AGENT_ONLY_PLATFORMS.has(platform.trim().toLowerCase());
 }
+
+/** Modelo multimodal para peritaje por imagen (`analyzeDamageImage`). */
+const VISION_DAMAGE_MODEL = 'gpt-5.5';
 
 /** Solo guardamos en conversation.platform valores que describen WhatsApp / Instagram / etc. */
 function shouldPersistPlatformOnConversation(
@@ -1880,7 +1882,7 @@ export class ChatService implements OnModuleDestroy {
     ];
 
     const completion = await this.openai.chat.completions.create({
-      model: OPENAI_VISION_MODEL,
+      model: VISION_DAMAGE_MODEL,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: systemPrompt },
@@ -2443,7 +2445,7 @@ export class ChatService implements OnModuleDestroy {
 
     try {
       const completion = await this.openai.chat.completions.create({
-        model: OPENAI_MODEL,
+        model: 'gpt-4o',
         temperature: 0.7,
         messages: [
           { role: 'system', content: system },
@@ -2601,7 +2603,7 @@ export class ChatService implements OnModuleDestroy {
     ];
 
     const chatCompletion = await this.openai.chat.completions.create({
-      model: OPENAI_MODEL,
+      model: 'gpt-4o',
       messages: chatMessages,
       max_tokens: 1200,
     });
@@ -3265,7 +3267,7 @@ export class ChatService implements OnModuleDestroy {
       });
     } else {
       const chatCompletion = await this.openai.chat.completions.create({
-        model: OPENAI_MODEL,
+        model: 'gpt-4o',
         messages: [
           {
             role: 'system',
@@ -3361,7 +3363,7 @@ ${catalogAppend}`;
     ];
 
     const probe = await this.openai.chat.completions.create({
-      model: OPENAI_MODEL,
+      model: 'gpt-4o-mini',
       response_format: { type: 'json_object' },
       messages: probeMessages,
       max_tokens: 900,
@@ -4502,7 +4504,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     let lastConfirmedIso: string | null = null;
     for (let step = 0; step < 6; step++) {
       const completion = await this.openai.chat.completions.create({
-        model: OPENAI_MODEL,
+        model: 'gpt-4o',
         messages,
         tools: AUTOPILOT_TOOLS,
         tool_choice: 'auto',
@@ -4872,7 +4874,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         }
 
         const completion = await this.openai.chat.completions.create({
-          model: OPENAI_MODEL,
+          model: 'gpt-4o',
           messages,
           tools: AUTOPILOT_TOOLS,
           tool_choice: 'auto',
@@ -4968,7 +4970,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       );
       const catalogAppend = await this.loadCatalogPromptAppendForLlm();
       const completion = await this.openai.chat.completions.create({
-        model: OPENAI_MODEL,
+        model: 'gpt-4o',
         messages: [
           { role: 'system', content: `${systemPrompt}${catalogAppend}` },
           ...turns,
@@ -5126,7 +5128,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const catalogAppend = await this.loadCatalogPromptAppendForLlm();
 
       const completion = await this.openai.chat.completions.create({
-        model: OPENAI_MODEL,
+        model: 'gpt-4o',
         messages: [
           {
             role: 'system',
