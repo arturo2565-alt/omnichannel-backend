@@ -61,7 +61,6 @@ import {
   classifyBañoPinturaTierWithLlm,
   coerceBañoSeveridadToCatalog,
   composeBañoNaturalInstantReply,
-  buildBañoNaturalInstantReplyText,
   extractBañoPersonalizedColorDetail,
   inferBañoVehicleDisplayLabelWithLlm,
 } from './baño-pintura-llm';
@@ -2957,26 +2956,42 @@ export class ChatService implements OnModuleDestroy {
     );
     if (!vehicleLabel) return null;
     try {
-      return buildBañoNaturalInstantReplyText({
-        vehicleLabel,
-        segmentoEs: severidadLiteral,
-        servicioDb: 'Baño de Pintura Exterior',
-        severidadLiteral,
-        resolution: {
-          lines: draft.lines.map((l) => ({
-            label: l.description,
-            amount: l.subtotal,
-          })),
-          extras: total > subtotal ?
+      const resolution = {
+        lines: draft.lines.map((l) => ({
+          label: l.description,
+          amount: l.subtotal,
+        })),
+        extras:
+          total > subtotal ?
             [{ label: 'Complementos', amount: total - subtotal }]
           : [],
-          subtotal,
-          total,
-          precioMx: subtotal,
-          diasEntrega: 5,
-          currency: AUTO_FIX_CURRENCY,
+        subtotal,
+        total,
+        precioMx: subtotal,
+        diasEntrega: 5,
+        currency: AUTO_FIX_CURRENCY,
+      };
+      return await composeBañoNaturalInstantReply(
+        this.openai,
+        {
+          vehicleLabel,
+          segmentoEs: severidadLiteral,
+          servicioDb: 'Baño de Pintura Exterior',
+          severidadLiteral,
+          resolution,
         },
-      });
+        {
+          inventarioDanos: (analysis.inventory ?? []).map((it) => ({
+            pieza: it.pieza,
+            severidad: it.severidad,
+            descripcionTecnica: it.descripcionTecnica,
+          })),
+          needsHeavyBodyworkDisclaimer: banioCompletoNeedsHeavyBodyworkDisclaimer(
+            analysis.inventory ?? [],
+          ),
+          conversationId,
+        },
+      );
     } catch (err) {
       console.warn('[VisionBPC] buildBanioClientMessageFromDraftLines:', err);
       return null;
@@ -3100,21 +3115,36 @@ export class ChatService implements OnModuleDestroy {
           )) ?? extractBañoColorDetailHeuristic(colorCtx);
       }
 
-      let text = await composeBañoNaturalInstantReply(this.openai, {
-        vehicleLabel,
-        segmentoEs: severidadLiteral,
-        servicioDb: canonical,
-        severidadLiteral,
-        resolution,
-        personalizedColorDetail,
-      });
+      const inventarioDanos = (
+        bpc.inventarioVisualPrevio ??
+        analysis.inventory ??
+        []
+      ).map((it) => ({
+        pieza: String(it.pieza ?? '').trim(),
+        severidad: String(it.severidad ?? '').trim(),
+        descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
+      }));
 
-      if (banioCompletoNeedsHeavyBodyworkDisclaimer(analysis.inventory ?? [])) {
-        text = text.replace(
-          '🔧 Hojalatería ligera y corrección de imperfecciones',
-          '🔧 Hojalatería media/pesada: puede requerir refacciones o trabajo extra tras desarme (no incluido en el baño de pintura exterior cotizado)',
-        );
-      }
+      const text = await composeBañoNaturalInstantReply(
+        this.openai,
+        {
+          vehicleLabel,
+          segmentoEs: severidadLiteral,
+          servicioDb: canonical,
+          severidadLiteral,
+          resolution,
+          personalizedColorDetail,
+        },
+        {
+          inventarioDanos,
+          needsHeavyBodyworkDisclaimer:
+            banioCompletoNeedsHeavyBodyworkDisclaimer(
+              analysis.inventory ?? [],
+            ),
+          conversationId,
+          variantSalt: draft.reference,
+        },
+      );
 
       return text;
     } catch (err) {

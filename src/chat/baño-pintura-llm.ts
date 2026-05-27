@@ -170,12 +170,6 @@ const TALLER_MAPS_URL =
 
 const BAÑO_COLOR_EXTRA_DIAS = 2;
 
-/** Precio en plantilla: `$29,000 MXN` (sin depender de OpenAI). */
-function formatBañoTemplatePriceMx(amount: number): string {
-  const v = Math.round(Number(amount) || 0);
-  return `$${v.toLocaleString('es-MX')} MXN`;
-}
-
 function parseClassificationJson(raw: string): Partial<BañoLlmClassification> | null {
   try {
     const o = JSON.parse(raw) as Record<string, unknown>;
@@ -249,16 +243,6 @@ export function isConvertibleVehicleLabel(vehicleLabel: string): boolean {
   return false;
 }
 
-/** Nombre corto del modelo para cierre (p. ej. "Bora"). */
-function shortModelNameForClosing(vehicleLabel: string): string {
-  const parts = String(vehicleLabel ?? '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (parts.length === 0) return 'vehículo';
-  return parts[parts.length - 1] ?? parts[0]!;
-}
-
 function cambioColorAddonFromResolution(resolution: InstantQuoteResolution): number {
   return resolution.extras.reduce(
     (sum, line) => sum + Math.round(Number(line.amount) || 0),
@@ -280,102 +264,180 @@ export type BañoInstantComposeFacts = {
   personalizedColorDetail?: string | null;
 };
 
-/**
- * Maqueta premium fija en TypeScript (sin redacción OpenAI del cuerpo del mensaje).
- */
-export function buildBañoNaturalInstantReplyText(facts: BañoInstantComposeFacts): string {
-  const { vehicleLabel, resolution, personalizedColorDetail } = facts;
-  const vehicle = String(vehicleLabel ?? '').trim();
-  if (!vehicle || isPlaceholderBañoVehicleLabel(vehicle)) {
-    throw new Error(
-      'buildBañoNaturalInstantReplyText: vehículo no perfilado (prohibido cotizar con placeholder)',
-    );
-  }
+export type BañoPremiumVariant = 'A' | 'B' | 'C';
 
-  const basePrice = Math.round(Number(resolution.precioMx));
-  const extraPrice = cambioColorAddonFromResolution(resolution);
-  const totalPrice = Math.round(
-    Number(resolution.total) || basePrice + extraPrice,
-  );
-  if (!Number.isFinite(basePrice) || basePrice <= 0 || !Number.isFinite(totalPrice) || totalPrice <= 0) {
-    throw new Error('buildBañoNaturalInstantReplyText: precios inválidos');
-  }
+export type BañoDraftLlmComposeInput = BañoInstantComposeFacts & {
+  variant: BañoPremiumVariant;
+  inventarioDanos: Array<{
+    pieza: string;
+    severidad: string;
+    descripcionTecnica?: string;
+  }>;
+  needsHeavyBodyworkDisclaimer: boolean;
+  mapsUrl?: string;
+};
 
+/** Variante A/B/C estable por conversación (misma lógica que el panel). */
+export function pickBañoPremiumVariant(
+  conversationId: string,
+  variantSalt = '',
+): BañoPremiumVariant {
+  const id = `${String(conversationId ?? '')}${String(variantSalt ?? '')}`;
+  let h = 0;
+  for (let i = 0; i < id.length; i++) {
+    h = (h + id.charCodeAt(i)) % 3;
+  }
+  return (['A', 'B', 'C'] as const)[h]!;
+}
+
+function buildBañoPricingContext(resolution: InstantQuoteResolution): {
+  baseMx: number;
+  extrasMx: number;
+  totalMx: number;
+  hasColorChange: boolean;
+  diasBase: number;
+  diasMostrar: number;
+  extrasLabels: string[];
+} {
+  const baseMx = Math.round(Number(resolution.precioMx) || 0);
+  const extrasMx = cambioColorAddonFromResolution(resolution);
+  const totalMx = Math.round(Number(resolution.total) || baseMx + extrasMx);
   const hasColorChange = hasCambioColorInResolution(resolution);
   const diasBase = Math.max(
     1,
     Math.floor(Number(resolution.diasEntrega) || 0) || 3,
   );
-  const diasShown = hasColorChange ? diasBase + BAÑO_COLOR_EXTRA_DIAS : diasBase;
-  const modeloCorto = shortModelNameForClosing(vehicle);
+  const diasMostrar = hasColorChange ? diasBase + BAÑO_COLOR_EXTRA_DIAS : diasBase;
+  const extrasLabels = resolution.extras.map((e) => e.label).filter(Boolean);
+  return {
+    baseMx,
+    extrasMx,
+    totalMx,
+    hasColorChange,
+    diasBase,
+    diasMostrar,
+    extrasLabels,
+  };
+}
 
-  const detail =
-    String(personalizedColorDetail ?? '').trim() ||
-    (hasColorChange ? '' : '');
+const BAÑO_DRAFT_MESSAGE_SYSTEM = `Eres el redactor premium de AutoFix (taller de carrocería y pintura en México).
+Generas el mensaje final para WhatsApp/Messenger del **Baño de Pintura Exterior** (cotización de borrador).
 
-  if (hasColorChange && extraPrice > 0) {
-    const baseStr = formatBañoTemplatePriceMx(basePrice);
-    const extraStr = formatBañoTemplatePriceMx(extraPrice);
-    const totalStr = formatBañoTemplatePriceMx(totalPrice);
+Recibirás JSON con: vehículo, precios de catálogo (obligatorios), inventario de daños/severidad de visión, variante de redacción (A, B o C), y flags.
 
-    const lines = [
-      `🎨 **Baño de Pintura + Cambio de Color (${vehicle})**`,
-      `💰 **Total Estimado: ${totalStr}** *(Base: ${baseStr} + Cambio de color: ${extraStr})*`,
-      `**Incluye:**`,
-      `🔧 Hojalatería ligera y corrección de imperfecciones`,
-      `✨ Materiales gama alta (Pintura y Barniz Sikkens)`,
-      `🛡️ Garantía por escrito en brillo y adherencia`,
-      `💎 Acabado espejo (Lijado y pulido nivel exposición)`,
-    ];
+Responde SOLO el texto del mensaje al cliente (sin JSON, sin meta-explicación).
 
-    if (detail) {
-      lines.push(`🎨 **Detalle personalizado:** ${detail}`);
-    }
+ESTRUCTURA OBLIGATORIA (puedes variar redacción según variante):
+1) Título con 🎨 que mencione baño de pintura (+ cambio de color si aplica) y el vehículo con marca/modelo.
+2) Línea de total con 💰 usando EXACTAMENTE los montos en pesos del JSON (formato: $29,000 MXN). Si hay cambio de color, desglosa base + extra en la misma línea o sublínea.
+3) Bloque "**Incluye:**" con viñetas con emojis (🔧 hojalatería, ✨ materiales Sikkens, 🛡️ garantía, 💎 acabado espejo). NO inventes servicios fuera de este paquete.
+4) ⏳ Tiempo estimado en días hábiles (usa diasMostrar del JSON).
+5) 📍 Ubicación con el mapsUrl del JSON (copiar URL tal cual).
+6) Cierre cordial invitando a agendar (📆); si es convertible, menciona inspección de toldo.
 
-    lines.push(
-      `⏳ **Tiempo estimado:** ${diasShown} días hábiles (Añade ${BAÑO_COLOR_EXTRA_DIAS} días extras si hay cambio de color)`,
-      `📍 **Ubicación del taller:** ${TALLER_MAPS_URL}`,
-      ``,
-    );
+VARIANTES DE TONO (aplica SOLO la indicada en variant):
+- **A — Directo:** apertura tipo "¡Listo! Aquí tienes el desglose…" / cotización clara; cierre "¿Qué día te queda mejor para ingresar tu unidad?"
+- **B — Aspiracional:** "¡Perfecto! Te comparto la estimación para dejar tu [vehículo] impecable"; enfatiza Sikkens y acabado espejo; cierre amable para agendar.
+- **C — Profesional cordial:** "Con gusto, este es el resumen de tu cotización"; tono sereno; cierre "dime qué día de la semana te funciona mejor".
 
-    if (isConvertibleVehicleLabel(vehicle)) {
-      lines.push(
-        `📅 **El ${modeloCorto}** requiere una inspección de cortesía para evaluar las gomas del toldo retráctil. ¿Te gustaría que te reserve fecha y hora para valoración?`,
-      );
-    } else {
-      lines.push(
-        `¿Te gustaría que te reserve fecha y hora para la transformación de tu ${modeloCorto}? 📆✨`,
-      );
-    }
+REGLA DISCLAIMER HOJALATERÍA PESADA (si needsHeavyBodyworkDisclaimer es true):
+- En la viñeta de hojalatería NO digas solo "hojalatería ligera".
+- Debes indicar que puede requerir **hojalatería media/pesada**, posibles refacciones o trabajo extra tras desarme, **no incluido** en el baño de pintura exterior cotizado.
+- Puedes aludir brevemente al inventario de daños (DM, DF, etc.) sin listar precios por pieza suelta.
 
-    return lines.join('\n');
-  }
+INVENTARIO DE DAÑOS:
+- Menciona de forma natural 1–3 hallazgos del inventarioDanos si ayudan al contexto (oxidación, desgaste, golpes en fascia, etc.).
+- No conviertas el mensaje en cotización por piezas sueltas; el servicio cotizado es el baño integral.
 
-  const totalStr = formatBañoTemplatePriceMx(totalPrice);
-  const lines = [
-    `🎨 **Baño de Pintura Exterior (${vehicle})**`,
-    `💰 **Total Estimado: ${totalStr}**`,
-    `**Incluye:**`,
-    `🔧 Hojalatería ligera y corrección de imperfecciones`,
-    `✨ Materiales gama alta (Pintura y Barniz Sikkens)`,
-    `🛡️ Garantía por escrito en brillo y adherencia`,
-    `💎 Acabado espejo (Lijado y pulido nivel exposición)`,
-    `⏳ **Tiempo estimado:** ${diasShown} días hábiles`,
-    `📍 **Ubicación del taller:** ${TALLER_MAPS_URL}`,
-    ``,
-  ];
+PRECIOS:
+- PROHIBIDO inventar, redondear distinto o omitir totalMx / baseMx / extrasMx del JSON.
+- PROHIBIDO placeholders: "tu vehículo", "su vehículo", "[Modelo]", "[Precio]".
 
-  if (isConvertibleVehicleLabel(vehicle)) {
-    lines.push(
-      `📅 **El ${modeloCorto}** requiere una inspección de cortesía para evaluar las gomas del toldo retráctil. ¿Te gustaría que te reserve fecha y hora para valoración?`,
-    );
-  } else {
-    lines.push(
-      `¿Te gustaría que te reserve fecha y hora para tu baño de pintura en el taller? 📆✨`,
+OTROS:
+- Español de México, tono premium cercano.
+- Usa **negritas** markdown donde encaje.
+- Máximo ~45 líneas.`;
+
+/**
+ * Redacción dinámica del mensaje BPC (gpt-4o) — sin plantilla TypeScript fija.
+ */
+export async function composeBañoDraftMessageWithLlm(
+  openai: OpenAI,
+  input: BañoDraftLlmComposeInput,
+): Promise<string> {
+  const vehicle = String(input.vehicleLabel ?? '').trim();
+  if (!vehicle || isPlaceholderBañoVehicleLabel(vehicle)) {
+    throw new Error(
+      'composeBañoDraftMessageWithLlm: vehículo no perfilado (prohibido cotizar con placeholder)',
     );
   }
 
-  return lines.join('\n');
+  const pricing = buildBañoPricingContext(input.resolution);
+  if (pricing.baseMx <= 0 || pricing.totalMx <= 0) {
+    throw new Error('composeBañoDraftMessageWithLlm: precios inválidos');
+  }
+
+  const mapsUrl = String(input.mapsUrl ?? TALLER_MAPS_URL).trim();
+  const payload = {
+    variant: input.variant,
+    vehiculo: vehicle,
+    segmentoCarroceria: input.segmentoEs,
+    servicioCatalogo: input.servicioDb,
+    severidadTalla: input.severidadLiteral,
+    precios: {
+      baseMx: pricing.baseMx,
+      extrasMx: pricing.extrasMx,
+      totalMx: pricing.totalMx,
+      moneda: 'MXN',
+      extrasDetalle: input.resolution.extras,
+    },
+    cambioDeColor: pricing.hasColorChange,
+    detalleColorPersonalizado: String(input.personalizedColorDetail ?? '').trim(),
+    diasBase: pricing.diasBase,
+    diasMostrar: pricing.diasMostrar,
+    diasExtraPorCambioColor: pricing.hasColorChange ? BAÑO_COLOR_EXTRA_DIAS : 0,
+    inventarioDanos: input.inventarioDanos,
+    needsHeavyBodyworkDisclaimer: input.needsHeavyBodyworkDisclaimer,
+    vehiculoConvertible: isConvertibleVehicleLabel(vehicle),
+    mapsUrl,
+  };
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    temperature: 0.65,
+    max_tokens: 900,
+    messages: [
+      { role: 'system', content: BAÑO_DRAFT_MESSAGE_SYSTEM },
+      {
+        role: 'user',
+        content: `Redacta el mensaje al cliente con estos datos (respeta variante ${input.variant}):\n${JSON.stringify(payload, null, 2)}`,
+      },
+    ],
+  });
+
+  const text = String(completion.choices[0]?.message?.content ?? '').trim();
+  if (!text || text.length < 80) {
+    throw new Error('composeBañoDraftMessageWithLlm: respuesta vacía o demasiado corta');
+  }
+  if (!text.includes('💰')) {
+    throw new Error('composeBañoDraftMessageWithLlm: falta línea de total con 💰');
+  }
+  if (!text.includes('🎨')) {
+    throw new Error('composeBañoDraftMessageWithLlm: falta encabezado 🎨');
+  }
+
+  console.log(
+    '[BañoDraftLlm]',
+    JSON.stringify({
+      variant: input.variant,
+      vehicleLabel: vehicle,
+      totalMx: pricing.totalMx,
+      heavyDisclaimer: input.needsHeavyBodyworkDisclaimer,
+      chars: text.length,
+    }),
+  );
+
+  return text;
 }
 
 /**
@@ -494,17 +556,41 @@ Sin precios, sin saludos, sin preguntas. Si no hay detalle concreto de color, {"
   }
 }
 
+export type ComposeBañoNaturalInstantReplyOptions = {
+  inventarioDanos?: BañoDraftLlmComposeInput['inventarioDanos'];
+  needsHeavyBodyworkDisclaimer?: boolean;
+  conversationId?: string;
+  variantSalt?: string;
+  variant?: BañoPremiumVariant;
+  mapsUrl?: string;
+};
+
 /**
- * Mensaje instantáneo al cliente: únicamente {@link buildBañoNaturalInstantReplyText} (sin redacción LLM).
+ * Mensaje al cliente para baño de pintura: redacción gpt-4o (variantes A/B/C + disclaimer dinámico).
  */
 export async function composeBañoNaturalInstantReply(
-  _openai: OpenAI,
+  openai: OpenAI,
   facts: BañoInstantComposeFacts,
+  options?: ComposeBañoNaturalInstantReplyOptions,
 ): Promise<string> {
-  console.log('--- [DEBUG ENTRÓ A VARIANTES DE BAÑO] ---');
+  const variant =
+    options?.variant ??
+    pickBañoPremiumVariant(
+      options?.conversationId ?? '',
+      options?.variantSalt ?? facts.severidadLiteral,
+    );
+
+  console.log('--- [DEBUG ENTRÓ A VARIANTES DE BAÑO — LLM] ---');
+  console.log('Variante:', variant);
   console.log('Vehículo:', facts.vehicleLabel);
-  console.log('Servicio DB:', facts.servicioDb);
-  console.log('Severidad / tier:', facts.severidadLiteral);
   console.log('Total resolución:', facts.resolution?.total);
-  return buildBañoNaturalInstantReplyText(facts);
+
+  return composeBañoDraftMessageWithLlm(openai, {
+    ...facts,
+    variant,
+    inventarioDanos: options?.inventarioDanos ?? [],
+    needsHeavyBodyworkDisclaimer:
+      options?.needsHeavyBodyworkDisclaimer === true,
+    mapsUrl: options?.mapsUrl,
+  });
 }
