@@ -53,6 +53,7 @@ import {
   validateWorkshopSlotUtcDetailed,
 } from './appointment-intent';
 import { AI_CONFIG_KEYS } from './ai-config-keys';
+import { DEFAULT_CHAT_APPOINTMENT_PROMPT } from './ai-config-defaults';
 import { AiConfigService } from './ai-config.service';
 import axios from 'axios';
 import { CatalogService } from '../catalog/catalog.service';
@@ -2945,6 +2946,7 @@ export class ChatService implements OnModuleDestroy {
     analysis: VehicleDamageAnalysis,
     conversationId: string,
     tierFlat: string,
+    options?: { forceRandomVariant?: boolean; temperature?: number },
   ): Promise<string | null> {
     const total = Math.round(Number(draft.total ?? draft.subtotal ?? 0));
     const subtotal = Math.round(Number(draft.subtotal ?? total));
@@ -2971,8 +2973,10 @@ export class ChatService implements OnModuleDestroy {
         diasEntrega: 5,
         currency: AUTO_FIX_CURRENCY,
       };
+      const chatPrompt = await this.getChatAppointmentSystemPrompt();
       return await composeBañoNaturalInstantReply(
         this.openai,
+        chatPrompt,
         {
           vehicleLabel,
           segmentoEs: severidadLiteral,
@@ -2990,6 +2994,11 @@ export class ChatService implements OnModuleDestroy {
             analysis.inventory ?? [],
           ),
           conversationId,
+          variantSalt: draft.reference,
+          forceRandomVariant: options?.forceRandomVariant === true,
+          temperature: options?.temperature ?? 0.75,
+          origenVision: true,
+          servicioCode: 'BPC',
         },
       );
     } catch (err) {
@@ -3001,11 +3010,21 @@ export class ChatService implements OnModuleDestroy {
   /**
    * Narrativa premium de baño de pintura cuando visión devolvió BPC (una sola línea en cotización).
    */
+  /** System prompt principal (chatAppointmentPrompt) desde BD o default. */
+  private async getChatAppointmentSystemPrompt(): Promise<string> {
+    const fromDb = await this.aiConfigService.getValue(
+      AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
+    );
+    const trimmed = String(fromDb ?? '').trim();
+    return trimmed || DEFAULT_CHAT_APPOINTMENT_PROMPT;
+  }
+
   private async composeVisionBpcFormalNarrative(
     draft: DraftQuote,
     analysis: VehicleDamageAnalysis,
     conversationId: string,
     tallerId: string | null,
+    options?: { forceRandomVariant?: boolean; temperature?: number },
   ): Promise<string | null> {
     try {
       console.log('--- [DEBUG BPC NARRATIVA] (composeVisionBpcFormalNarrative) ---');
@@ -3125,8 +3144,10 @@ export class ChatService implements OnModuleDestroy {
         descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
       }));
 
+      const chatPrompt = await this.getChatAppointmentSystemPrompt();
       const text = await composeBañoNaturalInstantReply(
         this.openai,
+        chatPrompt,
         {
           vehicleLabel,
           segmentoEs: severidadLiteral,
@@ -3143,6 +3164,10 @@ export class ChatService implements OnModuleDestroy {
             ),
           conversationId,
           variantSalt: draft.reference,
+          forceRandomVariant: options?.forceRandomVariant === true,
+          temperature: options?.temperature ?? 0.75,
+          origenVision: true,
+          servicioCode: 'BPC',
         },
       );
 
@@ -3165,6 +3190,7 @@ export class ChatService implements OnModuleDestroy {
       DamageInventoryMergeResult,
       'previousPiezas' | 'newPiezas'
     > | null,
+    narrativeOptions?: { forceRandomVariant?: boolean; temperature?: number },
   ): Promise<void> {
     const conv = await this.conversationRepository.findOne({
       where: { id: conversationId },
@@ -3198,6 +3224,7 @@ export class ChatService implements OnModuleDestroy {
         analysis,
         conversationId,
         tallerId,
+        narrativeOptions,
       );
       if (!bañoNarrative) {
         const tierFlat = await this.buildBanioTierContextForDraft(
@@ -3209,6 +3236,7 @@ export class ChatService implements OnModuleDestroy {
           analysis,
           conversationId,
           tierFlat,
+          narrativeOptions,
         );
       }
       if (bañoNarrative) {
@@ -3484,12 +3512,18 @@ export class ChatService implements OnModuleDestroy {
     const urls = parseDraftImageUrls(row.imageUrl ?? '');
     const imageCount = Math.max(1, urls.length);
 
+    console.log(
+      '[regenerateDraftQuoteClientNarrative] Forzando nueva llamada gpt-4o (no cache)',
+      { draftQuoteId, conversationId: row.conversationId },
+    );
+
     await this.applyClientFacingFormalNarrativeToDraft(
       draft,
       analysis,
       row.conversationId,
       imageCount,
       null,
+      { forceRandomVariant: true, temperature: 0.75 },
     );
 
     const draftForClient = normalizeDraftQuoteForClient(draft) ?? draft;
@@ -3832,14 +3866,20 @@ export class ChatService implements OnModuleDestroy {
       );
     }
     try {
-      return await composeBañoNaturalInstantReply(this.openai, {
-        vehicleLabel: vl,
-        segmentoEs: '',
-        servicioDb: canonical,
-        severidadLiteral,
-        resolution,
-        personalizedColorDetail,
-      });
+      const chatPrompt = await this.getChatAppointmentSystemPrompt();
+      return await composeBañoNaturalInstantReply(
+        this.openai,
+        chatPrompt,
+        {
+          vehicleLabel: vl,
+          segmentoEs: '',
+          servicioDb: canonical,
+          severidadLiteral,
+          resolution,
+          personalizedColorDetail,
+        },
+        { servicioCode: 'BPC' },
+      );
     } catch (err) {
       console.warn('[BañoPremiumInstant] plantilla no aplicable:', err);
       return null;
@@ -3987,14 +4027,20 @@ export class ChatService implements OnModuleDestroy {
       }),
     );
 
-    return composeBañoNaturalInstantReply(this.openai, {
-      vehicleLabel,
-      segmentoEs: 'sedán compacto mediano',
-      servicioDb: resolved.canonical,
-      severidadLiteral: sevFinal,
-      resolution,
-      personalizedColorDetail,
-    });
+    const chatPrompt = await this.getChatAppointmentSystemPrompt();
+    return composeBañoNaturalInstantReply(
+      this.openai,
+      chatPrompt,
+      {
+        vehicleLabel,
+        segmentoEs: 'sedán compacto mediano',
+        servicioDb: resolved.canonical,
+        severidadLiteral: sevFinal,
+        resolution,
+        personalizedColorDetail,
+      },
+      { servicioCode: 'BPC' },
+    );
   }
 
   /**
@@ -4154,14 +4200,20 @@ export class ChatService implements OnModuleDestroy {
     }
 
     try {
-      const premiumText = await composeBañoNaturalInstantReply(this.openai, {
-        vehicleLabel: vl,
-        segmentoEs: seg,
-        servicioDb: resolved.canonical,
-        severidadLiteral: sevFinal,
-        resolution,
-        personalizedColorDetail,
-      });
+      const chatPrompt = await this.getChatAppointmentSystemPrompt();
+      const premiumText = await composeBañoNaturalInstantReply(
+        this.openai,
+        chatPrompt,
+        {
+          vehicleLabel: vl,
+          segmentoEs: seg,
+          servicioDb: resolved.canonical,
+          severidadLiteral: sevFinal,
+          resolution,
+          personalizedColorDetail,
+        },
+        { servicioCode: 'BPC' },
+      );
       console.log(
         '[LOG-PINTURA 3-final] String plantilla premium ensamblado (primeros 400 chars):',
         premiumText.slice(0, 400),

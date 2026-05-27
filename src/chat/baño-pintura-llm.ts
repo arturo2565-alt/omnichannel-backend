@@ -275,6 +275,9 @@ export type BañoDraftLlmComposeInput = BañoInstantComposeFacts & {
   }>;
   needsHeavyBodyworkDisclaimer: boolean;
   mapsUrl?: string;
+  /** Código de servicio para el borrador (ej. BPC). */
+  servicioCode?: string;
+  origenVision?: boolean;
 };
 
 /** Variante A/B/C estable por conversación (misma lógica que el panel). */
@@ -288,6 +291,11 @@ export function pickBañoPremiumVariant(
     h = (h + id.charCodeAt(i)) % 3;
   }
   return (['A', 'B', 'C'] as const)[h]!;
+}
+
+/** Variante aleatoria (regenerar mensaje / rotar A-B-C). */
+export function pickRandomBañoPremiumVariant(): BañoPremiumVariant {
+  return (['A', 'B', 'C'] as const)[Math.floor(Math.random() * 3)]!;
 }
 
 function buildBañoPricingContext(resolution: InstantQuoteResolution): {
@@ -320,50 +328,39 @@ function buildBañoPricingContext(resolution: InstantQuoteResolution): {
   };
 }
 
-const BAÑO_DRAFT_MESSAGE_SYSTEM = `Eres el redactor premium de AutoFix (taller de carrocería y pintura en México).
-Generas el mensaje final para WhatsApp/Messenger del **Baño de Pintura Exterior** (cotización de borrador).
+/** Anexo técnico del borrador BPC; el cerebro principal es chatAppointmentPrompt. */
+const BAÑO_DRAFT_TECH_APPENDIX = `
+[Tarea: mensaje al cliente — borrador Baño de Pintura Exterior / BPC]
+Responde SOLO el texto final para WhatsApp/Messenger (sin JSON, sin meta-explicación).
 
-Recibirás JSON con: vehículo, precios de catálogo (obligatorios), inventario de daños/severidad de visión, variante de redacción (A, B o C), y flags.
+Usa las reglas de variantes A/B/C del system prompt principal. Aplica la variante indicada en el JSON del usuario ("variante": "A"|"B"|"C").
 
-Responde SOLO el texto del mensaje al cliente (sin JSON, sin meta-explicación).
+Variables clave del usuario (respétalas literalmente):
+- servicio: "BPC" = baño de pintura exterior integral (no cotices piezas sueltas).
+- precio: total en MXN (obligatorio, exacto).
+- vehiculo: marca y modelo.
+- origen_vision: si true, el peritaje viene de fotos.
+- daños_severos: si true, disclaimer de hojalatería media/pesada (no solo "ligera").
 
-ESTRUCTURA OBLIGATORIA (puedes variar redacción según variante):
-1) Título con 🎨 que mencione baño de pintura (+ cambio de color si aplica) y el vehículo con marca/modelo.
-2) Línea de total con 💰 usando EXACTAMENTE los montos en pesos del JSON (formato: $29,000 MXN). Si hay cambio de color, desglosa base + extra en la misma línea o sublínea.
-3) Bloque "**Incluye:**" con viñetas con emojis (🔧 hojalatería, ✨ materiales Sikkens, 🛡️ garantía, 💎 acabado espejo). NO inventes servicios fuera de este paquete.
-4) ⏳ Tiempo estimado en días hábiles (usa diasMostrar del JSON).
-5) 📍 Ubicación con el mapsUrl del JSON (copiar URL tal cual).
-6) Cierre cordial invitando a agendar (📆); si es convertible, menciona inspección de toldo.
+Estructura mínima: 🎨 título con vehículo, 💰 total exacto, **Incluye:** (🔧 ✨ 🛡️ 💎), ⏳ días, 📍 mapsUrl, cierre 📆.
+Precios: prohibido inventar o cambiar montos. Sin placeholders genéricos de vehículo.`;
 
-VARIANTES DE TONO (aplica SOLO la indicada en variant):
-- **A — Directo:** apertura tipo "¡Listo! Aquí tienes el desglose…" / cotización clara; cierre "¿Qué día te queda mejor para ingresar tu unidad?"
-- **B — Aspiracional:** "¡Perfecto! Te comparto la estimación para dejar tu [vehículo] impecable"; enfatiza Sikkens y acabado espejo; cierre amable para agendar.
-- **C — Profesional cordial:** "Con gusto, este es el resumen de tu cotización"; tono sereno; cierre "dime qué día de la semana te funciona mejor".
-
-REGLA DISCLAIMER HOJALATERÍA PESADA (si needsHeavyBodyworkDisclaimer es true):
-- En la viñeta de hojalatería NO digas solo "hojalatería ligera".
-- Debes indicar que puede requerir **hojalatería media/pesada**, posibles refacciones o trabajo extra tras desarme, **no incluido** en el baño de pintura exterior cotizado.
-- Puedes aludir brevemente al inventario de daños (DM, DF, etc.) sin listar precios por pieza suelta.
-
-INVENTARIO DE DAÑOS:
-- Menciona de forma natural 1–3 hallazgos del inventarioDanos si ayudan al contexto (oxidación, desgaste, golpes en fascia, etc.).
-- No conviertas el mensaje en cotización por piezas sueltas; el servicio cotizado es el baño integral.
-
-PRECIOS:
-- PROHIBIDO inventar, redondear distinto o omitir totalMx / baseMx / extrasMx del JSON.
-- PROHIBIDO placeholders: "tu vehículo", "su vehículo", "[Modelo]", "[Precio]".
-
-OTROS:
-- Español de México, tono premium cercano.
-- Usa **negritas** markdown donde encaje.
-- Máximo ~45 líneas.`;
+function buildBañoDraftSystemMessage(chatAppointmentSystemPrompt: string): string {
+  const base = String(chatAppointmentSystemPrompt ?? '').trim();
+  if (!base) {
+    throw new Error('composeBañoDraftMessageWithLlm: chatAppointmentPrompt vacío');
+  }
+  return `${base}\n\n${BAÑO_DRAFT_TECH_APPENDIX}`;
+}
 
 /**
- * Redacción dinámica del mensaje BPC (gpt-4o) — sin plantilla TypeScript fija.
+ * Redacción dinámica del mensaje BPC (gpt-4o) con chatAppointmentPrompt como system principal.
  */
 export async function composeBañoDraftMessageWithLlm(
   openai: OpenAI,
+  chatAppointmentSystemPrompt: string,
   input: BañoDraftLlmComposeInput,
+  options?: { temperature?: number },
 ): Promise<string> {
   const vehicle = String(input.vehicleLabel ?? '').trim();
   if (!vehicle || isPlaceholderBañoVehicleLabel(vehicle)) {
@@ -378,9 +375,21 @@ export async function composeBañoDraftMessageWithLlm(
   }
 
   const mapsUrl = String(input.mapsUrl ?? TALLER_MAPS_URL).trim();
-  const payload = {
-    variant: input.variant,
+  const servicioCode =
+    String(input.servicioCode ?? '').trim() ||
+    (String(input.servicioDb ?? '').toLowerCase().includes('baño') ? 'BPC' : 'BPC');
+
+  const userVariables = {
+    servicio: servicioCode,
+    precio: pricing.totalMx,
     vehiculo: vehicle,
+    origen_vision: input.origenVision !== false,
+    daños_severos: input.needsHeavyBodyworkDisclaimer,
+    variante: input.variant,
+  };
+
+  const contextPayload = {
+    ...userVariables,
     segmentoCarroceria: input.segmentoEs,
     servicioCatalogo: input.servicioDb,
     severidadTalla: input.severidadLiteral,
@@ -397,20 +406,21 @@ export async function composeBañoDraftMessageWithLlm(
     diasMostrar: pricing.diasMostrar,
     diasExtraPorCambioColor: pricing.hasColorChange ? BAÑO_COLOR_EXTRA_DIAS : 0,
     inventarioDanos: input.inventarioDanos,
-    needsHeavyBodyworkDisclaimer: input.needsHeavyBodyworkDisclaimer,
     vehiculoConvertible: isConvertibleVehicleLabel(vehicle),
     mapsUrl,
   };
 
+  const temperature = Math.max(0.7, Number(options?.temperature) || 0.75);
+
   const completion = await openai.chat.completions.create({
     model: 'gpt-4o',
-    temperature: 0.65,
+    temperature,
     max_tokens: 900,
     messages: [
-      { role: 'system', content: BAÑO_DRAFT_MESSAGE_SYSTEM },
+      { role: 'system', content: buildBañoDraftSystemMessage(chatAppointmentSystemPrompt) },
       {
         role: 'user',
-        content: `Redacta el mensaje al cliente con estos datos (respeta variante ${input.variant}):\n${JSON.stringify(payload, null, 2)}`,
+        content: `Redacta un mensaje NUEVO al cliente para este borrador de cotización.\n\nVariables obligatorias:\n${JSON.stringify(userVariables, null, 2)}\n\nContexto completo:\n${JSON.stringify(contextPayload, null, 2)}`,
       },
     ],
   });
@@ -563,34 +573,50 @@ export type ComposeBañoNaturalInstantReplyOptions = {
   variantSalt?: string;
   variant?: BañoPremiumVariant;
   mapsUrl?: string;
+  /** true = POST regenerate-narrative: nueva variante A/B/C cada vez. */
+  forceRandomVariant?: boolean;
+  temperature?: number;
+  origenVision?: boolean;
+  servicioCode?: string;
 };
 
 /**
- * Mensaje al cliente para baño de pintura: redacción gpt-4o (variantes A/B/C + disclaimer dinámico).
+ * Mensaje al cliente para baño de pintura: gpt-4o + chatAppointmentPrompt (variantes A/B/C).
  */
 export async function composeBañoNaturalInstantReply(
   openai: OpenAI,
+  chatAppointmentSystemPrompt: string,
   facts: BañoInstantComposeFacts,
   options?: ComposeBañoNaturalInstantReplyOptions,
 ): Promise<string> {
-  const variant =
-    options?.variant ??
-    pickBañoPremiumVariant(
-      options?.conversationId ?? '',
-      options?.variantSalt ?? facts.severidadLiteral,
-    );
+  const variant = options?.forceRandomVariant
+    ? pickRandomBañoPremiumVariant()
+    : (options?.variant ??
+      pickBañoPremiumVariant(
+        options?.conversationId ?? '',
+        options?.variantSalt ?? facts.severidadLiteral,
+      ));
 
-  console.log('--- [DEBUG ENTRÓ A VARIANTES DE BAÑO — LLM] ---');
-  console.log('Variante:', variant);
-  console.log('Vehículo:', facts.vehicleLabel);
-  console.log('Total resolución:', facts.resolution?.total);
-
-  return composeBañoDraftMessageWithLlm(openai, {
-    ...facts,
+  console.log('[BañoDraftCliente] LLM gpt-4o', {
     variant,
-    inventarioDanos: options?.inventarioDanos ?? [],
-    needsHeavyBodyworkDisclaimer:
-      options?.needsHeavyBodyworkDisclaimer === true,
-    mapsUrl: options?.mapsUrl,
+    forceRandomVariant: options?.forceRandomVariant === true,
+    vehiculo: facts.vehicleLabel,
+    total: facts.resolution?.total,
   });
+
+  return composeBañoDraftMessageWithLlm(
+    openai,
+    chatAppointmentSystemPrompt,
+    {
+      ...facts,
+      variant,
+      inventarioDanos: options?.inventarioDanos ?? [],
+      needsHeavyBodyworkDisclaimer:
+        options?.needsHeavyBodyworkDisclaimer === true,
+      mapsUrl: options?.mapsUrl,
+      servicioCode: options?.servicioCode ?? 'BPC',
+      origenVision: options?.origenVision !== false,
+    },
+    { temperature: options?.temperature ?? 0.75 },
+  );
 }
