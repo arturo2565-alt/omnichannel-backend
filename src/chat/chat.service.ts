@@ -63,6 +63,7 @@ import {
   composeBañoNaturalInstantReply,
   buildBañoNaturalInstantReplyText,
   extractBañoPersonalizedColorDetail,
+  inferBañoVehicleDisplayLabelWithLlm,
 } from './baño-pintura-llm';
 import {
   banioCompletoNeedsHeavyBodyworkDisclaimer,
@@ -2527,18 +2528,75 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Vehículo para plantillas BPC vía gpt-4o (JSON visión + chat estructurado; sin tierFlat contaminado).
+   */
+  private async resolveBpcVehicleLabelForNarrative(
+    analysis: VehicleDamageAnalysis,
+    conversationId: string,
+  ): Promise<string | null> {
+    const turns = await this.buildVisionTextHistoryForConversation(
+      conversationId,
+    );
+    const chatTurns: Array<{ role: 'user' | 'assistant'; content: string }> =
+      [];
+    for (const t of turns) {
+      if (t.role !== 'user' && t.role !== 'assistant') continue;
+      const content =
+        typeof t.content === 'string' ? t.content.trim() : '';
+      if (!content || content.includes('cloudinary')) continue;
+      chatTurns.push({ role: t.role, content });
+    }
+
+    const visionInventory = (analysis.inventory ?? []).map((it) => ({
+      pieza: String(it.pieza ?? '').trim(),
+      severidad: String(it.severidad ?? '').trim(),
+      descripcionTecnica: String(it.descripcionTecnica ?? '')
+        .trim()
+        .slice(0, 600),
+    }));
+
+    return inferBañoVehicleDisplayLabelWithLlm(this.openai, {
+      visionInventory,
+      damageSummary: {
+        descripcionTecnica: analysis.descripcionTecnica,
+        justificacion: analysis.justificacion,
+        pieza: analysis.pieza,
+      },
+      chatTurns,
+    });
+  }
+
+  /** Texto solo de mensajes del cliente (cambio de color / tier; sin logs de visión). */
+  private userChatTextFromTurns(
+    turns: readonly ChatCompletionMessageParam[],
+  ): string {
+    const parts: string[] = [];
+    for (const t of turns) {
+      if (t.role !== 'user') continue;
+      const c = typeof t.content === 'string' ? t.content.trim() : '';
+      if (c && !c.includes('cloudinary')) parts.push(c);
+    }
+    return parts.join('\n\n');
+  }
+
+  /**
    * Fallback si la celda no está marcada instant: arma plantilla baño desde totales del borrador.
    */
-  private buildBanioClientMessageFromDraftLines(
+  private async buildBanioClientMessageFromDraftLines(
     draft: DraftQuote,
+    analysis: VehicleDamageAnalysis,
+    conversationId: string,
     tierFlat: string,
-  ): string | null {
+  ): Promise<string | null> {
     const total = Math.round(Number(draft.total ?? draft.subtotal ?? 0));
     const subtotal = Math.round(Number(draft.subtotal ?? total));
     if (total <= 0 || !draft.lines?.length) return null;
     const severidadLiteral = inferBañoTierSeveridad(tierFlat);
-    const vehicleLabel =
-      inferBañoVehicleDisplayLabel(tierFlat) || 'su vehículo';
+    const vehicleLabel = await this.resolveBpcVehicleLabelForNarrative(
+      analysis,
+      conversationId,
+    );
+    if (!vehicleLabel) return null;
     try {
       return buildBañoNaturalInstantReplyText({
         vehicleLabel,
@@ -2592,10 +2650,17 @@ export class ChatService implements OnModuleDestroy {
       const bpc = analysis.inventory?.[0];
       if (!bpc) return null;
 
-      const visionContext =
-        await this.buildVisionTextContextForConversation(conversationId);
+      const chatTurns = await this.buildVisionTextHistoryForConversation(
+        conversationId,
+      );
+      const userChatText = this.userChatTextFromTurns(chatTurns);
       const tierFlat = flattenBañoTierSource(
-        [visionContext, analysis.descripcionTecnica, analysis.justificacion]
+        [
+          userChatText,
+          analysis.descripcionTecnica,
+          analysis.justificacion,
+          String(bpc.descripcionTecnica ?? ''),
+        ]
           .filter(Boolean)
           .join('\n'),
       );
@@ -2655,16 +2720,25 @@ export class ChatService implements OnModuleDestroy {
         }
       }
 
-      const vehicleLabel =
-        this.resolveBañoVehicleLabelFromTierContext(tierFlat) ??
-        inferBañoVehicleDisplayLabel(tierFlat) ??
-        'su vehículo';
+      const vehicleLabel = await this.resolveBpcVehicleLabelForNarrative(
+        analysis,
+        conversationId,
+      );
+      if (!vehicleLabel) {
+        console.warn(
+          '[VisionBPC] inferBañoVehicleDisplayLabelWithLlm sin vehículo; no se arma plantilla premium',
+        );
+        return null;
+      }
 
       let personalizedColorDetail: string | null = null;
       if (mentionsCambioDeColor(tierFlat)) {
+        const colorCtx = userChatText || tierFlat;
         personalizedColorDetail =
-          (await extractBañoPersonalizedColorDetail(this.openai, tierFlat)) ??
-          extractBañoColorDetailHeuristic(tierFlat);
+          (await extractBañoPersonalizedColorDetail(
+            this.openai,
+            colorCtx,
+          )) ?? extractBañoColorDetailHeuristic(colorCtx);
       }
 
       let text = await composeBañoNaturalInstantReply(this.openai, {
@@ -2741,8 +2815,10 @@ export class ChatService implements OnModuleDestroy {
           analysis,
           conversationId,
         );
-        bañoNarrative = this.buildBanioClientMessageFromDraftLines(
+        bañoNarrative = await this.buildBanioClientMessageFromDraftLines(
           draft,
+          analysis,
+          conversationId,
           tierFlat,
         );
       }

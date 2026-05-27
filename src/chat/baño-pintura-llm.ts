@@ -14,6 +14,135 @@ export type BañoLlmClassification = {
   severidadLiteral: string;
 };
 
+/** Entrada estructurada para inferir vehículo sin concatenar logs ni historial crudo. */
+export type BañoVehicleInferenceInput = {
+  visionInventory: Array<{
+    pieza: string;
+    severidad: string;
+    descripcionTecnica?: string;
+  }>;
+  damageSummary?: {
+    descripcionTecnica?: string;
+    justificacion?: string;
+    pieza?: string;
+  };
+  chatTurns?: Array<{ role: 'user' | 'assistant'; content: string }>;
+};
+
+function parseVehicleInferenceJson(raw: string): {
+  vehicleLabel: string;
+  confidence?: string;
+  reason?: string;
+} | null {
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const vehicleLabel =
+      typeof o['vehicleLabel'] === 'string' ? o['vehicleLabel'].trim() : '';
+    return {
+      vehicleLabel,
+      confidence:
+        typeof o['confidence'] === 'string' ? o['confidence'].trim() : undefined,
+      reason: typeof o['reason'] === 'string' ? o['reason'].trim() : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Rechaza salidas obviamente inválidas (no es limpieza del hilo; es validación post-IA). */
+function isLikelyContaminatedVehicleLabel(label: string): boolean {
+  const t = String(label ?? '').trim();
+  if (!t || t.length > 72) return true;
+  if (t.includes('\n')) return true;
+  if (t.includes('http://') || t.includes('https://')) return true;
+  if (t.includes('cloudinary')) return true;
+  if (isPlaceholderBañoVehicleLabel(t)) return true;
+  return false;
+}
+
+const INFER_VEHICLE_SYSTEM = `Eres un extractor de identidad vehicular para un taller de carrocería y pintura en México.
+
+Recibirás un JSON con:
+- inventario_vision: piezas y descripciones del análisis por fotos (visión multimodal).
+- peritaje: resumen técnico del daño (sin precios ni plantillas de cotización).
+- conversacion: mensajes recientes user/assistant del chat.
+
+Tu única tarea: inferir el vehículo del cliente (marca, modelo y año si hay evidencia).
+
+Responde SOLO con JSON válido:
+{
+  "vehicleLabel": "Marca Modelo Año",
+  "confidence": "high" | "medium" | "low",
+  "reason": "una frase breve en español"
+}
+
+REGLAS ESTRICTAS para vehicleLabel:
+- Una sola línea corta, legible para humanos. Ejemplos válidos: "Volkswagen Passat 2005", "Audi Q5 2023", "Ford Figo".
+- Prioridad de evidencia: mensajes del usuario que nombren su auto > descripción técnica de visión > contexto indirecto.
+- NO copies ni parafrasees logs del sistema, IDs, URLs, precios, listas de piezas dañadas, códigos de severidad (DL, DM, DMF), ni texto de cotizaciones previas.
+- NO incluyas frases del asistente salvo que repitan explícitamente el modelo confirmado por el cliente.
+- Si no puedes identificar marca y modelo con confianza razonable, devuelve vehicleLabel como cadena vacía "".
+- No inventes año si no hay pista; puedes omitir el año.
+- Prohibido usar placeholders: "tu vehículo", "su vehículo", "vehículo del cliente", "auto", etc.`;
+
+/**
+ * Inferencia pura por IA (gpt-4o): aísla marca, modelo y año para plantillas BPC.
+ */
+export async function inferBañoVehicleDisplayLabelWithLlm(
+  openai: OpenAI,
+  input: BañoVehicleInferenceInput,
+): Promise<string | null> {
+  const payload = JSON.stringify({
+    inventario_vision: input.visionInventory ?? [],
+    peritaje: input.damageSummary ?? null,
+    conversacion: (input.chatTurns ?? []).slice(-14),
+  });
+
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    temperature: 0.1,
+    max_tokens: 160,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: INFER_VEHICLE_SYSTEM },
+      {
+        role: 'user',
+        content: `Datos estructurados para inferir el vehículo:\n${payload.slice(0, 14_000)}`,
+      },
+    ],
+  });
+
+  const raw = completion.choices[0]?.message?.content?.trim() ?? '';
+  const parsed = parseVehicleInferenceJson(raw);
+  if (!parsed) {
+    console.warn('[BañoVehicleInfer] JSON inválido:', raw.slice(0, 200));
+    return null;
+  }
+
+  const label = parsed.vehicleLabel;
+  if (!label || isLikelyContaminatedVehicleLabel(label)) {
+    console.log(
+      '[BañoVehicleInfer] sin vehículo usable',
+      JSON.stringify({
+        vehicleLabel: label?.slice(0, 80) ?? '',
+        confidence: parsed.confidence,
+        reason: parsed.reason,
+      }),
+    );
+    return null;
+  }
+
+  console.log(
+    '[BañoVehicleInfer]',
+    JSON.stringify({
+      vehicleLabel: label,
+      confidence: parsed.confidence,
+      reason: parsed.reason,
+    }),
+  );
+  return label;
+}
+
 const TALLER_MAPS_URL =
   'https://maps.app.goo.gl/a3tEimJquzaJAwSD9?g_st=ipc';
 
