@@ -20,6 +20,10 @@ export interface DetectedDamageItem {
   severidad: string;
   descripcionTecnica: string;
   urls_origen: string[];
+  /** Marca/modelo/año inferidos por visión multimodal (raíz JSON o cruce BPC). */
+  vehiculoDetectado?: string;
+  /** Copia del inventario antes de colapsar a BPC (solo en fila BPC). */
+  inventarioVisualPrevio?: DetectedDamageItem[];
 }
 
 /** @deprecated usar DetectedDamageItem (descripcion → descripcionTecnica, urls_asociadas → urls_origen). */
@@ -39,6 +43,16 @@ export interface VehicleDamageAnalysis {
   severidadDelDano: string;
   /** Daños consolidados sobre el grupo de imágenes de la sesión. */
   inventory?: DetectedDamageItem[];
+  /** Vehículo visto en fotos (campo `vehiculo_detectado` del JSON de visión). */
+  vehiculoDetectado?: string;
+  /** Baño de pintura: peritaje guardado, esperando marca/modelo antes de cotizar. */
+  banioPinturaGate?: {
+    solicitarModeloBanio: boolean;
+    intencionBanioCompleto: boolean;
+    resumenDanosVisuales: string;
+    inventarioVisual: DetectedDamageItem[];
+    guardadoEn: string;
+  };
 }
 
 @Entity()

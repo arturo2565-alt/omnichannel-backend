@@ -41,8 +41,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     estimateAmount: number;
     /** Tras cotización IA el autopilot se apaga para revisión humana */
     isAutoPilotActive?: boolean;
+    awaitingVehicleForBanio?: boolean;
   }) {
     this.server.emit('draftQuoteReady', payload);
+  }
+
+  /** Peritaje visual guardado; falta marca/modelo antes de cotizar (sin precios en panel). */
+  emitDraftPeritajeAwaitingVehicle(payload: {
+    draftQuoteId: string;
+    conversationId: string;
+    messageId: string;
+    damageAnalysis: unknown;
+    isAutoPilotActive?: boolean;
+  }) {
+    this.server.emit('draftPeritajeAwaitingVehicle', payload);
   }
 
   /** Actualización de estado de lead / bandeja sin nuevo mensaje */

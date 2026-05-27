@@ -44,7 +44,10 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
 
 /** Texto del mensaje de usuario en visión: esquema JSON esperado y reglas del payload. */
 export const DEFAULT_VISION_JSON_USER_INSTRUCTION = `Responde ÚNICAMENTE con un objeto JSON válido (sin markdown):
-{ "items": [ ... ] }
+{ "items": [ ... ], "vehiculo_detectado": "..." }
+
+En la raíz del JSON, incluye SIEMPRE que sea posible:
+- "vehiculo_detectado": string con marca, modelo y año si los infieres de las fotos (ej. "Volkswagen Passat 2005", "Nissan March 2018"). Si no puedes identificar el auto con confianza razonable, usa cadena vacía "".
 
 Cada elemento de items es una **pieza o zona agrupada lógica** tras consolidar vistas:
 - Varias fotos del mismo punto de impacto mismo componente ⇒ un solo objeto y severidad máxima vista.

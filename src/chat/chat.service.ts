@@ -69,10 +69,18 @@ import {
   banioCompletoNeedsHeavyBodyworkDisclaimer,
   collapseVisionItemsToBpcIfNeeded,
   isBanioPinturaCompletoVisionInventory,
+  pickVehicleLabelFromDamageInventory,
   visionItemsIndicateBanioCompleto,
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
+import {
+  buildAutopilotSolicitarModeloBanioAppend,
+  buildBanioVisualDamageSummary,
+  DRAFT_QUOTE_STATUS_AWAITING_VEHICLE,
+  pickInventarioVisualForGate,
+  type BanioPinturaGateState,
+} from './banio-vehicle-gate';
 import {
   buildPlaygroundPostQuoteSchedulingSystemAppend,
   getPlaygroundInstantInterceptorDecision,
@@ -400,7 +408,11 @@ function inventoryItemsToVehicleAnalysis(
     severidad: it.severidad,
     descripcionTecnica: it.descripcionTecnica,
     urls_origen: [...(it.urls_origen ?? [])],
+    ...(it.vehiculoDetectado?.trim()
+      ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
+      : {}),
   }));
+  const vehiculoDetectado = pickVehicleLabelFromDamageInventory(inv);
   const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
   const worst = pickWorstDamageLevel(inv.map((i) => i.severidad));
   const piezaLabel =
@@ -425,6 +437,7 @@ function inventoryItemsToVehicleAnalysis(
     justificacion: just,
     partesAfectadas: partes.length ? partes : ['Estetica Exterior'],
     inventory: inv,
+    ...(vehiculoDetectado ? { vehiculoDetectado } : {}),
   };
 }
 
@@ -2319,6 +2332,7 @@ export class ChatService implements OnModuleDestroy {
       options?.tallerId,
     );
     let allDetectedDamages: DetectedDamageItem[] = [];
+    let accumulatedVisionVehicle: string | null = null;
 
     console.log(
       `[VisionChunk] Procesando ${imageUrls.length} imagen(es) en ${lotes.length} lote(s) de hasta ${ChatService.VISION_IMAGE_CHUNK_SIZE}`,
@@ -2338,12 +2352,20 @@ export class ChatService implements OnModuleDestroy {
         continue;
       }
 
+      const batchVehicle = pickVehicleLabelFromDamageInventory(batchItems);
+      if (batchVehicle) {
+        accumulatedVisionVehicle = batchVehicle;
+      }
+
       if (!allDetectedDamages.length) {
         allDetectedDamages = batchItems.map((it) => ({
           pieza: it.pieza,
           severidad: it.severidad,
           descripcionTecnica: it.descripcionTecnica,
           urls_origen: [...(it.urls_origen ?? [])],
+          ...(it.vehiculoDetectado?.trim()
+            ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
+            : {}),
         }));
       } else {
         const merged = mergeDamageInventoryAccumulative(
@@ -2372,9 +2394,14 @@ export class ChatService implements OnModuleDestroy {
     ]
       .filter(Boolean)
       .join('\n');
+    const visionRootForCollapse =
+      accumulatedVisionVehicle ?
+        { vehiculo_detectado: accumulatedVisionVehicle }
+      : undefined;
     return collapseVisionItemsToBpcIfNeeded(
       allDetectedDamages,
       tierContext,
+      visionRootForCollapse,
     );
   }
 
@@ -2527,6 +2554,317 @@ export class ChatService implements OnModuleDestroy {
     );
   }
 
+  private async findBanioAwaitingVehicleDraft(
+    conversationId: string,
+  ): Promise<DraftQuoteEntity | null> {
+    return this.draftQuoteRepository.findOne({
+      where: {
+        conversationId,
+        status: DRAFT_QUOTE_STATUS_AWAITING_VEHICLE,
+      },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  /**
+   * ¿Hay vehículo confiable para cotizar BPC? (visión, chat o IA con confianza ≠ low).
+   */
+  private async inferBpcVehicleForPricingGate(
+    analysis: VehicleDamageAnalysis,
+    conversationId: string,
+  ): Promise<{ usable: boolean; vehicleLabel: string | null }> {
+    const visionDetectedVehicle = pickVehicleLabelFromDamageInventory(
+      analysis.inventory,
+      analysis.vehiculoDetectado,
+    );
+
+    const turns = await this.buildVisionTextHistoryForConversation(
+      conversationId,
+    );
+    const chatTurns: Array<{ role: 'user' | 'assistant'; content: string }> =
+      [];
+    for (const t of turns) {
+      if (t.role !== 'user' && t.role !== 'assistant') continue;
+      const content =
+        typeof t.content === 'string' ? t.content.trim() : '';
+      if (!content || content.includes('cloudinary')) continue;
+      chatTurns.push({ role: t.role, content });
+    }
+
+    const visionInventory = (analysis.inventory ?? []).map((it) => ({
+      pieza: String(it.pieza ?? '').trim(),
+      severidad: String(it.severidad ?? '').trim(),
+      descripcionTecnica: String(it.descripcionTecnica ?? '')
+        .trim()
+        .slice(0, 600),
+    }));
+
+    const llm = await inferBañoVehicleDisplayLabelWithLlm(this.openai, {
+      visionInventory,
+      damageSummary: {
+        descripcionTecnica: analysis.descripcionTecnica,
+        justificacion: analysis.justificacion,
+        pieza: analysis.pieza,
+      },
+      chatTurns,
+      visionDetectedVehicle,
+    });
+
+    if (visionDetectedVehicle) {
+      return { usable: true, vehicleLabel: visionDetectedVehicle };
+    }
+
+    if (llm.vehicleLabel && llm.confidence !== 'low') {
+      return { usable: true, vehicleLabel: llm.vehicleLabel };
+    }
+
+    if (llm.vehicleLabel && llm.confidence === 'medium') {
+      return { usable: true, vehicleLabel: llm.vehicleLabel };
+    }
+
+    return { usable: false, vehicleLabel: null };
+  }
+
+  private buildEmptyDraftQuoteShell(
+    analysis: VehicleDamageAnalysis,
+  ): DraftQuote {
+    const ref = `DRAFT-${randomUUID().slice(0, 8).toUpperCase()}`;
+    return {
+      reference: ref,
+      generatedAt: new Date().toISOString(),
+      currency: AUTO_FIX_CURRENCY,
+      status: 'PENDING_APPROVAL',
+      lines: [],
+      subtotal: 0,
+      total: 0,
+      formalNarrative: '',
+      generatedMessage: '',
+      clientMessage: '',
+      analysisBasis: {
+        pieza: analysis.pieza,
+        severidad: analysis.severidad,
+        partesAfectadas: [...(analysis.partesAfectadas ?? [])],
+        severidadDelDano: analysis.severidadDelDano,
+        descripcionTecnica: analysis.descripcionTecnica,
+        justificacion: analysis.justificacion,
+        inventory: analysis.inventory ?? [],
+      },
+    };
+  }
+
+  /**
+   * Guarda peritaje visual sin precios; autopilot pedirá marca/modelo.
+   */
+  private async persistBanioAwaitingVehicleDraft(
+    conversationId: string,
+    messageId: string,
+    analysis: VehicleDamageAnalysis,
+    imageUrls: readonly string[],
+    tallerId: string | null,
+    gate: BanioPinturaGateState,
+  ): Promise<DraftQuoteEntity> {
+    const analysisWithGate: VehicleDamageAnalysis = {
+      ...analysis,
+      banioPinturaGate: gate,
+    };
+    const emptyQuote = this.buildEmptyDraftQuoteShell(analysisWithGate);
+    const persistedImageUrl = persistDraftImageUrlField(imageUrls);
+
+    const pendingWithPrice = await this.draftQuoteRepository.findOne({
+      where: { conversationId, status: 'PENDING_APPROVAL' },
+      order: { createdAt: 'DESC' },
+    });
+    if (pendingWithPrice) {
+      await this.draftQuoteRepository.remove(pendingWithPrice);
+    }
+
+    const existing = await this.draftQuoteRepository.findOne({
+      where: {
+        conversationId,
+        status: DRAFT_QUOTE_STATUS_AWAITING_VEHICLE,
+      },
+      order: { createdAt: 'DESC' },
+    });
+
+    let saved: DraftQuoteEntity;
+    if (existing) {
+      existing.messageId = messageId;
+      existing.imageUrl = persistedImageUrl;
+      existing.damageAnalysis = analysisWithGate;
+      existing.estimateAmount = 0;
+      existing.quotePayload = emptyQuote;
+      existing.tallerId = tallerId;
+      saved = await this.draftQuoteRepository.save(existing);
+    } else {
+      const row = this.draftQuoteRepository.create({
+        conversationId,
+        tallerId,
+        messageId,
+        imageUrl: persistedImageUrl,
+        damageAnalysis: analysisWithGate,
+        estimateAmount: 0,
+        quotePayload: emptyQuote,
+        status: DRAFT_QUOTE_STATUS_AWAITING_VEHICLE,
+      });
+      saved = await this.draftQuoteRepository.save(row);
+    }
+
+    await this.syncDraftQuoteLineItems(
+      saved.id,
+      analysisWithGate,
+      emptyQuote,
+      [...imageUrls],
+      tallerId,
+    );
+
+    await this.messageRepository.update(
+      { id: messageId },
+      { damageAnalysis: analysisWithGate, draftQuote: null },
+    );
+
+    await this.conversationRepository.update(
+      { id: conversationId },
+      { status: 'por_cotizar', isAutoPilotActive: true },
+    );
+
+    this.chatGateway.emitDraftPeritajeAwaitingVehicle({
+      draftQuoteId: saved.id,
+      conversationId,
+      messageId,
+      damageAnalysis: analysisWithGate,
+      isAutoPilotActive: true,
+    });
+
+    console.log(
+      '[BanioVehicleGate] Peritaje guardado sin precio; SOLICITAR_MODELO_BANIO activo',
+      { conversationId, draftId: saved.id },
+    );
+
+    return saved;
+  }
+
+  /**
+   * Tras respuesta del cliente con modelo: completa cotización BPC desde memoria visual.
+   */
+  private async tryFinalizeBanioDraftAfterVehicleReply(
+    conversationId: string,
+    inboundText: string,
+  ): Promise<boolean> {
+    const row = await this.findBanioAwaitingVehicleDraft(conversationId);
+    if (!row?.damageAnalysis?.banioPinturaGate?.solicitarModeloBanio) {
+      return false;
+    }
+
+    const gate = row.damageAnalysis.banioPinturaGate;
+    let analysis: VehicleDamageAnalysis = {
+      ...row.damageAnalysis,
+      partesAfectadas: [...(row.damageAnalysis.partesAfectadas ?? [])],
+      inventory: (row.damageAnalysis.inventory ?? []).map((it) => ({
+        ...it,
+        urls_origen: [...(it.urls_origen ?? [])],
+      })),
+    };
+
+    if (!isBanioPinturaCompletoVisionInventory(analysis.inventory)) {
+      const visual = pickInventarioVisualForGate(gate.inventarioVisual ?? []);
+      if (visual.length) {
+        analysis = inventoryItemsToVehicleAnalysis(
+          collapseVisionItemsToBpcIfNeeded(visual, inboundText, {
+            intencion_banio_completo_detectada: true,
+          }),
+          parseDraftImageUrls(row.imageUrl ?? ''),
+        );
+      }
+    }
+
+    const vehicle = await this.resolveBpcVehicleLabelForNarrative(
+      analysis,
+      conversationId,
+    );
+    if (!vehicle) {
+      return false;
+    }
+
+    analysis.vehiculoDetectado = vehicle;
+    if (analysis.inventory?.[0]) {
+      analysis.inventory[0].vehiculoDetectado = vehicle;
+    }
+    delete analysis.banioPinturaGate;
+
+    const tallerId = row.tallerId;
+    const imageUrls = parseDraftImageUrls(row.imageUrl ?? '');
+    const estimateAmount = await this.computePrimaryMatrixEstimate(
+      analysis,
+      tallerId,
+    );
+    let draftQuoteDoc = await this.generateDraftQuote(analysis, tallerId);
+    if (row.quotePayload?.reference) {
+      draftQuoteDoc = {
+        ...draftQuoteDoc,
+        reference: row.quotePayload.reference,
+        generatedAt: row.quotePayload.generatedAt,
+      };
+    }
+
+    await this.applyClientFacingFormalNarrativeToDraft(
+      draftQuoteDoc,
+      analysis,
+      conversationId,
+      Math.max(1, imageUrls.length),
+      null,
+    );
+    const draftQuoteForClient =
+      normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
+
+    row.damageAnalysis = analysis;
+    row.estimateAmount = estimateAmount;
+    row.quotePayload = draftQuoteForClient;
+    row.status = 'PENDING_APPROVAL';
+    const saved = await this.draftQuoteRepository.save(row);
+
+    await this.syncDraftQuoteLineItems(
+      saved.id,
+      analysis,
+      draftQuoteForClient,
+      imageUrls,
+      tallerId,
+    );
+
+    if (row.messageId) {
+      await this.messageRepository.update(
+        { id: row.messageId },
+        { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
+      );
+    }
+
+    await this.markConversationDraftPendingReview(conversationId);
+
+    this.chatGateway.emitDraftQuoteReady({
+      draftQuoteId: saved.id,
+      conversationId,
+      messageId: row.messageId ?? '',
+      damageAnalysis: analysis,
+      draftQuote: draftQuoteForClient,
+      estimateAmount,
+      isAutoPilotActive: false,
+    });
+
+    console.log(
+      '[BanioVehicleGate] Cotización BPC completada tras modelo del cliente:',
+      vehicle,
+    );
+    return true;
+  }
+
+  private async buildBanioSolicitarModeloAutopilotAppend(
+    conversationId: string,
+  ): Promise<string> {
+    const row = await this.findBanioAwaitingVehicleDraft(conversationId);
+    const gate = row?.damageAnalysis?.banioPinturaGate;
+    if (!gate?.solicitarModeloBanio) return '';
+    return buildAutopilotSolicitarModeloBanioAppend(gate);
+  }
+
   /**
    * Vehículo para plantillas BPC vía gpt-4o (JSON visión + chat estructurado; sin tierFlat contaminado).
    */
@@ -2555,7 +2893,12 @@ export class ChatService implements OnModuleDestroy {
         .slice(0, 600),
     }));
 
-    return inferBañoVehicleDisplayLabelWithLlm(this.openai, {
+    const visionDetectedVehicle = pickVehicleLabelFromDamageInventory(
+      analysis.inventory,
+      analysis.vehiculoDetectado,
+    );
+
+    const llm = await inferBañoVehicleDisplayLabelWithLlm(this.openai, {
       visionInventory,
       damageSummary: {
         descripcionTecnica: analysis.descripcionTecnica,
@@ -2563,7 +2906,23 @@ export class ChatService implements OnModuleDestroy {
         pieza: analysis.pieza,
       },
       chatTurns,
+      visionDetectedVehicle,
     });
+    if (llm.vehicleLabel && llm.confidence !== 'low') {
+      return llm.vehicleLabel;
+    }
+    if (visionDetectedVehicle) {
+      console.log(
+        '[BañoVehicleInfer] cruce visión→plantilla (sin vehículo en chat):',
+        visionDetectedVehicle,
+      );
+      return visionDetectedVehicle;
+    }
+    if (llm.vehicleLabel && llm.confidence === 'medium') {
+      return llm.vehicleLabel;
+    }
+
+    return null;
   }
 
   /** Texto solo de mensajes del cliente (cambio de color / tier; sin logs de visión). */
@@ -4596,6 +4955,40 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       analysis = inventoryItemsToVehicleAnalysis(newInventory, imageUrls);
     }
 
+    const banioIntent = visionItemsIndicateBanioCompleto(newInventory);
+    if (banioIntent) {
+      const vehicleGate = await this.inferBpcVehicleForPricingGate(
+        analysis,
+        conversationId,
+      );
+      if (!vehicleGate.usable) {
+        const inventarioVisual = pickInventarioVisualForGate(newInventory);
+        const gate: BanioPinturaGateState = {
+          solicitarModeloBanio: true,
+          intencionBanioCompleto: true,
+          resumenDanosVisuales: buildBanioVisualDamageSummary(inventarioVisual),
+          inventarioVisual,
+          guardadoEn: new Date().toISOString(),
+        };
+        await this.persistBanioAwaitingVehicleDraft(
+          conversationId,
+          attachingMessageId,
+          analysis,
+          allImageUrls,
+          visionTallerId,
+          gate,
+        );
+        return;
+      }
+      analysis = {
+        ...analysis,
+        vehiculoDetectado: vehicleGate.vehicleLabel ?? undefined,
+      };
+      if (analysis.inventory?.[0] && vehicleGate.vehicleLabel) {
+        analysis.inventory[0].vehiculoDetectado = vehicleGate.vehicleLabel;
+      }
+    }
+
     const estimateAmount = await this.computePrimaryMatrixEstimate(
       analysis,
       visionTallerId,
@@ -5159,6 +5552,20 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     argsJson: string,
     conversation: Conversation,
   ): Promise<Record<string, unknown>> {
+    const awaitingBanio = await this.findBanioAwaitingVehicleDraft(
+      conversation.id,
+    );
+    if (awaitingBanio?.damageAnalysis?.banioPinturaGate) {
+      const gate = awaitingBanio.damageAnalysis.banioPinturaGate;
+      return {
+        success: false,
+        SOLICITAR_MODELO_BANIO: true,
+        error:
+          'No cotizar todavía: falta marca y modelo del vehículo. Pregunta al cliente de forma natural. El peritaje visual ya está guardado.',
+        resumenDanosVisuales: gate.resumenDanosVisuales,
+      };
+    }
+
     let raw: Record<string, unknown>;
     try {
       raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
@@ -5505,6 +5912,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return true;
     }
 
+    const awaitingVehicleDraft = await this.findBanioAwaitingVehicleDraft(
+      conversationId,
+    );
+    if (awaitingVehicleDraft) {
+      return false;
+    }
+
     if (
       this.hasInboundVisionWorkInFlightSync(
         conversationId,
@@ -5576,6 +5990,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return;
     }
 
+    const mergedText = batch
+      .map((m) => String(m.content ?? '').trim())
+      .filter(Boolean)
+      .join('\n\n');
+    const finalizedBanio = await this.tryFinalizeBanioDraftAfterVehicleReply(
+      conversationId,
+      mergedText,
+    );
+    if (finalizedBanio) {
+      return;
+    }
+
     const anchor = batch[batch.length - 1]!;
     if (
       await this.shouldSuppressAutopilotForVisionPipeline(
@@ -5617,7 +6043,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           forAutopilot: true,
         })
       : '';
-    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}`;
+    const banioModelAppend = await this.buildBanioSolicitarModeloAutopilotAppend(
+      conversation.id,
+    );
+    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}${banioModelAppend}`;
     if (conversation.status !== 'agendado') {
       return head;
     }

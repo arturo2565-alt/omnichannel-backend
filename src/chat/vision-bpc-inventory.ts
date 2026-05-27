@@ -1,6 +1,10 @@
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { coerceDamageLevelCode, damageLevelRank, type DamageLevel } from './autofix-config';
-import { flattenBañoTierSource, inferBañoTierSeveridad } from './instant-quote-from-text';
+import {
+  flattenBañoTierSource,
+  inferBañoTierSeveridad,
+  isPlaceholderBañoVehicleLabel,
+} from './instant-quote-from-text';
 
 export const VISION_BPC_PIEZA_CODE = 'BPC';
 
@@ -30,6 +34,60 @@ export function isVisionBpcPiezaCode(pieza: string): boolean {
   if (!key) return false;
   if (BPC_PIEZA_ALIASES.has(key)) return true;
   return key === 'bpc' || /\bbpc\b/.test(key);
+}
+
+/** Lee vehículo del JSON crudo de visión (snake_case o camelCase). */
+export function extractVisionDetectedVehicle(visionRoot?: unknown): string | null {
+  if (!visionRoot || typeof visionRoot !== 'object') return null;
+  const o = visionRoot as Record<string, unknown>;
+  const keys = [
+    'vehiculo_detectado',
+    'vehiculoDetectado',
+    'vehículo_detectado',
+    'modelo_vehiculo',
+    'modeloVehiculo',
+    'vehicle_detected',
+    'detected_vehicle',
+  ] as const;
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+/** Etiqueta de vehículo usable para plantillas BPC (sin placeholders ni basura). */
+export function pickUsableVisionVehicleLabel(
+  ...candidates: Array<string | null | undefined>
+): string | null {
+  for (const raw of candidates) {
+    const t = String(raw ?? '').trim();
+    if (!t || t.length > 72) continue;
+    if (t.includes('\n')) continue;
+    if (t.includes('http://') || t.includes('https://')) continue;
+    if (t.includes('cloudinary')) continue;
+    if (isPlaceholderBañoVehicleLabel(t)) continue;
+    return t;
+  }
+  return null;
+}
+
+/** Vehículo guardado en inventario BPC o en el análisis agregado. */
+export function pickVehicleLabelFromDamageInventory(
+  inventory: readonly DetectedDamageItem[] | undefined,
+  analysisVehiculo?: string | null,
+): string | null {
+  const fromAnalysis = pickUsableVisionVehicleLabel(analysisVehiculo);
+  if (fromAnalysis) return fromAnalysis;
+  if (!inventory?.length) return null;
+  const bpc = inventory.find((it) => isVisionBpcPiezaCode(it.pieza));
+  const fromBpc = pickUsableVisionVehicleLabel(bpc?.vehiculoDetectado);
+  if (fromBpc) return fromBpc;
+  for (const it of inventory) {
+    const v = pickUsableVisionVehicleLabel(it.vehiculoDetectado);
+    if (v) return v;
+  }
+  return null;
 }
 
 export function visionJsonIndicatesBanioCompleto(root: unknown): boolean {
@@ -138,9 +196,23 @@ export function collapseVisionItemsToBpcIfNeeded(
     ),
   ];
 
+  const vehiculoDetectado = pickUsableVisionVehicleLabel(
+    extractVisionDetectedVehicle(visionRoot),
+    ...items.map((it) => it.vehiculoDetectado),
+  );
+
   console.log(
     `[VisionBPC] Colapsando ${items.length} ítem(s) → BPC (${tierSeveridad}); piezas sueltas omitidas del presupuesto.`,
+    vehiculoDetectado ? `vehículo visión: ${vehiculoDetectado}` : '',
   );
+
+  const inventarioVisualPrevio = items.map((it) => ({
+    pieza: it.pieza,
+    severidad: it.severidad,
+    descripcionTecnica: it.descripcionTecnica,
+    urls_origen: [...(it.urls_origen ?? [])],
+    ...(it.vehiculoDetectado ? { vehiculoDetectado: it.vehiculoDetectado } : {}),
+  }));
 
   return [
     {
@@ -148,6 +220,8 @@ export function collapseVisionItemsToBpcIfNeeded(
       severidad: tierSeveridad,
       descripcionTecnica,
       urls_origen: urls.length ? urls : [...(bpcRow.urls_origen ?? [])],
+      ...(vehiculoDetectado ? { vehiculoDetectado } : {}),
+      inventarioVisualPrevio,
     },
   ];
 }

@@ -1,6 +1,8 @@
 import {
   collapseVisionItemsToBpcIfNeeded,
+  extractVisionDetectedVehicle,
   isVisionBpcPiezaCode,
+  pickVehicleLabelFromDamageInventory,
   visionItemsIndicateBanioCompleto,
 } from './vision-bpc-inventory';
 
@@ -43,6 +45,33 @@ describe('vision-bpc-inventory', () => {
       expect.arrayContaining(['https://a/1.jpg', 'https://a/2.jpg']),
     );
     expect(visionItemsIndicateBanioCompleto(out)).toBe(true);
+  });
+
+  it('propaga vehiculo_detectado del JSON de visión al ítem BPC', () => {
+    const out = collapseVisionItemsToBpcIfNeeded(
+      [
+        {
+          pieza: 'Cofre',
+          severidad: 'DM',
+          descripcionTecnica: 'x',
+          urls_origen: [],
+        },
+      ],
+      'baño completo',
+      {
+        intencion_banio_completo_detectada: true,
+        vehiculo_detectado: 'Volkswagen Passat 2005',
+      },
+    );
+    expect(out[0]!.vehiculoDetectado).toBe('Volkswagen Passat 2005');
+    expect(
+      pickVehicleLabelFromDamageInventory(out, undefined),
+    ).toBe('Volkswagen Passat 2005');
+    expect(
+      extractVisionDetectedVehicle({
+        vehiculoDetectado: 'Audi Q5 2020',
+      }),
+    ).toBe('Audi Q5 2020');
   });
 
   it('respeta intencion_banio_completo_detectada sin sigla BPC', () => {

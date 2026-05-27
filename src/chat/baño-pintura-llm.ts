@@ -27,6 +27,14 @@ export type BañoVehicleInferenceInput = {
     pieza?: string;
   };
   chatTurns?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** `vehiculo_detectado` del JSON de visión (ojo de la IA en fotos). */
+  visionDetectedVehicle?: string | null;
+};
+
+export type BañoVehicleInferenceResult = {
+  vehicleLabel: string | null;
+  confidence: 'high' | 'medium' | 'low' | 'none';
+  reason?: string;
 };
 
 function parseVehicleInferenceJson(raw: string): {
@@ -66,6 +74,7 @@ Recibirás un JSON con:
 - inventario_vision: piezas y descripciones del análisis por fotos (visión multimodal).
 - peritaje: resumen técnico del daño (sin precios ni plantillas de cotización).
 - conversacion: mensajes recientes user/assistant del chat.
+- vehiculo_detectado_vision: marca/modelo/año que la IA de visión identificó en las fotos (puede estar vacío).
 
 Tu única tarea: inferir el vehículo del cliente (marca, modelo y año si hay evidencia).
 
@@ -78,12 +87,23 @@ Responde SOLO con JSON válido:
 
 REGLAS ESTRICTAS para vehicleLabel:
 - Una sola línea corta, legible para humanos. Ejemplos válidos: "Volkswagen Passat 2005", "Audi Q5 2023", "Ford Figo".
-- Prioridad de evidencia: mensajes del usuario que nombren su auto > descripción técnica de visión > contexto indirecto.
+- Prioridad de evidencia: mensajes del usuario que nombren su auto > vehiculo_detectado_vision (fotos) > descripción técnica de peritaje.
+- Si vehiculo_detectado_vision es confiable y el chat no contradice, puedes usarlo como vehicleLabel.
 - NO copies ni parafrasees logs del sistema, IDs, URLs, precios, listas de piezas dañadas, códigos de severidad (DL, DM, DMF), ni texto de cotizaciones previas.
 - NO incluyas frases del asistente salvo que repitan explícitamente el modelo confirmado por el cliente.
 - Si no puedes identificar marca y modelo con confianza razonable, devuelve vehicleLabel como cadena vacía "".
 - No inventes año si no hay pista; puedes omitir el año.
 - Prohibido usar placeholders: "tu vehículo", "su vehículo", "vehículo del cliente", "auto", etc.`;
+
+function normalizeVehicleConfidence(
+  raw: string | undefined,
+): BañoVehicleInferenceResult['confidence'] {
+  const c = String(raw ?? '').trim().toLowerCase();
+  if (c === 'high' || c === 'alta' || c === 'alto') return 'high';
+  if (c === 'medium' || c === 'media' || c === 'medio') return 'medium';
+  if (c === 'low' || c === 'baja' || c === 'bajo') return 'low';
+  return 'none';
+}
 
 /**
  * Inferencia pura por IA (gpt-4o): aísla marca, modelo y año para plantillas BPC.
@@ -91,11 +111,12 @@ REGLAS ESTRICTAS para vehicleLabel:
 export async function inferBañoVehicleDisplayLabelWithLlm(
   openai: OpenAI,
   input: BañoVehicleInferenceInput,
-): Promise<string | null> {
+): Promise<BañoVehicleInferenceResult> {
   const payload = JSON.stringify({
     inventario_vision: input.visionInventory ?? [],
     peritaje: input.damageSummary ?? null,
     conversacion: (input.chatTurns ?? []).slice(-14),
+    vehiculo_detectado_vision: String(input.visionDetectedVehicle ?? '').trim(),
   });
 
   const completion = await openai.chat.completions.create({
@@ -116,31 +137,32 @@ export async function inferBañoVehicleDisplayLabelWithLlm(
   const parsed = parseVehicleInferenceJson(raw);
   if (!parsed) {
     console.warn('[BañoVehicleInfer] JSON inválido:', raw.slice(0, 200));
-    return null;
+    return { vehicleLabel: null, confidence: 'none' };
   }
 
+  const confidence = normalizeVehicleConfidence(parsed.confidence);
   const label = parsed.vehicleLabel;
   if (!label || isLikelyContaminatedVehicleLabel(label)) {
     console.log(
       '[BañoVehicleInfer] sin vehículo usable',
       JSON.stringify({
         vehicleLabel: label?.slice(0, 80) ?? '',
-        confidence: parsed.confidence,
+        confidence,
         reason: parsed.reason,
       }),
     );
-    return null;
+    return { vehicleLabel: null, confidence, reason: parsed.reason };
   }
 
   console.log(
     '[BañoVehicleInfer]',
     JSON.stringify({
       vehicleLabel: label,
-      confidence: parsed.confidence,
+      confidence,
       reason: parsed.reason,
     }),
   );
-  return label;
+  return { vehicleLabel: label, confidence, reason: parsed.reason };
 }
 
 const TALLER_MAPS_URL =
