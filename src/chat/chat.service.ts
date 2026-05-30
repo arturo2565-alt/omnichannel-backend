@@ -34,7 +34,7 @@ import {
   normalizeTextForMatch,
   type DamageLevel,
 } from './autofix-config';
-import { resolveMatrixServicioRaw } from '../catalog/panel-pieza-catalog';
+import { resolveMatrixServicioRaw, normalizePanelPiezaCode } from '../catalog/panel-pieza-catalog';
 import {
   buildDraftQuoteLineFromQuoteRow,
   matrixServicioInputsWithCatalogResolve,
@@ -1186,12 +1186,10 @@ export class ChatService implements OnModuleDestroy {
     if (inv.length > 0 && inv.length === lines.length) {
       return lines.map((line, idx) => {
         const row = inv[idx];
-        const canonical =
-          snap.matchServicio(resolveMatrixServicioRaw(row.pieza.trim())) ??
-          row.pieza.trim();
+        const panelCode = normalizePanelPiezaCode(row.pieza.trim());
         return {
           sortOrder: idx,
-          pieza: canonical,
+          pieza: panelCode,
           severidad: coerceDamageLevelCode(row.severidad),
           precioMx: Math.round(
             Number(line.subtotal ?? line.unitPrice ?? 0),
@@ -1210,7 +1208,7 @@ export class ChatService implements OnModuleDestroy {
       return [
         {
           sortOrder: 0,
-          pieza: analysis.pieza || 'Estetica Exterior',
+          pieza: normalizePanelPiezaCode(analysis.pieza || 'Estetica Exterior'),
           severidad: coerceDamageLevelCode(
             analysis.severidad || analysis.severidadDelDano,
           ),
@@ -1248,7 +1246,8 @@ export class ChatService implements OnModuleDestroy {
         );
         out.push({
           sortOrder: idx,
-          pieza: g.canonical,
+          pieza:
+            normalizePanelPiezaCode(related[0]?.pieza ?? '') || g.canonical,
           severidad: g.damageLevel,
           precioMx: price,
           descripcionTecnica: descParts ? descParts.slice(0, 16000) : null,
@@ -1262,7 +1261,7 @@ export class ChatService implements OnModuleDestroy {
     return [
       {
         sortOrder: 0,
-        pieza: analysis.pieza || 'Estetica Exterior',
+        pieza: normalizePanelPiezaCode(analysis.pieza || 'Estetica Exterior'),
         severidad: coerceDamageLevelCode(
           analysis.severidad || analysis.severidadDelDano,
         ),
@@ -5025,14 +5024,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       if (isBanioPinturaCompletoVisionInventory(newInventory)) {
         analysis = inventoryItemsToVehicleAnalysis(newInventory, allImageUrls);
       } else if (priorInventory.length > 0) {
-        const snapMerge =
-          await this.catalogService.getMatrixPricingSnapshot(visionTallerId);
         const mergedInv = mergeDamageInventoryAccumulative(
           priorInventory,
           newInventory,
-          (raw) =>
-            snapMerge.matchServicio(resolveMatrixServicioRaw(raw)) ??
-            snapMerge.matchServicio(raw),
+          (raw) => normalizePanelPiezaCode(raw) || raw,
         );
         complementMeta = {
           previousPiezas: mergedInv.previousPiezas,
