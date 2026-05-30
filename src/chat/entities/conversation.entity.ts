@@ -68,6 +68,10 @@ export class Conversation {
   @Column({ type: 'boolean', default: true })
   isAutoPilotActive: boolean;
 
+  /** Alarma de recepción física: cliente esperando afuera del taller (Twilio). */
+  @Column({ name: 'cliente_esperando_afuera', type: 'boolean', default: false })
+  clienteEsperandoAfuera: boolean;
+
   @OneToMany(() => Message, (message) => message.conversation, {
     cascade: true,
     onDelete: 'CASCADE',

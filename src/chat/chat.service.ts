@@ -55,6 +55,7 @@ import {
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { DEFAULT_CHAT_APPOINTMENT_PROMPT } from './ai-config-defaults';
 import { AiConfigService } from './ai-config.service';
+import { TwilioService } from './twilio.service';
 import axios from 'axios';
 import { CatalogService } from '../catalog/catalog.service';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
@@ -610,6 +611,18 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'notificarLlegadaCliente',
+      description:
+        'Ejecuta esta herramienta inmediatamente cuando el cliente indique que ya llegó al taller o está esperando afuera.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
 ];
 
 /** Cuerpo del panel para enviar mensaje outbound con JWT (`tallerId` viene del token). */
@@ -703,6 +716,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly catalogService: CatalogService,
 
     private readonly tallerService: TallerService,
+
+    private readonly twilioService: TwilioService,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -5615,7 +5630,30 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       lastMessage: c.lastMessage,
       platform: normalizePlatformForApi(c.platform, fallbackByConvId.get(c.id)),
       isAutoPilotActive: Boolean(c.isAutoPilotActive),
+      clienteEsperandoAfuera: Boolean(c.clienteEsperandoAfuera),
     }));
+  }
+
+  /** Kill switch: cliente ya fue recibido en recepción (detiene alarma Twilio). */
+  async markClienteEsperandoAtendido(
+    conversationId: string,
+    tallerId: string,
+  ): Promise<{ ok: true; conversationId: string; clienteEsperandoAfuera: false }> {
+    const conv = await this.assertConversationForTaller(
+      conversationId,
+      tallerId,
+    );
+    conv.clienteEsperandoAfuera = false;
+    await this.conversationRepository.save(conv);
+    this.twilioService.stopArrivalAlarmLoop(conversationId);
+    console.log('[ArrivalAlarm] Cliente marcado como atendido', {
+      conversationId,
+    });
+    return {
+      ok: true,
+      conversationId,
+      clienteEsperandoAfuera: false,
+    };
   }
 
   // --- LÓGICA DE IA ---
@@ -5804,6 +5842,41 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     };
   }
 
+  /** Alarma de recepción física: marca espera afuera y dispara llamadas Twilio. */
+  private async executeNotificarLlegadaClienteTool(
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    conversation.clienteEsperandoAfuera = true;
+    await this.conversationRepository.save(conversation);
+
+    await this.twilioService.startArrivalAlarmLoop(conversation.id);
+
+    console.log('[ArrivalAlarm] notificarLlegadaCliente activado', {
+      conversationId: conversation.id,
+      contactName: conversation.contactName,
+    });
+
+    return {
+      success: true,
+      clienteEsperandoAfuera: true,
+      message:
+        'Recepción notificada por teléfono. Confirma al cliente que el equipo ya fue alertado y que lo atenderán en breve.',
+    };
+  }
+
+  /** Playground: misma lógica sin llamada Twilio real. */
+  private async executeNotificarLlegadaClienteToolPlayground(): Promise<
+    Record<string, unknown>
+  > {
+    return {
+      success: true,
+      preview: true,
+      clienteEsperandoAfuera: true,
+      message:
+        '(Simulador) Se habría activado la alarma de recepción y llamado al taller. No se marcó en BD ni se llamó por Twilio.',
+    };
+  }
+
   /**
    * Misma validación que {@link executeCreateAppointmentTool} pero sin persistir (panel de pruebas).
    */
@@ -5893,6 +5966,8 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             payload = await this.executeObtenerCotizacionExpressToolPlayground(
               tc.function.arguments ?? '{}',
             );
+          } else if (name === 'notificarLlegadaCliente') {
+            payload = await this.executeNotificarLlegadaClienteToolPlayground();
           } else {
             payload = { success: false, error: `Función no soportada: ${name}` };
           }
@@ -6285,6 +6360,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             } else if (name === 'obtenerCotizacionExpress') {
               payload = await this.executeObtenerCotizacionExpressTool(
                 args,
+                conversation,
+              );
+            } else if (name === 'notificarLlegadaCliente') {
+              payload = await this.executeNotificarLlegadaClienteTool(
                 conversation,
               );
             } else {

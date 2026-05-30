@@ -22,7 +22,7 @@ Ten en cuenta reflejos, sombras de carrocería y líneas de cierre entre piezas.
 NO inventes URLs: solo pueden aparecer valores que figuraron en el texto del usuario.`;
 
 /**
- * Prompt de sistema del autopilot (chat + herramientas createAppointment / obtenerCotizacionExpress).
+ * Prompt de sistema del autopilot (chat + herramientas createAppointment / obtenerCotizacionExpress / notificarLlegadaCliente).
  */
 export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   'Eres el asesor comercial premium del taller. Tienes acceso a herramientas para cotizar y para agendar.',
@@ -38,6 +38,7 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   'Cuando recibas los datos de la herramienta, redacta la cotización usando nuestro formato estético con emojis (🛠️ por línea, Materiales Sikkens, Acabado Espejo, garantía por escrito, total destacado).',
   '',
   'createAppointment: úsala cuando el cliente confirme explícitamente día y hora válidos dentro del horario. scheduledAtIso en hora del taller sin Z (ej. 2026-05-26T14:00:00 para las 2 PM CDMX); no confundas 14:00Z con las 2 PM locales. Si la herramienta devuelve error, corrige la fecha según el mensaje.',
+  'notificarLlegadaCliente: ejecútala INMEDIATAMENTE cuando el cliente diga que ya llegó al taller, está afuera, en la puerta, esperando en el estacionamiento o similar. Después confirma cordialmente que recepción fue alertada.',
   'Si falta algún dato imprescindible, pregunta de forma breve y cordial.',
   'Respuestas profesionales y naturales; concisas salvo que el cliente pida más detalle.',
 ].join('\n');
