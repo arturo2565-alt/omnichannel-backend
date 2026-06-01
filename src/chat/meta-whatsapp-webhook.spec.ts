@@ -1,6 +1,7 @@
 import {
   extractMetaWhatsAppInboundEvents,
   extractWaIdFromRawWhatsAppPayload,
+  extractWhatsAppWebhookMetadata,
   isMetaWhatsAppWebhook,
 } from './meta-whatsapp-webhook';
 
@@ -62,6 +63,17 @@ describe('meta-whatsapp-webhook', () => {
 
   it('extractWaIdFromRawWhatsAppPayload resuelve wa_id en payload anidado', () => {
     expect(extractWaIdFromRawWhatsAppPayload(samplePayload)).toBe('16315551181');
+  });
+
+  it('extractWhatsAppWebhookMetadata lee WABA y teléfono del negocio', () => {
+    const meta = extractWhatsAppWebhookMetadata(samplePayload);
+    expect(meta).toMatchObject({
+      wabaId: 'WABA-12345',
+      phoneNumberId: 'PHONE-NUM-ID-99',
+      displayPhoneNumber: '15550001111',
+      hasMessages: true,
+      hasStatuses: false,
+    });
   });
 
   it('ignora cambios de statuses sin messages', () => {

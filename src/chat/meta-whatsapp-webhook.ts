@@ -11,6 +11,8 @@ export type MetaWhatsAppInboundEvent = {
   text: string;
   /** URL directa si el payload ya trae enlace (p. ej. reenvío legacy). */
   imageUrl: string;
+  /** true = webhook de entrega/lectura (sin mensaje entrante). */
+  isStatusOnly?: boolean;
 };
 
 function pickTrimmed(...values: unknown[]): string {
@@ -116,6 +118,55 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
     };
   }
   return { text: '', imageUrl: '' };
+}
+
+/** Metadatos del primer change (validación de cuenta / número). */
+export function extractWhatsAppWebhookMetadata(body: unknown): {
+  wabaId: string;
+  phoneNumberId: string;
+  displayPhoneNumber: string;
+  hasMessages: boolean;
+  hasStatuses: boolean;
+} {
+  const b = body as Record<string, unknown> | null;
+  const empty = {
+    wabaId: '',
+    phoneNumberId: '',
+    displayPhoneNumber: '',
+    hasMessages: false,
+    hasStatuses: false,
+  };
+  if (!b || !Array.isArray(b.entry)) return empty;
+
+  for (const entry of b.entry) {
+    if (!entry || typeof entry !== 'object') continue;
+    const er = entry as Record<string, unknown>;
+    const wabaId = pickTrimmed(er.id);
+    const changes = Array.isArray(er.changes) ? er.changes : [];
+    for (const change of changes) {
+      if (!change || typeof change !== 'object') continue;
+      const value =
+        (change as Record<string, unknown>).value &&
+        typeof (change as Record<string, unknown>).value === 'object'
+          ? ((change as Record<string, unknown>).value as Record<string, unknown>)
+          : null;
+      if (!value) continue;
+      const metadata =
+        value.metadata && typeof value.metadata === 'object'
+          ? (value.metadata as Record<string, unknown>)
+          : {};
+      const messages = Array.isArray(value.messages) ? value.messages : [];
+      const statuses = Array.isArray(value.statuses) ? value.statuses : [];
+      return {
+        wabaId,
+        phoneNumberId: pickTrimmed(metadata.phone_number_id),
+        displayPhoneNumber: pickTrimmed(metadata.display_phone_number),
+        hasMessages: messages.length > 0,
+        hasStatuses: statuses.length > 0,
+      };
+    }
+  }
+  return empty;
 }
 
 /**

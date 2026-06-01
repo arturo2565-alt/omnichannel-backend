@@ -77,8 +77,13 @@ import {
 import {
   extractMetaWhatsAppInboundEvents,
   extractWaIdFromRawWhatsAppPayload,
+  extractWhatsAppWebhookMetadata,
   isMetaWhatsAppWebhook,
 } from './meta-whatsapp-webhook';
+import {
+  getWhatsAppEnvConfig,
+  isWhatsAppPayloadForOurAccount,
+} from './whatsapp-config';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import {
   buildAutopilotSolicitarModeloBanioAppend,
@@ -258,6 +263,10 @@ function isFacebookMessengerPlatform(
   return (
     s.includes('facebook') || s.includes('messenger') || s === 'fb'
   );
+}
+
+function isWhatsAppPlatform(platform: string | null | undefined): boolean {
+  return String(platform ?? '').toLowerCase().trim().includes('whatsapp');
 }
 
 /** Messenger / WhatsApp: autopilot por texto va en cola con debounce (no respuesta inmediata por mensaje). */
@@ -1532,6 +1541,78 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Envía texto al cliente por WhatsApp Cloud API (Graph).
+   * URL: /{WHATSAPP_PHONE_NUMBER_ID}/messages + Bearer WHATSAPP_ACCESS_TOKEN.
+   */
+  private async sendWhatsAppCloudText(
+    recipientWaId: string,
+    messageText: string,
+  ): Promise<void> {
+    const cfg = getWhatsAppEnvConfig();
+    const phoneNumberId = cfg.phoneNumberId;
+    const token = cfg.accessToken;
+    if (!phoneNumberId) {
+      console.warn(
+        'sendWhatsAppCloudText: falta WHATSAPP_PHONE_NUMBER_ID en entorno',
+      );
+      return;
+    }
+    if (!token) {
+      console.warn(
+        'sendWhatsAppCloudText: falta WHATSAPP_ACCESS_TOKEN en entorno',
+      );
+      return;
+    }
+    const to = String(recipientWaId ?? '').replace(/\D/g, '').trim();
+    const text = String(messageText ?? '').trim();
+    if (!to || !text) return;
+
+    const url = `https://graph.facebook.com/v21.0/${encodeURIComponent(phoneNumberId)}/messages`;
+    await axios.post(
+      url,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'text',
+        text: { body: text.slice(0, 4096) },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      },
+    );
+  }
+
+  /** Despacha outbound al canal correcto (Messenger o WhatsApp). */
+  private dispatchOutboundChannelMessage(
+    conversation: Conversation,
+    content: string,
+    skipChannelSend: boolean,
+  ): void {
+    if (skipChannelSend || isIncomingImage(content)) return;
+    const text = String(content ?? '').trim();
+    if (!text) return;
+
+    if (isFacebookMessengerPlatform(conversation.platform)) {
+      void this.sendFacebookMessengerText(
+        conversation.externalId,
+        text,
+      ).catch((err) =>
+        console.error('sendFacebookMessengerText (outbound):', err),
+      );
+      return;
+    }
+    if (isWhatsAppPlatform(conversation.platform)) {
+      void this.sendWhatsAppCloudText(conversation.externalId, text).catch(
+        (err) => console.error('sendWhatsAppCloudText (outbound):', err),
+      );
+    }
+  }
+
+  /**
    * Perfil público del PSID vía Graph (nombre y foto). Requiere `FB_PAGE_ACCESS_TOKEN`.
    */
   async getFacebookProfile(psid: string): Promise<{
@@ -1872,20 +1953,47 @@ export class ChatService implements OnModuleDestroy {
     processed: number;
     lastMessageId?: string;
   }> {
+    const meta = extractWhatsAppWebhookMetadata(body);
+    const cfg = getWhatsAppEnvConfig();
+
+    if (
+      !isWhatsAppPayloadForOurAccount(
+        {
+          wabaId: meta.wabaId,
+          phoneNumberId: meta.phoneNumberId,
+          displayPhoneNumber: meta.displayPhoneNumber,
+        },
+        cfg,
+      )
+    ) {
+      console.warn(
+        '[Meta WhatsApp webhook] Payload ignorado: no coincide con WHATSAPP_PHONE_NUMBER_ID / WHATSAPP_BUSINESS_ACCOUNT_ID / WHATSAPP_NUMBER',
+        {
+          incoming: {
+            wabaId: meta.wabaId,
+            phoneNumberId: meta.phoneNumberId,
+            displayPhoneNumber: meta.displayPhoneNumber,
+          },
+          expected: {
+            businessAccountId: cfg.businessAccountId || '(no configurado)',
+            phoneNumberId: cfg.phoneNumberId || '(no configurado)',
+            displayNumber: cfg.displayNumber || '(no configurado)',
+          },
+        },
+      );
+      return { processed: 0 };
+    }
+
     const events = extractMetaWhatsAppInboundEvents(body);
     if (!events.length) {
-      const wabaId = String(body?.entry?.[0]?.id ?? '').trim();
-      const meta = body?.entry?.[0]?.changes?.[0]?.value?.metadata;
       console.log(
-        '[Meta WhatsApp webhook] Sin mensajes entrantes (status/plantilla/test).',
+        '[Meta WhatsApp webhook] Sin mensajes entrantes (status/plantilla/test aceptado).',
         {
-          wabaId: wabaId || '(vacío)',
-          displayPhoneNumber:
-            meta?.display_phone_number != null
-              ? String(meta.display_phone_number)
-              : '',
-          phoneNumberId:
-            meta?.phone_number_id != null ? String(meta.phone_number_id) : '',
+          wabaId: meta.wabaId || '(vacío)',
+          displayPhoneNumber: meta.displayPhoneNumber || '',
+          phoneNumberId: meta.phoneNumberId || '',
+          hasStatuses: meta.hasStatuses,
+          hasMessages: meta.hasMessages,
         },
       );
       return { processed: 0 };
@@ -1895,8 +2003,29 @@ export class ChatService implements OnModuleDestroy {
     let lastMessageId: string | undefined;
 
     for (const evt of events) {
+      if (
+        !isWhatsAppPayloadForOurAccount(
+          {
+            wabaId: evt.wabaId,
+            phoneNumberId: evt.phoneNumberId,
+            displayPhoneNumber: evt.displayPhoneNumber,
+          },
+          cfg,
+        )
+      ) {
+        console.warn(
+          '[Meta WhatsApp webhook] Mensaje ignorado (cuenta/número no configurado)',
+          {
+            wabaId: evt.wabaId,
+            phoneNumberId: evt.phoneNumberId,
+            displayPhoneNumber: evt.displayPhoneNumber,
+          },
+        );
+        continue;
+      }
+
       const tallerId = await this.tallerService.resolveTallerIdForWebhook(
-        evt.phoneNumberId || evt.wabaId,
+        cfg.phoneNumberId || evt.phoneNumberId || evt.wabaId,
       );
 
       const basePayload: Record<string, unknown> = {
@@ -2288,15 +2417,12 @@ export class ChatService implements OnModuleDestroy {
 
     if (
       resolvedDirection === 'outbound' &&
-      isFacebookMessengerPlatform(conversation.platform) &&
-      !isIncomingImage(contentToSave) &&
       !data.skipOutboundFacebookSend
     ) {
-      void this.sendFacebookMessengerText(
-        conversation.externalId,
+      this.dispatchOutboundChannelMessage(
+        conversation,
         String(contentToSave),
-      ).catch((err) =>
-        console.error('sendFacebookMessengerText (outbound panel):', err),
+        false,
       );
     }
 
@@ -6599,12 +6725,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     this.chatGateway.emitNewMessage(savedOut);
 
-    if (isFacebookMessengerPlatform(conversation.platform)) {
-      void this.sendFacebookMessengerText(conversation.externalId, text).catch(
-        (err) =>
-          console.error('sendFacebookMessengerText (autopilot):', err),
-      );
-    }
+    this.dispatchOutboundChannelMessage(conversation, text, false);
   }
 
   async generateAiSuggestion(message: Message) {
