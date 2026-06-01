@@ -105,7 +105,7 @@ export class ChatController {
     return { url };
   }
 
-  /** Webhook Meta + envío legacy del panel (sin JWT). */
+  /** Webhook Meta (Messenger / WhatsApp) + envío plano del panel (sin JWT). */
   @Public()
   @Post()
   receiveMessage(@Req() req: Request, @Res() res: Response) {

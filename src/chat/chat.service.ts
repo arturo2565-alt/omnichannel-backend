@@ -74,6 +74,11 @@ import {
   visionItemsIndicateBanioCompleto,
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
+import {
+  extractMetaWhatsAppInboundEvents,
+  extractWaIdFromRawWhatsAppPayload,
+  isMetaWhatsAppWebhook,
+} from './meta-whatsapp-webhook';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import {
   buildAutopilotSolicitarModeloBanioAppend,
@@ -270,12 +275,13 @@ function shouldDebounceAutopilotInboundText(
 /**
  * Webhook de Meta Page (Messenger): `object: "page"` + `entry[]`.
  * Si `object` falta pero hay `entry[].messaging[]`, también lo tratamos como Meta (evita perder eventos).
- * Instagram usa `object: "instagram"` — no usar esta ruta.
+ * Instagram y WhatsApp usan otros `object` — no usar esta ruta.
  */
 function isMetaPageWebhook(body: unknown): boolean {
   const b = body as Record<string, unknown> | null;
   if (!b || !Array.isArray(b.entry)) return false;
   if (b.object === 'instagram') return false;
+  if (b.object === 'whatsapp_business_account') return false;
   if (b.object === 'page') return true;
   return b.entry.some(
     (e) =>
@@ -1601,7 +1607,7 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * POST `/webhook`: payload del panel (legacy) o webhook Meta (`object: page`).
+   * POST `/webhook`: panel (body plano), Meta Messenger (`object: page`) o WhatsApp (`whatsapp_business_account`).
    */
   async ingestWebhookPayload(body: any): Promise<{
     processed: number;
@@ -1610,12 +1616,23 @@ export class ChatService implements OnModuleDestroy {
     if (isMetaPageWebhook(body)) {
       return this.processMetaMessengerWebhook(body);
     }
+    if (isMetaWhatsAppWebhook(body)) {
+      return this.processMetaWhatsAppWebhook(body);
+    }
     if (body && typeof body === 'object' && Array.isArray((body as any).entry)) {
+      const obj = String((body as any).object ?? '').trim();
+      if (obj === 'instagram') {
+        console.warn(
+          '[webhook] payload Instagram recibido; integración no implementada.',
+        );
+        return { processed: 0 };
+      }
       console.warn(
-        '[webhook] payload con `entry` pero no clasificado como Meta page; object=',
-        (body as any).object,
-        '— se intentará como legacy (puede fallar si es otro producto Meta).',
+        '[webhook] payload con `entry` no reconocido; object=',
+        obj || '(vacío)',
+        '— omitido (no se usa modo legacy para productos Meta).',
       );
+      return { processed: 0 };
     }
     const saved = await this.saveMessage(body ?? {});
     return { processed: 1, lastMessageId: saved.id };
@@ -1849,6 +1866,106 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
+   * Normaliza eventos `entry[].changes[]` de WhatsApp Cloud API y delega en {@link saveMessage}.
+   */
+  private async processMetaWhatsAppWebhook(body: any): Promise<{
+    processed: number;
+    lastMessageId?: string;
+  }> {
+    const events = extractMetaWhatsAppInboundEvents(body);
+    if (!events.length) {
+      const wabaId = String(body?.entry?.[0]?.id ?? '').trim();
+      const meta = body?.entry?.[0]?.changes?.[0]?.value?.metadata;
+      console.log(
+        '[Meta WhatsApp webhook] Sin mensajes entrantes (status/plantilla/test).',
+        {
+          wabaId: wabaId || '(vacío)',
+          displayPhoneNumber:
+            meta?.display_phone_number != null
+              ? String(meta.display_phone_number)
+              : '',
+          phoneNumberId:
+            meta?.phone_number_id != null ? String(meta.phone_number_id) : '',
+        },
+      );
+      return { processed: 0 };
+    }
+
+    let n = 0;
+    let lastMessageId: string | undefined;
+
+    for (const evt of events) {
+      const tallerId = await this.tallerService.resolveTallerIdForWebhook(
+        evt.phoneNumberId || evt.wabaId,
+      );
+
+      const basePayload: Record<string, unknown> = {
+        externalId: evt.threadWaId,
+        wa_id: evt.threadWaId,
+        from: evt.threadWaId,
+        tallerId,
+        wabaId: evt.wabaId,
+        phoneNumberId: evt.phoneNumberId,
+        displayPhoneNumber: evt.displayPhoneNumber,
+        metaPageId: evt.phoneNumberId || evt.wabaId,
+        platform: 'whatsapp',
+        direction: 'inbound',
+        contactName: evt.contactName,
+      };
+
+      if (evt.messageId) {
+        const dup = await this.findMessageByMetaMid(evt.messageId);
+        if (dup) {
+          console.log(
+            '[Meta WhatsApp webhook] wamid duplicado, omitido:',
+            evt.messageId,
+          );
+          continue;
+        }
+      }
+
+      if (evt.text) {
+        const saved = await this.saveMessage({
+          ...basePayload,
+          message: evt.text,
+          ...(evt.messageId ? { metaMessageId: evt.messageId } : {}),
+        });
+        console.log(
+          '[Meta WhatsApp webhook] texto inbound | wa_id:',
+          evt.threadWaId,
+          '| WABA:',
+          evt.wabaId,
+          '| display:',
+          evt.displayPhoneNumber,
+          '| wamid:',
+          evt.messageId || '(sin id)',
+        );
+        lastMessageId = saved.id;
+        n++;
+      }
+
+      if (evt.imageUrl) {
+        const imageMid = evt.messageId
+          ? `${evt.messageId}:img`
+          : '';
+        if (imageMid) {
+          const dupImg = await this.findMessageByMetaMid(imageMid);
+          if (dupImg) continue;
+        }
+        const saved = await this.saveMessage({
+          ...basePayload,
+          message: evt.imageUrl,
+          ...(imageMid ? { metaMessageId: imageMid } : {}),
+        });
+        lastMessageId = saved.id;
+        n++;
+      }
+    }
+
+    return { processed: n, lastMessageId };
+  }
+
+  /**
    * GUARDAR MENSAJE Y ACTUALIZAR CONVERSACIÓN.
    * - Sin `direction` o distinto de `outbound` → **`inbound`** (mensajes del cliente / webhook canal).
    * - **`outbound`** → respuestas del agente (panel / cotización / dashboard); sin análisis de imagen entrante ni sugerencias IA sobre ese mismo mensaje.
@@ -1870,6 +1987,8 @@ export class ChatService implements OnModuleDestroy {
       const pageHint = pickFirstNonEmptyTrimmedString(
         data.metaPageId,
         data.pageId,
+        data.phoneNumberId,
+        data.wabaId,
       );
       if (pageHint) {
         tenantId = await this.tallerService.resolveTallerIdForWebhook(
@@ -1905,12 +2024,17 @@ export class ChatService implements OnModuleDestroy {
         data.externalId,
         data.id,
         data.from,
+        data.wa_id,
+        data.waId,
         data.sender_id,
         data.senderId,
       );
       if (!threadExternalId) {
+        threadExternalId = extractWaIdFromRawWhatsAppPayload(data);
+      }
+      if (!threadExternalId) {
         throw new BadRequestException(
-          'No se pudo determinar la conversación: envía `conversationId` (UUID interno) desde el panel, o bien `externalId` / `id` / `from` con el ID estable del contacto en el canal. No existe conversación por defecto ni fallback.',
+          'No se pudo determinar la conversación: envía `conversationId` (UUID interno) desde el panel, o bien `externalId` / `wa_id` / `from` con el ID estable del contacto en el canal (p. ej. número WhatsApp).',
         );
       }
 
@@ -1929,6 +2053,12 @@ export class ChatService implements OnModuleDestroy {
         data.name,
       );
 
+      const platformFromData = shouldPersistPlatformOnConversation(data.platform)
+        ? String(data.platform).trim()
+        : /^\d{8,15}$/.test(threadExternalId)
+          ? 'whatsapp'
+          : null;
+
       if (!conversation) {
         conversation = await this.findOrCreateConversationByExternalId(
           tenantId,
@@ -1937,8 +2067,8 @@ export class ChatService implements OnModuleDestroy {
             let displayName = contactName;
             let avatarUrl: string | null = null;
             if (
-              shouldPersistPlatformOnConversation(data.platform) &&
-              isFacebookMessengerPlatform(data.platform)
+              platformFromData &&
+              isFacebookMessengerPlatform(platformFromData)
             ) {
               const prof = await this.getFacebookProfile(threadExternalId);
               if (prof) {
@@ -1950,12 +2080,13 @@ export class ChatService implements OnModuleDestroy {
                 if (full) displayName = full;
                 if (prof.profile_pic) avatarUrl = prof.profile_pic;
               }
+            } else if (
+              !displayName &&
+              platformFromData === 'whatsapp'
+            ) {
+              displayName = `WhatsApp +${threadExternalId}`;
             }
-            const platformVal = shouldPersistPlatformOnConversation(
-              data.platform,
-            )
-              ? String(data.platform).trim()
-              : null;
+            const platformVal = platformFromData;
             const contact = await this.findOrCreateContactForTaller(
               tenantId,
               threadExternalId,
@@ -1982,8 +2113,8 @@ export class ChatService implements OnModuleDestroy {
         if (contactName && conversation.contactName !== contactName) {
           conversation.contactName = contactName;
         }
-        if (shouldPersistPlatformOnConversation(data.platform)) {
-          conversation.platform = String(data.platform).trim();
+        if (platformFromData) {
+          conversation.platform = platformFromData;
         }
         await this.conversationRepository.save(conversation);
       }
