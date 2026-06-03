@@ -25,6 +25,7 @@ import type {
   SendAgentMessageBody,
 } from './chat.service';
 import { AiConfigService } from './ai-config.service';
+import { getWhatsAppVerifyToken } from './whatsapp-config';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -45,8 +46,11 @@ export class ChatController {
     @Query('hub.challenge') challenge: string,
     @Res() res: Response,
   ) {
-    const verifyToken =
-      process.env.FB_VERIFY_TOKEN?.trim() || 'AutoFix_Secret_2026';
+    const verifyToken = getWhatsAppVerifyToken();
+    if (!verifyToken) {
+      console.warn('[webhook GET] WHATSAPP_VERIFY_TOKEN no configurado');
+      throw new ForbiddenException('Validación fallida: WHATSAPP_VERIFY_TOKEN no configurado');
+    }
     if (mode === 'subscribe' && token === verifyToken) {
       return res
         .status(200)

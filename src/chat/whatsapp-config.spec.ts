@@ -2,6 +2,10 @@ import {
   getWhatsAppEnvConfig,
   isWhatsAppPayloadForOurAccount,
   normalizeWhatsAppDigits,
+  getWhatsAppVerifyToken,
+  getWhatsAppAccessToken,
+  getWhatsAppPhoneNumberId,
+  buildWhatsAppMessagesUrl,
 } from './whatsapp-config';
 
 describe('whatsapp-config', () => {
@@ -53,5 +57,29 @@ describe('whatsapp-config', () => {
       ),
     ).toBe(true);
     expect(normalizeWhatsAppDigits('+52 55 1234 5678')).toBe('525512345678');
+  });
+
+  it('getWhatsAppVerifyToken lee solo WHATSAPP_VERIFY_TOKEN', () => {
+    process.env.WHATSAPP_VERIFY_TOKEN = 'AutoFix_Secret_2026';
+    delete process.env.FB_VERIFY_TOKEN;
+    expect(getWhatsAppVerifyToken()).toBe('AutoFix_Secret_2026');
+  });
+
+  it('getWhatsAppVerifyToken no usa FB_VERIFY_TOKEN como fallback', () => {
+    delete process.env.WHATSAPP_VERIFY_TOKEN;
+    process.env.FB_VERIFY_TOKEN = 'fb-only';
+    expect(getWhatsAppVerifyToken()).toBe('');
+  });
+
+  it('buildWhatsAppMessagesUrl usa WHATSAPP_PHONE_NUMBER_ID', () => {
+    process.env.WHATSAPP_PHONE_NUMBER_ID = '1234567890';
+    expect(buildWhatsAppMessagesUrl()).toBe(
+      'https://graph.facebook.com/v21.0/1234567890/messages',
+    );
+  });
+
+  it('getWhatsAppAccessToken lee WHATSAPP_ACCESS_TOKEN', () => {
+    process.env.WHATSAPP_ACCESS_TOKEN = 'EAA-test-token';
+    expect(getWhatsAppAccessToken()).toBe('EAA-test-token');
   });
 });

@@ -83,6 +83,9 @@ import {
 import {
   getWhatsAppEnvConfig,
   isWhatsAppPayloadForOurAccount,
+  getWhatsAppAccessToken,
+  getWhatsAppPhoneNumberId,
+  buildWhatsAppMessagesUrl,
 } from './whatsapp-config';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import {
@@ -1548,9 +1551,8 @@ export class ChatService implements OnModuleDestroy {
     recipientWaId: string,
     messageText: string,
   ): Promise<void> {
-    const cfg = getWhatsAppEnvConfig();
-    const phoneNumberId = cfg.phoneNumberId;
-    const token = cfg.accessToken;
+    const phoneNumberId = getWhatsAppPhoneNumberId();
+    const token = getWhatsAppAccessToken();
     if (!phoneNumberId) {
       console.warn(
         'sendWhatsAppCloudText: falta WHATSAPP_PHONE_NUMBER_ID en entorno',
@@ -1567,7 +1569,7 @@ export class ChatService implements OnModuleDestroy {
     const text = String(messageText ?? '').trim();
     if (!to || !text) return;
 
-    const url = `https://graph.facebook.com/v21.0/${encodeURIComponent(phoneNumberId)}/messages`;
+    const url = buildWhatsAppMessagesUrl(phoneNumberId);
     await axios.post(
       url,
       {
@@ -2025,7 +2027,7 @@ export class ChatService implements OnModuleDestroy {
       }
 
       const tallerId = await this.tallerService.resolveTallerIdForWebhook(
-        cfg.phoneNumberId || evt.phoneNumberId || evt.wabaId,
+        getWhatsAppPhoneNumberId() || evt.phoneNumberId || evt.wabaId,
       );
 
       const basePayload: Record<string, unknown> = {

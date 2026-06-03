@@ -6,6 +6,9 @@ export type WhatsAppEnvConfig = {
   accessToken: string;
 };
 
+/** Versión Graph API para WhatsApp Cloud. */
+export const WHATSAPP_GRAPH_API_VERSION = 'v21.0';
+
 export function getWhatsAppEnvConfig(): WhatsAppEnvConfig {
   return {
     businessAccountId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID?.trim() ?? '',
@@ -13,6 +16,33 @@ export function getWhatsAppEnvConfig(): WhatsAppEnvConfig {
     displayNumber: process.env.WHATSAPP_NUMBER?.trim() ?? '',
     accessToken: process.env.WHATSAPP_ACCESS_TOKEN?.trim() ?? '',
   };
+}
+
+/** Token de verificación GET del webhook WhatsApp (`hub.verify_token` ↔ WHATSAPP_VERIFY_TOKEN). */
+export function getWhatsAppVerifyToken(): string {
+  return process.env.WHATSAPP_VERIFY_TOKEN?.trim() ?? '';
+}
+
+/** Access token permanente de WhatsApp Cloud API (Railway: WHATSAPP_ACCESS_TOKEN). */
+export function getWhatsAppAccessToken(): string {
+  return process.env.WHATSAPP_ACCESS_TOKEN?.trim() ?? '';
+}
+
+/** Phone Number ID de la línea de WhatsApp (Railway: WHATSAPP_PHONE_NUMBER_ID). */
+export function getWhatsAppPhoneNumberId(): string {
+  return process.env.WHATSAPP_PHONE_NUMBER_ID?.trim() ?? '';
+}
+
+/**
+ * URL de envío de mensajes WhatsApp Cloud API.
+ * POST …/{WHATSAPP_PHONE_NUMBER_ID}/messages con Authorization: Bearer.
+ */
+export function buildWhatsAppMessagesUrl(phoneNumberId?: string): string {
+  const id = String(phoneNumberId ?? getWhatsAppPhoneNumberId()).trim();
+  if (!id) {
+    throw new Error('WHATSAPP_PHONE_NUMBER_ID no está configurado en el entorno.');
+  }
+  return `https://graph.facebook.com/${WHATSAPP_GRAPH_API_VERSION}/${encodeURIComponent(id)}/messages`;
 }
 
 export function whatsAppEnvConfigured(cfg: WhatsAppEnvConfig = getWhatsAppEnvConfig()): boolean {
