@@ -86,6 +86,7 @@ import {
   getWhatsAppAccessToken,
   getWhatsAppPhoneNumberId,
   buildWhatsAppMessagesUrl,
+  normalizeWhatsAppRecipientWaId,
 } from './whatsapp-config';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import {
@@ -1565,7 +1566,7 @@ export class ChatService implements OnModuleDestroy {
       );
       return;
     }
-    const to = String(recipientWaId ?? '').replace(/\D/g, '').trim();
+    const to = normalizeWhatsAppRecipientWaId(recipientWaId);
     const text = String(messageText ?? '').trim();
     if (!to || !text) return;
 

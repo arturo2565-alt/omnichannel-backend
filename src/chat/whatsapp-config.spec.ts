@@ -6,6 +6,7 @@ import {
   getWhatsAppAccessToken,
   getWhatsAppPhoneNumberId,
   buildWhatsAppMessagesUrl,
+  normalizeWhatsAppRecipientWaId,
 } from './whatsapp-config';
 
 describe('whatsapp-config', () => {
@@ -81,5 +82,14 @@ describe('whatsapp-config', () => {
   it('getWhatsAppAccessToken lee WHATSAPP_ACCESS_TOKEN', () => {
     process.env.WHATSAPP_ACCESS_TOKEN = 'EAA-test-token';
     expect(getWhatsAppAccessToken()).toBe('EAA-test-token');
+  });
+
+  it('normalizeWhatsAppRecipientWaId quita el 1 extra en 521… (13 dígitos MX)', () => {
+    expect(normalizeWhatsAppRecipientWaId('5215612345678')).toBe('525612345678');
+    expect(normalizeWhatsAppRecipientWaId('+52 1 56 1234 5678')).toBe('525612345678');
+  });
+
+  it('normalizeWhatsAppRecipientWaId no altera wa_id ya válido de 12 dígitos', () => {
+    expect(normalizeWhatsAppRecipientWaId('525612345678')).toBe('525612345678');
   });
 });
