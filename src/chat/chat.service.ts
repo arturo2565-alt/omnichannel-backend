@@ -1571,22 +1571,28 @@ export class ChatService implements OnModuleDestroy {
     if (!to || !text) return;
 
     const url = buildWhatsAppMessagesUrl(phoneNumberId);
-    await axios.post(
-      url,
-      {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to,
-        type: 'text',
-        text: { body: text.slice(0, 4096) },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
+    try {
+      await axios.post(
+        url,
+        {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to,
+          type: 'text',
+          text: { body: text.slice(0, 4096) },
         },
-      },
-    );
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+    } catch (error) {
+      const err = error as { response?: { data?: unknown } };
+      console.error('Error de Meta:', err.response?.data);
+      throw error;
+    }
   }
 
   /** Despacha outbound al canal correcto (Messenger o WhatsApp). */
