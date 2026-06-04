@@ -205,67 +205,6 @@ export class ChatController {
   }
 
   @UseGuards(JwtAuthGuard)
-  @Post('conversations/:id/text-quote/process')
-  @HttpCode(HttpStatus.OK)
-  async processTextClientQuote(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id') conversationId: string,
-    @Body() body: { userText: string; messageId?: string; contextText?: string },
-  ) {
-    return this.chatService.processTextClientQuoteForPanel(
-      conversationId,
-      user.tallerId,
-      body,
-    );
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Get('conversations/:id/text-quote/history')
-  async getTextQuoteChangeHistory(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id') conversationId: string,
-  ) {
-    return this.chatService.findTextQuoteChangeHistory(
-      conversationId,
-      user.tallerId,
-    );
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Post('conversations/:id/quote/update-from-catalog')
-  @HttpCode(HttpStatus.OK)
-  async updateQuoteFromCatalog(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id') conversationId: string,
-    @Body()
-    body: {
-      quoteId?: string;
-      customerText: string;
-      items: Array<{
-        partName: string;
-        action: 'pintar' | 'reparar_pintar' | 'cambiar_pintar' | 'ajustar' | 'otro';
-        damageDescription?: string;
-        severityHint?: 'DML' | 'DM' | 'DF' | 'unknown';
-        serviceCodeHint?: string;
-        source: 'texto_cliente' | 'vision' | 'manual' | 'ai_suggestion';
-        evidenceImageIds?: string[];
-      }>;
-      messageId?: string;
-    },
-  ) {
-    return this.chatService.actualizarCotizacionDesdeCatalogo(
-      {
-        conversationId,
-        tallerId: user.tallerId,
-        quoteId: body.quoteId,
-        customerText: body.customerText,
-        items: body.items,
-      },
-      { messageId: body.messageId, emitSocket: true },
-    );
-  }
-
-  @UseGuards(JwtAuthGuard)
   @Get('appointments')
   async getAppointments(@CurrentUser() user: AuthenticatedUser) {
     return await this.chatService.findAllAppointments(user.tallerId);

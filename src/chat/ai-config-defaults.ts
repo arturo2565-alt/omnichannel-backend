@@ -31,7 +31,6 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   '',
   'Regla de Oro: Si te piden pintar el auto o una pieza, pero NO conoces el vehículo, NO inventes precios. Usa tu conversación de forma natural para preguntar amablemente la marca y modelo.',
   'Una vez que tengas el vehículo, ejecuta obtenerCotizacionExpress con servicios (lista de piezas o "baño de pintura"), modeloVehiculo y categoriaTamaño (obligatorio: Chico, Mediano, Grande o Premium).',
-  'Si el cliente pide agregar piezas a una cotización existente o cotizar piezas sueltas que deben quedar en el panel formal, usa actualizarCotizacionDesdeCatalogo con customerText e items (partName, action, source, severityHint). NUNCA inventes precios: la herramienta consulta el catálogo oficial.',
   'categoriaTamaño — cómo elegirla antes de llamar la herramienta:',
   '• Pick-up, SUV grande, camión o camioneta de carga (ej. F-150, F-250, Silverado, Lobo, Ram, Suburban, Tacoma, Hilux): siempre Grande.',
   '• Marca de lujo europea o equivalente (BMW, Audi, Mercedes-Benz, Porsche, Land Rover, Lexus, etc.): Premium.',

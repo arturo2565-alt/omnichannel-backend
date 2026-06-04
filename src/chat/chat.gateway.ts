@@ -31,21 +31,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.emit('imageDamageAnalysis', payload);
   }
 
-  /** Actualización de cotización persistida (herramienta actualizarCotizacionDesdeCatalogo). */
-  emitQuoteUpdated(payload: {
-    quoteId: string;
-    conversationId: string;
-    messageId: string;
-    damageAnalysis: unknown;
-    draftQuote: unknown;
-    items: unknown;
-    estimateAmount: number;
-    requiresHumanReview?: boolean;
-    isAutoPilotActive?: boolean;
-  }) {
-    this.server.emit('quoteUpdated', payload);
-  }
-
   /** Nueva cotización persistida en `draft_quotes`, lista para revisión en el panel */
   emitDraftQuoteReady(payload: {
     draftQuoteId: string;

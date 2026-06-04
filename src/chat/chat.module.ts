@@ -8,7 +8,6 @@ import { Conversation } from './entities/conversation.entity';
 import { Contact } from './entities/contact.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
-import { DraftQuoteChangeLog } from './entities/draft-quote-change-log.entity';
 import { AppointmentEntity } from './entities/appointment.entity';
 import { AiConfigEntity } from './entities/ai-config.entity';
 import { AiConfigService } from './ai-config.service';
@@ -29,7 +28,6 @@ import { AuthModule } from '../auth/auth.module';
       Conversation,
       DraftQuoteEntity,
       DraftQuoteItem,
-      DraftQuoteChangeLog,
       AppointmentEntity,
       AiConfigEntity,
     ]),

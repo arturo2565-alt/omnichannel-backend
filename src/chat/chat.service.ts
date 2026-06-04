@@ -17,7 +17,6 @@ import { Conversation } from './entities/conversation.entity';
 import { Contact } from './entities/contact.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
-import { DraftQuoteChangeLog } from './entities/draft-quote-change-log.entity';
 import {
   AppointmentEntity,
   type AppointmentStatus,
@@ -151,27 +150,7 @@ import {
   tryResolveInstantQuoteFromUserText,
   tryVagueGenericServiceProfilingReply,
   userLatestMessageLooksLikeVehicleModelReply,
-  textLooksLikePiezaPinturaRepintadoRequest,
 } from './instant-quote-from-text';
-import {
-  buildClientMessageFromSavedDraftQuote,
-  detectTextClientQuoteIntent,
-  extractClientQuotePiecesHeuristic,
-  extractClientQuotePiecesWithLlm,
-  logTextClientQuoteFlow,
-  resolveExtractedPiecesAgainstCatalog,
-  resolvedLinesToDetectedDamageItems,
-} from './text-client-quote';
-import type { TextQuoteProcessResult } from './text-client-quote.types';
-import {
-  buildCustomerMessageDataFromQuote,
-  formattedLinesToDetectedDamageItems,
-  parseActualizarCotizacionToolArgs,
-  resolveCatalogItemToQuoteLine,
-  type ActualizarCotizacionInput,
-  type ActualizarCotizacionResult,
-  type FormattedQuoteLine,
-} from './actualizar-cotizacion-desde-catalogo';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -654,83 +633,6 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
-      name: 'actualizarCotizacionDesdeCatalogo',
-      description:
-        'Agrega piezas o servicios a la cotización formal de la conversación usando EXCLUSIVAMENTE el catálogo oficial del taller. Persiste en base de datos y actualiza el panel. NUNCA inventes precios: la herramienta los obtiene del catálogo o marca la línea como pendiente de revisión manual.',
-      parameters: {
-        type: 'object',
-        properties: {
-          quoteId: {
-            type: 'string',
-            description:
-              'UUID del borrador existente. Opcional: si se omite, se usa o crea la cotización activa PENDING_APPROVAL de la conversación.',
-          },
-          customerText: {
-            type: 'string',
-            description:
-              'Texto original del cliente que motivó agregar estas piezas (para historial y notas).',
-          },
-          items: {
-            type: 'array',
-            description: 'Piezas/servicios a agregar o actualizar en la cotización.',
-            items: {
-              type: 'object',
-              properties: {
-                partName: {
-                  type: 'string',
-                  description:
-                    'Nombre de la pieza en lenguaje natural (ej. fascia trasera, puerta delantera derecha).',
-                },
-                action: {
-                  type: 'string',
-                  enum: [
-                    'pintar',
-                    'reparar_pintar',
-                    'cambiar_pintar',
-                    'ajustar',
-                    'otro',
-                  ],
-                },
-                damageDescription: {
-                  type: 'string',
-                  description: 'Descripción del daño (ej. solo rayada, abolladura moderada).',
-                },
-                severityHint: {
-                  type: 'string',
-                  enum: ['DML', 'DM', 'DF', 'unknown'],
-                },
-                serviceCodeHint: {
-                  type: 'string',
-                  description:
-                    'Código panel opcional (FD, FT, PDI, PDD, Cofre, Toldo, etc.).',
-                },
-                source: {
-                  type: 'string',
-                  enum: [
-                    'texto_cliente',
-                    'vision',
-                    'manual',
-                    'ai_suggestion',
-                  ],
-                },
-                evidenceImageIds: {
-                  type: 'array',
-                  items: { type: 'string' },
-                  description:
-                    'IDs de mensajes con fotos evidencia en esta conversación.',
-                },
-              },
-              required: ['partName', 'action', 'source'],
-            },
-          },
-        },
-        required: ['customerText', 'items'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
       name: 'notificarLlegadaCliente',
       description:
         'Ejecuta esta herramienta inmediatamente cuando el cliente indique que ya llegó al taller o está esperando afuera.',
@@ -822,9 +724,6 @@ export class ChatService implements OnModuleDestroy {
 
     @InjectRepository(DraftQuoteItem)
     private readonly draftQuoteItemRepository: Repository<DraftQuoteItem>,
-
-    @InjectRepository(DraftQuoteChangeLog)
-    private readonly draftQuoteChangeLogRepository: Repository<DraftQuoteChangeLog>,
 
     @InjectRepository(AppointmentEntity)
     private readonly appointmentRepository: Repository<AppointmentEntity>,
@@ -1291,33 +1190,6 @@ export class ChatService implements OnModuleDestroy {
   /**
    * Persiste líneas relacionales alineadas con `draftQuote.quotePayload.lines` y el inventario/análisis.
    */
-  private draftQuoteItemExtrasFromInventoryRow(
-    row: DetectedDamageItem | undefined,
-    precioMx: number,
-  ): Omit<
-    DraftQuoteItem,
-    'id' | 'draftQuote' | 'draftQuoteId' | 'sortOrder' | 'pieza' | 'severidad' | 'precioMx' | 'descripcionTecnica' | 'urlsOrigen'
-  > {
-    return {
-      catalogServicio: row?.catalogServicio ?? null,
-      nombreVisible: row?.nombreVisible ?? null,
-      precioOficial:
-        row?.precioOficial != null
-          ? Math.round(Number(row.precioOficial))
-          : null,
-      precioFinal:
-        row?.precioFinal != null
-          ? Math.round(Number(row.precioFinal))
-          : Math.round(precioMx),
-      fuente: row?.fuente ?? 'vision',
-      evidencia: row?.evidencia ?? null,
-      confidence: row?.confidence ?? null,
-      notasInternas: row?.notasInternas ?? null,
-      estadoRevision: row?.estadoRevision ?? 'pendiente_revision_fisica',
-      lineCreatedAt: new Date(),
-    };
-  }
-
   private async buildDraftQuoteLineRowsForPersist(
     analysis: VehicleDamageAnalysis,
     doc: DraftQuote,
@@ -1334,30 +1206,24 @@ export class ChatService implements OnModuleDestroy {
       return lines.map((line, idx) => {
         const row = inv[idx];
         const panelCode = normalizePanelPiezaCode(row.pieza.trim());
-        const precioMx = Math.round(
-          Number(line.subtotal ?? line.unitPrice ?? 0),
-        );
         return {
           sortOrder: idx,
           pieza: panelCode,
           severidad: coerceDamageLevelCode(row.severidad),
-          precioMx,
+          precioMx: Math.round(
+            Number(line.subtotal ?? line.unitPrice ?? 0),
+          ),
           descripcionTecnica: row.descripcionTecnica ?? null,
           urlsOrigen:
             Array.isArray(row.urls_origen) && row.urls_origen.length > 0
               ? [...row.urls_origen]
               : null,
-          ...this.draftQuoteItemExtrasFromInventoryRow(row, precioMx),
         };
       });
     }
 
     if (inv.length > 0 && lines.length === 1) {
       const line0only = lines[0];
-      const precioMx = Math.round(
-        Number(line0only.subtotal ?? line0only.unitPrice ?? 0),
-      );
-      const head = inv[0];
       return [
         {
           sortOrder: 0,
@@ -1365,10 +1231,11 @@ export class ChatService implements OnModuleDestroy {
           severidad: coerceDamageLevelCode(
             analysis.severidad || analysis.severidadDelDano,
           ),
-          precioMx,
+          precioMx: Math.round(
+            Number(line0only.subtotal ?? line0only.unitPrice ?? 0),
+          ),
           descripcionTecnica: analysis.descripcionTecnica ?? null,
           urlsOrigen: fallbackUrls.length > 0 ? [...fallbackUrls] : null,
-          ...this.draftQuoteItemExtrasFromInventoryRow(head, precioMx),
         },
       ];
     }
@@ -1396,28 +1263,20 @@ export class ChatService implements OnModuleDestroy {
         const price = Math.round(
           Number(line?.subtotal ?? line?.unitPrice ?? g.unitPrice ?? 0),
         );
-        const relatedHead = related[0];
         out.push({
           sortOrder: idx,
           pieza:
-            normalizePanelPiezaCode(relatedHead?.pieza ?? '') || g.canonical,
+            normalizePanelPiezaCode(related[0]?.pieza ?? '') || g.canonical,
           severidad: g.damageLevel,
           precioMx: price,
           descripcionTecnica: descParts ? descParts.slice(0, 16000) : null,
           urlsOrigen: urlsSet.length > 0 ? urlsSet : null,
-          ...this.draftQuoteItemExtrasFromInventoryRow(relatedHead, price),
         });
       }
       return out;
     }
 
     const line0 = lines[0];
-    const precioMx = Math.round(
-      Number(
-        line0.subtotal ?? line0.unitPrice ?? doc.total ?? doc.subtotal ?? 0,
-      ),
-    );
-    const head = inv[0];
     return [
       {
         sortOrder: 0,
@@ -1425,10 +1284,13 @@ export class ChatService implements OnModuleDestroy {
         severidad: coerceDamageLevelCode(
           analysis.severidad || analysis.severidadDelDano,
         ),
-        precioMx,
+        precioMx: Math.round(
+          Number(
+            line0.subtotal ?? line0.unitPrice ?? doc.total ?? doc.subtotal ?? 0,
+          ),
+        ),
         descripcionTecnica: analysis.descripcionTecnica ?? null,
         urlsOrigen: fallbackUrls.length > 0 ? [...fallbackUrls] : null,
-        ...this.draftQuoteItemExtrasFromInventoryRow(head, precioMx),
       },
     ];
   }
@@ -1451,701 +1313,6 @@ export class ChatService implements OnModuleDestroy {
     await this.draftQuoteItemRepository.insert(
       rows.map((r) => ({ ...r, draftQuoteId })),
     );
-  }
-
-  /**
-   * Cotización formal por texto del cliente: extrae piezas, resuelve catálogo,
-   * crea/actualiza borrador PENDING_APPROVAL y redacta mensaje solo con líneas guardadas.
-   */
-  async processTextClientQuoteRequest(params: {
-    conversationId: string;
-    messageId: string;
-    userText: string;
-    contextText?: string;
-    tallerId?: string | null;
-  }): Promise<TextQuoteProcessResult> {
-    const userText = String(params.userText ?? '').trim();
-    if (!userText || !detectTextClientQuoteIntent(userText)) {
-      return {
-        handled: false,
-        extractedPieces: [],
-        resolvedLines: [],
-        unresolvedPieces: [],
-        addedPanelCodes: [],
-        totalGuardado: 0,
-      };
-    }
-
-    const tallerId =
-      params.tallerId ??
-      (await this.tallerIdForConversation(params.conversationId));
-    const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
-
-    let extracted = extractClientQuotePiecesHeuristic(userText);
-    if (!extracted.length) {
-      extracted = await extractClientQuotePiecesWithLlm(
-        this.openai,
-        userText,
-        params.contextText,
-      );
-    }
-
-    logTextClientQuoteFlow({
-      phase: 'extracted',
-      conversationId: params.conversationId,
-      userText: userText.slice(0, 500),
-      extractedCount: extracted.length,
-      extracted,
-    });
-
-    if (!extracted.length) {
-      const clarify =
-        'Recibí tu mensaje sobre la cotización. ¿Puedes indicarme qué pieza exacta deseas agregar o cotizar? (Por ejemplo: fascia trasera, puerta delantera, cofre). Si tienes foto del daño, envíala por aquí.';
-      return {
-        handled: true,
-        clientMessage: clarify,
-        extractedPieces: [],
-        resolvedLines: [],
-        unresolvedPieces: [],
-        addedPanelCodes: [],
-        totalGuardado: 0,
-      };
-    }
-
-    const { resolved, unresolved } = resolveExtractedPiecesAgainstCatalog(
-      extracted,
-      snap,
-      'texto_cliente',
-    );
-    const pricedLines = resolved.filter((l) => l.precioFinal > 0);
-    const incomingItems = resolvedLinesToDetectedDamageItems(
-      pricedLines.length ? pricedLines : resolved,
-    );
-
-    logTextClientQuoteFlow({
-      phase: 'resolved',
-      conversationId: params.conversationId,
-      catalogCodes: resolved.map((r) => ({
-        panel: r.panelCode,
-        servicio: r.catalogServicio,
-        severidad: r.severidad,
-        precio: r.precioFinal,
-      })),
-      unresolved: unresolved.map((u) => u.textoOriginal),
-    });
-
-    const existingDraft = await this.draftQuoteRepository.findOne({
-      where: {
-        conversationId: params.conversationId,
-        status: 'PENDING_APPROVAL',
-      },
-      order: { createdAt: 'DESC' },
-    });
-
-    let priorInventory: DetectedDamageItem[] = [];
-    let imageUrls: string[] = [];
-    if (existingDraft) {
-      priorInventory = this.extractPriorInventoryFromDraft(existingDraft);
-      imageUrls = parseDraftImageUrls(existingDraft.imageUrl ?? '');
-    }
-
-    const mergedInv = mergeDamageInventoryAccumulative(
-      priorInventory,
-      incomingItems,
-      (raw) => normalizePanelPiezaCode(raw) || raw,
-    );
-
-    const analysis = inventoryItemsToVehicleAnalysis(
-      mergedInv.merged,
-      imageUrls,
-    );
-    analysis.justificacion = [
-      analysis.justificacion,
-      `Piezas declaradas por texto del cliente (${new Date().toISOString()}): ${userText.slice(0, 400)}`,
-    ]
-      .filter(Boolean)
-      .join('\n');
-
-    let draftQuoteDoc = await this.generateDraftQuote(analysis, tallerId);
-    if (existingDraft?.quotePayload?.reference) {
-      draftQuoteDoc = {
-        ...draftQuoteDoc,
-        reference: existingDraft.quotePayload.reference,
-        generatedAt: existingDraft.quotePayload.generatedAt,
-      };
-    }
-
-    const clientMessage = buildClientMessageFromSavedDraftQuote(draftQuoteDoc, {
-      newPanelCodes: mergedInv.newPiezas,
-      unresolvedLabels: unresolved.map(
-        (u) => u.nombreVisible ?? u.textoOriginal,
-      ),
-    });
-    draftQuoteDoc.formalNarrative = clientMessage;
-    draftQuoteDoc.generatedMessage = clientMessage;
-    draftQuoteDoc.clientMessage = clientMessage;
-
-    const draftQuoteForClient =
-      normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
-    const estimateAmount = Math.round(draftQuoteForClient.total ?? 0);
-    const persistedImageUrl = persistDraftImageUrlField(imageUrls);
-
-    let savedDraft: DraftQuoteEntity;
-    if (existingDraft) {
-      existingDraft.messageId = params.messageId;
-      existingDraft.damageAnalysis = analysis;
-      existingDraft.estimateAmount = estimateAmount;
-      existingDraft.quotePayload = draftQuoteForClient;
-      existingDraft.tallerId = tallerId;
-      if (persistedImageUrl) {
-        existingDraft.imageUrl = persistedImageUrl;
-      }
-      savedDraft = await this.draftQuoteRepository.save(existingDraft);
-    } else {
-      const row = this.draftQuoteRepository.create({
-        conversationId: params.conversationId,
-        tallerId,
-        messageId: params.messageId,
-        imageUrl: persistedImageUrl,
-        damageAnalysis: analysis,
-        estimateAmount,
-        quotePayload: draftQuoteForClient,
-        status: 'PENDING_APPROVAL',
-      });
-      savedDraft = await this.draftQuoteRepository.save(row);
-    }
-
-    await this.syncDraftQuoteLineItems(
-      savedDraft.id,
-      analysis,
-      draftQuoteForClient,
-      imageUrls,
-      tallerId,
-    );
-
-    await this.messageRepository.update(
-      { id: params.messageId },
-      { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
-    );
-
-    await this.markConversationDraftPendingReview(params.conversationId);
-
-    await this.draftQuoteChangeLogRepository.insert({
-      draftQuoteId: savedDraft.id,
-      conversationId: params.conversationId,
-      triggerMessage: userText.slice(0, 4000),
-      extractedPieces: extracted,
-      resolvedCatalogCodes: resolved.map((r) => ({
-        panelCode: r.panelCode,
-        catalogServicio: r.catalogServicio,
-        severidad: r.severidad,
-        precioOficial: r.precioOficial,
-      })),
-      addedLines: mergedInv.newPiezas,
-      snapshotTotal: {
-        subtotal: draftQuoteForClient.subtotal,
-        total: draftQuoteForClient.total,
-      },
-      clientMessageSent: clientMessage,
-    });
-
-    this.chatGateway.emitDraftQuoteReady({
-      draftQuoteId: savedDraft.id,
-      conversationId: params.conversationId,
-      messageId: params.messageId,
-      damageAnalysis: analysis,
-      draftQuote: draftQuoteForClient,
-      estimateAmount,
-      isAutoPilotActive: true,
-    });
-
-    logTextClientQuoteFlow({
-      phase: 'persisted',
-      conversationId: params.conversationId,
-      draftQuoteId: savedDraft.id,
-      addedPanelCodes: mergedInv.newPiezas,
-      totalGuardado: estimateAmount,
-      clientMessagePreview: clientMessage.slice(0, 300),
-    });
-
-    return {
-      handled: true,
-      clientMessage,
-      extractedPieces: extracted,
-      resolvedLines: resolved,
-      unresolvedPieces: unresolved,
-      addedPanelCodes: mergedInv.newPiezas,
-      totalGuardado: estimateAmount,
-    };
-  }
-
-  /**
-   * Interceptor de autopilot: persiste cotización por texto y envía respuesta al cliente.
-   * Funciona aunque ya exista borrador PENDING_APPROVAL.
-   */
-  private async tryHandleTextClientQuoteFromInbound(
-    conversation: Conversation,
-    userText: string,
-    messageId: string,
-    contextText?: string,
-  ): Promise<boolean> {
-    if (!detectTextClientQuoteIntent(userText)) {
-      return false;
-    }
-    if (
-      mentionsBañoDePinturaIntent(userText) &&
-      !textLooksLikePiezaPinturaRepintadoRequest(userText)
-    ) {
-      return false;
-    }
-
-    const result = await this.processTextClientQuoteRequest({
-      conversationId: conversation.id,
-      messageId,
-      userText,
-      contextText,
-      tallerId: conversation.tallerId,
-    });
-    if (!result.handled || !result.clientMessage) {
-      return false;
-    }
-
-    const autopilotTallerId =
-      conversation.tallerId ??
-      (await this.tallerService.findDefaultTallerId());
-    const outbound = this.messageRepository.create({
-      content: result.clientMessage,
-      channelType: conversation.platform || 'test',
-      senderName: 'Asistente IA',
-      direction: 'outbound',
-      externalId: conversation.externalId,
-      conversationId: conversation.id,
-      conversation,
-      tallerId: autopilotTallerId,
-    });
-    const savedOut = await this.messageRepository.save(outbound);
-
-    conversation.lastMessageAt = new Date();
-    conversation.lastMessage =
-      result.clientMessage.length > 120
-        ? `${result.clientMessage.slice(0, 117)}…`
-        : result.clientMessage;
-    await this.conversationRepository.save(conversation);
-
-    this.chatGateway.emitNewMessage(savedOut);
-    this.dispatchOutboundChannelMessage(
-      conversation,
-      result.clientMessage,
-      false,
-    );
-
-    logTextClientQuoteFlow({
-      phase: 'sent_to_client',
-      conversationId: conversation.id,
-      messageId: savedOut.id,
-      totalGuardado: result.totalGuardado,
-    });
-
-    return true;
-  }
-
-  /** API panel: procesar cotización por texto sin enviar mensaje al cliente. */
-  async processTextClientQuoteForPanel(
-    conversationId: string,
-    tallerId: string,
-    body: { userText: string; messageId?: string; contextText?: string },
-  ): Promise<TextQuoteProcessResult> {
-    await this.assertConversationForTaller(conversationId, tallerId);
-    const messages = await this.findMessagesByConversation(
-      conversationId,
-      tallerId,
-    );
-    const lastInbound = [...messages]
-      .reverse()
-      .find((m) => String(m.direction ?? '').toLowerCase() === 'inbound');
-    const messageId =
-      String(body.messageId ?? '').trim() || lastInbound?.id || randomUUID();
-    return this.processTextClientQuoteRequest({
-      conversationId,
-      messageId,
-      userText: body.userText,
-      contextText: body.contextText,
-      tallerId,
-    });
-  }
-
-  async findTextQuoteChangeHistory(
-    conversationId: string,
-    tallerId: string,
-  ): Promise<DraftQuoteChangeLog[]> {
-    await this.assertConversationForTaller(conversationId, tallerId);
-    return this.draftQuoteChangeLogRepository.find({
-      where: { conversationId },
-      order: { createdAt: 'DESC' },
-      take: 50,
-    });
-  }
-
-  /**
-   * Herramienta del agente: agrega piezas a cotización formal solo con catálogo oficial.
-   */
-  async actualizarCotizacionDesdeCatalogo(
-    input: ActualizarCotizacionInput,
-    options?: { messageId?: string; emitSocket?: boolean },
-  ): Promise<ActualizarCotizacionResult> {
-    const conversationId = String(input.conversationId ?? '').trim();
-    const tallerId = String(input.tallerId ?? '').trim();
-    if (!conversationId || !tallerId) {
-      return {
-        success: false,
-        quoteId: null,
-        itemsAdded: [],
-        itemsPending: [],
-        total: 0,
-        subtotal: 0,
-        formattedLines: [],
-        requiresHumanReview: true,
-        customerMessageData: {
-          pricedLines: [],
-          pendingLines: [],
-          total: 0,
-          currency: AUTO_FIX_CURRENCY,
-          disclaimer: 'Error de validación.',
-        },
-        error: 'conversationId y tallerId son obligatorios.',
-      };
-    }
-
-    await this.assertConversationForTaller(conversationId, tallerId);
-    const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
-
-    const formattedIncoming: FormattedQuoteLine[] = [];
-    for (const item of input.items) {
-      const evidenceUrls = await this.resolveEvidenceUrlsFromMessageIds(
-        conversationId,
-        item.evidenceImageIds ?? [],
-      );
-      formattedIncoming.push(
-        resolveCatalogItemToQuoteLine(item, snap, evidenceUrls),
-      );
-    }
-
-    const itemsAdded = formattedIncoming.filter((l) => l.precioFinal > 0);
-    const itemsPending = formattedIncoming.filter((l) => l.precioFinal <= 0);
-    const requiresHumanReview = itemsPending.length > 0;
-
-    console.log('[actualizarCotizacionDesdeCatalogo]', JSON.stringify({
-      conversationId,
-      tallerId,
-      customerText: input.customerText.slice(0, 300),
-      itemsRequested: input.items.length,
-      itemsAdded: itemsAdded.map((l) => ({
-        panel: l.panelCode,
-        servicio: l.catalogServicio,
-        severidad: l.severidad,
-        precio: l.precioFinal,
-      })),
-      itemsPending: itemsPending.map((l) => l.panelCode),
-    }));
-
-    let existingDraft: DraftQuoteEntity | null = null;
-    if (input.quoteId?.trim()) {
-      existingDraft = await this.draftQuoteRepository.findOne({
-        where: {
-          id: input.quoteId.trim(),
-          conversationId,
-          tallerId,
-          status: 'PENDING_APPROVAL',
-        },
-        relations: { items: true },
-      });
-    }
-    if (!existingDraft) {
-      existingDraft = await this.draftQuoteRepository.findOne({
-        where: { conversationId, tallerId, status: 'PENDING_APPROVAL' },
-        order: { createdAt: 'DESC' },
-        relations: { items: true },
-      });
-    }
-
-    let priorInventory: DetectedDamageItem[] = [];
-    let imageUrls: string[] = [];
-    if (existingDraft) {
-      priorInventory = this.extractPriorInventoryFromDraft(existingDraft);
-      imageUrls = parseDraftImageUrls(existingDraft.imageUrl ?? '');
-    }
-
-    const incomingDamageItems = formattedLinesToDetectedDamageItems(
-      itemsAdded.length ? itemsAdded : formattedIncoming,
-    );
-    const mergedInv = mergeDamageInventoryAccumulative(
-      priorInventory,
-      incomingDamageItems,
-      (raw) => normalizePanelPiezaCode(raw) || raw,
-    );
-
-    const analysis = inventoryItemsToVehicleAnalysis(
-      mergedInv.merged,
-      imageUrls,
-    );
-    analysis.justificacion = [
-      analysis.justificacion,
-      `Actualización catálogo (${new Date().toISOString()}): ${input.customerText.slice(0, 400)}`,
-    ]
-      .filter(Boolean)
-      .join('\n');
-
-    let draftQuoteDoc = await this.generateDraftQuote(analysis, tallerId);
-    if (existingDraft?.quotePayload?.reference) {
-      draftQuoteDoc = {
-        ...draftQuoteDoc,
-        reference: existingDraft.quotePayload.reference,
-        generatedAt: existingDraft.quotePayload.generatedAt,
-      };
-    }
-
-    const clientMessage = buildClientMessageFromSavedDraftQuote(draftQuoteDoc, {
-      newPanelCodes: mergedInv.newPiezas,
-      unresolvedLabels: itemsPending.map((p) => p.nombreVisible),
-    });
-    draftQuoteDoc.formalNarrative = clientMessage;
-    draftQuoteDoc.generatedMessage = clientMessage;
-    draftQuoteDoc.clientMessage = clientMessage;
-
-    const draftQuoteForClient =
-      normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
-    const estimateAmount = Math.round(draftQuoteForClient.total ?? 0);
-    const persistedImageUrl = persistDraftImageUrlField(imageUrls);
-
-    const messageId =
-      options?.messageId?.trim() ||
-      existingDraft?.messageId ||
-      (
-        await this.messageRepository.findOne({
-          where: { conversationId, direction: 'inbound' },
-          order: { createdAt: 'DESC' },
-        })
-      )?.id ||
-      randomUUID();
-
-    let savedDraft: DraftQuoteEntity;
-    if (existingDraft) {
-      existingDraft.messageId = messageId;
-      existingDraft.damageAnalysis = analysis;
-      existingDraft.estimateAmount = estimateAmount;
-      existingDraft.quotePayload = draftQuoteForClient;
-      existingDraft.tallerId = tallerId;
-      if (persistedImageUrl) {
-        existingDraft.imageUrl = persistedImageUrl;
-      }
-      savedDraft = await this.draftQuoteRepository.save(existingDraft);
-    } else {
-      const row = this.draftQuoteRepository.create({
-        conversationId,
-        tallerId,
-        messageId,
-        imageUrl: persistedImageUrl,
-        damageAnalysis: analysis,
-        estimateAmount,
-        quotePayload: draftQuoteForClient,
-        status: 'PENDING_APPROVAL',
-      });
-      savedDraft = await this.draftQuoteRepository.save(row);
-    }
-
-    await this.syncDraftQuoteLineItems(
-      savedDraft.id,
-      analysis,
-      draftQuoteForClient,
-      imageUrls,
-      tallerId,
-    );
-
-    await this.messageRepository.update(
-      { id: messageId },
-      { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
-    );
-
-    await this.markConversationDraftPendingReview(conversationId);
-
-    const savedItems = await this.draftQuoteItemRepository.find({
-      where: { draftQuoteId: savedDraft.id },
-      order: { sortOrder: 'ASC' },
-    });
-
-    await this.draftQuoteChangeLogRepository.insert({
-      draftQuoteId: savedDraft.id,
-      conversationId,
-      triggerMessage: input.customerText.slice(0, 4000),
-      extractedPieces: input.items,
-      resolvedCatalogCodes: formattedIncoming.map((l) => ({
-        panelCode: l.panelCode,
-        catalogServicio: l.catalogServicio,
-        severidad: l.severidad,
-        precioOficial: l.precioOficial,
-        estadoRevision: l.estadoRevision,
-      })),
-      addedLines: mergedInv.newPiezas,
-      snapshotTotal: {
-        subtotal: draftQuoteForClient.subtotal,
-        total: draftQuoteForClient.total,
-      },
-      clientMessageSent: clientMessage,
-    });
-
-    const customerMessageData = buildCustomerMessageDataFromQuote(
-      draftQuoteForClient,
-      itemsAdded,
-      itemsPending,
-    );
-
-    if (options?.emitSocket !== false) {
-      this.chatGateway.emitQuoteUpdated({
-        quoteId: savedDraft.id,
-        conversationId,
-        messageId,
-        damageAnalysis: analysis,
-        draftQuote: draftQuoteForClient,
-        items: savedItems,
-        estimateAmount,
-        requiresHumanReview,
-        isAutoPilotActive: true,
-      });
-      this.chatGateway.emitDraftQuoteReady({
-        draftQuoteId: savedDraft.id,
-        conversationId,
-        messageId,
-        damageAnalysis: analysis,
-        draftQuote: draftQuoteForClient,
-        estimateAmount,
-        isAutoPilotActive: true,
-      });
-    }
-
-    console.log('[actualizarCotizacionDesdeCatalogo] persisted', JSON.stringify({
-      quoteId: savedDraft.id,
-      total: estimateAmount,
-      requiresHumanReview,
-    }));
-
-    return {
-      success: true,
-      quoteId: savedDraft.id,
-      itemsAdded,
-      itemsPending,
-      total: estimateAmount,
-      subtotal: Math.round(draftQuoteForClient.subtotal ?? 0),
-      formattedLines: formattedIncoming,
-      requiresHumanReview,
-      customerMessageData,
-    };
-  }
-
-  private async resolveEvidenceUrlsFromMessageIds(
-    conversationId: string,
-    messageIds: readonly string[],
-  ): Promise<string[]> {
-    const ids = messageIds.map((id) => String(id ?? '').trim()).filter(Boolean);
-    if (!ids.length) return [];
-    const rows = await this.messageRepository.find({
-      where: { conversationId, id: In(ids) },
-    });
-    const urls: string[] = [];
-    for (const row of rows) {
-      const c = String(row.content ?? '').trim();
-      if (c && isIncomingImage(c)) {
-        urls.push(c);
-      }
-    }
-    return [...new Set(urls)];
-  }
-
-  private async executeActualizarCotizacionDesdeCatalogoToolPlayground(
-    argsJson: string,
-  ): Promise<Record<string, unknown>> {
-    const parsed = parseActualizarCotizacionToolArgs(argsJson);
-    if (!parsed.ok) {
-      return { success: false, error: parsed.error };
-    }
-    const snap = await this.catalogService.getMatrixPricingSnapshot();
-    const formattedIncoming = parsed.data.items.map((item) =>
-      resolveCatalogItemToQuoteLine(item, snap, []),
-    );
-    const itemsAdded = formattedIncoming.filter((l) => l.precioFinal > 0);
-    const itemsPending = formattedIncoming.filter((l) => l.precioFinal <= 0);
-    const total = itemsAdded.reduce((s, l) => s + l.precioFinal, 0);
-    return {
-      success: true,
-      preview: true,
-      quoteId: null,
-      itemsAdded,
-      itemsPending,
-      total,
-      subtotal: total,
-      formattedLines: formattedIncoming,
-      requiresHumanReview: itemsPending.length > 0,
-      customerMessageData: {
-        pricedLines: itemsAdded.map((l) => ({
-          label: `${l.nombreVisible} (${l.severidad})`,
-          amount: l.precioFinal,
-          currency: AUTO_FIX_CURRENCY,
-        })),
-        pendingLines: itemsPending.map((p) => p.nombreVisible),
-        total,
-        currency: AUTO_FIX_CURRENCY,
-        disclaimer:
-          'Vista previa simulador — no persistida. En chat real se guarda en BD y panel.',
-      },
-      instruccion:
-        'Redacta la respuesta usando SOLO los montos de customerMessageData. PROHIBIDO inventar precios.',
-    };
-  }
-
-  private async executeActualizarCotizacionDesdeCatalogoTool(
-    argsJson: string,
-    conversation: Conversation,
-    inboundMessageId?: string,
-  ): Promise<Record<string, unknown>> {
-    const parsed = parseActualizarCotizacionToolArgs(argsJson);
-    if (!parsed.ok) {
-      return { success: false, error: parsed.error };
-    }
-
-    const tallerId =
-      conversation.tallerId ??
-      (await this.tallerService.findDefaultTallerId());
-    if (!tallerId) {
-      return { success: false, error: 'No se pudo determinar tallerId.' };
-    }
-
-    const result = await this.actualizarCotizacionDesdeCatalogo(
-      {
-        conversationId: conversation.id,
-        tallerId,
-        quoteId: parsed.data.quoteId,
-        customerText: parsed.data.customerText,
-        items: parsed.data.items,
-      },
-      { messageId: inboundMessageId, emitSocket: true },
-    );
-
-    if (!result.success) {
-      return { success: false, error: result.error ?? 'Error al actualizar cotización.' };
-    }
-
-    return {
-      success: true,
-      quoteId: result.quoteId,
-      itemsAdded: result.itemsAdded,
-      itemsPending: result.itemsPending,
-      total: result.total,
-      subtotal: result.subtotal,
-      formattedLines: result.formattedLines,
-      requiresHumanReview: result.requiresHumanReview,
-      customerMessageData: result.customerMessageData,
-      instruccion:
-        'Redacta la respuesta al cliente usando SOLO customerMessageData y formattedLines. PROHIBIDO inventar precios.',
-    };
   }
 
   private async loadDraftQuoteWithItemsOrThrow(
@@ -3219,22 +2386,14 @@ export class ChatService implements OnModuleDestroy {
         if (shouldDebounceAutopilotInboundText(convRow.platform)) {
           this.scheduleDebouncedAutopilotTextReply(conversationIdForSockets);
         } else if (
-          !(await this.tryHandleTextClientQuoteFromInbound(
-            convRow,
-            contentToSave,
-            saved.id,
+          !(await this.shouldSuppressAutopilotForVisionPipeline(
+            conversationIdForSockets,
+            saved,
           ))
         ) {
-          if (
-            !(await this.shouldSuppressAutopilotForVisionPipeline(
-              conversationIdForSockets,
-              saved,
-            ))
-          ) {
-            void this.autoPilotSendTextReply(saved, convRow).catch((err) =>
-              console.error('autoPilotSendTextReply:', err),
-            );
-          }
+          void this.autoPilotSendTextReply(saved, convRow).catch((err) =>
+            console.error('autoPilotSendTextReply:', err),
+          );
         }
       } else {
         this.generateAiSuggestion(saved);
@@ -3618,17 +2777,6 @@ export class ChatService implements OnModuleDestroy {
         severidad: it.severidad,
         descripcionTecnica: it.descripcionTecnica,
         urls_origen: [...(it.urls_origen ?? [])],
-        ...(it.fuente ? { fuente: it.fuente } : {}),
-        ...(it.nombreVisible ? { nombreVisible: it.nombreVisible } : {}),
-        ...(it.catalogServicio ? { catalogServicio: it.catalogServicio } : {}),
-        ...(it.precioOficial != null
-          ? { precioOficial: it.precioOficial }
-          : {}),
-        ...(it.precioFinal != null ? { precioFinal: it.precioFinal } : {}),
-        ...(it.evidencia ? { evidencia: it.evidencia } : {}),
-        ...(it.confidence != null ? { confidence: it.confidence } : {}),
-        ...(it.notasInternas ? { notasInternas: it.notasInternas } : {}),
-        ...(it.estadoRevision ? { estadoRevision: it.estadoRevision } : {}),
       }));
     }
     const fromBasis = existingDraft.quotePayload?.analysisBasis?.inventory;
@@ -7079,11 +6227,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             payload = await this.executeObtenerCotizacionExpressToolPlayground(
               tc.function.arguments ?? '{}',
             );
-          } else if (name === 'actualizarCotizacionDesdeCatalogo') {
-            payload =
-              await this.executeActualizarCotizacionDesdeCatalogoToolPlayground(
-                tc.function.arguments ?? '{}',
-              );
           } else if (name === 'notificarLlegadaCliente') {
             payload = await this.executeNotificarLlegadaClienteToolPlayground();
           } else {
@@ -7278,23 +6421,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     }
 
     const anchor = batch[batch.length - 1]!;
-    const mergedContext = batch
-      .slice(0, -1)
-      .map((m) => String(m.content ?? '').trim())
-      .filter(Boolean)
-      .join('\n\n');
-
-    if (
-      await this.tryHandleTextClientQuoteFromInbound(
-        conv,
-        mergedText,
-        anchor.id,
-        mergedContext || undefined,
-      )
-    ) {
-      return;
-    }
-
     if (
       await this.shouldSuppressAutopilotForVisionPipeline(
         conversationId,
@@ -7496,12 +6622,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
               payload = await this.executeObtenerCotizacionExpressTool(
                 args,
                 conversation,
-              );
-            } else if (name === 'actualizarCotizacionDesdeCatalogo') {
-              payload = await this.executeActualizarCotizacionDesdeCatalogoTool(
-                args,
-                conversation,
-                inboundMsg.id,
               );
             } else if (name === 'notificarLlegadaCliente') {
               payload = await this.executeNotificarLlegadaClienteTool(

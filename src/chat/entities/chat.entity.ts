@@ -24,16 +24,6 @@ export interface DetectedDamageItem {
   vehiculoDetectado?: string;
   /** Copia del inventario antes de colapsar a BPC (solo en fila BPC). */
   inventarioVisualPrevio?: DetectedDamageItem[];
-  /** Origen de la línea: texto_cliente | vision | manual | ai_suggestion */
-  fuente?: string;
-  nombreVisible?: string;
-  catalogServicio?: string;
-  precioOficial?: number;
-  precioFinal?: number;
-  evidencia?: string;
-  confidence?: number;
-  notasInternas?: string;
-  estadoRevision?: string;
 }
 
 /** @deprecated usar DetectedDamageItem (descripcion → descripcionTecnica, urls_asociadas → urls_origen). */
