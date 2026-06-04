@@ -11,9 +11,9 @@ import {
   resolveDamageLevelFromText,
 } from './autofix-config';
 
+/** Entrada parseada desde la tool — sin cotizacionId (lo resuelve el backend). */
 export type ActualizarCotizacionExistenteInput = {
-  cotizacionId: string;
-  piezaOServicio: string;
+  piezasOServicios: string[];
   severidad?: string;
   descripcionDano?: string;
 };
@@ -31,6 +31,7 @@ export type ActualizarCotizacionExistenteToolResult = {
   success: boolean;
   cotizacionId: string | null;
   piezaAgregada: PiezaResueltaCatalogo | null;
+  piezasAgregadas: PiezaResueltaCatalogo[];
   totalAnterior: number;
   totalNuevo: number;
   incremento: number;
@@ -38,6 +39,25 @@ export type ActualizarCotizacionExistenteToolResult = {
   error?: string;
   instruccion?: string;
 };
+
+function normalizePiezasFromRaw(raw: Record<string, unknown>): string[] {
+  const fromArray = raw.piezasOServicios ?? raw.piezas_o_servicios ?? raw.servicios ?? raw.piezas;
+  if (Array.isArray(fromArray)) {
+    return fromArray
+      .map((p) => String(p ?? '').trim())
+      .filter((p) => p.length > 0);
+  }
+  const single = String(
+    raw.piezaOServicio ??
+      raw.pieza_o_servicio ??
+      raw.pieza ??
+      raw.servicio ??
+      raw.partName ??
+      '',
+  ).trim();
+  if (single) return [single];
+  return [];
+}
 
 export function parseActualizarCotizacionExistenteArgs(
   argsJson: string,
@@ -49,23 +69,13 @@ export function parseActualizarCotizacionExistenteArgs(
     return { ok: false, error: 'Argumentos inválidos (JSON).' };
   }
 
-  const cotizacionId = String(
-    raw.cotizacionId ?? raw.cotizacion_id ?? raw.quoteId ?? raw.quote_id ?? '',
-  ).trim();
-  const piezaOServicio = String(
-    raw.piezaOServicio ??
-      raw.pieza_o_servicio ??
-      raw.pieza ??
-      raw.servicio ??
-      raw.partName ??
-      '',
-  ).trim();
-
-  if (!cotizacionId) {
-    return { ok: false, error: 'cotizacionId es obligatorio.' };
-  }
-  if (!piezaOServicio) {
-    return { ok: false, error: 'piezaOServicio es obligatorio.' };
+  const piezasOServicios = normalizePiezasFromRaw(raw);
+  if (!piezasOServicios.length) {
+    return {
+      ok: false,
+      error:
+        'Indica al menos una pieza en piezasOServicios (array) o piezaOServicio (string). No envíes cotizacionId ni quoteId.',
+    };
   }
 
   const severidad = String(raw.severidad ?? raw.severityHint ?? '').trim() || undefined;
@@ -75,7 +85,7 @@ export function parseActualizarCotizacionExistenteArgs(
 
   return {
     ok: true,
-    data: { cotizacionId, piezaOServicio, severidad, descripcionDano },
+    data: { piezasOServicios, severidad, descripcionDano },
   };
 }
 
@@ -120,7 +130,7 @@ export function resolverPiezaEnCatalogo(
     panelCode: panelCode || piezaOServicio,
     nombreVisible,
     catalogServicio,
-    severidad: precioCatalogo > 0 ? severidad : severidad,
+    severidad,
     precioCatalogo,
     requiereRevisionManual: precioCatalogo <= 0,
   };

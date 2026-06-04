@@ -10,17 +10,33 @@ describe('actualizar-cotizacion-existente', () => {
     { servicio: 'Puerta', severidad: 'DL', precio: 4200, diasEntrega: 3, isInstantService: true },
   ]);
 
-  it('parsea cotizacionId y piezaOServicio', () => {
+  it('parsea piezasOServicios sin exigir cotizacionId', () => {
     const parsed = parseActualizarCotizacionExistenteArgs(
       JSON.stringify({
-        cotizacionId: 'abc-123',
+        piezasOServicios: ['fascia trasera', 'puerta delantera'],
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.data.piezasOServicios).toEqual([
+        'fascia trasera',
+        'puerta delantera',
+      ]);
+    }
+  });
+
+  it('ignora cotizacionId alucinado y acepta piezaOServicio única', () => {
+    const parsed = parseActualizarCotizacionExistenteArgs(
+      JSON.stringify({
+        cotizacionId: '12345',
+        quoteId: '999',
         piezaOServicio: 'fascia trasera',
       }),
     );
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
-      expect(parsed.data.cotizacionId).toBe('abc-123');
-      expect(parsed.data.piezaOServicio).toBe('fascia trasera');
+      expect(parsed.data.piezasOServicios).toEqual(['fascia trasera']);
+      expect('cotizacionId' in parsed.data).toBe(false);
     }
   });
 

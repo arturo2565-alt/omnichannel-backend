@@ -116,13 +116,13 @@ export class ChatController {
     },
   ) {
     return this.chatService.actualizarCotizacionExistente({
-      cotizacionId,
-      piezaOServicio: body.piezaOServicio,
+      piezasOServicios: [body.piezaOServicio],
       severidad: body.severidad,
       descripcionDano: body.descripcionDano,
       conversationId,
       tallerId: user.tallerId,
       messageId: body.messageId,
+      cotizacionIdOverride: cotizacionId,
     });
   }
 
