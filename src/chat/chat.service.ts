@@ -151,6 +151,12 @@ import {
   tryVagueGenericServiceProfilingReply,
   userLatestMessageLooksLikeVehicleModelReply,
 } from './instant-quote-from-text';
+import {
+  formatPiezaAgregadaLinea,
+  parseActualizarCotizacionExistenteArgs,
+  resolverPiezaEnCatalogo,
+  type ActualizarCotizacionExistenteToolResult,
+} from './actualizar-cotizacion-existente';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -627,6 +633,41 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ['scheduledAtIso'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'actualizarCotizacionExistente',
+      description:
+        'Agrega una pieza o servicio a una cotización formal ya existente. Consulta el catálogo oficial del taller para el precio; NUNCA inventes montos. Requiere el ID del borrador activo (cotizacionId) y el nombre de la pieza/servicio a agregar.',
+      parameters: {
+        type: 'object',
+        properties: {
+          cotizacionId: {
+            type: 'string',
+            description:
+              'UUID del borrador/cotización activa (draft_quotes.id) visible en el panel.',
+          },
+          piezaOServicio: {
+            type: 'string',
+            description:
+              'Pieza o servicio a agregar (ej. fascia trasera, puerta delantera derecha, cofre, toldo).',
+          },
+          severidad: {
+            type: 'string',
+            enum: ['DL', 'DML', 'DM', 'DMF', 'DF', 'DMFuerte'],
+            description:
+              'Severidad del daño si se conoce. Si no se indica, se infiere del contexto o DL.',
+          },
+          descripcionDano: {
+            type: 'string',
+            description:
+              'Descripción breve del daño (ej. solo rayada, abolladura moderada).',
+          },
+        },
+        required: ['cotizacionId', 'piezaOServicio'],
       },
     },
   },
@@ -1313,6 +1354,300 @@ export class ChatService implements OnModuleDestroy {
     await this.draftQuoteItemRepository.insert(
       rows.map((r) => ({ ...r, draftQuoteId })),
     );
+  }
+
+  /**
+   * Agrega una pieza/servicio a un borrador existente usando precios del catálogo oficial.
+   */
+  async actualizarCotizacionExistente(params: {
+    cotizacionId: string;
+    piezaOServicio: string;
+    severidad?: string;
+    descripcionDano?: string;
+    conversationId: string;
+    tallerId: string;
+    messageId?: string;
+  }): Promise<ActualizarCotizacionExistenteToolResult> {
+    const cotizacionId = String(params.cotizacionId ?? '').trim();
+    const piezaOServicio = String(params.piezaOServicio ?? '').trim();
+    if (!cotizacionId || !piezaOServicio) {
+      return {
+        success: false,
+        cotizacionId: null,
+        piezaAgregada: null,
+        totalAnterior: 0,
+        totalNuevo: 0,
+        incremento: 0,
+        requiresHumanReview: true,
+        error: 'cotizacionId y piezaOServicio son obligatorios.',
+      };
+    }
+
+    await this.assertConversationForTaller(params.conversationId, params.tallerId);
+
+    const existingDraft = await this.draftQuoteRepository.findOne({
+      where: {
+        id: cotizacionId,
+        conversationId: params.conversationId,
+        tallerId: params.tallerId,
+        status: 'PENDING_APPROVAL',
+      },
+      relations: { items: true },
+    });
+
+    if (!existingDraft) {
+      return {
+        success: false,
+        cotizacionId,
+        piezaAgregada: null,
+        totalAnterior: 0,
+        totalNuevo: 0,
+        incremento: 0,
+        requiresHumanReview: true,
+        error: `Cotización activa no encontrada: ${cotizacionId}`,
+      };
+    }
+
+    const totalAnterior = Math.round(
+      Number(existingDraft.quotePayload?.total ?? existingDraft.estimateAmount ?? 0),
+    );
+
+    const snap = await this.catalogService.getMatrixPricingSnapshot(params.tallerId);
+    const piezaResuelta = resolverPiezaEnCatalogo(piezaOServicio, snap, {
+      severidad: params.severidad,
+      descripcionDano: params.descripcionDano,
+    });
+
+    console.log('[actualizarCotizacionExistente]', JSON.stringify({
+      cotizacionId,
+      conversationId: params.conversationId,
+      piezaOServicio,
+      piezaResuelta,
+      totalAnterior,
+    }));
+
+    if (piezaResuelta.requiereRevisionManual) {
+      return {
+        success: false,
+        cotizacionId,
+        piezaAgregada: piezaResuelta,
+        totalAnterior,
+        totalNuevo: totalAnterior,
+        incremento: 0,
+        requiresHumanReview: true,
+        error: `No se encontró precio en catálogo para "${piezaOServicio}". Requiere revisión manual.`,
+        instruccion:
+          'Informa al cliente que esa pieza requiere revisión en taller; no des precio inventado.',
+      };
+    }
+
+    const priorInventory = this.extractPriorInventoryFromDraft(existingDraft);
+    const imageUrls = parseDraftImageUrls(existingDraft.imageUrl ?? '');
+
+    const incomingItem: DetectedDamageItem = {
+      pieza: piezaResuelta.panelCode,
+      severidad: piezaResuelta.severidad,
+      descripcionTecnica:
+        params.descripcionDano?.trim() ||
+        `Agregado por agente: ${piezaResuelta.nombreVisible}`,
+      urls_origen: [],
+    };
+
+    const mergedInv = mergeDamageInventoryAccumulative(
+      priorInventory,
+      [incomingItem],
+      (raw) => normalizePanelPiezaCode(raw) || raw,
+    );
+
+    const analysis = inventoryItemsToVehicleAnalysis(
+      mergedInv.merged,
+      imageUrls,
+    );
+    analysis.justificacion = [
+      analysis.justificacion,
+      `Pieza agregada (${new Date().toISOString()}): ${piezaOServicio} — ${formatPiezaAgregadaLinea(piezaResuelta)}`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    let draftQuoteDoc = await this.generateDraftQuote(analysis, params.tallerId);
+    if (existingDraft.quotePayload?.reference) {
+      draftQuoteDoc = {
+        ...draftQuoteDoc,
+        reference: existingDraft.quotePayload.reference,
+        generatedAt: existingDraft.quotePayload.generatedAt,
+      };
+    }
+
+    const draftQuoteForClient =
+      normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
+    const totalNuevo = Math.round(draftQuoteForClient.total ?? 0);
+    const incremento = Math.max(0, totalNuevo - totalAnterior);
+    const estimateAmount = totalNuevo;
+
+    const messageId =
+      params.messageId?.trim() ||
+      existingDraft.messageId ||
+      randomUUID();
+
+    existingDraft.messageId = messageId;
+    existingDraft.damageAnalysis = analysis;
+    existingDraft.estimateAmount = estimateAmount;
+    existingDraft.quotePayload = draftQuoteForClient;
+    const savedDraft = await this.draftQuoteRepository.save(existingDraft);
+
+    await this.syncDraftQuoteLineItems(
+      savedDraft.id,
+      analysis,
+      draftQuoteForClient,
+      imageUrls,
+      params.tallerId,
+    );
+
+    await this.messageRepository.update(
+      { id: messageId },
+      { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
+    );
+
+    await this.markConversationDraftPendingReview(params.conversationId);
+
+    const savedItems = await this.draftQuoteItemRepository.find({
+      where: { draftQuoteId: savedDraft.id },
+      order: { sortOrder: 'ASC' },
+    });
+
+    this.chatGateway.emitCotizacionActualizada({
+      cotizacionId: savedDraft.id,
+      conversationId: params.conversationId,
+      messageId,
+      damageAnalysis: analysis,
+      draftQuote: draftQuoteForClient,
+      items: savedItems,
+      estimateAmount,
+      totalAnterior,
+      piezaAgregada: piezaResuelta,
+      requiresHumanReview: false,
+    });
+
+    this.chatGateway.emitDraftQuoteReady({
+      draftQuoteId: savedDraft.id,
+      conversationId: params.conversationId,
+      messageId,
+      damageAnalysis: analysis,
+      draftQuote: draftQuoteForClient,
+      estimateAmount,
+      isAutoPilotActive: true,
+    });
+
+    console.log('[actualizarCotizacionExistente] persisted', JSON.stringify({
+      cotizacionId: savedDraft.id,
+      totalAnterior,
+      totalNuevo,
+      incremento,
+    }));
+
+    return {
+      success: true,
+      cotizacionId: savedDraft.id,
+      piezaAgregada: piezaResuelta,
+      totalAnterior,
+      totalNuevo,
+      incremento,
+      requiresHumanReview: false,
+      instruccion:
+        'Usa totalNuevo e incremento para redactar al cliente. PROHIBIDO inventar precios distintos a los devueltos.',
+    };
+  }
+
+  /** Resuelve cotizacionId activa de la conversación si el agente no lo conoce. */
+  async findActiveCotizacionIdForConversation(
+    conversationId: string,
+    tallerId: string,
+  ): Promise<string | null> {
+    const row = await this.draftQuoteRepository.findOne({
+      where: { conversationId, tallerId, status: 'PENDING_APPROVAL' },
+      order: { createdAt: 'DESC' },
+      select: ['id'],
+    });
+    return row?.id ?? null;
+  }
+
+  private async executeActualizarCotizacionExistenteToolPlayground(
+    argsJson: string,
+  ): Promise<Record<string, unknown>> {
+    const parsed = parseActualizarCotizacionExistenteArgs(argsJson);
+    if (!parsed.ok) {
+      return { success: false, error: parsed.error };
+    }
+    const snap = await this.catalogService.getMatrixPricingSnapshot();
+    const piezaResuelta = resolverPiezaEnCatalogo(
+      parsed.data.piezaOServicio,
+      snap,
+      {
+        severidad: parsed.data.severidad,
+        descripcionDano: parsed.data.descripcionDano,
+      },
+    );
+    return {
+      success: !piezaResuelta.requiereRevisionManual,
+      preview: true,
+      cotizacionId: parsed.data.cotizacionId,
+      piezaAgregada: piezaResuelta,
+      precioPieza: piezaResuelta.precioCatalogo,
+      requiresHumanReview: piezaResuelta.requiereRevisionManual,
+      lineaFormateada: formatPiezaAgregadaLinea(piezaResuelta),
+      instruccion:
+        'Simulador: no persistido. En chat real se suma al total y actualiza el panel.',
+    };
+  }
+
+  private async executeActualizarCotizacionExistenteTool(
+    argsJson: string,
+    conversation: Conversation,
+    inboundMessageId?: string,
+  ): Promise<Record<string, unknown>> {
+    const parsed = parseActualizarCotizacionExistenteArgs(argsJson);
+    if (!parsed.ok) {
+      return { success: false, error: parsed.error };
+    }
+
+    const tallerId =
+      conversation.tallerId ??
+      (await this.tallerService.findDefaultTallerId());
+    if (!tallerId) {
+      return { success: false, error: 'No se pudo determinar tallerId.' };
+    }
+
+    let cotizacionId = parsed.data.cotizacionId;
+    const draftExists = await this.draftQuoteRepository.findOne({
+      where: {
+        id: cotizacionId,
+        conversationId: conversation.id,
+        status: 'PENDING_APPROVAL',
+      },
+      select: ['id'],
+    });
+    if (!draftExists) {
+      const fallback = await this.findActiveCotizacionIdForConversation(
+        conversation.id,
+        tallerId,
+      );
+      if (fallback) {
+        cotizacionId = fallback;
+      }
+    }
+
+    const result = await this.actualizarCotizacionExistente({
+      cotizacionId,
+      piezaOServicio: parsed.data.piezaOServicio,
+      severidad: parsed.data.severidad,
+      descripcionDano: parsed.data.descripcionDano,
+      conversationId: conversation.id,
+      tallerId,
+      messageId: inboundMessageId,
+    });
+
+    return result as unknown as Record<string, unknown>;
   }
 
   private async loadDraftQuoteWithItemsOrThrow(
@@ -6227,6 +6562,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             payload = await this.executeObtenerCotizacionExpressToolPlayground(
               tc.function.arguments ?? '{}',
             );
+          } else if (name === 'actualizarCotizacionExistente') {
+            payload =
+              await this.executeActualizarCotizacionExistenteToolPlayground(
+                tc.function.arguments ?? '{}',
+              );
           } else if (name === 'notificarLlegadaCliente') {
             payload = await this.executeNotificarLlegadaClienteToolPlayground();
           } else {
@@ -6622,6 +6962,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
               payload = await this.executeObtenerCotizacionExpressTool(
                 args,
                 conversation,
+              );
+            } else if (name === 'actualizarCotizacionExistente') {
+              payload = await this.executeActualizarCotizacionExistenteTool(
+                args,
+                conversation,
+                inboundMsg.id,
               );
             } else if (name === 'notificarLlegadaCliente') {
               payload = await this.executeNotificarLlegadaClienteTool(

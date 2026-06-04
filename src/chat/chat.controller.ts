@@ -101,6 +101,32 @@ export class ChatController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Post('conversations/:conversationId/cotizacion/:cotizacionId/agregar-pieza')
+  @HttpCode(HttpStatus.OK)
+  async agregarPiezaACotizacion(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('conversationId') conversationId: string,
+    @Param('cotizacionId') cotizacionId: string,
+    @Body()
+    body: {
+      piezaOServicio: string;
+      severidad?: string;
+      descripcionDano?: string;
+      messageId?: string;
+    },
+  ) {
+    return this.chatService.actualizarCotizacionExistente({
+      cotizacionId,
+      piezaOServicio: body.piezaOServicio,
+      severidad: body.severidad,
+      descripcionDano: body.descripcionDano,
+      conversationId,
+      tallerId: user.tallerId,
+      messageId: body.messageId,
+    });
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Post('upload')
   @UseInterceptors(FileInterceptor('file'))
   async uploadFile(@UploadedFile() file: Express.Multer.File) {

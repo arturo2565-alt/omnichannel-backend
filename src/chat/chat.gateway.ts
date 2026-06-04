@@ -31,6 +31,22 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.emit('imageDamageAnalysis', payload);
   }
 
+  /** Cotización existente actualizada (herramienta actualizarCotizacionExistente). */
+  emitCotizacionActualizada(payload: {
+    cotizacionId: string;
+    conversationId: string;
+    messageId: string;
+    damageAnalysis: unknown;
+    draftQuote: unknown;
+    items: unknown;
+    estimateAmount: number;
+    totalAnterior: number;
+    piezaAgregada: unknown;
+    requiresHumanReview?: boolean;
+  }) {
+    this.server.emit('cotizacionActualizada', payload);
+  }
+
   /** Nueva cotización persistida en `draft_quotes`, lista para revisión en el panel */
   emitDraftQuoteReady(payload: {
     draftQuoteId: string;
