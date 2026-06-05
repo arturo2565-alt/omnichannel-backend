@@ -34,7 +34,12 @@ import {
   normalizeTextForMatch,
   type DamageLevel,
 } from './autofix-config';
-import { resolveMatrixServicioRaw, normalizePanelPiezaCode } from '../catalog/panel-pieza-catalog';
+import {
+  findPanelPiezaOption,
+  isSpecialPanelPieza,
+  normalizePanelPiezaCode,
+  resolveMatrixServicioRaw,
+} from '../catalog/panel-pieza-catalog';
 import {
   buildDraftQuoteLineFromQuoteRow,
   matrixServicioInputsWithCatalogResolve,
@@ -151,15 +156,6 @@ import {
   tryVagueGenericServiceProfilingReply,
   userLatestMessageLooksLikeVehicleModelReply,
 } from './instant-quote-from-text';
-import {
-  buildMensajeClienteAutoAprobado,
-  formatPiezaAgregadaLinea,
-  isAutoAprobableSeveridad,
-  parseActualizarCotizacionExistenteArgs,
-  resolverPiezaEnCatalogo,
-  type ActualizarCotizacionExistenteToolResult,
-  type SeveridadInferidaTool,
-} from './actualizar-cotizacion-existente';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -642,46 +638,31 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
-      name: 'actualizarCotizacionExistente',
-      description:
-        'Agrega pieza(s) a la cotización activa de ESTA conversación (PENDING_APPROVAL o APPROVED). NO envíes cotizacionId. Incluye severidadInferida: DL = leve (auto-aprobable, responde al cliente con total), DM/DF = requiere validación humana en panel.',
-      parameters: {
-        type: 'object',
-        properties: {
-          piezasOServicios: {
-            type: 'array',
-            items: { type: 'string' },
-            description:
-              'Lista de piezas a agregar (ej. ["fascia trasera"]). Preferido si son varias.',
-          },
-          piezaOServicio: {
-            type: 'string',
-            description: 'Una sola pieza o servicio a agregar.',
-          },
-          severidadInferida: {
-            type: 'string',
-            enum: ['DL', 'DM', 'DF'],
-            description:
-              'DL = rayón/leve (precio catálogo DL, cotización puede seguir APPROVED). DM o DF = daño moderado/grave (requiere revisión humana, panel editable).',
-          },
-          descripcionDano: {
-            type: 'string',
-            description: 'Descripción breve del daño (ej. solo rayada, abolladura).',
-          },
-        },
-        required: ['severidadInferida'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
       name: 'notificarLlegadaCliente',
       description:
         'Ejecuta esta herramienta inmediatamente cuando el cliente indique que ya llegó al taller o está esperando afuera.',
       parameters: {
         type: 'object',
         properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'agregarServicioLeve',
+      description:
+        'Añade una pieza estética de daño leve (DL) a la cotización ya entregada al cliente cuando solicite incluir otra pieza menor sin rehacer el peritaje completo.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pieza: {
+            type: 'string',
+            description:
+              'Pieza a repintar (ej. Fascia trasera, Puerta delantera derecha, Salpicadera izquierda).',
+          },
+        },
+        required: ['pieza'],
       },
     },
   },
@@ -1358,445 +1339,6 @@ export class ChatService implements OnModuleDestroy {
     );
   }
 
-  /**
-   * Agrega pieza(s) a cotización PENDING_APPROVAL o APPROVED.
-   * DL → auto-aprobación; DM/DF → revisión humana y panel editable.
-   */
-  async actualizarCotizacionExistente(params: {
-    piezasOServicios: string[];
-    severidadInferida: SeveridadInferidaTool;
-    descripcionDano?: string;
-    conversationId: string;
-    tallerId: string;
-    messageId?: string;
-    cotizacionIdOverride?: string;
-  }): Promise<ActualizarCotizacionExistenteToolResult> {
-    const piezas = (params.piezasOServicios ?? [])
-      .map((p) => String(p ?? '').trim())
-      .filter(Boolean);
-    const severidadInferida = params.severidadInferida;
-
-    if (!piezas.length) {
-      return {
-        success: false,
-        cotizacionId: null,
-        cotizacionStatus: null,
-        piezaAgregada: null,
-        piezasAgregadas: [],
-        totalAnterior: 0,
-        totalNuevo: 0,
-        incremento: 0,
-        requiresHumanReview: true,
-        autoAprobado: false,
-        autopilotPausado: false,
-        error: 'Se requiere al menos una pieza o servicio.',
-      };
-    }
-
-    await this.assertConversationForTaller(params.conversationId, params.tallerId);
-
-    const autoAprobable = isAutoAprobableSeveridad(severidadInferida);
-
-    let existingDraft: DraftQuoteEntity | null = null;
-    if (params.cotizacionIdOverride?.trim()) {
-      existingDraft = await this.draftQuoteRepository.findOne({
-        where: {
-          id: params.cotizacionIdOverride.trim(),
-          conversationId: params.conversationId,
-          tallerId: params.tallerId,
-          status: In(['PENDING_APPROVAL', 'APPROVED']),
-        },
-        relations: { items: true },
-      });
-    }
-    if (!existingDraft) {
-      existingDraft = await this.findActiveCotizacionForConversation(
-        params.conversationId,
-        params.tallerId,
-      );
-    }
-
-    if (!existingDraft) {
-      return {
-        success: false,
-        cotizacionId: null,
-        cotizacionStatus: null,
-        piezaAgregada: null,
-        piezasAgregadas: [],
-        totalAnterior: 0,
-        totalNuevo: 0,
-        incremento: 0,
-        requiresHumanReview: true,
-        autoAprobado: false,
-        autopilotPausado: false,
-        error:
-          'No hay cotización activa (PENDING_APPROVAL o APPROVED) en esta conversación.',
-      };
-    }
-
-    const cotizacionId = existingDraft.id;
-    const statusAnterior = existingDraft.status;
-    const wasApproved = statusAnterior === 'APPROVED';
-
-    const totalAnterior = Math.round(
-      Number(existingDraft.quotePayload?.total ?? existingDraft.estimateAmount ?? 0),
-    );
-
-    const snap = await this.catalogService.getMatrixPricingSnapshot(params.tallerId);
-    const piezasResueltas = piezas.map((piezaOServicio) =>
-      resolverPiezaEnCatalogo(piezaOServicio, snap, {
-        severidadInferida,
-        descripcionDano: params.descripcionDano,
-      }),
-    );
-
-    const sinCatalogo = piezasResueltas.filter((p) => !p.catalogServicio);
-    if (sinCatalogo.length === piezasResueltas.length) {
-      return {
-        success: false,
-        cotizacionId,
-        cotizacionStatus: statusAnterior,
-        piezaAgregada: piezasResueltas[0] ?? null,
-        piezasAgregadas: piezasResueltas,
-        totalAnterior,
-        totalNuevo: totalAnterior,
-        incremento: 0,
-        requiresHumanReview: true,
-        autoAprobado: false,
-        autopilotPausado: false,
-        error: `Pieza(s) no encontrada(s) en catálogo: ${piezas.join(', ')}.`,
-      };
-    }
-
-    if (autoAprobable) {
-      const sinPrecioDl = piezasResueltas.filter(
-        (p) => p.catalogServicio && p.precioCatalogo <= 0,
-      );
-      if (sinPrecioDl.length === piezasResueltas.length) {
-        return {
-          success: false,
-          cotizacionId,
-          cotizacionStatus: statusAnterior,
-          piezaAgregada: piezasResueltas[0] ?? null,
-          piezasAgregadas: piezasResueltas,
-          totalAnterior,
-          totalNuevo: totalAnterior,
-          incremento: 0,
-          requiresHumanReview: true,
-          autoAprobado: false,
-          autopilotPausado: false,
-          error: 'Sin precio DL en catálogo para la pieza indicada.',
-        };
-      }
-    }
-
-    console.log('[actualizarCotizacionExistente]', JSON.stringify({
-      cotizacionId,
-      conversationId: params.conversationId,
-      severidadInferida,
-      autoAprobable,
-      statusAnterior,
-      piezas,
-      piezasResueltas,
-      totalAnterior,
-    }));
-
-    const priorInventory = this.extractPriorInventoryFromDraft(existingDraft);
-    const imageUrls = parseDraftImageUrls(existingDraft.imageUrl ?? '');
-
-    const incomingItems: DetectedDamageItem[] = piezasResueltas
-      .filter((p) => p.catalogServicio)
-      .map((piezaResuelta, idx) => {
-        const precioLinea =
-          autoAprobable && piezaResuelta.precioCatalogo > 0
-            ? piezaResuelta.precioCatalogo
-            : piezaResuelta.precioCatalogo > 0
-              ? piezaResuelta.precioCatalogo
-              : 0;
-        return {
-          pieza: piezaResuelta.panelCode,
-          severidad: piezaResuelta.severidad,
-          descripcionTecnica:
-            params.descripcionDano?.trim() ||
-            `Agregado (${severidadInferida}): ${piezaResuelta.nombreVisible} — ${piezas[idx]}`,
-          urls_origen: [],
-          ...(precioLinea > 0
-            ? { precioFinal: precioLinea, precioOficial: precioLinea }
-            : {}),
-        };
-      });
-
-    const mergedInv = mergeDamageInventoryAccumulative(
-      priorInventory,
-      incomingItems,
-      (raw) => normalizePanelPiezaCode(raw) || raw,
-    );
-
-    const analysis = inventoryItemsToVehicleAnalysis(
-      mergedInv.merged,
-      imageUrls,
-    );
-    const lineasAgregadas = piezasResueltas
-      .filter((p) => p.catalogServicio)
-      .map(formatPiezaAgregadaLinea)
-      .join('; ');
-    analysis.justificacion = [
-      analysis.justificacion,
-      `Actualización (${new Date().toISOString()}) [${severidadInferida}]: ${lineasAgregadas}`,
-    ]
-      .filter(Boolean)
-      .join('\n');
-
-    let draftQuoteDoc = await this.generateDraftQuote(analysis, params.tallerId);
-    if (existingDraft.quotePayload?.reference) {
-      draftQuoteDoc = {
-        ...draftQuoteDoc,
-        reference: existingDraft.quotePayload.reference,
-        generatedAt: existingDraft.quotePayload.generatedAt,
-      };
-    }
-
-    let nuevoStatus: string;
-    let requiresHumanReview: boolean;
-    let autopilotPausado: boolean;
-    let autoAprobado: boolean;
-
-    if (autoAprobable) {
-      nuevoStatus = wasApproved ? 'APPROVED' : 'PENDING_APPROVAL';
-      requiresHumanReview = false;
-      autopilotPausado = false;
-      autoAprobado = true;
-      draftQuoteDoc.status = nuevoStatus as typeof draftQuoteDoc.status;
-    } else {
-      nuevoStatus = 'PENDING_APPROVAL';
-      requiresHumanReview = true;
-      autopilotPausado = true;
-      autoAprobado = false;
-      draftQuoteDoc.status = 'PENDING_APPROVAL';
-    }
-
-    const draftQuoteForClient =
-      normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
-    draftQuoteForClient.status = nuevoStatus as typeof draftQuoteForClient.status;
-
-    const totalNuevo = Math.round(draftQuoteForClient.total ?? 0);
-    const incremento = Math.max(0, totalNuevo - totalAnterior);
-    const estimateAmount = totalNuevo;
-
-    const messageId =
-      params.messageId?.trim() ||
-      existingDraft.messageId ||
-      randomUUID();
-
-    existingDraft.messageId = messageId;
-    existingDraft.damageAnalysis = analysis;
-    existingDraft.estimateAmount = estimateAmount;
-    existingDraft.quotePayload = draftQuoteForClient;
-    existingDraft.status = nuevoStatus;
-    const savedDraft = await this.draftQuoteRepository.save(existingDraft);
-
-    await this.syncDraftQuoteLineItems(
-      savedDraft.id,
-      analysis,
-      draftQuoteForClient,
-      imageUrls,
-      params.tallerId,
-    );
-
-    await this.messageRepository.update(
-      { id: messageId },
-      { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
-    );
-
-    if (autopilotPausado) {
-      await this.conversationRepository.update(
-        { id: params.conversationId },
-        { isAutoPilotActive: false },
-      );
-      await this.markConversationDraftPendingReview(params.conversationId);
-    } else if (!wasApproved) {
-      await this.markConversationDraftPendingReview(params.conversationId);
-    }
-
-    const savedItems = await this.draftQuoteItemRepository.find({
-      where: { draftQuoteId: savedDraft.id },
-      order: { sortOrder: 'ASC' },
-    });
-
-    const ultimaPieza =
-      piezasResueltas.filter((p) => p.catalogServicio).at(-1) ?? null;
-
-    const mensajeParaCliente = autoAprobado
-      ? buildMensajeClienteAutoAprobado({
-          piezas: piezasResueltas,
-          totalNuevo,
-          incremento,
-        })
-      : undefined;
-
-    this.chatGateway.emitCotizacionActualizada({
-      cotizacionId: savedDraft.id,
-      conversationId: params.conversationId,
-      messageId,
-      damageAnalysis: analysis,
-      draftQuote: draftQuoteForClient,
-      items: savedItems,
-      estimateAmount,
-      totalAnterior,
-      piezaAgregada: ultimaPieza,
-      requiresHumanReview,
-      cotizacionStatus: nuevoStatus,
-      statusAnterior,
-      autoAprobado,
-      autopilotPausado,
-      panelDesbloqueado: wasApproved && nuevoStatus === 'PENDING_APPROVAL',
-    });
-
-    this.chatGateway.emitDraftQuoteReady({
-      draftQuoteId: savedDraft.id,
-      conversationId: params.conversationId,
-      messageId,
-      damageAnalysis: analysis,
-      draftQuote: draftQuoteForClient,
-      estimateAmount,
-      isAutoPilotActive: !autopilotPausado,
-    });
-
-    if (autopilotPausado) {
-      this.chatGateway.emitConversationLeadUpdated({
-        conversationId: params.conversationId,
-        status: 'por_cotizar',
-        isAutoPilotActive: false,
-      });
-    }
-
-    console.log('[actualizarCotizacionExistente] persisted', JSON.stringify({
-      cotizacionId: savedDraft.id,
-      nuevoStatus,
-      totalAnterior,
-      totalNuevo,
-      incremento,
-      autoAprobado,
-      autopilotPausado,
-    }));
-
-    return {
-      success: true,
-      cotizacionId: savedDraft.id,
-      cotizacionStatus: nuevoStatus,
-      piezaAgregada: ultimaPieza,
-      piezasAgregadas: piezasResueltas,
-      totalAnterior,
-      totalNuevo,
-      incremento,
-      requiresHumanReview,
-      autoAprobado,
-      autopilotPausado,
-      mensajeParaCliente,
-      instruccion: autoAprobado
-        ? `Daño leve (DL) auto-aprobado. Responde al cliente usando mensajeParaCliente o totalNuevo (${totalNuevo}). PROHIBIDO inventar otros montos.`
-        : `Daño ${severidadInferida}: requiere validación humana en panel. NO des precio final al cliente; indica que un asesor revisará la cotización.`,
-    };
-  }
-
-  /** Cotización activa más reciente: PENDING_APPROVAL o APPROVED. */
-  async findActiveCotizacionForConversation(
-    conversationId: string,
-    tallerId: string,
-  ): Promise<DraftQuoteEntity | null> {
-    return this.draftQuoteRepository.findOne({
-      where: {
-        conversationId,
-        tallerId,
-        status: In(['PENDING_APPROVAL', 'APPROVED']),
-      },
-      order: { createdAt: 'DESC' },
-      relations: { items: true },
-    });
-  }
-
-  /** @deprecated Usar findActiveCotizacionForConversation */
-  async findActiveCotizacionIdForConversation(
-    conversationId: string,
-    tallerId: string,
-  ): Promise<string | null> {
-    const row = await this.findActiveCotizacionForConversation(
-      conversationId,
-      tallerId,
-    );
-    return row?.id ?? null;
-  }
-
-  private async executeActualizarCotizacionExistenteToolPlayground(
-    argsJson: string,
-  ): Promise<Record<string, unknown>> {
-    const parsed = parseActualizarCotizacionExistenteArgs(argsJson);
-    if (!parsed.ok) {
-      return { success: false, error: parsed.error };
-    }
-    const snap = await this.catalogService.getMatrixPricingSnapshot();
-    const piezasResueltas = parsed.data.piezasOServicios.map((pieza) =>
-      resolverPiezaEnCatalogo(pieza, snap, {
-        severidadInferida: parsed.data.severidadInferida,
-        descripcionDano: parsed.data.descripcionDano,
-      }),
-    );
-    const autoAprobable = isAutoAprobableSeveridad(parsed.data.severidadInferida);
-    const ok = piezasResueltas.some(
-      (p) => p.catalogServicio && (autoAprobable ? p.precioCatalogo > 0 : true),
-    );
-    return {
-      success: ok,
-      preview: true,
-      cotizacionId: null,
-      severidadInferida: parsed.data.severidadInferida,
-      piezasAgregadas: piezasResueltas,
-      requiresHumanReview: !autoAprobable,
-      autoAprobado: autoAprobable && ok,
-      instruccion:
-        'Simulador: cotizacionId se resuelve en BD por conversación. No persistido aquí.',
-    };
-  }
-
-  private async executeActualizarCotizacionExistenteTool(
-    argsJson: string,
-    conversation: Conversation,
-    inboundMessageId?: string,
-  ): Promise<Record<string, unknown>> {
-    const parsed = parseActualizarCotizacionExistenteArgs(argsJson);
-    if (!parsed.ok) {
-      return { success: false, error: parsed.error };
-    }
-
-    const tallerId =
-      conversation.tallerId ??
-      (await this.tallerService.findDefaultTallerId());
-    if (!tallerId) {
-      return { success: false, error: 'No se pudo determinar tallerId.' };
-    }
-
-    console.log(
-      '[actualizarCotizacionExistenteTool] Resolviendo cotización por conversationId',
-      JSON.stringify({
-        conversationId: conversation.id,
-        externalId: conversation.externalId,
-        piezas: parsed.data.piezasOServicios,
-        ignoredIdsFromLlm: true,
-      }),
-    );
-
-    const result = await this.actualizarCotizacionExistente({
-      piezasOServicios: parsed.data.piezasOServicios,
-      severidadInferida: parsed.data.severidadInferida,
-      descripcionDano: parsed.data.descripcionDano,
-      conversationId: conversation.id,
-      tallerId,
-      messageId: inboundMessageId,
-    });
-
-    return result as unknown as Record<string, unknown>;
-  }
-
   private async loadDraftQuoteWithItemsOrThrow(
     id: string,
     tallerId?: string,
@@ -2053,28 +1595,22 @@ export class ChatService implements OnModuleDestroy {
     if (!to || !text) return;
 
     const url = buildWhatsAppMessagesUrl(phoneNumberId);
-    try {
-      await axios.post(
-        url,
-        {
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to,
-          type: 'text',
-          text: { body: text.slice(0, 4096) },
+    await axios.post(
+      url,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'text',
+        text: { body: text.slice(0, 4096) },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
         },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-        },
-      );
-    } catch (error) {
-      const err = error as { response?: { data?: unknown } };
-      console.error('Error de Meta:', err.response?.data);
-      throw error;
-    }
+      },
+    );
   }
 
   /** Despacha outbound al canal correcto (Messenger o WhatsApp). */
@@ -6585,6 +6121,188 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     };
   }
 
+  /** Añade pieza estética DL a la cotización más reciente de la conversación. */
+  private async executeAgregarServicioLeveTool(
+    argsJson: string,
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+
+    const piezaInput = pickFirstNonEmptyTrimmedString(raw.pieza, raw.piezaNombre);
+    if (!piezaInput) {
+      return { success: false, error: 'Falta el parámetro pieza.' };
+    }
+
+    if (isSpecialPanelPieza(piezaInput)) {
+      return {
+        success: false,
+        error:
+          'Esta herramienta solo aplica a piezas estéticas del catálogo, no a refacciones ni daños internos.',
+      };
+    }
+
+    const panelOpt = findPanelPiezaOption(piezaInput);
+    if (!panelOpt) {
+      return {
+        success: false,
+        error: `No reconozco la pieza "${piezaInput}". Pide al cliente que la describa con el nombre habitual del taller.`,
+      };
+    }
+
+    const row = await this.draftQuoteRepository.findOne({
+      where: {
+        conversationId: conversation.id,
+        status: In(['PENDING_APPROVAL', 'APPROVED']),
+      },
+      order: { createdAt: 'DESC' },
+      relations: { items: true },
+    });
+    if (!row) {
+      return {
+        success: false,
+        error:
+          'No hay cotización entregada para esta conversación. Primero debe existir un borrador pendiente o aprobado.',
+      };
+    }
+
+    const snap = await this.catalogService.getMatrixPricingSnapshot(
+      conversation.tallerId ?? row.tallerId ?? undefined,
+    );
+    const matrixRaw = resolveMatrixServicioRaw(piezaInput);
+    const canonical = snap.matchServicio(matrixRaw) ?? matrixRaw;
+    const precioPieza = Math.round(snap.getAmount(canonical, 'DL'));
+    if (!Number.isFinite(precioPieza) || precioPieza <= 0) {
+      return {
+        success: false,
+        error: `No hay precio de daño leve (DL) en catálogo para "${panelOpt.fullName}".`,
+      };
+    }
+
+    const panelCode = normalizePanelPiezaCode(piezaInput);
+    const existingItems = [...(row.items ?? [])].sort(
+      (a, b) => a.sortOrder - b.sortOrder,
+    );
+    const nextSortOrder =
+      existingItems.length > 0
+        ? Math.max(...existingItems.map((i) => i.sortOrder)) + 1
+        : 0;
+
+    const prevTotal = Math.round(
+      Number(row.quotePayload?.total ?? row.estimateAmount ?? 0),
+    );
+    const nuevoTotalGlobal = prevTotal + precioPieza;
+
+    const newInvItem: DetectedDamageItem = {
+      pieza: panelOpt.fullName,
+      severidad: 'DL',
+      descripcionTecnica:
+        'Servicio estético de daño leve agregado por solicitud del cliente.',
+      urls_origen: [],
+    };
+    const prevInv = row.damageAnalysis.inventory ?? [];
+    const mergedInventory = [...prevInv, newInvItem];
+    const fallbackUrls = parseDraftImageUrls(row.imageUrl);
+    const analysisMerged = inventoryItemsToVehicleAnalysis(
+      mergedInventory,
+      fallbackUrls,
+    );
+
+    const allRowsForPricing: QuoteRowInput[] = [
+      ...existingItems.map((it) => ({
+        pieza: it.pieza,
+        severidad: it.severidad,
+        precioMx: it.precioMx,
+      })),
+      { pieza: panelCode, severidad: 'DL', precioMx: precioPieza },
+    ];
+    const manualLines: DraftQuoteLine[] = allRowsForPricing.map((L, idx) =>
+      buildDraftQuoteLineFromQuoteRow(L, idx, snap),
+    );
+
+    const quotePayloadBase = row.quotePayload;
+    const quotePayload: DraftQuote = {
+      ...quotePayloadBase,
+      lines: manualLines,
+      subtotal: nuevoTotalGlobal,
+      total: nuevoTotalGlobal,
+      analysisBasis: {
+        ...quotePayloadBase.analysisBasis,
+        inventory: mergedInventory,
+      },
+    };
+    const quotePayloadForClient =
+      normalizeDraftQuoteForClient(quotePayload) ?? quotePayload;
+
+    row.damageAnalysis = analysisMerged;
+    row.estimateAmount = nuevoTotalGlobal;
+    row.quotePayload = quotePayloadForClient;
+    const saved = await this.draftQuoteRepository.save(row);
+
+    await this.draftQuoteItemRepository.insert({
+      draftQuoteId: saved.id,
+      sortOrder: nextSortOrder,
+      pieza: panelCode,
+      severidad: 'DL',
+      precioMx: precioPieza,
+      descripcionTecnica: newInvItem.descripcionTecnica,
+      urlsOrigen: null,
+    });
+
+    if (row.messageId) {
+      await this.messageRepository.update(
+        { id: row.messageId },
+        {
+          damageAnalysis: analysisMerged,
+          draftQuote: quotePayloadForClient,
+        },
+      );
+    }
+
+    const toolResult = {
+      piezaAgregada: panelOpt.fullName,
+      precioPieza,
+      nuevoTotalGlobal,
+    };
+
+    this.chatGateway.emitDraftQuoteLeveAdded({
+      draftQuoteId: saved.id,
+      conversationId: row.conversationId,
+      messageId: row.messageId,
+      draftQuote: quotePayloadForClient,
+      damageAnalysis: analysisMerged,
+      estimateAmount: nuevoTotalGlobal,
+      ...toolResult,
+    });
+
+    return toolResult;
+  }
+
+  /** Playground: sin cotización real en BD. */
+  private async executeAgregarServicioLeveToolPlayground(
+    argsJson: string,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+    const piezaInput = pickFirstNonEmptyTrimmedString(raw.pieza);
+    const panelOpt = piezaInput ? findPanelPiezaOption(piezaInput) : null;
+    return {
+      success: false,
+      preview: true,
+      error:
+        'En el simulador no se persiste la cotización. En producción esta herramienta actualiza el borrador entregado.',
+      piezaSolicitada: panelOpt?.fullName ?? piezaInput ?? null,
+    };
+  }
+
   /** Alarma de recepción física: marca espera afuera y dispara llamadas Twilio. */
   private async executeNotificarLlegadaClienteTool(
     conversation: Conversation,
@@ -6709,13 +6427,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             payload = await this.executeObtenerCotizacionExpressToolPlayground(
               tc.function.arguments ?? '{}',
             );
-          } else if (name === 'actualizarCotizacionExistente') {
-            payload =
-              await this.executeActualizarCotizacionExistenteToolPlayground(
-                tc.function.arguments ?? '{}',
-              );
           } else if (name === 'notificarLlegadaCliente') {
             payload = await this.executeNotificarLlegadaClienteToolPlayground();
+          } else if (name === 'agregarServicioLeve') {
+            payload = await this.executeAgregarServicioLeveToolPlayground(
+              tc.function.arguments ?? '{}',
+            );
           } else {
             payload = { success: false, error: `Función no soportada: ${name}` };
           }
@@ -7110,14 +6827,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
                 args,
                 conversation,
               );
-            } else if (name === 'actualizarCotizacionExistente') {
-              payload = await this.executeActualizarCotizacionExistenteTool(
-                args,
-                conversation,
-                inboundMsg.id,
-              );
             } else if (name === 'notificarLlegadaCliente') {
               payload = await this.executeNotificarLlegadaClienteTool(
+                conversation,
+              );
+            } else if (name === 'agregarServicioLeve') {
+              payload = await this.executeAgregarServicioLeveTool(
+                args,
                 conversation,
               );
             } else {

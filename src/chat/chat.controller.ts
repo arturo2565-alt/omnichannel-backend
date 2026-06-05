@@ -18,7 +18,6 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { normalizeSeveridadInferida } from './actualizar-cotizacion-existente';
 import { ChatService } from './chat.service';
 import type {
   PatchDraftQuoteBody,
@@ -99,35 +98,6 @@ export class ChatController {
       conversationId,
       user.tallerId,
     );
-  }
-
-  @UseGuards(JwtAuthGuard)
-  @Post('conversations/:conversationId/cotizacion/:cotizacionId/agregar-pieza')
-  @HttpCode(HttpStatus.OK)
-  async agregarPiezaACotizacion(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('conversationId') conversationId: string,
-    @Param('cotizacionId') cotizacionId: string,
-    @Body()
-    body: {
-      piezaOServicio: string;
-      severidadInferida?: string;
-      severidad?: string;
-      descripcionDano?: string;
-      messageId?: string;
-    },
-  ) {
-    const severidadInferida =
-      normalizeSeveridadInferida(body.severidadInferida ?? body.severidad) ?? 'DL';
-    return this.chatService.actualizarCotizacionExistente({
-      piezasOServicios: [body.piezaOServicio],
-      severidadInferida,
-      descripcionDano: body.descripcionDano,
-      conversationId,
-      tallerId: user.tallerId,
-      messageId: body.messageId,
-      cotizacionIdOverride: cotizacionId,
-    });
   }
 
   @UseGuards(JwtAuthGuard)
