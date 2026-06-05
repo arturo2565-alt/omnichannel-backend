@@ -8,6 +8,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { Conversation } from './conversation.entity';
+import { DraftQuoteEntity } from './draft-quote.entity';
 
 export type AppointmentStatus = 'pendiente' | 'confirmada' | 'finalizada';
 
@@ -40,6 +41,13 @@ export class AppointmentEntity {
 
   @Column({ type: 'varchar', length: 24, default: 'pendiente' })
   status: AppointmentStatus;
+
+  @Column({ type: 'uuid', nullable: true })
+  draftQuoteId: string | null;
+
+  @ManyToOne(() => DraftQuoteEntity, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({ name: 'draftQuoteId' })
+  draftQuote: DraftQuoteEntity | null;
 
   @CreateDateColumn()
   createdAt: Date;

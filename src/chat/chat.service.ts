@@ -55,6 +55,7 @@ import {
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { DEFAULT_CHAT_APPOINTMENT_PROMPT } from './ai-config-defaults';
 import { AiConfigService } from './ai-config.service';
+import { ActiveQuoteService } from './active-quote.service';
 import { TwilioService } from './twilio.service';
 import axios from 'axios';
 import { CatalogService } from '../catalog/catalog.service';
@@ -641,6 +642,48 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'actualizarCotizacionActiva',
+      description:
+        'Añade o acumula una pieza/servicio en la cotización progresiva del chat. Úsala cuando el cliente pida incluir otra pieza (ej. "también la fascia trasera") después de una cotización previa. Devuelve el total actualizado y un resumen listo para redactar al cliente.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pieza: {
+            type: 'string',
+            description:
+              'Pieza o servicio (ej. Fascia trasera, Puerta delantera derecha, baño de pintura).',
+          },
+          precio: {
+            type: 'number',
+            description:
+              'Precio MXN opcional. Omítelo para usar el catálogo oficial (DL en piezas; baño requiere categoria).',
+          },
+          categoria: {
+            type: 'string',
+            enum: ['Chico', 'Mediano', 'Grande', 'Premium'],
+            description:
+              'Obligatorio para baño de pintura si no envías precio. Tamaño del vehículo.',
+          },
+        },
+        required: ['pieza'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'obtenerCotizacionActual',
+      description:
+        'Lee la cotización progresiva persistida de esta conversación (líneas y total acumulado). Úsala antes de redactar o cuando necesites confirmar el monto actual sin hacer matemáticas.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
 ];
 
 /** Cuerpo del panel para enviar mensaje outbound con JWT (`tallerId` viene del token). */
@@ -736,6 +779,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly tallerService: TallerService,
 
     private readonly twilioService: TwilioService,
+
+    private readonly activeQuoteService: ActiveQuoteService,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -6030,6 +6075,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     success: boolean;
     appointmentId?: string;
     scheduledAt?: string;
+    draftQuoteId?: string;
     error?: string;
   }> {
     let raw: Record<string, unknown>;
@@ -6073,6 +6119,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       scheduledAt: d,
       status: 'confirmada',
     });
+
+    const activeQuote = await this.activeQuoteService.getActiveQuote(
+      conversation.id,
+    );
+    if (activeQuote) {
+      row.draftQuoteId = activeQuote.id;
+    }
+
     const saved = await this.appointmentRepository.save(row);
 
     conversation.status = 'agendado';
@@ -6093,6 +6147,107 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       success: true,
       appointmentId: saved.id,
       scheduledAt: saved.scheduledAt.toISOString(),
+      draftQuoteId: saved.draftQuoteId ?? undefined,
+    };
+  }
+
+  private async executeActualizarCotizacionActivaTool(
+    argsJson: string,
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+
+    const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+    const precioRaw = raw.precio ?? raw.precioMx;
+    const precio =
+      precioRaw != null && Number.isFinite(Number(precioRaw))
+        ? Number(precioRaw)
+        : undefined;
+    const categoria = pickFirstNonEmptyTrimmedString(
+      raw.categoria,
+      raw.categoriaTamaño,
+      raw.categoria_tamano,
+    );
+    const vehicleModel = pickFirstNonEmptyTrimmedString(
+      raw.modeloVehiculo,
+      raw.vehicleDescription,
+      raw.vehicle,
+    );
+
+    const result = await this.activeQuoteService.addItemToQuote({
+      conversationId: conversation.id,
+      tallerId: conversation.tallerId ?? null,
+      pieza,
+      precio,
+      categoria: categoria || undefined,
+      vehicleModel: vehicleModel || undefined,
+    });
+
+    if (!result.success) {
+      return { success: false, error: result.error ?? 'No se pudo actualizar.' };
+    }
+
+    return {
+      success: true,
+      piezaAgregada: result.piezaAgregada,
+      precioPieza: result.precioPieza,
+      nuevoTotalGlobal: result.nuevoTotalGlobal,
+      resumen: result.resumen,
+      yaExistia: result.yaExistia ?? false,
+    };
+  }
+
+  private async executeObtenerCotizacionActualTool(
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    const summary = await this.activeQuoteService.getQuoteSummary(
+      conversation.id,
+    );
+    return {
+      success: true,
+      vacia: summary.vacia,
+      resumen: summary.resumen,
+      total: summary.total ?? 0,
+      itemCount: summary.itemCount ?? 0,
+    };
+  }
+
+  /** Playground: cotización progresiva sin BD (vista previa). */
+  private async executeActualizarCotizacionActivaToolPlayground(
+    argsJson: string,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+    const pieza = pickFirstNonEmptyTrimmedString(raw.pieza);
+    return {
+      success: false,
+      preview: true,
+      error:
+        '(Simulador) La cotización progresiva se persiste en conversaciones reales. En producción actualizarCotizacionActiva guarda en draft_quotes.',
+      piezaSolicitada: pieza || null,
+    };
+  }
+
+  private async executeObtenerCotizacionActualToolPlayground(): Promise<
+    Record<string, unknown>
+  > {
+    return {
+      success: true,
+      preview: true,
+      vacia: true,
+      resumen:
+        '(Simulador) No hay cotización activa en BD. En producción obtenerCotizacionActual lee draft_quotes de la conversación.',
+      total: 0,
+      itemCount: 0,
     };
   }
 
@@ -6222,6 +6377,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             );
           } else if (name === 'notificarLlegadaCliente') {
             payload = await this.executeNotificarLlegadaClienteToolPlayground();
+          } else if (name === 'actualizarCotizacionActiva') {
+            payload = await this.executeActualizarCotizacionActivaToolPlayground(
+              tc.function.arguments ?? '{}',
+            );
+          } else if (name === 'obtenerCotizacionActual') {
+            payload = await this.executeObtenerCotizacionActualToolPlayground();
           } else {
             payload = { success: false, error: `Función no soportada: ${name}` };
           }
@@ -6618,6 +6779,15 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
               );
             } else if (name === 'notificarLlegadaCliente') {
               payload = await this.executeNotificarLlegadaClienteTool(
+                conversation,
+              );
+            } else if (name === 'actualizarCotizacionActiva') {
+              payload = await this.executeActualizarCotizacionActivaTool(
+                args,
+                conversation,
+              );
+            } else if (name === 'obtenerCotizacionActual') {
+              payload = await this.executeObtenerCotizacionActualTool(
                 conversation,
               );
             } else {

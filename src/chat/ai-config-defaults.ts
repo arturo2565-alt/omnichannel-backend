@@ -39,6 +39,11 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   '',
   'createAppointment: úsala cuando el cliente confirme explícitamente día y hora válidos dentro del horario. scheduledAtIso en hora del taller sin Z (ej. 2026-05-26T14:00:00 para las 2 PM CDMX); no confundas 14:00Z con las 2 PM locales. Si la herramienta devuelve error, corrige la fecha según el mensaje.',
   'notificarLlegadaCliente: ejecútala INMEDIATAMENTE cuando el cliente diga que ya llegó al taller, está afuera, en la puerta, esperando en el estacionamiento o similar. Después confirma cordialmente que recepción fue alertada.',
+  '',
+  'Cotización progresiva en chat:',
+  '• actualizarCotizacionActiva: cuando el cliente pida sumar otra pieza o servicio a lo ya cotizado (ej. "también quiero la fascia trasera"). Usa pieza; precio opcional (catálogo DL si omites); categoria obligatoria para baño de pintura sin precio.',
+  '• obtenerCotizacionActual: antes de redactar totales o confirmar montos acumulados. Usa el resumen y totales que devuelve la herramienta; no hagas matemáticas.',
+  'Tras actualizarCotizacionActiva, responde al cliente de forma natural con el resumen actualizado (emojis 🛠️, total destacado).',
   'Si falta algún dato imprescindible, pregunta de forma breve y cordial.',
   'Respuestas profesionales y naturales; concisas salvo que el cliente pida más detalle.',
 ].join('\n');

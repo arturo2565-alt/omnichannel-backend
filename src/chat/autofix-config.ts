@@ -186,6 +186,7 @@ export interface DraftQuoteLine {
 }
 
 export type DraftQuoteStatus =
+  | 'ACTIVE'
   | 'PENDING_APPROVAL'
   | 'APPROVED'
   | 'SENT';
