@@ -57,21 +57,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.emit('draftPeritajeAwaitingVehicle', payload);
   }
 
-  /** Pieza estética DL añadida a cotización ya entregada (PENDING o APPROVED). */
-  emitDraftQuoteLeveAdded(payload: {
-    draftQuoteId: string;
-    conversationId: string;
-    messageId: string | null;
-    draftQuote: unknown;
-    damageAnalysis: unknown;
-    estimateAmount: number;
-    piezaAgregada: string;
-    precioPieza: number;
-    nuevoTotalGlobal: number;
-  }) {
-    this.server.emit('draftQuoteLeveAdded', payload);
-  }
-
   /** Actualización de estado de lead / bandeja sin nuevo mensaje */
   emitConversationLeadUpdated(payload: {
     conversationId: string;

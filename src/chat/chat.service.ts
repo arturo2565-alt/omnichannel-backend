@@ -34,12 +34,7 @@ import {
   normalizeTextForMatch,
   type DamageLevel,
 } from './autofix-config';
-import {
-  findPanelPiezaOption,
-  isSpecialPanelPieza,
-  normalizePanelPiezaCode,
-  resolveMatrixServicioRaw,
-} from '../catalog/panel-pieza-catalog';
+import { resolveMatrixServicioRaw, normalizePanelPiezaCode } from '../catalog/panel-pieza-catalog';
 import {
   buildDraftQuoteLineFromQuoteRow,
   matrixServicioInputsWithCatalogResolve,
@@ -91,7 +86,6 @@ import {
   getWhatsAppAccessToken,
   getWhatsAppPhoneNumberId,
   buildWhatsAppMessagesUrl,
-  normalizeWhatsAppRecipientWaId,
 } from './whatsapp-config';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import {
@@ -644,25 +638,6 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
       parameters: {
         type: 'object',
         properties: {},
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'agregarServicioLeve',
-      description:
-        'Añade una pieza estética de daño leve (DL) a la cotización ya entregada al cliente cuando solicite incluir otra pieza menor sin rehacer el peritaje completo.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pieza: {
-            type: 'string',
-            description:
-              'Pieza a repintar (ej. Fascia trasera, Puerta delantera derecha, Salpicadera izquierda).',
-          },
-        },
-        required: ['pieza'],
       },
     },
   },
@@ -1590,7 +1565,7 @@ export class ChatService implements OnModuleDestroy {
       );
       return;
     }
-    const to = normalizeWhatsAppRecipientWaId(recipientWaId);
+    const to = String(recipientWaId ?? '').replace(/\D/g, '').trim();
     const text = String(messageText ?? '').trim();
     if (!to || !text) return;
 
@@ -6121,188 +6096,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     };
   }
 
-  /** Añade pieza estética DL a la cotización más reciente de la conversación. */
-  private async executeAgregarServicioLeveTool(
-    argsJson: string,
-    conversation: Conversation,
-  ): Promise<Record<string, unknown>> {
-    let raw: Record<string, unknown>;
-    try {
-      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
-    } catch {
-      return { success: false, error: 'Argumentos inválidos (JSON).' };
-    }
-
-    const piezaInput = pickFirstNonEmptyTrimmedString(raw.pieza, raw.piezaNombre);
-    if (!piezaInput) {
-      return { success: false, error: 'Falta el parámetro pieza.' };
-    }
-
-    if (isSpecialPanelPieza(piezaInput)) {
-      return {
-        success: false,
-        error:
-          'Esta herramienta solo aplica a piezas estéticas del catálogo, no a refacciones ni daños internos.',
-      };
-    }
-
-    const panelOpt = findPanelPiezaOption(piezaInput);
-    if (!panelOpt) {
-      return {
-        success: false,
-        error: `No reconozco la pieza "${piezaInput}". Pide al cliente que la describa con el nombre habitual del taller.`,
-      };
-    }
-
-    const row = await this.draftQuoteRepository.findOne({
-      where: {
-        conversationId: conversation.id,
-        status: In(['PENDING_APPROVAL', 'APPROVED']),
-      },
-      order: { createdAt: 'DESC' },
-      relations: { items: true },
-    });
-    if (!row) {
-      return {
-        success: false,
-        error:
-          'No hay cotización entregada para esta conversación. Primero debe existir un borrador pendiente o aprobado.',
-      };
-    }
-
-    const snap = await this.catalogService.getMatrixPricingSnapshot(
-      conversation.tallerId ?? row.tallerId ?? undefined,
-    );
-    const matrixRaw = resolveMatrixServicioRaw(piezaInput);
-    const canonical = snap.matchServicio(matrixRaw) ?? matrixRaw;
-    const precioPieza = Math.round(snap.getAmount(canonical, 'DL'));
-    if (!Number.isFinite(precioPieza) || precioPieza <= 0) {
-      return {
-        success: false,
-        error: `No hay precio de daño leve (DL) en catálogo para "${panelOpt.fullName}".`,
-      };
-    }
-
-    const panelCode = normalizePanelPiezaCode(piezaInput);
-    const existingItems = [...(row.items ?? [])].sort(
-      (a, b) => a.sortOrder - b.sortOrder,
-    );
-    const nextSortOrder =
-      existingItems.length > 0
-        ? Math.max(...existingItems.map((i) => i.sortOrder)) + 1
-        : 0;
-
-    const prevTotal = Math.round(
-      Number(row.quotePayload?.total ?? row.estimateAmount ?? 0),
-    );
-    const nuevoTotalGlobal = prevTotal + precioPieza;
-
-    const newInvItem: DetectedDamageItem = {
-      pieza: panelOpt.fullName,
-      severidad: 'DL',
-      descripcionTecnica:
-        'Servicio estético de daño leve agregado por solicitud del cliente.',
-      urls_origen: [],
-    };
-    const prevInv = row.damageAnalysis.inventory ?? [];
-    const mergedInventory = [...prevInv, newInvItem];
-    const fallbackUrls = parseDraftImageUrls(row.imageUrl);
-    const analysisMerged = inventoryItemsToVehicleAnalysis(
-      mergedInventory,
-      fallbackUrls,
-    );
-
-    const allRowsForPricing: QuoteRowInput[] = [
-      ...existingItems.map((it) => ({
-        pieza: it.pieza,
-        severidad: it.severidad,
-        precioMx: it.precioMx,
-      })),
-      { pieza: panelCode, severidad: 'DL', precioMx: precioPieza },
-    ];
-    const manualLines: DraftQuoteLine[] = allRowsForPricing.map((L, idx) =>
-      buildDraftQuoteLineFromQuoteRow(L, idx, snap),
-    );
-
-    const quotePayloadBase = row.quotePayload;
-    const quotePayload: DraftQuote = {
-      ...quotePayloadBase,
-      lines: manualLines,
-      subtotal: nuevoTotalGlobal,
-      total: nuevoTotalGlobal,
-      analysisBasis: {
-        ...quotePayloadBase.analysisBasis,
-        inventory: mergedInventory,
-      },
-    };
-    const quotePayloadForClient =
-      normalizeDraftQuoteForClient(quotePayload) ?? quotePayload;
-
-    row.damageAnalysis = analysisMerged;
-    row.estimateAmount = nuevoTotalGlobal;
-    row.quotePayload = quotePayloadForClient;
-    const saved = await this.draftQuoteRepository.save(row);
-
-    await this.draftQuoteItemRepository.insert({
-      draftQuoteId: saved.id,
-      sortOrder: nextSortOrder,
-      pieza: panelCode,
-      severidad: 'DL',
-      precioMx: precioPieza,
-      descripcionTecnica: newInvItem.descripcionTecnica,
-      urlsOrigen: null,
-    });
-
-    if (row.messageId) {
-      await this.messageRepository.update(
-        { id: row.messageId },
-        {
-          damageAnalysis: analysisMerged,
-          draftQuote: quotePayloadForClient,
-        },
-      );
-    }
-
-    const toolResult = {
-      piezaAgregada: panelOpt.fullName,
-      precioPieza,
-      nuevoTotalGlobal,
-    };
-
-    this.chatGateway.emitDraftQuoteLeveAdded({
-      draftQuoteId: saved.id,
-      conversationId: row.conversationId,
-      messageId: row.messageId,
-      draftQuote: quotePayloadForClient,
-      damageAnalysis: analysisMerged,
-      estimateAmount: nuevoTotalGlobal,
-      ...toolResult,
-    });
-
-    return toolResult;
-  }
-
-  /** Playground: sin cotización real en BD. */
-  private async executeAgregarServicioLeveToolPlayground(
-    argsJson: string,
-  ): Promise<Record<string, unknown>> {
-    let raw: Record<string, unknown>;
-    try {
-      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
-    } catch {
-      return { success: false, error: 'Argumentos inválidos (JSON).' };
-    }
-    const piezaInput = pickFirstNonEmptyTrimmedString(raw.pieza);
-    const panelOpt = piezaInput ? findPanelPiezaOption(piezaInput) : null;
-    return {
-      success: false,
-      preview: true,
-      error:
-        'En el simulador no se persiste la cotización. En producción esta herramienta actualiza el borrador entregado.',
-      piezaSolicitada: panelOpt?.fullName ?? piezaInput ?? null,
-    };
-  }
-
   /** Alarma de recepción física: marca espera afuera y dispara llamadas Twilio. */
   private async executeNotificarLlegadaClienteTool(
     conversation: Conversation,
@@ -6429,10 +6222,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             );
           } else if (name === 'notificarLlegadaCliente') {
             payload = await this.executeNotificarLlegadaClienteToolPlayground();
-          } else if (name === 'agregarServicioLeve') {
-            payload = await this.executeAgregarServicioLeveToolPlayground(
-              tc.function.arguments ?? '{}',
-            );
           } else {
             payload = { success: false, error: `Función no soportada: ${name}` };
           }
@@ -6829,11 +6618,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
               );
             } else if (name === 'notificarLlegadaCliente') {
               payload = await this.executeNotificarLlegadaClienteTool(
-                conversation,
-              );
-            } else if (name === 'agregarServicioLeve') {
-              payload = await this.executeAgregarServicioLeveTool(
-                args,
                 conversation,
               );
             } else {
