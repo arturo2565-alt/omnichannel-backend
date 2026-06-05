@@ -59,6 +59,18 @@ export function normalizeWhatsAppDigits(raw: string): string {
   return String(raw ?? '').replace(/\D/g, '');
 }
 
+/**
+ * Normaliza wa_id / `to` para envío WhatsApp Cloud API.
+ * México: corrige 521XXXXXXXXXX (13 dígitos) → 52XXXXXXXXXX (12 dígitos).
+ */
+export function normalizeWhatsAppRecipientWaId(raw: string): string {
+  let digits = normalizeWhatsAppDigits(raw);
+  if (digits.startsWith('521') && digits.length === 13) {
+    digits = `52${digits.slice(3)}`;
+  }
+  return digits;
+}
+
 export type WhatsAppOwnershipFields = {
   wabaId?: string;
   phoneNumberId?: string;

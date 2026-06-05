@@ -12,7 +12,6 @@ import { AppointmentEntity } from './entities/appointment.entity';
 import { AiConfigEntity } from './entities/ai-config.entity';
 import { AiConfigService } from './ai-config.service';
 import { TwilioService } from './twilio.service';
-import { ActiveQuoteService } from './active-quote.service';
 import { ArrivalAlarmController } from './arrival-alarm.controller';
 import { CatalogModule } from '../catalog/catalog.module';
 import { TallerModule } from '../taller/taller.module';
@@ -34,8 +33,8 @@ import { AuthModule } from '../auth/auth.module';
     ]),
   ],
   controllers: [ChatController, ArrivalAlarmController],
-  providers: [ChatService, ChatGateway, AiConfigService, TwilioService, ActiveQuoteService],
-  exports: [ChatService, AiConfigService, TwilioService, ActiveQuoteService],
+  providers: [ChatService, ChatGateway, AiConfigService, TwilioService],
+  exports: [ChatService, AiConfigService, TwilioService],
 })
 
 export class ChatModule {}
