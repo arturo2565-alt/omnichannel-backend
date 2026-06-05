@@ -43,6 +43,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     totalAnterior: number;
     piezaAgregada: unknown;
     requiresHumanReview?: boolean;
+    cotizacionStatus?: string;
+    statusAnterior?: string;
+    autoAprobado?: boolean;
+    autopilotPausado?: boolean;
+    panelDesbloqueado?: boolean;
   }) {
     this.server.emit('cotizacionActualizada', payload);
   }

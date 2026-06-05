@@ -152,10 +152,13 @@ import {
   userLatestMessageLooksLikeVehicleModelReply,
 } from './instant-quote-from-text';
 import {
+  buildMensajeClienteAutoAprobado,
   formatPiezaAgregadaLinea,
+  isAutoAprobableSeveridad,
   parseActualizarCotizacionExistenteArgs,
   resolverPiezaEnCatalogo,
   type ActualizarCotizacionExistenteToolResult,
+  type SeveridadInferidaTool,
 } from './actualizar-cotizacion-existente';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
@@ -641,7 +644,7 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: 'actualizarCotizacionExistente',
       description:
-        'Agrega pieza(s) o servicio(s) a la cotización formal activa de ESTA conversación. El backend localiza el borrador automáticamente; NO envíes cotizacionId, quoteId ni ningún UUID. Consulta el catálogo oficial del taller; NUNCA inventes montos.',
+        'Agrega pieza(s) a la cotización activa de ESTA conversación (PENDING_APPROVAL o APPROVED). NO envíes cotizacionId. Incluye severidadInferida: DL = leve (auto-aprobable, responde al cliente con total), DM/DF = requiere validación humana en panel.',
       parameters: {
         type: 'object',
         properties: {
@@ -649,25 +652,24 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
             type: 'array',
             items: { type: 'string' },
             description:
-              'Lista de piezas o servicios a agregar (ej. ["fascia trasera", "puerta delantera derecha"]). Preferido si son varias.',
+              'Lista de piezas a agregar (ej. ["fascia trasera"]). Preferido si son varias.',
           },
           piezaOServicio: {
             type: 'string',
-            description:
-              'Alternativa: una sola pieza o servicio a agregar (ej. fascia trasera, cofre, toldo).',
+            description: 'Una sola pieza o servicio a agregar.',
           },
-          severidad: {
+          severidadInferida: {
             type: 'string',
-            enum: ['DL', 'DML', 'DM', 'DMF', 'DF', 'DMFuerte'],
+            enum: ['DL', 'DM', 'DF'],
             description:
-              'Severidad del daño si se conoce. Si no se indica, se infiere del contexto o DL.',
+              'DL = rayón/leve (precio catálogo DL, cotización puede seguir APPROVED). DM o DF = daño moderado/grave (requiere revisión humana, panel editable).',
           },
           descripcionDano: {
             type: 'string',
-            description:
-              'Descripción breve del daño (ej. solo rayada, abolladura moderada).',
+            description: 'Descripción breve del daño (ej. solo rayada, abolladura).',
           },
         },
+        required: ['severidadInferida'],
       },
     },
   },
@@ -1357,85 +1359,84 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * Agrega pieza(s)/servicio(s) al borrador PENDING_APPROVAL de la conversación.
-   * El cotizacionId se resuelve en BD; no confiar en IDs enviados por la IA.
+   * Agrega pieza(s) a cotización PENDING_APPROVAL o APPROVED.
+   * DL → auto-aprobación; DM/DF → revisión humana y panel editable.
    */
   async actualizarCotizacionExistente(params: {
     piezasOServicios: string[];
-    severidad?: string;
+    severidadInferida: SeveridadInferidaTool;
     descripcionDano?: string;
     conversationId: string;
     tallerId: string;
     messageId?: string;
-    /** Solo uso interno REST (URL); la tool del agente no lo envía. */
     cotizacionIdOverride?: string;
   }): Promise<ActualizarCotizacionExistenteToolResult> {
     const piezas = (params.piezasOServicios ?? [])
       .map((p) => String(p ?? '').trim())
       .filter(Boolean);
+    const severidadInferida = params.severidadInferida;
+
     if (!piezas.length) {
       return {
         success: false,
         cotizacionId: null,
+        cotizacionStatus: null,
         piezaAgregada: null,
         piezasAgregadas: [],
         totalAnterior: 0,
         totalNuevo: 0,
         incremento: 0,
         requiresHumanReview: true,
+        autoAprobado: false,
+        autopilotPausado: false,
         error: 'Se requiere al menos una pieza o servicio.',
       };
     }
 
     await this.assertConversationForTaller(params.conversationId, params.tallerId);
 
-    let cotizacionId = params.cotizacionIdOverride?.trim() || null;
-    if (!cotizacionId) {
-      cotizacionId = await this.findActiveCotizacionIdForConversation(
+    const autoAprobable = isAutoAprobableSeveridad(severidadInferida);
+
+    let existingDraft: DraftQuoteEntity | null = null;
+    if (params.cotizacionIdOverride?.trim()) {
+      existingDraft = await this.draftQuoteRepository.findOne({
+        where: {
+          id: params.cotizacionIdOverride.trim(),
+          conversationId: params.conversationId,
+          tallerId: params.tallerId,
+          status: In(['PENDING_APPROVAL', 'APPROVED']),
+        },
+        relations: { items: true },
+      });
+    }
+    if (!existingDraft) {
+      existingDraft = await this.findActiveCotizacionForConversation(
         params.conversationId,
         params.tallerId,
       );
     }
 
-    if (!cotizacionId) {
-      return {
-        success: false,
-        cotizacionId: null,
-        piezaAgregada: null,
-        piezasAgregadas: [],
-        totalAnterior: 0,
-        totalNuevo: 0,
-        incremento: 0,
-        requiresHumanReview: true,
-        error:
-          'No hay cotización activa (PENDING_APPROVAL) en esta conversación. Primero genera un borrador con fotos o cotización previa.',
-      };
-    }
-
-    const existingDraft = await this.draftQuoteRepository.findOne({
-      where: {
-        id: cotizacionId,
-        conversationId: params.conversationId,
-        tallerId: params.tallerId,
-        status: 'PENDING_APPROVAL',
-      },
-      relations: { items: true },
-    });
-
     if (!existingDraft) {
       return {
         success: false,
         cotizacionId: null,
+        cotizacionStatus: null,
         piezaAgregada: null,
         piezasAgregadas: [],
         totalAnterior: 0,
         totalNuevo: 0,
         incremento: 0,
         requiresHumanReview: true,
+        autoAprobado: false,
+        autopilotPausado: false,
         error:
-          'Cotización activa no encontrada en base de datos para esta conversación.',
+          'No hay cotización activa (PENDING_APPROVAL o APPROVED) en esta conversación.',
       };
     }
+
+    const cotizacionId = existingDraft.id;
+    const statusAnterior = existingDraft.status;
+    const wasApproved = statusAnterior === 'APPROVED';
 
     const totalAnterior = Math.round(
       Number(existingDraft.quotePayload?.total ?? existingDraft.estimateAmount ?? 0),
@@ -1444,48 +1445,86 @@ export class ChatService implements OnModuleDestroy {
     const snap = await this.catalogService.getMatrixPricingSnapshot(params.tallerId);
     const piezasResueltas = piezas.map((piezaOServicio) =>
       resolverPiezaEnCatalogo(piezaOServicio, snap, {
-        severidad: params.severidad,
+        severidadInferida,
         descripcionDano: params.descripcionDano,
       }),
     );
-    const piezasPendientes = piezasResueltas.filter((p) => p.requiereRevisionManual);
-    const piezasConPrecio = piezasResueltas.filter((p) => !p.requiereRevisionManual);
 
-    console.log('[actualizarCotizacionExistente]', JSON.stringify({
-      cotizacionId,
-      conversationId: params.conversationId,
-      piezas,
-      piezasResueltas,
-      totalAnterior,
-    }));
-
-    if (!piezasConPrecio.length) {
+    const sinCatalogo = piezasResueltas.filter((p) => !p.catalogServicio);
+    if (sinCatalogo.length === piezasResueltas.length) {
       return {
         success: false,
         cotizacionId,
+        cotizacionStatus: statusAnterior,
         piezaAgregada: piezasResueltas[0] ?? null,
         piezasAgregadas: piezasResueltas,
         totalAnterior,
         totalNuevo: totalAnterior,
         incremento: 0,
         requiresHumanReview: true,
-        error: `Ninguna pieza tiene precio en catálogo: ${piezas.join(', ')}.`,
-        instruccion:
-          'Informa al cliente que esas piezas requieren revisión en taller; no des precio inventado.',
+        autoAprobado: false,
+        autopilotPausado: false,
+        error: `Pieza(s) no encontrada(s) en catálogo: ${piezas.join(', ')}.`,
       };
     }
+
+    if (autoAprobable) {
+      const sinPrecioDl = piezasResueltas.filter(
+        (p) => p.catalogServicio && p.precioCatalogo <= 0,
+      );
+      if (sinPrecioDl.length === piezasResueltas.length) {
+        return {
+          success: false,
+          cotizacionId,
+          cotizacionStatus: statusAnterior,
+          piezaAgregada: piezasResueltas[0] ?? null,
+          piezasAgregadas: piezasResueltas,
+          totalAnterior,
+          totalNuevo: totalAnterior,
+          incremento: 0,
+          requiresHumanReview: true,
+          autoAprobado: false,
+          autopilotPausado: false,
+          error: 'Sin precio DL en catálogo para la pieza indicada.',
+        };
+      }
+    }
+
+    console.log('[actualizarCotizacionExistente]', JSON.stringify({
+      cotizacionId,
+      conversationId: params.conversationId,
+      severidadInferida,
+      autoAprobable,
+      statusAnterior,
+      piezas,
+      piezasResueltas,
+      totalAnterior,
+    }));
 
     const priorInventory = this.extractPriorInventoryFromDraft(existingDraft);
     const imageUrls = parseDraftImageUrls(existingDraft.imageUrl ?? '');
 
-    const incomingItems: DetectedDamageItem[] = piezasConPrecio.map((piezaResuelta, idx) => ({
-      pieza: piezaResuelta.panelCode,
-      severidad: piezaResuelta.severidad,
-      descripcionTecnica:
-        params.descripcionDano?.trim() ||
-        `Agregado por agente: ${piezaResuelta.nombreVisible} (${piezas[idx]})`,
-      urls_origen: [],
-    }));
+    const incomingItems: DetectedDamageItem[] = piezasResueltas
+      .filter((p) => p.catalogServicio)
+      .map((piezaResuelta, idx) => {
+        const precioLinea =
+          autoAprobable && piezaResuelta.precioCatalogo > 0
+            ? piezaResuelta.precioCatalogo
+            : piezaResuelta.precioCatalogo > 0
+              ? piezaResuelta.precioCatalogo
+              : 0;
+        return {
+          pieza: piezaResuelta.panelCode,
+          severidad: piezaResuelta.severidad,
+          descripcionTecnica:
+            params.descripcionDano?.trim() ||
+            `Agregado (${severidadInferida}): ${piezaResuelta.nombreVisible} — ${piezas[idx]}`,
+          urls_origen: [],
+          ...(precioLinea > 0
+            ? { precioFinal: precioLinea, precioOficial: precioLinea }
+            : {}),
+        };
+      });
 
     const mergedInv = mergeDamageInventoryAccumulative(
       priorInventory,
@@ -1497,12 +1536,13 @@ export class ChatService implements OnModuleDestroy {
       mergedInv.merged,
       imageUrls,
     );
-    const lineasAgregadas = piezasConPrecio
+    const lineasAgregadas = piezasResueltas
+      .filter((p) => p.catalogServicio)
       .map(formatPiezaAgregadaLinea)
       .join('; ');
     analysis.justificacion = [
       analysis.justificacion,
-      `Piezas agregadas (${new Date().toISOString()}): ${lineasAgregadas}`,
+      `Actualización (${new Date().toISOString()}) [${severidadInferida}]: ${lineasAgregadas}`,
     ]
       .filter(Boolean)
       .join('\n');
@@ -1516,12 +1556,32 @@ export class ChatService implements OnModuleDestroy {
       };
     }
 
+    let nuevoStatus: string;
+    let requiresHumanReview: boolean;
+    let autopilotPausado: boolean;
+    let autoAprobado: boolean;
+
+    if (autoAprobable) {
+      nuevoStatus = wasApproved ? 'APPROVED' : 'PENDING_APPROVAL';
+      requiresHumanReview = false;
+      autopilotPausado = false;
+      autoAprobado = true;
+      draftQuoteDoc.status = nuevoStatus as typeof draftQuoteDoc.status;
+    } else {
+      nuevoStatus = 'PENDING_APPROVAL';
+      requiresHumanReview = true;
+      autopilotPausado = true;
+      autoAprobado = false;
+      draftQuoteDoc.status = 'PENDING_APPROVAL';
+    }
+
     const draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
+    draftQuoteForClient.status = nuevoStatus as typeof draftQuoteForClient.status;
+
     const totalNuevo = Math.round(draftQuoteForClient.total ?? 0);
     const incremento = Math.max(0, totalNuevo - totalAnterior);
     const estimateAmount = totalNuevo;
-    const requiresHumanReview = piezasPendientes.length > 0;
 
     const messageId =
       params.messageId?.trim() ||
@@ -1532,6 +1592,7 @@ export class ChatService implements OnModuleDestroy {
     existingDraft.damageAnalysis = analysis;
     existingDraft.estimateAmount = estimateAmount;
     existingDraft.quotePayload = draftQuoteForClient;
+    existingDraft.status = nuevoStatus;
     const savedDraft = await this.draftQuoteRepository.save(existingDraft);
 
     await this.syncDraftQuoteLineItems(
@@ -1547,14 +1608,31 @@ export class ChatService implements OnModuleDestroy {
       { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
     );
 
-    await this.markConversationDraftPendingReview(params.conversationId);
+    if (autopilotPausado) {
+      await this.conversationRepository.update(
+        { id: params.conversationId },
+        { isAutoPilotActive: false },
+      );
+      await this.markConversationDraftPendingReview(params.conversationId);
+    } else if (!wasApproved) {
+      await this.markConversationDraftPendingReview(params.conversationId);
+    }
 
     const savedItems = await this.draftQuoteItemRepository.find({
       where: { draftQuoteId: savedDraft.id },
       order: { sortOrder: 'ASC' },
     });
 
-    const ultimaPieza = piezasConPrecio[piezasConPrecio.length - 1] ?? null;
+    const ultimaPieza =
+      piezasResueltas.filter((p) => p.catalogServicio).at(-1) ?? null;
+
+    const mensajeParaCliente = autoAprobado
+      ? buildMensajeClienteAutoAprobado({
+          piezas: piezasResueltas,
+          totalNuevo,
+          incremento,
+        })
+      : undefined;
 
     this.chatGateway.emitCotizacionActualizada({
       cotizacionId: savedDraft.id,
@@ -1567,6 +1645,11 @@ export class ChatService implements OnModuleDestroy {
       totalAnterior,
       piezaAgregada: ultimaPieza,
       requiresHumanReview,
+      cotizacionStatus: nuevoStatus,
+      statusAnterior,
+      autoAprobado,
+      autopilotPausado,
+      panelDesbloqueado: wasApproved && nuevoStatus === 'PENDING_APPROVAL',
     });
 
     this.chatGateway.emitDraftQuoteReady({
@@ -1576,42 +1659,71 @@ export class ChatService implements OnModuleDestroy {
       damageAnalysis: analysis,
       draftQuote: draftQuoteForClient,
       estimateAmount,
-      isAutoPilotActive: true,
+      isAutoPilotActive: !autopilotPausado,
     });
+
+    if (autopilotPausado) {
+      this.chatGateway.emitConversationLeadUpdated({
+        conversationId: params.conversationId,
+        status: 'por_cotizar',
+        isAutoPilotActive: false,
+      });
+    }
 
     console.log('[actualizarCotizacionExistente] persisted', JSON.stringify({
       cotizacionId: savedDraft.id,
+      nuevoStatus,
       totalAnterior,
       totalNuevo,
       incremento,
-      piezasAgregadas: piezasConPrecio.length,
+      autoAprobado,
+      autopilotPausado,
     }));
 
     return {
       success: true,
       cotizacionId: savedDraft.id,
+      cotizacionStatus: nuevoStatus,
       piezaAgregada: ultimaPieza,
       piezasAgregadas: piezasResueltas,
       totalAnterior,
       totalNuevo,
       incremento,
       requiresHumanReview,
-      instruccion: requiresHumanReview
-        ? 'Algunas piezas quedaron pendientes de revisión manual. Usa totalNuevo para las que sí tienen precio. PROHIBIDO inventar montos.'
-        : 'Usa totalNuevo e incremento para redactar al cliente. PROHIBIDO inventar precios distintos a los devueltos.',
+      autoAprobado,
+      autopilotPausado,
+      mensajeParaCliente,
+      instruccion: autoAprobado
+        ? `Daño leve (DL) auto-aprobado. Responde al cliente usando mensajeParaCliente o totalNuevo (${totalNuevo}). PROHIBIDO inventar otros montos.`
+        : `Daño ${severidadInferida}: requiere validación humana en panel. NO des precio final al cliente; indica que un asesor revisará la cotización.`,
     };
   }
 
-  /** Resuelve cotizacionId activa de la conversación si el agente no lo conoce. */
+  /** Cotización activa más reciente: PENDING_APPROVAL o APPROVED. */
+  async findActiveCotizacionForConversation(
+    conversationId: string,
+    tallerId: string,
+  ): Promise<DraftQuoteEntity | null> {
+    return this.draftQuoteRepository.findOne({
+      where: {
+        conversationId,
+        tallerId,
+        status: In(['PENDING_APPROVAL', 'APPROVED']),
+      },
+      order: { createdAt: 'DESC' },
+      relations: { items: true },
+    });
+  }
+
+  /** @deprecated Usar findActiveCotizacionForConversation */
   async findActiveCotizacionIdForConversation(
     conversationId: string,
     tallerId: string,
   ): Promise<string | null> {
-    const row = await this.draftQuoteRepository.findOne({
-      where: { conversationId, tallerId, status: 'PENDING_APPROVAL' },
-      order: { createdAt: 'DESC' },
-      select: ['id'],
-    });
+    const row = await this.findActiveCotizacionForConversation(
+      conversationId,
+      tallerId,
+    );
     return row?.id ?? null;
   }
 
@@ -1625,17 +1737,22 @@ export class ChatService implements OnModuleDestroy {
     const snap = await this.catalogService.getMatrixPricingSnapshot();
     const piezasResueltas = parsed.data.piezasOServicios.map((pieza) =>
       resolverPiezaEnCatalogo(pieza, snap, {
-        severidad: parsed.data.severidad,
+        severidadInferida: parsed.data.severidadInferida,
         descripcionDano: parsed.data.descripcionDano,
       }),
     );
-    const ok = piezasResueltas.some((p) => !p.requiereRevisionManual);
+    const autoAprobable = isAutoAprobableSeveridad(parsed.data.severidadInferida);
+    const ok = piezasResueltas.some(
+      (p) => p.catalogServicio && (autoAprobable ? p.precioCatalogo > 0 : true),
+    );
     return {
       success: ok,
       preview: true,
       cotizacionId: null,
+      severidadInferida: parsed.data.severidadInferida,
       piezasAgregadas: piezasResueltas,
-      requiresHumanReview: piezasResueltas.some((p) => p.requiereRevisionManual),
+      requiresHumanReview: !autoAprobable,
+      autoAprobado: autoAprobable && ok,
       instruccion:
         'Simulador: cotizacionId se resuelve en BD por conversación. No persistido aquí.',
     };
@@ -1670,7 +1787,7 @@ export class ChatService implements OnModuleDestroy {
 
     const result = await this.actualizarCotizacionExistente({
       piezasOServicios: parsed.data.piezasOServicios,
-      severidad: parsed.data.severidad,
+      severidadInferida: parsed.data.severidadInferida,
       descripcionDano: parsed.data.descripcionDano,
       conversationId: conversation.id,
       tallerId,

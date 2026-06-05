@@ -18,6 +18,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { normalizeSeveridadInferida } from './actualizar-cotizacion-existente';
 import { ChatService } from './chat.service';
 import type {
   PatchDraftQuoteBody,
@@ -110,14 +111,17 @@ export class ChatController {
     @Body()
     body: {
       piezaOServicio: string;
+      severidadInferida?: string;
       severidad?: string;
       descripcionDano?: string;
       messageId?: string;
     },
   ) {
+    const severidadInferida =
+      normalizeSeveridadInferida(body.severidadInferida ?? body.severidad) ?? 'DL';
     return this.chatService.actualizarCotizacionExistente({
       piezasOServicios: [body.piezaOServicio],
-      severidad: body.severidad,
+      severidadInferida,
       descripcionDano: body.descripcionDano,
       conversationId,
       tallerId: user.tallerId,
