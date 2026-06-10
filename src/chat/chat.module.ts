@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatService } from './chat.service';
+import { DraftQuoteService } from './draft-quote.service';
 import { ChatController } from './chat.controller';
 import { Message } from './entities/chat.entity';
 import { ChatGateway } from './chat.gateway';
@@ -33,8 +34,8 @@ import { AuthModule } from '../auth/auth.module';
     ]),
   ],
   controllers: [ChatController, ArrivalAlarmController],
-  providers: [ChatService, ChatGateway, AiConfigService, TwilioService],
-  exports: [ChatService, AiConfigService, TwilioService],
+  providers: [ChatService, DraftQuoteService, ChatGateway, AiConfigService, TwilioService],
+  exports: [ChatService, DraftQuoteService, AiConfigService, TwilioService],
 })
 
 export class ChatModule {}

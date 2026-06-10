@@ -89,6 +89,7 @@ import {
   normalizeWhatsAppRecipientWaId,
 } from './whatsapp-config';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
+import { DraftQuoteService } from './draft-quote.service';
 import {
   buildAutopilotSolicitarModeloBanioAppend,
   buildBanioVisualDamageSummary,
@@ -599,6 +600,110 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'obtenerCotizacionActual',
+      description:
+        'Devuelve el estado actual de la cotización en borrador de esta conversación (piezas, precios, total). Si no existe borrador activo, crea uno vacío. Úsala antes de agregar o quitar servicios, o cuando el cliente pregunte "¿cuánto llevo?" / "¿qué tengo cotizado?".',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'agregarServicioLeve',
+      description:
+        'Agrega a la cotización activa una pieza con daño leve (rayón, raspón, retoque de pintura — severidad DL). Es el caso más frecuente. Valida la pieza contra el catálogo del taller y recalcula el total. Idempotente: si la pieza ya está, no la duplica.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pieza: {
+            type: 'string',
+            description:
+              'Nombre de la pieza (ej. Puerta delantera izquierda, Fascia, Salpicadera, Cofre).',
+          },
+          descripcionTecnica: {
+            type: 'string',
+            description:
+              'Opcional: descripción breve del daño visible (rayón, raspón, etc.).',
+          },
+        },
+        required: ['pieza'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'actualizarCotizacion',
+      description:
+        'Herramienta general para modificar la cotización en borrador: agregar, quitar o actualizar una pieza. Recalcula el total automáticamente tras cada cambio.',
+      parameters: {
+        type: 'object',
+        properties: {
+          accion: {
+            type: 'string',
+            enum: ['agregar', 'quitar', 'actualizar'],
+            description:
+              'agregar = nueva pieza; quitar = eliminar pieza; actualizar = cambiar severidad o precio de pieza existente.',
+          },
+          pieza: {
+            type: 'string',
+            description: 'Pieza afectada (nombre del catálogo o texto libre del cliente).',
+          },
+          precio: {
+            type: 'number',
+            description:
+              'Opcional: precio manual en MXN (solo si el operador o contexto lo exige; si omites, se usa catálogo).',
+          },
+          severidad: {
+            type: 'string',
+            description:
+              'Opcional: nivel de daño (DL, DML, DM, DMF, DF, DMFuerte). Por defecto DL en agregar.',
+          },
+          descripcionTecnica: {
+            type: 'string',
+            description: 'Opcional: nota técnica del daño o servicio.',
+          },
+        },
+        required: ['accion', 'pieza'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'eliminarServicioDeCotizacion',
+      description:
+        'Elimina una pieza específica de la cotización en borrador de esta conversación. Idempotente: si la pieza no está, informa sin error.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pieza: {
+            type: 'string',
+            description: 'Pieza a eliminar de la cotización.',
+          },
+        },
+        required: ['pieza'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'obtenerResumenCotizacion',
+      description:
+        'Genera un texto formateado y listo para mostrar al cliente con el desglose actual de la cotización (líneas con emoji 🛠️ y total). Úsala cuando debas presentar o confirmar el presupuesto acumulado de forma natural.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'createAppointment',
       description:
         'Registra una cita en la base de datos del taller. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. En el panel de simulación (playground), la misma llamada solo valida horario y devuelve vista previa sin persistir en BD.',
@@ -737,6 +842,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly tallerService: TallerService,
 
     private readonly twilioService: TwilioService,
+
+    private readonly draftQuoteService: DraftQuoteService,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -5913,6 +6020,123 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
   // --- LÓGICA DE IA ---
 
+  private parseToolArgsJson(argsJson: string): Record<string, unknown> | null {
+    try {
+      return JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }
+
+  private async executeProgressiveQuoteTool(
+    name: string,
+    argsJson: string,
+    conversation: Conversation,
+    preview: boolean,
+  ): Promise<Record<string, unknown>> {
+    const raw = this.parseToolArgsJson(argsJson);
+    if (!raw) {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+
+    const tallerId = conversation.tallerId ?? null;
+    const conversationId = conversation.id;
+
+    let result: Record<string, unknown>;
+
+    switch (name) {
+      case 'obtenerCotizacionActual': {
+        const r = await this.draftQuoteService.obtenerCotizacionActual(
+          conversationId,
+          tallerId,
+        );
+        result = r as Record<string, unknown>;
+        break;
+      }
+      case 'agregarServicioLeve': {
+        const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+        const descripcionTecnica = pickFirstNonEmptyTrimmedString(
+          raw.descripcionTecnica,
+          raw.descripcion,
+        );
+        const r = await this.draftQuoteService.agregarServicioLeve(
+          conversationId,
+          tallerId,
+          pieza,
+          descripcionTecnica || undefined,
+        );
+        result = r as Record<string, unknown>;
+        break;
+      }
+      case 'actualizarCotizacion': {
+        const accion = pickFirstNonEmptyTrimmedString(raw.accion, raw.action);
+        const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+        const precioRaw = raw.precio ?? raw.precioMx;
+        const precio =
+          precioRaw != null && Number.isFinite(Number(precioRaw))
+            ? Math.round(Number(precioRaw))
+            : undefined;
+        const severidad = pickFirstNonEmptyTrimmedString(
+          raw.severidad,
+          raw.nivelDano,
+        );
+        const descripcionTecnica = pickFirstNonEmptyTrimmedString(
+          raw.descripcionTecnica,
+          raw.descripcion,
+        );
+        const r = await this.draftQuoteService.actualizarCotizacion(
+          conversationId,
+          tallerId,
+          accion as 'agregar' | 'quitar' | 'actualizar',
+          pieza,
+          {
+            precio,
+            severidad: severidad || undefined,
+            descripcionTecnica: descripcionTecnica || undefined,
+          },
+        );
+        result = r as Record<string, unknown>;
+        break;
+      }
+      case 'eliminarServicioDeCotizacion': {
+        const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+        const r = await this.draftQuoteService.eliminarServicioDeCotizacion(
+          conversationId,
+          tallerId,
+          pieza,
+        );
+        result = r as Record<string, unknown>;
+        break;
+      }
+      case 'obtenerResumenCotizacion': {
+        const r = await this.draftQuoteService.obtenerResumenCotizacion(
+          conversationId,
+          tallerId,
+          conversation.contactName ?? undefined,
+        );
+        result = r as Record<string, unknown>;
+        break;
+      }
+      default:
+        return { success: false, error: `Función de cotización desconocida: ${name}` };
+    }
+
+    if (preview) {
+      return { ...result, preview: true };
+    }
+    return result;
+  }
+
+  private isProgressiveQuoteToolName(name: string): boolean {
+    return (
+      name === 'obtenerCotizacionActual' ||
+      name === 'agregarServicioLeve' ||
+      name === 'actualizarCotizacion' ||
+      name === 'eliminarServicioDeCotizacion' ||
+      name === 'obtenerResumenCotizacion'
+    );
+  }
+
   /** Persiste cita tras llamada de herramienta createAppointment (validación de horario del taller). */
   /** Playground: misma lógica que producción (sin persistir cotización). */
   private async executeObtenerCotizacionExpressToolPlayground(
@@ -6178,6 +6402,15 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       { role: 'user', content: params.userContentForTurn },
     ];
 
+    const playgroundConversationId = randomUUID();
+    const playgroundTallerId = await this.tallerService.findDefaultTallerId();
+    const playgroundConversation = {
+      id: playgroundConversationId,
+      status: 'nuevo',
+      tallerId: playgroundTallerId,
+      contactName: 'Cliente (simulador)',
+    } as Conversation;
+
     let lastConfirmedIso: string | null = null;
     for (let step = 0; step < 6; step++) {
       const completion = await this.openai.chat.completions.create({
@@ -6220,6 +6453,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           } else if (name === 'obtenerCotizacionExpress') {
             payload = await this.executeObtenerCotizacionExpressToolPlayground(
               tc.function.arguments ?? '{}',
+            );
+          } else if (this.isProgressiveQuoteToolName(name)) {
+            payload = await this.executeProgressiveQuoteTool(
+              name,
+              tc.function.arguments ?? '{}',
+              playgroundConversation,
+              true,
             );
           } else if (name === 'notificarLlegadaCliente') {
             payload = await this.executeNotificarLlegadaClienteToolPlayground();
@@ -6616,6 +6856,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
               payload = await this.executeObtenerCotizacionExpressTool(
                 args,
                 conversation,
+              );
+            } else if (this.isProgressiveQuoteToolName(name)) {
+              payload = await this.executeProgressiveQuoteTool(
+                name,
+                args,
+                conversation,
+                false,
               );
             } else if (name === 'notificarLlegadaCliente') {
               payload = await this.executeNotificarLlegadaClienteTool(
