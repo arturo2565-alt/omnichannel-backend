@@ -797,6 +797,10 @@ export class ChatService implements OnModuleDestroy {
   /** Ventana histórica (p. ej. fallback / consultas) para imágenes entrantes recientes en la conversación. */
   static readonly RECENT_IMAGE_LOOKBACK_MS = 5 * 60 * 1000;
 
+  /** Respuesta al cliente si el autopilot no puede completar tras ejecutar tools (evita chat mudo). */
+  private static readonly AUTOPILOT_TECHNICAL_FALLBACK_REPLY =
+    'Disculpa, tuve un inconveniente técnico al actualizar tu cotización. ¿Me confirmas qué pieza deseas quitar o modificar? En un momento te respondo con el detalle.';
+
   /** conversationId → timeout del análisis consolidado pendiente */
   private readonly consolidatedImageTimers = new Map<
     string,
@@ -6108,6 +6112,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         case 'actualizarCotizacion': {
           const accion = pickFirstNonEmptyTrimmedString(raw.accion, raw.action);
           const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+          console.log('[BUG CRÍTICO AUTOPILOT] actualizarCotizacion — inicio:', {
+            conversationId,
+            accion,
+            pieza,
+            rawArgs: raw,
+          });
           const precioRaw = raw.precio ?? raw.precioMx;
           const precio =
             precioRaw != null && Number.isFinite(Number(precioRaw))
@@ -6137,11 +6147,24 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         }
         case 'eliminarServicioDeCotizacion': {
           const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+          console.log('[BUG CRÍTICO AUTOPILOT] eliminarServicioDeCotizacion — inicio:', {
+            conversationId,
+            pieza,
+            rawArgs: raw,
+          });
           const r = await this.draftQuoteService.eliminarServicioDeCotizacion(
             conversationId,
             tallerId,
             pieza,
           );
+          console.log('[BUG CRÍTICO AUTOPILOT] eliminarServicioDeCotizacion — resultado:', {
+            conversationId,
+            pieza,
+            success: r.success,
+            totalGlobal: r.totalGlobal,
+            desglose: r.desglose,
+            error: r.error,
+          });
           result = r as Record<string, unknown>;
           break;
         }
@@ -6166,11 +6189,65 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       }
       return result;
     } catch (err) {
+      console.error('[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:', err);
       console.error(`[executeProgressiveQuoteTool] ${name}:`, err);
       return {
         success: false,
         error: `Error al procesar ${name}. Informa al cliente que hubo un problema técnico y ofrece reintentar.`,
+        instruccionParaModelo:
+          'Responde al cliente de forma cordial: hubo un error técnico al modificar la cotización. Pide que confirme qué pieza desea quitar o cambiar. NO te quedes en silencio.',
       };
+    }
+  }
+
+  private buildAutopilotToolFailurePayload(
+    toolName: string,
+    error: unknown,
+  ): Record<string, unknown> {
+    console.error('[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:', error);
+    if (error instanceof Error && error.stack) {
+      console.error('[BUG CRÍTICO AUTOPILOT] stack trace:', error.stack);
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      success: false,
+      error: `Fallo técnico en herramienta ${toolName}: ${detail}`,
+      instruccionParaModelo:
+        'Hubo un error técnico en el backend. Responde al cliente de forma cordial, disculpa el inconveniente y pide que repita qué pieza desea quitar o modificar. NO te quedes en silencio.',
+    };
+  }
+
+  private async invokeAutopilotToolCall(
+    name: string,
+    args: string,
+    conversation: Conversation,
+    preview: boolean,
+  ): Promise<Record<string, unknown>> {
+    console.log('[AutopilotTool] invocación:', {
+      name,
+      conversationId: conversation?.id ?? null,
+      preview,
+      argsPreview: args.slice(0, 500),
+    });
+    if (
+      name === 'eliminarServicioDeCotizacion' ||
+      name === 'actualizarCotizacion'
+    ) {
+      console.log('[BUG CRÍTICO AUTOPILOT] Inicio tool modificación cotización:', {
+        name,
+        conversationId: conversation?.id,
+        args,
+      });
+    }
+    try {
+      return await this.executeAutopilotToolSafely(
+        name,
+        args,
+        conversation,
+        preview,
+      );
+    } catch (error) {
+      return this.buildAutopilotToolFailurePayload(name, error);
     }
   }
 
@@ -6216,10 +6293,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           : `Función desconocida: ${name}`,
       };
     } catch (err) {
+      console.error('[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:', err);
       console.error(`[executeAutopilotToolSafely] ${name}:`, err);
       return {
         success: false,
         error: `Error interno en herramienta ${name}. No congelar la conversación: informa al cliente amablemente y ofrece reintentar.`,
+        instruccionParaModelo:
+          'Responde al cliente de forma cordial tras el fallo técnico. NO te quedes en silencio.',
       };
     }
   }
@@ -6626,12 +6706,21 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             continue;
           }
           const name = tc.function.name;
-          const payload = await this.executeAutopilotToolSafely(
-            name,
-            tc.function.arguments ?? '{}',
-            playgroundConversation,
-            true,
-          );
+          let payload: Record<string, unknown>;
+          try {
+            payload = await this.invokeAutopilotToolCall(
+              name,
+              tc.function.arguments ?? '{}',
+              playgroundConversation,
+              true,
+            );
+          } catch (toolErr) {
+            console.error(
+              '[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:',
+              toolErr,
+            );
+            payload = this.buildAutopilotToolFailurePayload(name, toolErr);
+          }
           if (
             name === 'createAppointment' &&
             payload.success &&
@@ -6963,6 +7052,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const messages: ChatCompletionMessageParam[] = [...dialogue];
 
       let lastConfirmedIso: string | null = null;
+      let executedToolsThisSession = false;
 
       for (let step = 0; step < 6; step++) {
         const freshChatPrompt = await this.aiConfigService.getValue(
@@ -6987,13 +7077,26 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           messages.unshift({ role: 'system', content: systemContent });
         }
 
-        const completion = await this.openai.chat.completions.create({
-          model: 'gpt-4o',
-          messages,
-          tools: AUTOPILOT_TOOLS,
-          tool_choice: 'auto',
-          temperature: 0.4,
-        });
+        let completion;
+        try {
+          completion = await this.openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages,
+            tools: AUTOPILOT_TOOLS,
+            tool_choice: 'auto',
+            temperature: 0.4,
+          });
+        } catch (openAiErr) {
+          console.error(
+            '[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:',
+            openAiErr,
+          );
+          console.error(
+            '[BUG CRÍTICO AUTOPILOT] Fallo OpenAI chat.completions:',
+            openAiErr,
+          );
+          return ChatService.AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
+        }
 
         const choice = completion.choices[0]?.message;
         if (!choice) break;
@@ -7001,38 +7104,74 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         const toolCalls = choice.tool_calls;
         if (toolCalls?.length) {
           messages.push(choice as ChatCompletionMessageParam);
-          for (const tc of toolCalls) {
-            if (tc.type !== 'function') {
+          try {
+            for (const tc of toolCalls) {
+              executedToolsThisSession = true;
+              let payload: Record<string, unknown>;
+              try {
+                if (tc.type !== 'function') {
+                  payload = {
+                    success: false,
+                    error: 'Tipo de herramienta no soportado.',
+                  };
+                } else {
+                  const name = tc.function.name;
+                  const args = tc.function.arguments ?? '{}';
+                  payload = await this.invokeAutopilotToolCall(
+                    name,
+                    args,
+                    conversation,
+                    false,
+                  );
+                  if (
+                    name === 'createAppointment' &&
+                    payload.success &&
+                    typeof payload.scheduledAt === 'string'
+                  ) {
+                    lastConfirmedIso = payload.scheduledAt;
+                  }
+                }
+              } catch (toolErr) {
+                console.error(
+                  '[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:',
+                  toolErr,
+                );
+                const toolName =
+                  tc.type === 'function' ? tc.function.name : 'desconocida';
+                payload = this.buildAutopilotToolFailurePayload(
+                  toolName,
+                  toolErr,
+                );
+              }
               messages.push({
                 role: 'tool',
                 tool_call_id: tc.id,
-                content: JSON.stringify({
-                  success: false,
-                  error: 'Tipo de herramienta no soportado.',
-                }),
+                content: JSON.stringify(payload),
               });
-              continue;
             }
-            const name = tc.function.name;
-            const args = tc.function.arguments ?? '{}';
-            const payload = await this.executeAutopilotToolSafely(
-              name,
-              args,
-              conversation,
-              false,
+          } catch (batchErr) {
+            console.error(
+              '[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:',
+              batchErr,
             );
-            if (
-              name === 'createAppointment' &&
-              payload.success &&
-              typeof payload.scheduledAt === 'string'
-            ) {
-              lastConfirmedIso = payload.scheduledAt;
+            for (const tc of toolCalls) {
+              const alreadyPushed = messages.some(
+                (m) =>
+                  m.role === 'tool' &&
+                  'tool_call_id' in m &&
+                  m.tool_call_id === tc.id,
+              );
+              if (alreadyPushed) continue;
+              const toolName =
+                tc.type === 'function' ? tc.function.name : 'desconocida';
+              messages.push({
+                role: 'tool',
+                tool_call_id: tc.id,
+                content: JSON.stringify(
+                  this.buildAutopilotToolFailurePayload(toolName, batchErr),
+                ),
+              });
             }
-            messages.push({
-              role: 'tool',
-              tool_call_id: tc.id,
-              content: JSON.stringify(payload),
-            });
           }
           continue;
         }
@@ -7053,15 +7192,37 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             return 'Tu cita ha quedado registrada. ¡Te esperamos!';
           }
         }
+
+        if (executedToolsThisSession) {
+          console.warn(
+            '[BUG CRÍTICO AUTOPILOT] LLM sin texto tras tools; forzando reintento de respuesta',
+            { conversationId: conversation.id, step },
+          );
+          messages.push({
+            role: 'user',
+            content:
+              'SISTEMA: Responde al cliente ahora con un mensaje claro en español, usando los resultados de las herramientas que acabas de ejecutar (desglose y totalGlobal si aplica). No te quedes en silencio.',
+          });
+          continue;
+        }
         return null;
+      }
+
+      if (executedToolsThisSession) {
+        console.warn(
+          '[BUG CRÍTICO AUTOPILOT] Agotados pasos del autopilot tras tools sin respuesta final',
+          { conversationId: conversation.id },
+        );
+        return ChatService.AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
       }
 
       return lastConfirmedIso
         ? 'Tu cita ha quedado registrada. ¡Te esperamos!'
         : null;
     } catch (err) {
+      console.error('[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:', err);
       console.error('composeAutopilotReplyWithTools:', err);
-      return null;
+      return ChatService.AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
     }
   }
 
