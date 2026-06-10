@@ -227,21 +227,48 @@ export function buildObtenerCotizacionExpressPayload(
   }
 
   const usedPiezas = new Set<string>();
+  console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — piezaRequests:', piezaRequests);
   for (const rawPieza of piezaRequests) {
     const canonical = snap.matchServicio(rawPieza);
     if (!canonical) {
+      console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — sin match:', {
+        rawPieza,
+        canonical: null,
+      });
       continue;
     }
     if (isBañoDePinturaServicio(canonical)) {
+      console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — omitida (baño pintura):', {
+        rawPieza,
+        canonical,
+      });
       continue;
     }
     const k = normalizeTextForMatch(canonical);
     if (k.includes('ceramico') || (k.includes('estetica') && k.includes('automotriz'))) {
+      console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — omitida (cerámico/estética):', {
+        rawPieza,
+        canonical,
+      });
       continue;
     }
-    if (usedPiezas.has(canonical)) continue;
+    if (usedPiezas.has(canonical)) {
+      console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — DUPLICADO OMITIDO (usedPiezas):', {
+        rawPieza,
+        canonical,
+        usedPiezas: [...usedPiezas],
+      });
+      continue;
+    }
 
     const unit = snap.getPriceForCanonical(canonical, PIEZA_DL);
+    console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — precio catálogo:', {
+      rawPieza,
+      canonical,
+      severidad: PIEZA_DL,
+      precioUnitarioMx: unit,
+      seAgregaALines: unit > 0,
+    });
     if (unit <= 0) continue;
 
     usedPiezas.add(canonical);
@@ -289,6 +316,18 @@ export function buildObtenerCotizacionExpressPayload(
   });
 
   const result = envelope as ObtenerCotizacionExpressResult;
+
+  console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — totales calculados:', {
+    subtotalMx,
+    totalMx,
+    totalGlobal: result.totalGlobal,
+    desglose,
+    lineCount: lines.length,
+    lines: lines.map((l) => ({
+      servicio: l.servicio,
+      precioLineaMx: l.precioLineaMx,
+    })),
+  });
 
   if (leadAgendado) {
     result.notaAgendado =

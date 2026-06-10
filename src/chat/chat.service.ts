@@ -6077,12 +6077,30 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             raw.descripcionTecnica,
             raw.descripcion,
           );
+          console.log('[DEBUG COTIZACIÓN] agregarServicioLeve — pieza recibida:', {
+            conversationId,
+            pieza,
+            descripcionTecnica: descripcionTecnica || null,
+          });
+          const snapLeve = await this.catalogService.getMatrixPricingSnapshot(
+            tallerId ?? undefined,
+          );
+          this.debugLogCotizacionCatalogLookup(snapLeve, [pieza], 'agregarServicioLeve');
           const r = await this.draftQuoteService.agregarServicioLeve(
             conversationId,
             tallerId,
             pieza,
             descripcionTecnica || undefined,
           );
+          console.log('[DEBUG COTIZACIÓN] agregarServicioLeve — payload final hacia LLM:', {
+            success: r.success,
+            subtotalMx: r.cotizacion?.subtotalMx,
+            totalMx: r.cotizacion?.totalMx,
+            totalGlobal: r.totalGlobal,
+            desglose: r.desglose,
+            itemCount: r.cotizacion?.itemCount,
+            items: r.cotizacion?.items,
+          });
           result = r as Record<string, unknown>;
           break;
         }
@@ -6215,6 +6233,42 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
   }
 
+  /**
+   * Traza lookup de precio por pieza en catálogo (severidad DL express).
+   * Ayuda a detectar deduplicación indebida (ej. dos Fascias → una sola línea).
+   */
+  private debugLogCotizacionCatalogLookup(
+    snap: MatrixPricingSnapshot,
+    piezas: readonly string[],
+    toolName: string,
+  ): void {
+    const seenCanonical = new Set<string>();
+    for (let i = 0; i < piezas.length; i++) {
+      const rawPieza = String(piezas[i] ?? '').trim();
+      if (!rawPieza) continue;
+      const canonical = snap.matchServicio(rawPieza);
+      const precioDl = canonical
+        ? snap.getPriceForCanonical(canonical, 'DL')
+        : 0;
+      const yaVista = canonical ? seenCanonical.has(canonical) : false;
+      if (canonical) seenCanonical.add(canonical);
+      console.log(
+        `[DEBUG COTIZACIÓN] ${toolName} — lookup catálogo [${i + 1}/${piezas.length}]:`,
+        {
+          rawPieza,
+          canonical: canonical ?? null,
+          precioDl,
+          yaVistaEnEsteRequest: yaVista,
+          accion: !canonical
+            ? 'SIN_MATCH_CATALOGO'
+            : yaVista
+              ? 'DUPLICADO_CANONICAL_OMITIRIA_EN_EXPRESS'
+              : 'OK_SUMARIA',
+        },
+      );
+    }
+  }
+
   /** Persiste cita tras llamada de herramienta createAppointment (validación de horario del taller). */
   /** Playground: misma lógica que producción (sin persistir cotización). */
   private async executeObtenerCotizacionExpressToolPlayground(
@@ -6285,6 +6339,16 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const isAgendado =
         String(conversation.status ?? '').toLowerCase().trim() === 'agendado';
 
+      console.log('[DEBUG COTIZACIÓN] obtenerCotizacionExpress — piezas/servicios recibidos:', {
+        conversationId: conversation.id,
+        servicios,
+        modeloVehiculo,
+        categoriaTamaño,
+        cantidadPiezas: servicios.length,
+      });
+
+      this.debugLogCotizacionCatalogLookup(snap, servicios, 'obtenerCotizacionExpress');
+
       const result = buildObtenerCotizacionExpressPayload(
         snap,
         servicios,
@@ -6292,6 +6356,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         categoriaTamaño,
         { leadAgendado: isAgendado },
       );
+
+      console.log('[DEBUG COTIZACIÓN] obtenerCotizacionExpress — payload final hacia LLM:', {
+        success: result.success,
+        subtotalMx: result.subtotalMx,
+        totalMx: result.totalMx,
+        totalGlobal: result.totalGlobal,
+        desglose: result.desglose,
+        lines: result.lines,
+        extras: result.extras,
+        lineCount: result.lines?.length ?? 0,
+        desgloseCount: result.desglose?.length ?? 0,
+      });
 
       if (
         result.success &&
