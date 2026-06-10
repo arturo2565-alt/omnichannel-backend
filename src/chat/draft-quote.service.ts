@@ -4,14 +4,14 @@ import { randomUUID } from 'crypto';
 import { Repository } from 'typeorm';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
+import { Conversation } from './entities/conversation.entity';
 import { CatalogService } from '../catalog/catalog.service';
 import {
   AUTO_FIX_CURRENCY,
   coerceDamageLevelCode,
-  damageLevelRank,
   DraftQuote,
   DraftQuoteLine,
-  formatAutoFixMoney,
+  normalizeTextForMatch,
   type DamageLevel,
 } from './autofix-config';
 import {
@@ -20,67 +20,30 @@ import {
   type QuoteRowInput,
 } from './draft-quote-inventory-pricing';
 import {
+  findPanelPiezaOption,
   normalizePanelPiezaCode,
   resolveMatrixServicioRaw,
-  findPanelPiezaOption,
 } from '../catalog/panel-pieza-catalog';
-import type {
-  DetectedDamageItem,
-  VehicleDamageAnalysis,
-} from './entities/chat.entity';
-import {
-  draftQuoteLinesToClientePiezaRows,
-  formatDraftQuoteLineToolEmoji,
-} from './draft-quote-resume';
+import type { DetectedDamageItem, VehicleDamageAnalysis } from './entities/chat.entity';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import { DRAFT_QUOTE_STATUS_AWAITING_VEHICLE } from './banio-vehicle-gate';
 import {
   buildCotizacionToolEnvelope,
-  sumDesglosePrecios,
   type CotizacionDesgloseLine,
 } from './cotizacion-tool-envelope';
-import { normalizeTextForMatch } from './autofix-config';
+import type { ObtenerCotizacionExpressResult } from './autopilot-cotizacion-express';
 
 const LIGHT_DAMAGE_SEVERITY: DamageLevel = 'DL';
 
-export type DraftQuoteItemDto = {
-  pieza: string;
-  piezaCanonical: string;
-  severidad: string;
-  precioMx: number;
-  descripcionTecnica: string;
-};
+/** Estados editables de cotización progresiva (borrador activo). */
+const ACTIVE_QUOTE_STATUSES = [
+  'PENDING_APPROVAL',
+  'APPROVED',
+  DRAFT_QUOTE_STATUS_AWAITING_VEHICLE,
+] as const;
 
-export type DraftQuoteStateDto = {
-  draftQuoteId: string;
-  reference: string;
-  status: string;
-  moneda: typeof AUTO_FIX_CURRENCY;
-  itemCount: number;
-  items: DraftQuoteItemDto[];
-  subtotalMx: number;
-  totalMx: number;
-  creadaEnEstaLlamada?: boolean;
-};
-
-export type DraftQuoteToolResult = {
-  success: boolean;
-  error?: string;
-  piezaNoEnCatalogo?: boolean;
-  piezasDisponiblesEjemplo?: string[];
-  yaExistia?: boolean;
-  noEncontrada?: boolean;
-  accion?: string;
-  cotizacion?: DraftQuoteStateDto;
-  resumenCliente?: string;
-  resumenLineas?: string[];
-  desglose?: CotizacionDesgloseLine[];
-  totalGlobal?: number;
-  instruccionParaModelo?: string;
-};
-
-type CotizacionAccion = 'agregar' | 'quitar' | 'actualizar';
+export type QuoteToolResult = Record<string, unknown>;
 
 @Injectable()
 export class DraftQuoteService {
@@ -91,509 +54,33 @@ export class DraftQuoteService {
     @InjectRepository(DraftQuoteItem)
     private readonly draftQuoteItemRepository: Repository<DraftQuoteItem>,
 
+    @InjectRepository(Conversation)
+    private readonly conversationRepository: Repository<Conversation>,
+
     private readonly catalogService: CatalogService,
   ) {}
 
-  /** Estado actual de la cotización activa; crea borrador vacío si no existe. */
-  async obtenerCotizacionActual(
+  /** Busca borrador activo o crea uno vacío para la conversación. */
+  async getOrCreateActiveQuote(
     conversationId: string,
-    tallerId: string | null,
-  ): Promise<DraftQuoteToolResult> {
-    return this.safeTool(async () => {
-      const { row, created } = await this.getOrCreateActiveDraft(
-        conversationId,
-        tallerId,
-      );
-      return this.wrapToolResult({ success: true }, row, created);
-    });
-  }
-
-  /** Persiste cotización express en borrador activo (para poder quitar piezas después). */
-  async persistExpressCotizacion(
-    conversationId: string,
-    tallerId: string | null,
-    desglose: readonly CotizacionDesgloseLine[],
-  ): Promise<void> {
-    if (!desglose.length) return;
-
-    const { row } = await this.getOrCreateActiveDraft(conversationId, tallerId);
-    const snap = await this.catalogService.getMatrixPricingSnapshot(
-      tallerId ?? undefined,
-    );
-
-    const priceOverrides = new Map<string, number>();
-    const inventory: DetectedDamageItem[] = desglose.map((line) => {
-      const piezaRaw = String(line.pieza ?? '').trim();
-      const panelOpt = findPanelPiezaOption(piezaRaw);
-      const displayPieza = panelOpt?.code ?? piezaRaw;
-      const canonical = snap.matchServicio(piezaRaw) ?? piezaRaw;
-      const precio = Math.round(Number(line.precio) || 0);
-      priceOverrides.set(this.piezaMatchKey(displayPieza), precio);
-      return {
-        pieza: displayPieza,
-        severidad: LIGHT_DAMAGE_SEVERITY,
-        descripcionTecnica: `Cotización express — ${canonical} (DL).`,
-        urls_origen: [],
-      };
-    });
-
-    await this.persistInventoryChanges(
-      row,
-      inventory,
-      tallerId,
-      priceOverrides,
-    );
-  }
-
-  /** Agrega daño leve (DL) a la cotización activa. Idempotente si la pieza ya está. */
-  async agregarServicioLeve(
-    conversationId: string,
-    tallerId: string | null,
-    pieza: string,
-    descripcionTecnica?: string,
-  ): Promise<DraftQuoteToolResult> {
-    return this.safeTool(async () => {
-      const piezaTrim = String(pieza ?? '').trim();
-      if (!piezaTrim) {
-        return { success: false, error: 'Falta el parámetro pieza.' };
-      }
-
-      const snap = await this.catalogService.getMatrixPricingSnapshot(
-        tallerId ?? undefined,
-      );
-      const resolved = this.resolvePiezaInCatalog(piezaTrim, snap);
-      if (!resolved.ok) {
-        return {
-          success: false,
-          error: resolved.error,
-          piezaNoEnCatalogo: true,
-          piezasDisponiblesEjemplo: resolved.ejemplos,
-        };
-      }
-
-      const { row } = await this.getOrCreateActiveDraft(conversationId, tallerId);
-      const inventory = this.extractInventory(row);
-      const existingIdx = this.findInventoryIndexByCanonical(
-        inventory,
-        resolved.canonical,
-        snap,
-      );
-
-      if (existingIdx >= 0) {
-        const saved = await this.draftQuoteRepository.findOne({
-          where: { id: row.id },
-          relations: { items: true },
-        });
-        return this.wrapToolResult(
-          { success: true, yaExistia: true },
-          saved ?? row,
-        );
-      }
-
-      const precioMx = snap.getAmount(resolved.canonical, LIGHT_DAMAGE_SEVERITY);
-      if (precioMx <= 0) {
-        return {
-          success: false,
-          error: `No hay precio de catálogo para ${resolved.canonical} con severidad ${LIGHT_DAMAGE_SEVERITY}.`,
-          piezaNoEnCatalogo: true,
-        };
-      }
-
-      const desc =
-        String(descripcionTecnica ?? '').trim() ||
-        `Daño leve (${LIGHT_DAMAGE_SEVERITY}): rayón, raspón o retoque de pintura.`;
-
-      inventory.push({
-        pieza: resolved.displayPieza,
-        severidad: LIGHT_DAMAGE_SEVERITY,
-        descripcionTecnica: desc,
-        urls_origen: [],
-      });
-
-      const saved = await this.persistInventoryChanges(row, inventory, tallerId);
-      return this.wrapToolResult({ success: true, accion: 'agregar' }, saved);
-    });
-  }
-
-  /** Actualiza la cotización: agregar, quitar o modificar una pieza. */
-  async actualizarCotizacion(
-    conversationId: string,
-    tallerId: string | null,
-    accion: CotizacionAccion,
-    pieza: string,
-    opts?: {
-      precio?: number;
-      severidad?: string;
-      descripcionTecnica?: string;
-    },
-  ): Promise<DraftQuoteToolResult> {
-    return this.safeTool(async () => {
-      const piezaTrim = String(pieza ?? '').trim();
-      const accionNorm = String(accion ?? '')
-        .trim()
-        .toLowerCase() as CotizacionAccion;
-
-      if (!piezaTrim) {
-        return { success: false, error: 'Falta el parámetro pieza.' };
-      }
-      if (!['agregar', 'quitar', 'actualizar'].includes(accionNorm)) {
-        return {
-          success: false,
-          error: 'accion debe ser "agregar", "quitar" o "actualizar".',
-        };
-      }
-
-      if (accionNorm === 'quitar') {
-        return this.eliminarServicioDeCotizacion(
-          conversationId,
-          tallerId,
-          piezaTrim,
-        );
-      }
-
-      const snap = await this.catalogService.getMatrixPricingSnapshot(
-        tallerId ?? undefined,
-      );
-      const resolved = this.resolvePiezaInCatalog(piezaTrim, snap);
-      if (!resolved.ok) {
-        return {
-          success: false,
-          error: resolved.error,
-          piezaNoEnCatalogo: true,
-          piezasDisponiblesEjemplo: resolved.ejemplos,
-        };
-      }
-
-      const { row } = await this.getOrCreateActiveDraft(conversationId, tallerId);
-      let inventory = this.extractInventory(row);
-
-      if (accionNorm === 'agregar') {
-        const existingIdx = this.findInventoryIndexByCanonical(
-          inventory,
-          resolved.canonical,
-          snap,
-        );
-        if (existingIdx >= 0) {
-          return this.wrapToolResult(
-            { success: true, yaExistia: true, accion: 'agregar' },
-            row,
-          );
-        }
-
-        const sev = coerceDamageLevelCode(
-          opts?.severidad ?? LIGHT_DAMAGE_SEVERITY,
-        );
-        const precioMx =
-          opts?.precio != null && Number.isFinite(opts.precio) && opts.precio >= 0
-            ? Math.round(opts.precio)
-            : snap.getAmount(resolved.canonical, sev);
-
-        if (precioMx <= 0) {
-          return {
-            success: false,
-            error: `No hay precio de catálogo para ${resolved.canonical} (${sev}).`,
-          };
-        }
-
-        inventory.push({
-          pieza: resolved.displayPieza,
-          severidad: sev,
-          descripcionTecnica:
-            String(opts?.descripcionTecnica ?? '').trim() ||
-            `Servicio ${sev} en ${resolved.displayPieza}.`,
-          urls_origen: [],
-        });
-      } else {
-        const idx = this.findInventoryIndexByCanonical(
-          inventory,
-          resolved.canonical,
-          snap,
-        );
-        if (idx < 0) {
-          return {
-            success: false,
-            error: `La pieza "${piezaTrim}" no está en la cotización actual. Usa accion "agregar" primero.`,
-          };
-        }
-
-        const current = inventory[idx]!;
-        const sev = opts?.severidad
-          ? coerceDamageLevelCode(opts.severidad)
-          : coerceDamageLevelCode(current.severidad);
-
-        inventory[idx] = {
-          ...current,
-          severidad: sev,
-          descripcionTecnica:
-            String(opts?.descripcionTecnica ?? '').trim() ||
-            current.descripcionTecnica,
-        };
-      }
-
-      const priceOverrides = new Map<string, number>();
-      if (opts?.precio != null && Number.isFinite(opts.precio) && opts.precio >= 0) {
-        priceOverrides.set(
-          this.piezaMatchKey(resolved.displayPieza),
-          Math.round(opts.precio),
-        );
-      }
-
-      const saved = await this.persistInventoryChanges(
-        row,
-        inventory,
-        tallerId,
-        priceOverrides.size > 0 ? priceOverrides : undefined,
-      );
-      return this.wrapToolResult(
-        { success: true, accion: accionNorm },
-        saved,
-      );
-    });
-  }
-
-  /** Elimina una pieza de la cotización activa (draft_quote_items + totales). */
-  async eliminarServicioDeCotizacion(
-    conversationId: string,
-    tallerId: string | null,
-    pieza: string,
-  ): Promise<DraftQuoteToolResult> {
-    return this.safeTool(async () => {
-      const piezaTrim = String(pieza ?? '').trim();
-      if (!piezaTrim) {
-        return { success: false, error: 'Falta el parámetro pieza.' };
-      }
-
-      const row = await this.findActiveDraftForMutation(conversationId);
-      if (!row) {
-        return {
-          success: false,
-          error:
-            'No hay cotización activa en esta conversación. Cotiza primero con obtenerCotizacionExpress o agrega piezas.',
-        };
-      }
-
-      const snap = await this.catalogService.getMatrixPricingSnapshot(
-        tallerId ?? undefined,
-      );
-
-      let workingRow = row;
-      let items = [...(workingRow.items ?? [])].sort(
-        (a, b) => a.sortOrder - b.sortOrder,
-      );
-
-      if (!items.length) {
-        const inventory = this.extractInventory(workingRow);
-        if (inventory.length > 0) {
-          workingRow = await this.persistInventoryChanges(
-            workingRow,
-            inventory,
-            tallerId,
-          );
-          items = [...(workingRow.items ?? [])].sort(
-            (a, b) => a.sortOrder - b.sortOrder,
-          );
-        }
-      }
-
-      const removeIdx = this.findDraftItemIndexToRemove(items, piezaTrim, snap);
-      if (removeIdx < 0) {
-        return this.wrapToolResult(
-          {
-            success: true,
-            noEncontrada: true,
-            accion: 'quitar',
-            error: `La pieza "${piezaTrim}" no está en la cotización actual.`,
-          },
-          workingRow,
-        );
-      }
-
-      const removedItem = items[removeIdx]!;
-      await this.draftQuoteItemRepository.delete({ id: removedItem.id });
-
-      const remainingItems = items.filter((_, i) => i !== removeIdx);
-      const inventory = remainingItems.map((it) => ({
-        pieza: it.pieza,
-        severidad: it.severidad,
-        descripcionTecnica: it.descripcionTecnica ?? '',
-        urls_origen: [...(it.urlsOrigen ?? [])],
-      }));
-
-      const priceByPieza = new Map(
-        remainingItems.map(
-          (it) => [this.piezaMatchKey(it.pieza), it.precioMx] as const,
-        ),
-      );
-
-      const saved = await this.persistInventoryChanges(
-        workingRow,
-        inventory,
-        tallerId,
-        priceByPieza,
-      );
-
-      return this.wrapToolResult(
-        {
-          success: true,
-          accion: 'quitar',
-          piezaEliminada: this.displayPiezaLabel(removedItem.pieza),
-        },
-        saved,
-      );
-    });
-  }
-
-  /** Texto formateado listo para mostrar al cliente. */
-  async obtenerResumenCotizacion(
-    conversationId: string,
-    tallerId: string | null,
-    contactName?: string,
-  ): Promise<DraftQuoteToolResult> {
-    return this.safeTool(async () => {
-      const { row } = await this.getOrCreateActiveDraft(conversationId, tallerId);
-      const cotizacion = this.buildStateDto(row);
-      const resumen = this.buildClienteResumen(cotizacion, contactName);
-      return this.wrapToolResult(
-        {
-          success: true,
-          resumenCliente: resumen.texto,
-          resumenLineas: resumen.lineas,
-        },
-        row,
-      );
-    });
-  }
-
-  // --- Internos ---
-
-  private async safeTool(
-    fn: () => Promise<DraftQuoteToolResult>,
-  ): Promise<DraftQuoteToolResult> {
-    try {
-      return await fn();
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Error interno al procesar la cotización.';
-      console.error('[DraftQuoteService] tool error:', err);
-      return {
-        success: false,
-        error: `No se pudo completar la operación de cotización: ${message}. Informa al cliente que hubo un problema técnico y ofrece reintentar.`,
-      };
-    }
-  }
-
-  private wrapToolResult(
-    base: Record<string, unknown>,
-    row: DraftQuoteEntity,
-    creadaEnEstaLlamada = false,
-  ): DraftQuoteToolResult {
-    const cotizacion = this.buildStateDto(row, creadaEnEstaLlamada);
-    const desglose = this.desgloseFromDraftRow(row);
-    const envelope = buildCotizacionToolEnvelope(desglose, {
-      ...base,
-      cotizacion,
-    });
-    return envelope as DraftQuoteToolResult;
-  }
-
-  private desgloseFromDraftRow(row: DraftQuoteEntity): CotizacionDesgloseLine[] {
-    const items = [...(row.items ?? [])].sort(
-      (a, b) => a.sortOrder - b.sortOrder,
-    );
-    if (items.length > 0) {
-      return items.map((it) => ({
-        pieza: this.displayPiezaLabel(it.pieza),
-        precio: Math.round(Number(it.precioMx) || 0),
-      }));
-    }
-    const lines = row.quotePayload?.lines ?? [];
-    return draftQuoteLinesToClientePiezaRows(lines).map((lr) => ({
-      pieza: lr.pieza,
-      precio: lr.precioMx,
-    }));
-  }
-
-  private displayPiezaLabel(piezaCode: string): string {
-    const opt = findPanelPiezaOption(piezaCode);
-    return opt?.fullName ?? (String(piezaCode ?? '').trim() || 'Servicio');
-  }
-
-  private piezaMatchKey(raw: string): string {
-    const opt = findPanelPiezaOption(raw);
-    const code = opt?.code ?? normalizePanelPiezaCode(raw);
-    return normalizeTextForMatch(code || raw);
-  }
-
-  private async findActiveDraftForMutation(
-    conversationId: string,
-  ): Promise<DraftQuoteEntity | null> {
-    const activeStatuses = [
-      'PENDING_APPROVAL',
-      DRAFT_QUOTE_STATUS_AWAITING_VEHICLE,
-    ];
-    const row = await this.draftQuoteRepository.findOne({
-      where: activeStatuses.map((status) => ({ conversationId, status })),
-      order: { createdAt: 'DESC' },
-      relations: { items: true },
-    });
-    if (row) {
-      row.items?.sort((a, b) => a.sortOrder - b.sortOrder);
-      return row;
-    }
-    return null;
-  }
-
-  private findDraftItemIndexToRemove(
-    items: readonly DraftQuoteItem[],
-    piezaSearch: string,
-    snap: MatrixPricingSnapshot,
-  ): number {
-    const searchKey = this.piezaMatchKey(piezaSearch);
-    const searchCanonical =
-      snap.matchServicio(resolveMatrixServicioRaw(piezaSearch)) ?? '';
-    const searchNorm = normalizeTextForMatch(piezaSearch);
-
-    return items.findIndex((it) => {
-      const storedKey = this.piezaMatchKey(it.pieza);
-      if (storedKey === searchKey) return true;
-      if (searchCanonical) {
-        const storedCanonical =
-          snap.matchServicio(resolveMatrixServicioRaw(it.pieza)) ?? '';
-        if (
-          storedCanonical &&
-          normalizeTextForMatch(storedCanonical) ===
-            normalizeTextForMatch(searchCanonical)
-        ) {
-          const searchOpt = findPanelPiezaOption(piezaSearch);
-          const storedOpt = findPanelPiezaOption(it.pieza);
-          if (!searchOpt || !storedOpt || searchOpt.code === storedOpt.code) {
-            return true;
-          }
-        }
-      }
-      const storedLabel = normalizeTextForMatch(this.displayPiezaLabel(it.pieza));
-      if (storedLabel === searchNorm) return true;
-      if (storedLabel.includes(searchNorm) || searchNorm.includes(storedLabel)) {
-        return searchNorm.length >= 4 || storedLabel.length >= 4;
-      }
-      return false;
-    });
-  }
-
-  private async getOrCreateActiveDraft(
-    conversationId: string,
-    tallerId: string | null,
-  ): Promise<{ row: DraftQuoteEntity; created: boolean }> {
-    const activeStatuses = ['PENDING_APPROVAL', DRAFT_QUOTE_STATUS_AWAITING_VEHICLE];
+  ): Promise<DraftQuoteEntity> {
     const existing = await this.draftQuoteRepository.findOne({
-      where: activeStatuses.map((status) => ({ conversationId, status })),
+      where: ACTIVE_QUOTE_STATUSES.map((status) => ({
+        conversationId,
+        status,
+      })),
       order: { createdAt: 'DESC' },
       relations: { items: true },
     });
     if (existing) {
       existing.items?.sort((a, b) => a.sortOrder - b.sortOrder);
-      return { row: existing, created: false };
+      return existing;
     }
+
+    const conv = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+      select: ['id', 'tallerId'],
+    });
 
     const emptyAnalysis: VehicleDamageAnalysis = {
       pieza: 'Sin piezas',
@@ -605,19 +92,186 @@ export class DraftQuoteService {
       inventory: [],
     };
 
-    const emptyQuote = this.buildEmptyQuotePayload(emptyAnalysis);
     const row = this.draftQuoteRepository.create({
       conversationId,
-      tallerId,
+      tallerId: conv?.tallerId ?? null,
       messageId: null,
       imageUrl: '',
       damageAnalysis: emptyAnalysis,
       estimateAmount: 0,
-      quotePayload: emptyQuote,
+      quotePayload: this.buildEmptyQuotePayload(emptyAnalysis),
       status: 'PENDING_APPROVAL',
     });
-    const saved = await this.draftQuoteRepository.save(row);
-    return { row: saved, created: true };
+    return this.draftQuoteRepository.save(row);
+  }
+
+  /** Estado + desglose actual (crea borrador vacío si no existe). */
+  async getCurrentQuoteState(conversationId: string): Promise<QuoteToolResult> {
+    return this.safe(async () => {
+      const quote = await this.getOrCreateActiveQuote(conversationId);
+      const saved = await this.recalculateTotal(quote);
+      return this.toToolResponse(saved, { creadaConsulta: true });
+    });
+  }
+
+  /** Agrega servicio de daño leve (DL) con precio de catálogo. */
+  async addLightService(
+    conversationId: string,
+    pieza: string,
+  ): Promise<QuoteToolResult> {
+    return this.safe(async () => {
+      const piezaTrim = String(pieza ?? '').trim();
+      if (!piezaTrim) {
+        return { success: false, error: 'Falta el parámetro pieza.' };
+      }
+
+      const tallerId = await this.resolveTallerId(conversationId);
+      const snap = await this.catalogService.getMatrixPricingSnapshot(
+        tallerId ?? undefined,
+      );
+      const resolved = this.resolvePiezaInCatalog(piezaTrim, snap);
+      if (!resolved.ok) {
+        return {
+          success: false,
+          error: resolved.error,
+          piezasDisponiblesEjemplo: resolved.ejemplos,
+        };
+      }
+
+      const quote = await this.getOrCreateActiveQuote(conversationId);
+      const inventory = this.itemsToInventory(quote);
+      const key = this.piezaMatchKey(resolved.displayPieza);
+      if (inventory.some((it) => this.piezaMatchKey(it.pieza) === key)) {
+        const saved = await this.recalculateTotal(quote);
+        return this.toToolResponse(saved, { success: true, yaExistia: true });
+      }
+
+      const precioMx = snap.getAmount(resolved.canonical, LIGHT_DAMAGE_SEVERITY);
+      if (precioMx <= 0) {
+        return {
+          success: false,
+          error: `No hay precio de catálogo para ${resolved.canonical} (${LIGHT_DAMAGE_SEVERITY}).`,
+        };
+      }
+
+      inventory.push({
+        pieza: resolved.displayPieza,
+        severidad: LIGHT_DAMAGE_SEVERITY,
+        descripcionTecnica: `Daño leve (${LIGHT_DAMAGE_SEVERITY}): rayón, raspón o retoque de pintura.`,
+        urls_origen: [],
+      });
+
+      const saved = await this.persistInventory(quote, inventory, tallerId);
+      return this.toToolResponse(saved, { success: true, accion: 'agregar' });
+    });
+  }
+
+  /** Elimina item por nombre de pieza (match flexible). */
+  async removeQuoteItem(
+    conversationId: string,
+    pieza: string,
+  ): Promise<QuoteToolResult> {
+    return this.safe(async () => {
+      const piezaTrim = String(pieza ?? '').trim();
+      if (!piezaTrim) {
+        return { success: false, error: 'Falta el parámetro pieza.' };
+      }
+
+      const quote = await this.findActiveQuote(conversationId);
+      if (!quote) {
+        return {
+          success: false,
+          error:
+            'No hay cotización activa. Usa obtenerCotizacionActual o cotiza primero con obtenerCotizacionExpress.',
+        };
+      }
+
+      const tallerId = await this.resolveTallerId(conversationId);
+      const snap = await this.catalogService.getMatrixPricingSnapshot(
+        tallerId ?? undefined,
+      );
+
+      let items = [...(quote.items ?? [])].sort(
+        (a, b) => a.sortOrder - b.sortOrder,
+      );
+      if (!items.length) {
+        items = this.inventoryToItemRows(
+          this.itemsToInventory(quote),
+          quote.id,
+        );
+      }
+
+      const idx = this.findItemIndexByPieza(items, piezaTrim, snap);
+      if (idx < 0) {
+        const current = await this.recalculateTotal(quote);
+        return this.toToolResponse(current, {
+          success: true,
+          noEncontrada: true,
+          error: `No encontré "${piezaTrim}" en la cotización actual.`,
+        });
+      }
+
+      const removed = items[idx]!;
+      if (removed.id) {
+        await this.draftQuoteItemRepository.delete({ id: removed.id });
+      }
+      items.splice(idx, 1);
+
+      const inventory = items.map((it) => ({
+        pieza: it.pieza,
+        severidad: it.severidad,
+        descripcionTecnica: it.descripcionTecnica ?? '',
+        urls_origen: [...(it.urlsOrigen ?? [])],
+      }));
+
+      const saved = await this.persistInventory(quote, inventory, tallerId);
+      return this.toToolResponse(saved, {
+        success: true,
+        accion: 'quitar',
+        piezaEliminada: this.displayPiezaLabel(removed.pieza),
+      });
+    });
+  }
+
+  /** Recalcula total desde items y persiste quotePayload + estimateAmount. */
+  async recalculateTotal(quote: DraftQuoteEntity): Promise<DraftQuoteEntity> {
+    const tallerId = quote.tallerId;
+    const snap = await this.catalogService.getMatrixPricingSnapshot(
+      tallerId ?? undefined,
+    );
+
+    const withItems = await this.draftQuoteRepository.findOne({
+      where: { id: quote.id },
+      relations: { items: true },
+    });
+    const row = withItems ?? quote;
+    row.items?.sort((a, b) => a.sortOrder - b.sortOrder);
+
+    const inventory = this.itemsToInventory(row);
+    return this.persistInventory(row, inventory, tallerId, snap);
+  }
+
+  // --- Internos ---
+
+  private async findActiveQuote(
+    conversationId: string,
+  ): Promise<DraftQuoteEntity | null> {
+    return this.draftQuoteRepository.findOne({
+      where: ACTIVE_QUOTE_STATUSES.map((status) => ({
+        conversationId,
+        status,
+      })),
+      order: { createdAt: 'DESC' },
+      relations: { items: true },
+    });
+  }
+
+  private async resolveTallerId(conversationId: string): Promise<string | null> {
+    const conv = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+      select: ['id', 'tallerId'],
+    });
+    return conv?.tallerId ?? null;
   }
 
   private buildEmptyQuotePayload(analysis: VehicleDamageAnalysis): DraftQuote {
@@ -644,25 +298,7 @@ export class DraftQuoteService {
     };
   }
 
-  private extractInventory(row: DraftQuoteEntity): DetectedDamageItem[] {
-    const fromAnalysis = row.damageAnalysis?.inventory;
-    if (Array.isArray(fromAnalysis) && fromAnalysis.length > 0) {
-      return fromAnalysis.map((it) => ({
-        pieza: it.pieza,
-        severidad: it.severidad,
-        descripcionTecnica: it.descripcionTecnica,
-        urls_origen: [...(it.urls_origen ?? [])],
-      }));
-    }
-    const fromBasis = row.quotePayload?.analysisBasis?.inventory;
-    if (Array.isArray(fromBasis) && fromBasis.length > 0) {
-      return fromBasis.map((it) => ({
-        pieza: it.pieza,
-        severidad: it.severidad,
-        descripcionTecnica: it.descripcionTecnica,
-        urls_origen: [...(it.urls_origen ?? [])],
-      }));
-    }
+  private itemsToInventory(row: DraftQuoteEntity): DetectedDamageItem[] {
     if (row.items?.length) {
       return row.items.map((it) => ({
         pieza: it.pieza,
@@ -671,117 +307,44 @@ export class DraftQuoteService {
         urls_origen: [...(it.urlsOrigen ?? [])],
       }));
     }
+    const fromAnalysis = row.damageAnalysis?.inventory;
+    if (Array.isArray(fromAnalysis) && fromAnalysis.length) {
+      return fromAnalysis.map((it) => ({
+        pieza: it.pieza,
+        severidad: it.severidad,
+        descripcionTecnica: it.descripcionTecnica,
+        urls_origen: [...(it.urls_origen ?? [])],
+      }));
+    }
     return [];
   }
 
-  private resolvePiezaInCatalog(
-    piezaRaw: string,
-    snap: MatrixPricingSnapshot,
-  ):
-    | { ok: true; canonical: string; displayPieza: string }
-    | { ok: false; error: string; ejemplos: string[] } {
-    const matrixRaw = resolveMatrixServicioRaw(piezaRaw);
-    const canonical = snap.matchServicio(matrixRaw);
-    if (!canonical) {
-      const ejemplos = snap.serviciosOrderedLongestFirst.slice(0, 8);
-      return {
-        ok: false,
-        error: `La pieza "${piezaRaw}" no coincide con el catálogo del taller. Usa un nombre canónico (ej. Puerta, Fascia, Salpicadera).`,
-        ejemplos,
-      };
-    }
-    const displayPieza = normalizePanelPiezaCode(piezaRaw) || piezaRaw;
-    return { ok: true, canonical, displayPieza };
-  }
-
-  private findInventoryIndexByCanonical(
+  private inventoryToItemRows(
     inventory: DetectedDamageItem[],
-    canonical: string,
-    snap: MatrixPricingSnapshot,
-  ): number {
-    const target = canonical.toLowerCase();
-    return inventory.findIndex((it) => {
-      const c =
-        snap.matchServicio(resolveMatrixServicioRaw(it.pieza)) ??
-        normalizePanelPiezaCode(it.pieza) ??
-        it.pieza;
-      return String(c).toLowerCase() === target;
-    });
+    draftQuoteId: string,
+  ): DraftQuoteItem[] {
+    return inventory.map((it, idx) =>
+      this.draftQuoteItemRepository.create({
+        draftQuoteId,
+        sortOrder: idx,
+        pieza: normalizePanelPiezaCode(it.pieza) || it.pieza,
+        severidad: coerceDamageLevelCode(it.severidad),
+        precioMx: 0,
+        descripcionTecnica: it.descripcionTecnica ?? null,
+        urlsOrigen: it.urls_origen?.length ? [...it.urls_origen] : null,
+      }),
+    );
   }
 
-  private removePiezaFromInventory(
-    inventory: DetectedDamageItem[],
-    piezaRaw: string,
-    snap: MatrixPricingSnapshot,
-  ): { inventory: DetectedDamageItem[]; removed: boolean } {
-    const canonical =
-      snap.matchServicio(resolveMatrixServicioRaw(piezaRaw)) ??
-      normalizePanelPiezaCode(piezaRaw) ??
-      piezaRaw;
-    const idx = this.findInventoryIndexByCanonical(inventory, canonical, snap);
-    if (idx < 0) {
-      return { inventory, removed: false };
-    }
-    const next = [...inventory];
-    next.splice(idx, 1);
-    return { inventory: next, removed: true };
-  }
-
-  private inventoryToAnalysis(
-    inventory: DetectedDamageItem[],
-    prev: VehicleDamageAnalysis,
-  ): VehicleDamageAnalysis {
-    const inv = inventory.map((it) => ({
-      pieza: it.pieza,
-      severidad: coerceDamageLevelCode(it.severidad),
-      descripcionTecnica: it.descripcionTecnica,
-      urls_origen: [...(it.urls_origen ?? [])],
-    }));
-    const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
-    let worst: DamageLevel = 'DL';
-    for (const it of inv) {
-      const sev = coerceDamageLevelCode(it.severidad);
-      if (damageLevelRank(sev) > damageLevelRank(worst)) worst = sev;
-    }
-    const piezaLabel =
-      partes.length === 1
-        ? partes[0]!
-        : partes.length > 1
-          ? `${partes.slice(0, 2).join(' + ')}${partes.length > 2 ? ` (+${partes.length - 2} más)` : ''}`
-          : 'Sin piezas';
-    const desc = inv.length
-      ? inv
-          .map(
-            (it) =>
-              `• ${it.pieza} (${it.severidad}): ${it.descripcionTecnica}`,
-          )
-          .join('\n')
-      : 'Sin servicios en la cotización.';
-
-    return {
-      ...prev,
-      pieza: piezaLabel,
-      severidad: worst,
-      severidadDelDano: worst,
-      descripcionTecnica: desc,
-      partesAfectadas: partes,
-      inventory: inv,
-      justificacion:
-        prev.justificacion ||
-        `Cotización progresiva (${inv.length} servicio(s)).`,
-    };
-  }
-
-  private async persistInventoryChanges(
+  private async persistInventory(
     row: DraftQuoteEntity,
     inventory: DetectedDamageItem[],
     tallerId: string | null,
-    priceOverrides?: Map<string, number>,
+    snapIn?: MatrixPricingSnapshot,
   ): Promise<DraftQuoteEntity> {
-    const snap = await this.catalogService.getMatrixPricingSnapshot(
-      tallerId ?? undefined,
-    );
-    const analysis = this.inventoryToAnalysis(inventory, row.damageAnalysis);
+    const snap =
+      snapIn ??
+      (await this.catalogService.getMatrixPricingSnapshot(tallerId ?? undefined));
 
     const existingPrices = new Map<string, number>();
     for (const it of row.items ?? []) {
@@ -793,14 +356,11 @@ export class DraftQuoteService {
         snap.matchServicio(resolveMatrixServicioRaw(it.pieza)) ?? it.pieza;
       const sev = coerceDamageLevelCode(it.severidad);
       const key = this.piezaMatchKey(it.pieza);
-      const override = priceOverrides?.get(key);
       const stored = existingPrices.get(key);
       const precioMx =
-        override != null
-          ? override
-          : stored != null
-            ? stored
-            : snap.getAmount(canonical, sev);
+        stored != null && stored > 0
+          ? stored
+          : snap.getAmount(canonical, sev);
       return {
         pieza: it.pieza,
         severidad: sev,
@@ -813,6 +373,30 @@ export class DraftQuoteService {
     const lines: DraftQuoteLine[] = quoteRows.map((qr, idx) =>
       buildDraftQuoteLineFromQuoteRow(qr, idx, snap),
     );
+
+    const analysis: VehicleDamageAnalysis = {
+      ...(row.damageAnalysis ?? {
+        pieza: 'Sin piezas',
+        severidad: 'DL',
+        severidadDelDano: 'DL',
+        descripcionTecnica: '',
+        justificacion: '',
+        partesAfectadas: [],
+      }),
+      pieza:
+        inventory.length === 1
+          ? inventory[0]!.pieza
+          : inventory.length > 1
+            ? `${inventory.length} piezas`
+            : 'Sin piezas',
+      partesAfectadas: inventory.map((i) => i.pieza),
+      inventory: inventory.map((it) => ({
+        pieza: it.pieza,
+        severidad: coerceDamageLevelCode(it.severidad),
+        descripcionTecnica: it.descripcionTecnica,
+        urls_origen: [...(it.urls_origen ?? [])],
+      })),
+    };
 
     const quotePayload: DraftQuote = {
       ...(row.quotePayload ?? this.buildEmptyQuotePayload(analysis)),
@@ -828,13 +412,9 @@ export class DraftQuoteService {
           descripcionTecnica: analysis.descripcionTecnica,
           justificacion: analysis.justificacion,
         }),
-        pieza: analysis.pieza,
-        severidad: analysis.severidad,
-        partesAfectadas: [...analysis.partesAfectadas],
-        severidadDelDano: analysis.severidadDelDano,
-        descripcionTecnica: analysis.descripcionTecnica,
-        justificacion: analysis.justificacion,
         inventory: analysis.inventory,
+        pieza: analysis.pieza,
+        partesAfectadas: analysis.partesAfectadas,
       },
     };
 
@@ -844,130 +424,177 @@ export class DraftQuoteService {
     row.damageAnalysis = analysis;
     row.estimateAmount = total;
     row.quotePayload = quotePayloadForClient;
-    if (row.status === DRAFT_QUOTE_STATUS_AWAITING_VEHICLE && total > 0) {
-      row.status = 'PENDING_APPROVAL';
-    }
+    row.tallerId = tallerId ?? row.tallerId;
 
     const saved = await this.draftQuoteRepository.save(row);
-    await this.syncDraftQuoteLineItems(
-      saved.id,
-      analysis,
-      quotePayloadForClient,
-      tallerId,
-    );
 
-    const withItems = await this.draftQuoteRepository.findOne({
-      where: { id: saved.id },
-      relations: { items: true },
-    });
-    return withItems ?? saved;
-  }
-
-  private async syncDraftQuoteLineItems(
-    draftQuoteId: string,
-    analysis: VehicleDamageAnalysis,
-    doc: DraftQuote,
-    tallerId: string | null,
-  ): Promise<void> {
-    await this.draftQuoteItemRepository.delete({ draftQuoteId });
-    const inv = analysis.inventory ?? [];
-    const lines = doc.lines ?? [];
-    if (!inv.length) return;
-
-    const rows: Partial<DraftQuoteItem>[] = inv.map((it, idx) => {
-      const line = lines[idx];
-      return {
-        draftQuoteId,
+    await this.draftQuoteItemRepository.delete({ draftQuoteId: saved.id });
+    if (inventory.length) {
+      const itemRows = inventory.map((it, idx) => ({
+        draftQuoteId: saved.id,
         sortOrder: idx,
         pieza: normalizePanelPiezaCode(it.pieza) || it.pieza,
         severidad: coerceDamageLevelCode(it.severidad),
         precioMx: Math.round(
-          Number(line?.subtotal ?? line?.unitPrice ?? 0),
+          Number(
+            lines[idx]?.subtotal ?? lines[idx]?.unitPrice ?? quoteRows[idx]?.precioMx ?? 0,
+          ),
         ),
         descripcionTecnica: it.descripcionTecnica ?? null,
-        urlsOrigen:
-          Array.isArray(it.urls_origen) && it.urls_origen.length > 0
-            ? [...it.urls_origen]
-            : null,
-      };
+        urlsOrigen: it.urls_origen?.length ? [...it.urls_origen] : null,
+      }));
+      await this.draftQuoteItemRepository.insert(itemRows);
+    }
+
+    const reloaded = await this.draftQuoteRepository.findOne({
+      where: { id: saved.id },
+      relations: { items: true },
     });
-
-    if (rows.length) {
-      await this.draftQuoteItemRepository.insert(rows);
-    }
+    return reloaded ?? saved;
   }
 
-  private buildStateDto(
-    row: DraftQuoteEntity,
-    creadaEnEstaLlamada = false,
-  ): DraftQuoteStateDto {
-    const payload = row.quotePayload;
-    const desglose = this.desgloseFromDraftRow(row);
-    const totalFromDesglose = sumDesglosePrecios(desglose);
-    const lineRows = desglose.map((d) => ({
-      pieza: d.pieza,
-      precioMx: d.precio,
+  /**
+   * Persiste líneas de obtenerCotizacionExpress en el borrador activo
+   * para que agregar/quitar piezas funcione después de una cotización express.
+   */
+  async importFromExpressResult(
+    conversationId: string,
+    express: ObtenerCotizacionExpressResult,
+    tallerId: string | null,
+  ): Promise<DraftQuoteEntity | null> {
+    if (!express.success || !express.lines?.length) return null;
+
+    const inventory: DetectedDamageItem[] = express.lines.map((line) => ({
+      pieza: line.servicio,
+      severidad: coerceDamageLevelCode(line.severidad),
+      descripcionTecnica:
+        line.tipo === 'bano_pintura'
+          ? `Baño de pintura (${line.severidad})`
+          : `Daño leve (${line.severidad}): cotización express.`,
+      urls_origen: [],
     }));
-    const itemsFromDb = row.items ?? [];
 
-    const items: DraftQuoteItemDto[] =
-      itemsFromDb.length > 0
-        ? itemsFromDb.map((it) => ({
-            pieza: this.displayPiezaLabel(it.pieza),
-            piezaCanonical: it.pieza,
-            severidad: it.severidad,
-            precioMx: it.precioMx,
-            descripcionTecnica: it.descripcionTecnica ?? '',
-          }))
-        : lineRows.map((lr, idx) => {
-            const inv = payload?.analysisBasis?.inventory?.[idx];
-            return {
-              pieza: lr.pieza,
-              piezaCanonical: lr.pieza,
-              severidad: inv?.severidad ?? 'DL',
-              precioMx: lr.precioMx,
-              descripcionTecnica: inv?.descripcionTecnica ?? '',
-            };
-          });
-
-    return {
-      draftQuoteId: row.id,
-      reference: payload?.reference ?? '',
-      status: row.status,
-      moneda: AUTO_FIX_CURRENCY,
-      itemCount: items.length,
-      items,
-      subtotalMx: totalFromDesglose,
-      totalMx: totalFromDesglose,
-      ...(creadaEnEstaLlamada ? { creadaEnEstaLlamada: true } : {}),
-    };
+    const quote = await this.getOrCreateActiveQuote(conversationId);
+    return this.persistInventory(quote, inventory, tallerId);
   }
 
-  private buildClienteResumen(
-    cotizacion: DraftQuoteStateDto,
-    contactName?: string,
-  ): { texto: string; lineas: string[] } {
-    const name = String(contactName ?? '').trim() || 'cliente';
-    const lineas = cotizacion.items.map((it) =>
-      formatDraftQuoteLineToolEmoji(it.pieza, it.precioMx),
-    );
+  /** Resumen estructurado { desglose, totalGlobal }. */
+  async getQuoteSummary(conversationId: string): Promise<QuoteToolResult> {
+    return this.getCurrentQuoteState(conversationId);
+  }
 
-    if (cotizacion.itemCount === 0) {
+  private toDesglose(row: DraftQuoteEntity): CotizacionDesgloseLine[] {
+    const items = [...(row.items ?? [])].sort(
+      (a, b) => a.sortOrder - b.sortOrder,
+    );
+    if (items.length) {
+      return items.map((it) => ({
+        pieza: this.displayPiezaLabel(it.pieza),
+        precio: Math.round(Number(it.precioMx) || 0),
+      }));
+    }
+    return (row.quotePayload?.lines ?? []).map((line) => ({
+      pieza: String(line.description ?? '').split('—')[0]?.trim() || 'Servicio',
+      precio: Math.round(Number(line.subtotal ?? line.unitPrice ?? 0)),
+    }));
+  }
+
+  private toToolResponse(
+    row: DraftQuoteEntity,
+    extra: Record<string, unknown>,
+  ): QuoteToolResult {
+    const desglose = this.toDesglose(row);
+    return buildCotizacionToolEnvelope(desglose, {
+      ...extra,
+      draftQuoteId: row.id,
+      status: row.status,
+      itemCount: desglose.length,
+    }) as QuoteToolResult;
+  }
+
+  private resolvePiezaInCatalog(
+    piezaRaw: string,
+    snap: MatrixPricingSnapshot,
+  ):
+    | { ok: true; canonical: string; displayPieza: string }
+    | { ok: false; error: string; ejemplos: string[] } {
+    const fromPanel = findPanelPiezaOption(piezaRaw);
+    const matrixRaw = resolveMatrixServicioRaw(
+      fromPanel?.catalogPieza || piezaRaw,
+    );
+    const canonical = snap.matchServicio(matrixRaw);
+    if (!canonical) {
       return {
-        lineas: [],
-        texto: `Aún no hay servicios en tu cotización, ${name}. Cuando me indiques las piezas a reparar, te voy armando el desglose.`,
+        ok: false,
+        error: `La pieza "${piezaRaw}" no coincide con el catálogo del taller.`,
+        ejemplos: snap.serviciosOrderedLongestFirst.slice(0, 8),
       };
     }
+    const displayPieza =
+      fromPanel?.code ?? normalizePanelPiezaCode(piezaRaw) ?? piezaRaw;
+    return { ok: true, canonical, displayPieza };
+  }
 
-    const totalFmt = formatAutoFixMoney(cotizacion.totalMx);
-    const texto = [
-      `Aquí tienes el resumen de tu cotización, ${name}:`,
-      '',
-      ...lineas,
-      '',
-      `💰 Inversión total estimada: ${totalFmt} *(sujeto a revisión física en taller)*`,
-    ].join('\n');
+  private displayPiezaLabel(piezaCode: string): string {
+    const opt = findPanelPiezaOption(piezaCode);
+    return opt?.fullName ?? (String(piezaCode ?? '').trim() || 'Servicio');
+  }
 
-    return { texto, lineas };
+  private piezaMatchKey(raw: string): string {
+    const opt = findPanelPiezaOption(raw);
+    const code = opt?.code ?? normalizePanelPiezaCode(raw);
+    return normalizeTextForMatch(code || raw);
+  }
+
+  private findItemIndexByPieza(
+    items: readonly DraftQuoteItem[],
+    piezaSearch: string,
+    snap: MatrixPricingSnapshot,
+  ): number {
+    const searchKey = this.piezaMatchKey(piezaSearch);
+    const searchNorm = normalizeTextForMatch(piezaSearch);
+    const searchCanonical =
+      snap.matchServicio(resolveMatrixServicioRaw(piezaSearch)) ?? '';
+
+    return items.findIndex((it) => {
+      const storedKey = this.piezaMatchKey(it.pieza);
+      if (storedKey === searchKey) return true;
+      const label = normalizeTextForMatch(this.displayPiezaLabel(it.pieza));
+      if (label === searchNorm) return true;
+      if (searchCanonical) {
+        const storedCanon =
+          snap.matchServicio(resolveMatrixServicioRaw(it.pieza)) ?? '';
+        if (
+          storedCanon &&
+          normalizeTextForMatch(storedCanon) ===
+            normalizeTextForMatch(searchCanonical)
+        ) {
+          const searchOpt = findPanelPiezaOption(piezaSearch);
+          const storedOpt = findPanelPiezaOption(it.pieza);
+          if (!searchOpt || !storedOpt || searchOpt.code === storedOpt.code) {
+            return true;
+          }
+        }
+      }
+      return (
+        label.includes(searchNorm) ||
+        (searchNorm.length >= 4 && searchNorm.includes(label))
+      );
+    });
+  }
+
+  private async safe(fn: () => Promise<QuoteToolResult>): Promise<QuoteToolResult> {
+    try {
+      return await fn();
+    } catch (err) {
+      console.error('[DraftQuoteService]', err);
+      return {
+        success: false,
+        error:
+          'Error interno al procesar la cotización. Informa al cliente amablemente y pide reintentar.',
+        instruccionParaModelo:
+          'Hubo un error técnico. Responde al cliente sin quedarte en silencio.',
+      };
+    }
   }
 }

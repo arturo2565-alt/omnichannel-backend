@@ -123,7 +123,6 @@ import {
 import {
   buildObtenerCotizacionExpressPayload,
   normalizeCategoriaTamanoExpress,
-  resolveExpressLineServicioLabel,
 } from './autopilot-cotizacion-express';
 import {
   assistantMessageIsBañoVehiclePrompt,
@@ -603,11 +602,8 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: 'obtenerCotizacionActual',
       description:
-        'Devuelve el estado actual de la cotización en borrador de esta conversación (piezas, precios, total). Si no existe borrador activo, crea uno vacío. Úsala antes de agregar o quitar servicios, o cuando el cliente pregunte "¿cuánto llevo?" / "¿qué tengo cotizado?".',
-      parameters: {
-        type: 'object',
-        properties: {},
-      },
+        'Obtiene el estado actual de la cotización en borrador de esta conversación. Úsala siempre antes de agregar o quitar piezas para conocer el presupuesto actual.',
+      parameters: { type: 'object', properties: {} },
     },
   },
   {
@@ -615,19 +611,14 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: 'agregarServicioLeve',
       description:
-        'Agrega a la cotización activa una pieza con daño leve (rayón, raspón, retoque de pintura — severidad DL). Es el caso más frecuente. Valida la pieza contra el catálogo del taller y recalcula el total. Idempotente: si la pieza ya está, no la duplica.',
+        'Agrega una pieza de daño leve (rayón, raspón, pintar, pulir) a la cotización activa de la conversación actual.',
       parameters: {
         type: 'object',
         properties: {
           pieza: {
             type: 'string',
             description:
-              'Nombre de la pieza (ej. Puerta delantera izquierda, Fascia, Salpicadera, Cofre).',
-          },
-          descripcionTecnica: {
-            type: 'string',
-            description:
-              'Opcional: descripción breve del daño visible (rayón, raspón, etc.).',
+              'Nombre de la pieza (ej: "Fascia trasera", "Toldo", "Puerta delantera izquierda").',
           },
         },
         required: ['pieza'],
@@ -637,69 +628,19 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
-      name: 'actualizarCotizacion',
+      name: 'eliminarItemCotizacion',
       description:
-        'Herramienta general para modificar la cotización en borrador: agregar, quitar o actualizar una pieza. Recalcula el total automáticamente tras cada cambio.',
-      parameters: {
-        type: 'object',
-        properties: {
-          accion: {
-            type: 'string',
-            enum: ['agregar', 'quitar', 'actualizar'],
-            description:
-              'agregar = nueva pieza; quitar = eliminar pieza; actualizar = cambiar severidad o precio de pieza existente.',
-          },
-          pieza: {
-            type: 'string',
-            description: 'Pieza afectada (nombre del catálogo o texto libre del cliente).',
-          },
-          precio: {
-            type: 'number',
-            description:
-              'Opcional: precio manual en MXN (solo si el operador o contexto lo exige; si omites, se usa catálogo).',
-          },
-          severidad: {
-            type: 'string',
-            description:
-              'Opcional: nivel de daño (DL, DML, DM, DMF, DF, DMFuerte). Por defecto DL en agregar.',
-          },
-          descripcionTecnica: {
-            type: 'string',
-            description: 'Opcional: nota técnica del daño o servicio.',
-          },
-        },
-        required: ['accion', 'pieza'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'eliminarServicioDeCotizacion',
-      description:
-        'Elimina una pieza de la cotización activa cuando el cliente diga "sin el/la…", "quita", "cancela", "mejor no", "mejor sin", etc. Recibe el nombre de la pieza (ej. Toldo, Fascia delantera). El backend recalcula desglose y totalGlobal; NO sumes precios tú.',
+        'Elimina una pieza o servicio de la cotización activa usando el nombre de la pieza. NO envíes IDs ni UUIDs.',
       parameters: {
         type: 'object',
         properties: {
           pieza: {
             type: 'string',
             description:
-              'Pieza a eliminar tal como la entiendes del mensaje (ej. Toldo, Fascia delantera, Puerta delantera izquierda).',
+              'Nombre de la pieza a remover (ej: "Toldo", "Fascia delantera").',
           },
         },
         required: ['pieza'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'obtenerResumenCotizacion',
-      description:
-        'Genera un texto formateado y listo para mostrar al cliente con el desglose actual de la cotización (líneas con emoji 🛠️ y total). Úsala cuando debas presentar o confirmar el presupuesto acumulado de forma natural.',
-      parameters: {
-        type: 'object',
-        properties: {},
       },
     },
   },
@@ -751,13 +692,13 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** Reglas de cotización: totales solo vienen del backend (desglose + totalGlobal). */
-const AUTOPILOT_COTIZACION_MATH_APPEND = [
+const AUTOPILOT_PROGRESSIVE_QUOTE_APPEND = [
   '',
-  '[COTIZACIÓN — REGLAS OBLIGATORIAS]',
-  'PROHIBIDO sumar, restar o calcular totales por tu cuenta. Usa EXACTAMENTE desglose y totalGlobal que devuelven las herramientas (obtenerCotizacionExpress, eliminarServicioDeCotizacion, obtenerCotizacionActual, etc.).',
-  'Si el cliente pide quitar una pieza ("sin el toldo", "quita la fascia", "mejor no", "cancela X"), ejecuta eliminarServicioDeCotizacion con el nombre de la pieza ANTES de responder.',
-  'Presenta al cliente cada línea de desglose con emoji 🛠️ y el totalGlobal tal cual, sin recalcular.',
+  '[COTIZACIÓN PROGRESIVA]',
+  'Nunca pidas ni envíes UUIDs ni IDs de base de datos. Todo se resuelve con el contexto de la conversación y el nombre de la pieza.',
+  'Antes de agregar, quitar o presentar un presupuesto modificado, llama obtenerCotizacionActual si no tienes el desglose fresco.',
+  'PROHIBIDO calcular totales: usa EXACTAMENTE desglose y totalGlobal de las herramientas.',
+  'Si el cliente dice "sin el…", "quita", "cancela" o "mejor no", usa eliminarItemCotizacion con el nombre de la pieza.',
 ].join('\n');
 
 /** Cuerpo del panel para enviar mensaje outbound con JWT (`tallerId` viene del token). */
@@ -796,10 +737,6 @@ export class ChatService implements OnModuleDestroy {
 
   /** Ventana histórica (p. ej. fallback / consultas) para imágenes entrantes recientes en la conversación. */
   static readonly RECENT_IMAGE_LOOKBACK_MS = 5 * 60 * 1000;
-
-  /** Respuesta al cliente si el autopilot no puede completar tras ejecutar tools (evita chat mudo). */
-  private static readonly AUTOPILOT_TECHNICAL_FALLBACK_REPLY =
-    'Disculpa, tuve un inconveniente técnico al actualizar tu cotización. ¿Me confirmas qué pieza deseas quitar o modificar? En un momento te respondo con el detalle.';
 
   /** conversationId → timeout del análisis consolidado pendiente */
   private readonly consolidatedImageTimers = new Map<
@@ -6035,322 +5972,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
   // --- LÓGICA DE IA ---
 
-  private parseToolArgsJson(argsJson: string): Record<string, unknown> | null {
-    try {
-      return JSON.parse(argsJson || '{}') as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-
-  private async executeProgressiveQuoteTool(
-    name: string,
-    argsJson: string,
-    conversation: Conversation,
-    preview: boolean,
-  ): Promise<Record<string, unknown>> {
-    try {
-      if (!conversation?.id) {
-        return {
-          success: false,
-          error: 'Conversación no válida para cotización progresiva.',
-        };
-      }
-
-      const raw = this.parseToolArgsJson(argsJson);
-      if (!raw) {
-        return { success: false, error: 'Argumentos inválidos (JSON).' };
-      }
-
-      const tallerId = conversation.tallerId ?? null;
-      const conversationId = conversation.id;
-
-      let result: Record<string, unknown>;
-
-      switch (name) {
-        case 'obtenerCotizacionActual': {
-          const r = await this.draftQuoteService.obtenerCotizacionActual(
-            conversationId,
-            tallerId,
-          );
-          result = r as Record<string, unknown>;
-          break;
-        }
-        case 'agregarServicioLeve': {
-          const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
-          const descripcionTecnica = pickFirstNonEmptyTrimmedString(
-            raw.descripcionTecnica,
-            raw.descripcion,
-          );
-          console.log('[DEBUG COTIZACIÓN] agregarServicioLeve — pieza recibida:', {
-            conversationId,
-            pieza,
-            descripcionTecnica: descripcionTecnica || null,
-          });
-          const snapLeve = await this.catalogService.getMatrixPricingSnapshot(
-            tallerId ?? undefined,
-          );
-          this.debugLogCotizacionCatalogLookup(snapLeve, [pieza], 'agregarServicioLeve');
-          const r = await this.draftQuoteService.agregarServicioLeve(
-            conversationId,
-            tallerId,
-            pieza,
-            descripcionTecnica || undefined,
-          );
-          console.log('[DEBUG COTIZACIÓN] agregarServicioLeve — payload final hacia LLM:', {
-            success: r.success,
-            subtotalMx: r.cotizacion?.subtotalMx,
-            totalMx: r.cotizacion?.totalMx,
-            totalGlobal: r.totalGlobal,
-            desglose: r.desglose,
-            itemCount: r.cotizacion?.itemCount,
-            items: r.cotizacion?.items,
-          });
-          result = r as Record<string, unknown>;
-          break;
-        }
-        case 'actualizarCotizacion': {
-          const accion = pickFirstNonEmptyTrimmedString(raw.accion, raw.action);
-          const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
-          console.log('[BUG CRÍTICO AUTOPILOT] actualizarCotizacion — inicio:', {
-            conversationId,
-            accion,
-            pieza,
-            rawArgs: raw,
-          });
-          const precioRaw = raw.precio ?? raw.precioMx;
-          const precio =
-            precioRaw != null && Number.isFinite(Number(precioRaw))
-              ? Math.round(Number(precioRaw))
-              : undefined;
-          const severidad = pickFirstNonEmptyTrimmedString(
-            raw.severidad,
-            raw.nivelDano,
-          );
-          const descripcionTecnica = pickFirstNonEmptyTrimmedString(
-            raw.descripcionTecnica,
-            raw.descripcion,
-          );
-          const r = await this.draftQuoteService.actualizarCotizacion(
-            conversationId,
-            tallerId,
-            accion as 'agregar' | 'quitar' | 'actualizar',
-            pieza,
-            {
-              precio,
-              severidad: severidad || undefined,
-              descripcionTecnica: descripcionTecnica || undefined,
-            },
-          );
-          result = r as Record<string, unknown>;
-          break;
-        }
-        case 'eliminarServicioDeCotizacion': {
-          const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
-          console.log('[BUG CRÍTICO AUTOPILOT] eliminarServicioDeCotizacion — inicio:', {
-            conversationId,
-            pieza,
-            rawArgs: raw,
-          });
-          const r = await this.draftQuoteService.eliminarServicioDeCotizacion(
-            conversationId,
-            tallerId,
-            pieza,
-          );
-          console.log('[BUG CRÍTICO AUTOPILOT] eliminarServicioDeCotizacion — resultado:', {
-            conversationId,
-            pieza,
-            success: r.success,
-            totalGlobal: r.totalGlobal,
-            desglose: r.desglose,
-            error: r.error,
-          });
-          result = r as Record<string, unknown>;
-          break;
-        }
-        case 'obtenerResumenCotizacion': {
-          const r = await this.draftQuoteService.obtenerResumenCotizacion(
-            conversationId,
-            tallerId,
-            conversation.contactName ?? undefined,
-          );
-          result = r as Record<string, unknown>;
-          break;
-        }
-        default:
-          return {
-            success: false,
-            error: `Función de cotización desconocida: ${name}`,
-          };
-      }
-
-      if (preview) {
-        return { ...result, preview: true };
-      }
-      return result;
-    } catch (err) {
-      console.error('[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:', err);
-      console.error(`[executeProgressiveQuoteTool] ${name}:`, err);
-      return {
-        success: false,
-        error: `Error al procesar ${name}. Informa al cliente que hubo un problema técnico y ofrece reintentar.`,
-        instruccionParaModelo:
-          'Responde al cliente de forma cordial: hubo un error técnico al modificar la cotización. Pide que confirme qué pieza desea quitar o cambiar. NO te quedes en silencio.',
-      };
-    }
-  }
-
-  private buildAutopilotToolFailurePayload(
-    toolName: string,
-    error: unknown,
-  ): Record<string, unknown> {
-    console.error('[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:', error);
-    if (error instanceof Error && error.stack) {
-      console.error('[BUG CRÍTICO AUTOPILOT] stack trace:', error.stack);
-    }
-    const detail = error instanceof Error ? error.message : String(error);
-    return {
-      success: false,
-      error: `Fallo técnico en herramienta ${toolName}: ${detail}`,
-      instruccionParaModelo:
-        'Hubo un error técnico en el backend. Responde al cliente de forma cordial, disculpa el inconveniente y pide que repita qué pieza desea quitar o modificar. NO te quedes en silencio.',
-    };
-  }
-
-  private async invokeAutopilotToolCall(
-    name: string,
-    args: string,
-    conversation: Conversation,
-    preview: boolean,
-  ): Promise<Record<string, unknown>> {
-    console.log('[AutopilotTool] invocación:', {
-      name,
-      conversationId: conversation?.id ?? null,
-      preview,
-      argsPreview: args.slice(0, 500),
-    });
-    if (
-      name === 'eliminarServicioDeCotizacion' ||
-      name === 'actualizarCotizacion'
-    ) {
-      console.log('[BUG CRÍTICO AUTOPILOT] Inicio tool modificación cotización:', {
-        name,
-        conversationId: conversation?.id,
-        args,
-      });
-    }
-    try {
-      return await this.executeAutopilotToolSafely(
-        name,
-        args,
-        conversation,
-        preview,
-      );
-    } catch (error) {
-      return this.buildAutopilotToolFailurePayload(name, error);
-    }
-  }
-
-  private async executeAutopilotToolSafely(
-    name: string,
-    args: string,
-    conversation: Conversation,
-    preview: boolean,
-  ): Promise<Record<string, unknown>> {
-    try {
-      if (name === 'createAppointment') {
-        if (preview) {
-          return (await this.executeCreateAppointmentToolPlayground(args)) as Record<
-            string,
-            unknown
-          >;
-        }
-        return (await this.executeCreateAppointmentTool(
-          args,
-          conversation,
-        )) as Record<string, unknown>;
-      }
-      if (name === 'obtenerCotizacionExpress') {
-        const payload = await this.executeObtenerCotizacionExpressTool(
-          args,
-          conversation,
-        );
-        return preview ? { ...payload, preview: true } : payload;
-      }
-      if (this.isProgressiveQuoteToolName(name)) {
-        return this.executeProgressiveQuoteTool(name, args, conversation, preview);
-      }
-      if (name === 'notificarLlegadaCliente') {
-        if (preview) {
-          return this.executeNotificarLlegadaClienteToolPlayground();
-        }
-        return this.executeNotificarLlegadaClienteTool(conversation);
-      }
-      return {
-        success: false,
-        error: preview
-          ? `Función no soportada: ${name}`
-          : `Función desconocida: ${name}`,
-      };
-    } catch (err) {
-      console.error('[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:', err);
-      console.error(`[executeAutopilotToolSafely] ${name}:`, err);
-      return {
-        success: false,
-        error: `Error interno en herramienta ${name}. No congelar la conversación: informa al cliente amablemente y ofrece reintentar.`,
-        instruccionParaModelo:
-          'Responde al cliente de forma cordial tras el fallo técnico. NO te quedes en silencio.',
-      };
-    }
-  }
-
-  private isProgressiveQuoteToolName(name: string): boolean {
-    return (
-      name === 'obtenerCotizacionActual' ||
-      name === 'agregarServicioLeve' ||
-      name === 'actualizarCotizacion' ||
-      name === 'eliminarServicioDeCotizacion' ||
-      name === 'obtenerResumenCotizacion'
-    );
-  }
-
-  /**
-   * Traza lookup de precio por pieza en catálogo (severidad DL express).
-   * Ayuda a detectar deduplicación indebida (ej. dos Fascias → una sola línea).
-   */
-  private debugLogCotizacionCatalogLookup(
-    snap: MatrixPricingSnapshot,
-    piezas: readonly string[],
-    toolName: string,
-  ): void {
-    const occurrenceByCanonical = new Map<string, number>();
-    for (let i = 0; i < piezas.length; i++) {
-      const rawPieza = String(piezas[i] ?? '').trim();
-      if (!rawPieza) continue;
-      const canonical = snap.matchServicio(rawPieza);
-      const precioDl = canonical
-        ? snap.getPriceForCanonical(canonical, 'DL')
-        : 0;
-      const servicioLabel = canonical
-        ? resolveExpressLineServicioLabel(
-            rawPieza,
-            canonical,
-            occurrenceByCanonical,
-          )
-        : null;
-      console.log(
-        `[DEBUG COTIZACIÓN] ${toolName} — lookup catálogo [${i + 1}/${piezas.length}]:`,
-        {
-          rawPieza,
-          canonical: canonical ?? null,
-          servicioLabel,
-          precioDl,
-          accion: !canonical ? 'SIN_MATCH_CATALOGO' : 'LINEA_INDIVIDUAL',
-        },
-      );
-    }
-  }
-
   /** Persiste cita tras llamada de herramienta createAppointment (validación de horario del taller). */
   /** Playground: misma lógica que producción (sin persistir cotización). */
   private async executeObtenerCotizacionExpressToolPlayground(
@@ -6365,121 +5986,132 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     argsJson: string,
     conversation: Conversation,
   ): Promise<Record<string, unknown>> {
+    const awaitingBanio = await this.findBanioAwaitingVehicleDraft(
+      conversation.id,
+    );
+    if (awaitingBanio?.damageAnalysis?.banioPinturaGate) {
+      const gate = awaitingBanio.damageAnalysis.banioPinturaGate;
+      return {
+        success: false,
+        SOLICITAR_MODELO_BANIO: true,
+        error:
+          'No cotizar todavía: falta marca y modelo del vehículo. Pregunta al cliente de forma natural. El peritaje visual ya está guardado.',
+        resumenDanosVisuales: gate.resumenDanosVisuales,
+      };
+    }
+
+    let raw: Record<string, unknown>;
     try {
-      const awaitingBanio = await this.findBanioAwaitingVehicleDraft(
-        conversation.id,
-      );
-      if (awaitingBanio?.damageAnalysis?.banioPinturaGate) {
-        const gate = awaitingBanio.damageAnalysis.banioPinturaGate;
-        return {
-          success: false,
-          SOLICITAR_MODELO_BANIO: true,
-          error:
-            'No cotizar todavía: falta marca y modelo del vehículo. Pregunta al cliente de forma natural. El peritaje visual ya está guardado.',
-          resumenDanosVisuales: gate.resumenDanosVisuales,
-        };
-      }
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
 
-      let raw: Record<string, unknown>;
-      try {
-        raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
-      } catch {
-        return { success: false, error: 'Argumentos inválidos (JSON).' };
-      }
+    const serviciosRaw = raw.servicios ?? raw.services ?? raw.piezas;
+    const servicios = Array.isArray(serviciosRaw)
+      ? serviciosRaw.map((s) => String(s ?? '').trim()).filter(Boolean)
+      : typeof serviciosRaw === 'string' && serviciosRaw.trim()
+        ? [serviciosRaw.trim()]
+        : [];
 
-      const serviciosRaw = raw.servicios ?? raw.services ?? raw.piezas;
-      const servicios = Array.isArray(serviciosRaw)
-        ? serviciosRaw.map((s) => String(s ?? '').trim()).filter(Boolean)
-        : typeof serviciosRaw === 'string' && serviciosRaw.trim()
-          ? [serviciosRaw.trim()]
-          : [];
+    const modeloVehiculo = pickFirstNonEmptyTrimmedString(
+      raw.modeloVehiculo,
+      raw.modelo_vehiculo,
+      raw.vehicleModel,
+      raw.vehicleDescription,
+    );
 
-      const modeloVehiculo = pickFirstNonEmptyTrimmedString(
-        raw.modeloVehiculo,
-        raw.modelo_vehiculo,
-        raw.vehicleModel,
-        raw.vehicleDescription,
-      );
-
-      const categoriaRaw = pickFirstNonEmptyTrimmedString(
-        raw.categoriaTamaño,
-        raw.categoriaTamano,
-        raw.categoria_tamano,
-      );
-      const categoriaTamaño = normalizeCategoriaTamanoExpress(categoriaRaw);
-      if (!categoriaTamaño) {
-        return {
-          success: false,
-          error:
-            'Falta categoriaTamaño válida (Chico, Mediano, Grande o Premium).',
-        };
-      }
-
-      const snap = await this.catalogService.getMatrixPricingSnapshot(
-        conversation.tallerId ?? undefined,
-      );
-      const isAgendado =
-        String(conversation.status ?? '').toLowerCase().trim() === 'agendado';
-
-      console.log('[DEBUG COTIZACIÓN] obtenerCotizacionExpress — piezas/servicios recibidos:', {
-        conversationId: conversation.id,
-        servicios,
-        modeloVehiculo,
-        categoriaTamaño,
-        cantidadPiezas: servicios.length,
-      });
-
-      this.debugLogCotizacionCatalogLookup(snap, servicios, 'obtenerCotizacionExpress');
-
-      const result = buildObtenerCotizacionExpressPayload(
-        snap,
-        servicios,
-        modeloVehiculo,
-        categoriaTamaño,
-        { leadAgendado: isAgendado },
-      );
-
-      console.log('[DEBUG COTIZACIÓN] obtenerCotizacionExpress — payload final hacia LLM:', {
-        success: result.success,
-        subtotalMx: result.subtotalMx,
-        totalMx: result.totalMx,
-        totalGlobal: result.totalGlobal,
-        desglose: result.desglose,
-        lines: result.lines,
-        extras: result.extras,
-        lineCount: result.lines?.length ?? 0,
-        desgloseCount: result.desglose?.length ?? 0,
-      });
-
-      if (
-        result.success &&
-        Array.isArray(result.desglose) &&
-        result.desglose.length > 0 &&
-        conversation.id
-      ) {
-        try {
-          await this.draftQuoteService.persistExpressCotizacion(
-            conversation.id,
-            conversation.tallerId ?? null,
-            result.desglose,
-          );
-        } catch (persistErr) {
-          console.error(
-            '[obtenerCotizacionExpress] no se pudo persistir borrador:',
-            persistErr,
-          );
-        }
-      }
-
-      return result as Record<string, unknown>;
-    } catch (err) {
-      console.error('[executeObtenerCotizacionExpressTool]:', err);
+    const categoriaRaw = pickFirstNonEmptyTrimmedString(
+      raw.categoriaTamaño,
+      raw.categoriaTamano,
+      raw.categoria_tamano,
+    );
+    const categoriaTamaño = normalizeCategoriaTamanoExpress(categoriaRaw);
+    if (!categoriaTamaño) {
       return {
         success: false,
         error:
-          'Error al consultar precios del catálogo. Pide disculpas al cliente e intenta de nuevo.',
+          'Falta categoriaTamaño válida (Chico, Mediano, Grande o Premium).',
       };
     }
+
+    const snap = await this.catalogService.getMatrixPricingSnapshot(
+      conversation.tallerId ?? undefined,
+    );
+    const isAgendado =
+      String(conversation.status ?? '').toLowerCase().trim() === 'agendado';
+
+    const result = buildObtenerCotizacionExpressPayload(
+      snap,
+      servicios,
+      modeloVehiculo,
+      categoriaTamaño,
+      { leadAgendado: isAgendado },
+    );
+
+    if (result.success && conversation.id) {
+      try {
+        await this.draftQuoteService.importFromExpressResult(
+          conversation.id,
+          result,
+          conversation.tallerId ?? null,
+        );
+      } catch (err) {
+        console.error('[obtenerCotizacionExpress] import borrador:', err);
+      }
+    }
+
+    return result as Record<string, unknown>;
+  }
+
+  private isProgressiveQuoteToolName(name: string): boolean {
+    return (
+      name === 'obtenerCotizacionActual' ||
+      name === 'agregarServicioLeve' ||
+      name === 'eliminarItemCotizacion'
+    );
+  }
+
+  private async executeProgressiveQuoteTool(
+    name: string,
+    argsJson: string,
+    conversationId: string,
+  ): Promise<Record<string, unknown>> {
+    let args: Record<string, unknown> = {};
+    if (argsJson?.trim()) {
+      try {
+        args = JSON.parse(argsJson) as Record<string, unknown>;
+      } catch {
+        return { success: false, error: 'Argumentos inválidos (JSON).' };
+      }
+    }
+
+    const pieza = String(args.pieza ?? '').trim();
+
+    switch (name) {
+      case 'obtenerCotizacionActual':
+        return this.draftQuoteService.getCurrentQuoteState(conversationId);
+      case 'agregarServicioLeve':
+        return this.draftQuoteService.addLightService(conversationId, pieza);
+      case 'eliminarItemCotizacion':
+        return this.draftQuoteService.removeQuoteItem(conversationId, pieza);
+      default:
+        return { success: false, error: `Herramienta desconocida: ${name}` };
+    }
+  }
+
+  /** Playground: cotización progresiva con id efímero (no ligado a conversación real). */
+  private async executeProgressiveQuoteToolPlayground(
+    name: string,
+    argsJson: string,
+  ): Promise<Record<string, unknown>> {
+    const stubConversationId = `playground-${randomUUID()}`;
+    const result = await this.executeProgressiveQuoteTool(
+      name,
+      argsJson,
+      stubConversationId,
+    );
+    return { ...result, preview: true };
   }
 
   private resolveCreateAppointmentScheduledAt(raw: Record<string, unknown>): {
@@ -6667,15 +6299,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       { role: 'user', content: params.userContentForTurn },
     ];
 
-    const playgroundConversationId = randomUUID();
-    const playgroundTallerId = await this.tallerService.findDefaultTallerId();
-    const playgroundConversation = {
-      id: playgroundConversationId,
-      status: 'nuevo',
-      tallerId: playgroundTallerId,
-      contactName: 'Cliente (simulador)',
-    } as Conversation;
-
     let lastConfirmedIso: string | null = null;
     for (let step = 0; step < 6; step++) {
       const completion = await this.openai.chat.completions.create({
@@ -6707,26 +6330,27 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           }
           const name = tc.function.name;
           let payload: Record<string, unknown>;
-          try {
-            payload = await this.invokeAutopilotToolCall(
+          if (name === 'createAppointment') {
+            const r = await this.executeCreateAppointmentToolPlayground(
+              tc.function.arguments ?? '{}',
+            );
+            payload = { ...r };
+            if (r.success && r.scheduledAt) {
+              lastConfirmedIso = r.scheduledAt;
+            }
+          } else if (name === 'obtenerCotizacionExpress') {
+            payload = await this.executeObtenerCotizacionExpressToolPlayground(
+              tc.function.arguments ?? '{}',
+            );
+          } else if (this.isProgressiveQuoteToolName(name)) {
+            payload = await this.executeProgressiveQuoteToolPlayground(
               name,
               tc.function.arguments ?? '{}',
-              playgroundConversation,
-              true,
             );
-          } catch (toolErr) {
-            console.error(
-              '[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:',
-              toolErr,
-            );
-            payload = this.buildAutopilotToolFailurePayload(name, toolErr);
-          }
-          if (
-            name === 'createAppointment' &&
-            payload.success &&
-            typeof payload.scheduledAt === 'string'
-          ) {
-            lastConfirmedIso = payload.scheduledAt;
+          } else if (name === 'notificarLlegadaCliente') {
+            payload = await this.executeNotificarLlegadaClienteToolPlayground();
+          } else {
+            payload = { success: false, error: `Función no soportada: ${name}` };
           }
           messages.push({
             role: 'tool',
@@ -6960,7 +6584,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const banioModelAppend = await this.buildBanioSolicitarModeloAutopilotAppend(
       conversation.id,
     );
-    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}${banioModelAppend}${AUTOPILOT_COTIZACION_MATH_APPEND}`;
+    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}${banioModelAppend}${AUTOPILOT_PROGRESSIVE_QUOTE_APPEND}`;
     if (conversation.status !== 'agendado') {
       return head;
     }
@@ -7052,7 +6676,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const messages: ChatCompletionMessageParam[] = [...dialogue];
 
       let lastConfirmedIso: string | null = null;
-      let executedToolsThisSession = false;
 
       for (let step = 0; step < 6; step++) {
         const freshChatPrompt = await this.aiConfigService.getValue(
@@ -7077,26 +6700,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           messages.unshift({ role: 'system', content: systemContent });
         }
 
-        let completion;
-        try {
-          completion = await this.openai.chat.completions.create({
-            model: 'gpt-4o',
-            messages,
-            tools: AUTOPILOT_TOOLS,
-            tool_choice: 'auto',
-            temperature: 0.4,
-          });
-        } catch (openAiErr) {
-          console.error(
-            '[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:',
-            openAiErr,
-          );
-          console.error(
-            '[BUG CRÍTICO AUTOPILOT] Fallo OpenAI chat.completions:',
-            openAiErr,
-          );
-          return ChatService.AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
-        }
+        const completion = await this.openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages,
+          tools: AUTOPILOT_TOOLS,
+          tool_choice: 'auto',
+          temperature: 0.4,
+        });
 
         const choice = completion.choices[0]?.message;
         if (!choice) break;
@@ -7104,74 +6714,56 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         const toolCalls = choice.tool_calls;
         if (toolCalls?.length) {
           messages.push(choice as ChatCompletionMessageParam);
-          try {
-            for (const tc of toolCalls) {
-              executedToolsThisSession = true;
-              let payload: Record<string, unknown>;
-              try {
-                if (tc.type !== 'function') {
-                  payload = {
-                    success: false,
-                    error: 'Tipo de herramienta no soportado.',
-                  };
-                } else {
-                  const name = tc.function.name;
-                  const args = tc.function.arguments ?? '{}';
-                  payload = await this.invokeAutopilotToolCall(
-                    name,
-                    args,
-                    conversation,
-                    false,
-                  );
-                  if (
-                    name === 'createAppointment' &&
-                    payload.success &&
-                    typeof payload.scheduledAt === 'string'
-                  ) {
-                    lastConfirmedIso = payload.scheduledAt;
-                  }
-                }
-              } catch (toolErr) {
-                console.error(
-                  '[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:',
-                  toolErr,
-                );
-                const toolName =
-                  tc.type === 'function' ? tc.function.name : 'desconocida';
-                payload = this.buildAutopilotToolFailurePayload(
-                  toolName,
-                  toolErr,
-                );
-              }
+          for (const tc of toolCalls) {
+            if (tc.type !== 'function') {
               messages.push({
                 role: 'tool',
                 tool_call_id: tc.id,
-                content: JSON.stringify(payload),
+                content: JSON.stringify({
+                  success: false,
+                  error: 'Tipo de herramienta no soportado.',
+                }),
               });
+              continue;
             }
-          } catch (batchErr) {
-            console.error(
-              '[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:',
-              batchErr,
-            );
-            for (const tc of toolCalls) {
-              const alreadyPushed = messages.some(
-                (m) =>
-                  m.role === 'tool' &&
-                  'tool_call_id' in m &&
-                  m.tool_call_id === tc.id,
+            const name = tc.function.name;
+            const args = tc.function.arguments ?? '{}';
+            let payload: Record<string, unknown>;
+            if (name === 'createAppointment') {
+              const aptPayload = await this.executeCreateAppointmentTool(
+                args,
+                conversation,
               );
-              if (alreadyPushed) continue;
-              const toolName =
-                tc.type === 'function' ? tc.function.name : 'desconocida';
-              messages.push({
-                role: 'tool',
-                tool_call_id: tc.id,
-                content: JSON.stringify(
-                  this.buildAutopilotToolFailurePayload(toolName, batchErr),
-                ),
-              });
+              payload = aptPayload as Record<string, unknown>;
+              if (aptPayload.success && aptPayload.scheduledAt) {
+                lastConfirmedIso = aptPayload.scheduledAt;
+              }
+            } else if (name === 'obtenerCotizacionExpress') {
+              payload = await this.executeObtenerCotizacionExpressTool(
+                args,
+                conversation,
+              );
+            } else if (this.isProgressiveQuoteToolName(name)) {
+              payload = await this.executeProgressiveQuoteTool(
+                name,
+                args,
+                conversation.id,
+              );
+            } else if (name === 'notificarLlegadaCliente') {
+              payload = await this.executeNotificarLlegadaClienteTool(
+                conversation,
+              );
+            } else {
+              payload = {
+                success: false,
+                error: `Función desconocida: ${name}`,
+              };
             }
+            messages.push({
+              role: 'tool',
+              tool_call_id: tc.id,
+              content: JSON.stringify(payload),
+            });
           }
           continue;
         }
@@ -7192,37 +6784,15 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             return 'Tu cita ha quedado registrada. ¡Te esperamos!';
           }
         }
-
-        if (executedToolsThisSession) {
-          console.warn(
-            '[BUG CRÍTICO AUTOPILOT] LLM sin texto tras tools; forzando reintento de respuesta',
-            { conversationId: conversation.id, step },
-          );
-          messages.push({
-            role: 'user',
-            content:
-              'SISTEMA: Responde al cliente ahora con un mensaje claro en español, usando los resultados de las herramientas que acabas de ejecutar (desglose y totalGlobal si aplica). No te quedes en silencio.',
-          });
-          continue;
-        }
         return null;
-      }
-
-      if (executedToolsThisSession) {
-        console.warn(
-          '[BUG CRÍTICO AUTOPILOT] Agotados pasos del autopilot tras tools sin respuesta final',
-          { conversationId: conversation.id },
-        );
-        return ChatService.AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
       }
 
       return lastConfirmedIso
         ? 'Tu cita ha quedado registrada. ¡Te esperamos!'
         : null;
     } catch (err) {
-      console.error('[BUG CRÍTICO AUTOPILOT] Error ejecutando tool del LLM:', err);
       console.error('composeAutopilotReplyWithTools:', err);
-      return ChatService.AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
+      return null;
     }
   }
 

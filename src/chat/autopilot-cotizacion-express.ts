@@ -1,10 +1,5 @@
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import { AUTO_FIX_CURRENCY, normalizeTextForMatch } from './autofix-config';
-import {
-  buildCotizacionToolEnvelope,
-  desgloseFromExpressLines,
-  type CotizacionDesgloseLine,
-} from './cotizacion-tool-envelope';
 import { coerceBañoSeveridadToCatalog } from './baño-pintura-llm';
 import {
   inferBañoVehicleDisplayLabel,
@@ -13,11 +8,6 @@ import {
   mentionsBañoDePinturaIntent,
   resolveBañoCanonicalFromSnap,
 } from './instant-quote-from-text';
-import {
-  findPanelPiezaOption,
-  PANEL_PIEZA_OPTIONS,
-  type PanelPiezaOption,
-} from '../catalog/panel-pieza-catalog';
 
 const PIEZA_DL = 'DL';
 
@@ -113,10 +103,6 @@ export type ObtenerCotizacionExpressResult = {
   extras?: { label: string; amount: number }[];
   subtotalMx?: number;
   totalMx?: number;
-  /** Desglose autoritativo — el LLM debe usar totalGlobal, no sumar. */
-  desglose?: CotizacionDesgloseLine[];
-  totalGlobal?: number;
-  instruccionParaModelo?: string;
   diasEntrega?: number;
   leadAgendado?: boolean;
   notaAgendado?: string;
@@ -131,48 +117,6 @@ export function servicioSolicitudLooksLikeBano(raw: string): boolean {
   return /\b(bano de pintura|bano pintura|bano completo|bano integral|pintura exterior completa|baño de pintura|baño completo)\b/.test(
     n,
   );
-}
-
-/** Variantes de panel que comparten el mismo servicio en PriceMatrix (ej. FD/FT → Fascia). */
-function panelVariantsForCatalogPieza(catalogPieza: string): PanelPiezaOption[] {
-  return PANEL_PIEZA_OPTIONS.filter(
-    (o) =>
-      o.catalogPieza === catalogPieza &&
-      !o.internalDamageRange &&
-      !o.refaccionManual,
-  );
-}
-
-/**
- * Etiqueta descriptiva por ocurrencia en el request.
- * Repeticiones genéricas (ej. "Fascia" × 2) → Fascia delantera, Fascia trasera, etc.
- */
-export function resolveExpressLineServicioLabel(
-  rawPieza: string,
-  canonical: string,
-  canonicalOccurrenceByIndex: Map<string, number>,
-): string {
-  const idx = canonicalOccurrenceByIndex.get(canonical) ?? 0;
-
-  const fromRaw = findPanelPiezaOption(rawPieza);
-  if (
-    fromRaw?.catalogPieza === canonical &&
-    !fromRaw.internalDamageRange &&
-    !fromRaw.refaccionManual
-  ) {
-    canonicalOccurrenceByIndex.set(canonical, idx + 1);
-    return fromRaw.fullName;
-  }
-
-  canonicalOccurrenceByIndex.set(canonical, idx + 1);
-  const variants = panelVariantsForCatalogPieza(canonical);
-  if (variants.length > 1) {
-    return variants[idx % variants.length]!.fullName;
-  }
-  if (variants.length === 1) {
-    return variants[0]!.fullName;
-  }
-  return canonical;
 }
 
 /**
@@ -273,51 +217,27 @@ export function buildObtenerCotizacionExpressPayload(
     diasEntrega = Math.max(diasEntrega, resolution.diasEntrega);
   }
 
-  const canonicalOccurrenceByIndex = new Map<string, number>();
-  console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — piezaRequests:', piezaRequests);
+  const usedPiezas = new Set<string>();
   for (const rawPieza of piezaRequests) {
     const canonical = snap.matchServicio(rawPieza);
     if (!canonical) {
-      console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — sin match:', {
-        rawPieza,
-        canonical: null,
-      });
       continue;
     }
     if (isBañoDePinturaServicio(canonical)) {
-      console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — omitida (baño pintura):', {
-        rawPieza,
-        canonical,
-      });
       continue;
     }
     const k = normalizeTextForMatch(canonical);
     if (k.includes('ceramico') || (k.includes('estetica') && k.includes('automotriz'))) {
-      console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — omitida (cerámico/estética):', {
-        rawPieza,
-        canonical,
-      });
       continue;
     }
+    if (usedPiezas.has(canonical)) continue;
 
     const unit = snap.getPriceForCanonical(canonical, PIEZA_DL);
-    const servicioLabel = resolveExpressLineServicioLabel(
-      rawPieza,
-      canonical,
-      canonicalOccurrenceByIndex,
-    );
-    console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — precio catálogo:', {
-      rawPieza,
-      canonical,
-      servicioLabel,
-      severidad: PIEZA_DL,
-      precioUnitarioMx: unit,
-      seAgregaALines: unit > 0,
-    });
     if (unit <= 0) continue;
 
+    usedPiezas.add(canonical);
     lines.push({
-      servicio: servicioLabel,
+      servicio: canonical,
       canonical,
       tipo: 'pieza',
       severidad: PIEZA_DL,
@@ -339,10 +259,9 @@ export function buildObtenerCotizacionExpressPayload(
   const subtotalMx = lines.reduce((s, l) => s + l.precioLineaMx, 0);
   const extrasTotal = extras.reduce((s, e) => s + e.amount, 0);
   const totalMx = subtotalMx + extrasTotal;
-  const desglose = desgloseFromExpressLines(lines, extras);
 
   const leadAgendado = options?.leadAgendado === true;
-  const envelope = buildCotizacionToolEnvelope(desglose, {
+  const result: ObtenerCotizacionExpressResult = {
     success: true,
     categoriaTamaño,
     severidadCatalogo: lines.find((l) => l.tipo === 'bano_pintura')?.severidad,
@@ -356,22 +275,8 @@ export function buildObtenerCotizacionExpressPayload(
     diasEntrega,
     leadAgendado,
     formatoRedaccion:
-      'Redacta al cliente con emojis 🛠️ por línea usando desglose (pieza + precio), totalGlobal en negritas tal cual, Materiales premium Sikkens, Acabado Espejo y garantía por escrito cuando encaje.',
-  });
-
-  const result = envelope as ObtenerCotizacionExpressResult;
-
-  console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — totales calculados:', {
-    subtotalMx,
-    totalMx,
-    totalGlobal: result.totalGlobal,
-    desglose,
-    lineCount: lines.length,
-    lines: lines.map((l) => ({
-      servicio: l.servicio,
-      precioLineaMx: l.precioLineaMx,
-    })),
-  });
+      'Redacta al cliente con emojis 🛠️ por línea, total en negritas, Materiales premium Sikkens, Acabado Espejo y garantía por escrito cuando encaje.',
+  };
 
   if (leadAgendado) {
     result.notaAgendado =
