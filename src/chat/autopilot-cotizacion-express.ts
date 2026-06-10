@@ -13,6 +13,11 @@ import {
   mentionsBañoDePinturaIntent,
   resolveBañoCanonicalFromSnap,
 } from './instant-quote-from-text';
+import {
+  findPanelPiezaOption,
+  PANEL_PIEZA_OPTIONS,
+  type PanelPiezaOption,
+} from '../catalog/panel-pieza-catalog';
 
 const PIEZA_DL = 'DL';
 
@@ -128,6 +133,48 @@ export function servicioSolicitudLooksLikeBano(raw: string): boolean {
   );
 }
 
+/** Variantes de panel que comparten el mismo servicio en PriceMatrix (ej. FD/FT → Fascia). */
+function panelVariantsForCatalogPieza(catalogPieza: string): PanelPiezaOption[] {
+  return PANEL_PIEZA_OPTIONS.filter(
+    (o) =>
+      o.catalogPieza === catalogPieza &&
+      !o.internalDamageRange &&
+      !o.refaccionManual,
+  );
+}
+
+/**
+ * Etiqueta descriptiva por ocurrencia en el request.
+ * Repeticiones genéricas (ej. "Fascia" × 2) → Fascia delantera, Fascia trasera, etc.
+ */
+export function resolveExpressLineServicioLabel(
+  rawPieza: string,
+  canonical: string,
+  canonicalOccurrenceByIndex: Map<string, number>,
+): string {
+  const idx = canonicalOccurrenceByIndex.get(canonical) ?? 0;
+
+  const fromRaw = findPanelPiezaOption(rawPieza);
+  if (
+    fromRaw?.catalogPieza === canonical &&
+    !fromRaw.internalDamageRange &&
+    !fromRaw.refaccionManual
+  ) {
+    canonicalOccurrenceByIndex.set(canonical, idx + 1);
+    return fromRaw.fullName;
+  }
+
+  canonicalOccurrenceByIndex.set(canonical, idx + 1);
+  const variants = panelVariantsForCatalogPieza(canonical);
+  if (variants.length > 1) {
+    return variants[idx % variants.length]!.fullName;
+  }
+  if (variants.length === 1) {
+    return variants[0]!.fullName;
+  }
+  return canonical;
+}
+
 /**
  * Consulta PriceMatrix para cotización express (piezas DL o baño por tamaño del vehículo).
  */
@@ -226,7 +273,7 @@ export function buildObtenerCotizacionExpressPayload(
     diasEntrega = Math.max(diasEntrega, resolution.diasEntrega);
   }
 
-  const usedPiezas = new Set<string>();
+  const canonicalOccurrenceByIndex = new Map<string, number>();
   console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — piezaRequests:', piezaRequests);
   for (const rawPieza of piezaRequests) {
     const canonical = snap.matchServicio(rawPieza);
@@ -252,28 +299,25 @@ export function buildObtenerCotizacionExpressPayload(
       });
       continue;
     }
-    if (usedPiezas.has(canonical)) {
-      console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — DUPLICADO OMITIDO (usedPiezas):', {
-        rawPieza,
-        canonical,
-        usedPiezas: [...usedPiezas],
-      });
-      continue;
-    }
 
     const unit = snap.getPriceForCanonical(canonical, PIEZA_DL);
+    const servicioLabel = resolveExpressLineServicioLabel(
+      rawPieza,
+      canonical,
+      canonicalOccurrenceByIndex,
+    );
     console.log('[DEBUG COTIZACIÓN] buildObtenerCotizacionExpressPayload — precio catálogo:', {
       rawPieza,
       canonical,
+      servicioLabel,
       severidad: PIEZA_DL,
       precioUnitarioMx: unit,
       seAgregaALines: unit > 0,
     });
     if (unit <= 0) continue;
 
-    usedPiezas.add(canonical);
     lines.push({
-      servicio: canonical,
+      servicio: servicioLabel,
       canonical,
       tipo: 'pieza',
       severidad: PIEZA_DL,

@@ -123,6 +123,7 @@ import {
 import {
   buildObtenerCotizacionExpressPayload,
   normalizeCategoriaTamanoExpress,
+  resolveExpressLineServicioLabel,
 } from './autopilot-cotizacion-express';
 import {
   assistantMessageIsBañoVehiclePrompt,
@@ -6242,7 +6243,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     piezas: readonly string[],
     toolName: string,
   ): void {
-    const seenCanonical = new Set<string>();
+    const occurrenceByCanonical = new Map<string, number>();
     for (let i = 0; i < piezas.length; i++) {
       const rawPieza = String(piezas[i] ?? '').trim();
       if (!rawPieza) continue;
@@ -6250,20 +6251,21 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const precioDl = canonical
         ? snap.getPriceForCanonical(canonical, 'DL')
         : 0;
-      const yaVista = canonical ? seenCanonical.has(canonical) : false;
-      if (canonical) seenCanonical.add(canonical);
+      const servicioLabel = canonical
+        ? resolveExpressLineServicioLabel(
+            rawPieza,
+            canonical,
+            occurrenceByCanonical,
+          )
+        : null;
       console.log(
         `[DEBUG COTIZACIÓN] ${toolName} — lookup catálogo [${i + 1}/${piezas.length}]:`,
         {
           rawPieza,
           canonical: canonical ?? null,
+          servicioLabel,
           precioDl,
-          yaVistaEnEsteRequest: yaVista,
-          accion: !canonical
-            ? 'SIN_MATCH_CATALOGO'
-            : yaVista
-              ? 'DUPLICADO_CANONICAL_OMITIRIA_EN_EXPRESS'
-              : 'OK_SUMARIA',
+          accion: !canonical ? 'SIN_MATCH_CATALOGO' : 'LINEA_INDIVIDUAL',
         },
       );
     }
