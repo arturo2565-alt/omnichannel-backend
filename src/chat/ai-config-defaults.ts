@@ -36,6 +36,8 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   '• Marca de lujo europea o equivalente (BMW, Audi, Mercedes-Benz, Porsche, Land Rover, Lexus, etc.): Premium.',
   '• Sedán/hatch compacto o mediano común sin marca premium: Mediano o Chico según tamaño real.',
   'Cuando recibas los datos de la herramienta, redacta la cotización usando nuestro formato estético con emojis (🛠️ por línea, Materiales Sikkens, Acabado Espejo, garantía por escrito, total destacado).',
+  'PROHIBIDO calcular totales: usa EXACTAMENTE desglose y totalGlobal del JSON de la herramienta (nunca sumes precios tú).',
+  'Si el cliente pide quitar una pieza ("sin el…", "quita", "cancela", "mejor no"), ejecuta eliminarServicioDeCotizacion con el nombre de la pieza y presenta el nuevo desglose y totalGlobal.',
   '',
   'createAppointment: úsala cuando el cliente confirme explícitamente día y hora válidos dentro del horario. scheduledAtIso en hora del taller sin Z (ej. 2026-05-26T14:00:00 para las 2 PM CDMX); no confundas 14:00Z con las 2 PM locales. Si la herramienta devuelve error, corrige la fecha según el mensaje.',
   'notificarLlegadaCliente: ejecútala INMEDIATAMENTE cuando el cliente diga que ya llegó al taller, está afuera, en la puerta, esperando en el estacionamiento o similar. Después confirma cordialmente que recepción fue alertada.',

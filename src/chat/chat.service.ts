@@ -676,13 +676,14 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: 'eliminarServicioDeCotizacion',
       description:
-        'Elimina una pieza específica de la cotización en borrador de esta conversación. Idempotente: si la pieza no está, informa sin error.',
+        'Elimina una pieza de la cotización activa cuando el cliente diga "sin el/la…", "quita", "cancela", "mejor no", "mejor sin", etc. Recibe el nombre de la pieza (ej. Toldo, Fascia delantera). El backend recalcula desglose y totalGlobal; NO sumes precios tú.',
       parameters: {
         type: 'object',
         properties: {
           pieza: {
             type: 'string',
-            description: 'Pieza a eliminar de la cotización.',
+            description:
+              'Pieza a eliminar tal como la entiendes del mensaje (ej. Toldo, Fascia delantera, Puerta delantera izquierda).',
           },
         },
         required: ['pieza'],
@@ -748,6 +749,15 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     },
   },
 ];
+
+/** Reglas de cotización: totales solo vienen del backend (desglose + totalGlobal). */
+const AUTOPILOT_COTIZACION_MATH_APPEND = [
+  '',
+  '[COTIZACIÓN — REGLAS OBLIGATORIAS]',
+  'PROHIBIDO sumar, restar o calcular totales por tu cuenta. Usa EXACTAMENTE desglose y totalGlobal que devuelven las herramientas (obtenerCotizacionExpress, eliminarServicioDeCotizacion, obtenerCotizacionActual, etc.).',
+  'Si el cliente pide quitar una pieza ("sin el toldo", "quita la fascia", "mejor no", "cancela X"), ejecuta eliminarServicioDeCotizacion con el nombre de la pieza ANTES de responder.',
+  'Presenta al cliente cada línea de desglose con emoji 🛠️ y el totalGlobal tal cual, sin recalcular.',
+].join('\n');
 
 /** Cuerpo del panel para enviar mensaje outbound con JWT (`tallerId` viene del token). */
 export type SendAgentMessageBody = {
@@ -6034,97 +6044,165 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     conversation: Conversation,
     preview: boolean,
   ): Promise<Record<string, unknown>> {
-    const raw = this.parseToolArgsJson(argsJson);
-    if (!raw) {
-      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    try {
+      if (!conversation?.id) {
+        return {
+          success: false,
+          error: 'Conversación no válida para cotización progresiva.',
+        };
+      }
+
+      const raw = this.parseToolArgsJson(argsJson);
+      if (!raw) {
+        return { success: false, error: 'Argumentos inválidos (JSON).' };
+      }
+
+      const tallerId = conversation.tallerId ?? null;
+      const conversationId = conversation.id;
+
+      let result: Record<string, unknown>;
+
+      switch (name) {
+        case 'obtenerCotizacionActual': {
+          const r = await this.draftQuoteService.obtenerCotizacionActual(
+            conversationId,
+            tallerId,
+          );
+          result = r as Record<string, unknown>;
+          break;
+        }
+        case 'agregarServicioLeve': {
+          const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+          const descripcionTecnica = pickFirstNonEmptyTrimmedString(
+            raw.descripcionTecnica,
+            raw.descripcion,
+          );
+          const r = await this.draftQuoteService.agregarServicioLeve(
+            conversationId,
+            tallerId,
+            pieza,
+            descripcionTecnica || undefined,
+          );
+          result = r as Record<string, unknown>;
+          break;
+        }
+        case 'actualizarCotizacion': {
+          const accion = pickFirstNonEmptyTrimmedString(raw.accion, raw.action);
+          const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+          const precioRaw = raw.precio ?? raw.precioMx;
+          const precio =
+            precioRaw != null && Number.isFinite(Number(precioRaw))
+              ? Math.round(Number(precioRaw))
+              : undefined;
+          const severidad = pickFirstNonEmptyTrimmedString(
+            raw.severidad,
+            raw.nivelDano,
+          );
+          const descripcionTecnica = pickFirstNonEmptyTrimmedString(
+            raw.descripcionTecnica,
+            raw.descripcion,
+          );
+          const r = await this.draftQuoteService.actualizarCotizacion(
+            conversationId,
+            tallerId,
+            accion as 'agregar' | 'quitar' | 'actualizar',
+            pieza,
+            {
+              precio,
+              severidad: severidad || undefined,
+              descripcionTecnica: descripcionTecnica || undefined,
+            },
+          );
+          result = r as Record<string, unknown>;
+          break;
+        }
+        case 'eliminarServicioDeCotizacion': {
+          const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+          const r = await this.draftQuoteService.eliminarServicioDeCotizacion(
+            conversationId,
+            tallerId,
+            pieza,
+          );
+          result = r as Record<string, unknown>;
+          break;
+        }
+        case 'obtenerResumenCotizacion': {
+          const r = await this.draftQuoteService.obtenerResumenCotizacion(
+            conversationId,
+            tallerId,
+            conversation.contactName ?? undefined,
+          );
+          result = r as Record<string, unknown>;
+          break;
+        }
+        default:
+          return {
+            success: false,
+            error: `Función de cotización desconocida: ${name}`,
+          };
+      }
+
+      if (preview) {
+        return { ...result, preview: true };
+      }
+      return result;
+    } catch (err) {
+      console.error(`[executeProgressiveQuoteTool] ${name}:`, err);
+      return {
+        success: false,
+        error: `Error al procesar ${name}. Informa al cliente que hubo un problema técnico y ofrece reintentar.`,
+      };
     }
+  }
 
-    const tallerId = conversation.tallerId ?? null;
-    const conversationId = conversation.id;
-
-    let result: Record<string, unknown>;
-
-    switch (name) {
-      case 'obtenerCotizacionActual': {
-        const r = await this.draftQuoteService.obtenerCotizacionActual(
-          conversationId,
-          tallerId,
-        );
-        result = r as Record<string, unknown>;
-        break;
+  private async executeAutopilotToolSafely(
+    name: string,
+    args: string,
+    conversation: Conversation,
+    preview: boolean,
+  ): Promise<Record<string, unknown>> {
+    try {
+      if (name === 'createAppointment') {
+        if (preview) {
+          return (await this.executeCreateAppointmentToolPlayground(args)) as Record<
+            string,
+            unknown
+          >;
+        }
+        return (await this.executeCreateAppointmentTool(
+          args,
+          conversation,
+        )) as Record<string, unknown>;
       }
-      case 'agregarServicioLeve': {
-        const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
-        const descripcionTecnica = pickFirstNonEmptyTrimmedString(
-          raw.descripcionTecnica,
-          raw.descripcion,
+      if (name === 'obtenerCotizacionExpress') {
+        const payload = await this.executeObtenerCotizacionExpressTool(
+          args,
+          conversation,
         );
-        const r = await this.draftQuoteService.agregarServicioLeve(
-          conversationId,
-          tallerId,
-          pieza,
-          descripcionTecnica || undefined,
-        );
-        result = r as Record<string, unknown>;
-        break;
+        return preview ? { ...payload, preview: true } : payload;
       }
-      case 'actualizarCotizacion': {
-        const accion = pickFirstNonEmptyTrimmedString(raw.accion, raw.action);
-        const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
-        const precioRaw = raw.precio ?? raw.precioMx;
-        const precio =
-          precioRaw != null && Number.isFinite(Number(precioRaw))
-            ? Math.round(Number(precioRaw))
-            : undefined;
-        const severidad = pickFirstNonEmptyTrimmedString(
-          raw.severidad,
-          raw.nivelDano,
-        );
-        const descripcionTecnica = pickFirstNonEmptyTrimmedString(
-          raw.descripcionTecnica,
-          raw.descripcion,
-        );
-        const r = await this.draftQuoteService.actualizarCotizacion(
-          conversationId,
-          tallerId,
-          accion as 'agregar' | 'quitar' | 'actualizar',
-          pieza,
-          {
-            precio,
-            severidad: severidad || undefined,
-            descripcionTecnica: descripcionTecnica || undefined,
-          },
-        );
-        result = r as Record<string, unknown>;
-        break;
+      if (this.isProgressiveQuoteToolName(name)) {
+        return this.executeProgressiveQuoteTool(name, args, conversation, preview);
       }
-      case 'eliminarServicioDeCotizacion': {
-        const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
-        const r = await this.draftQuoteService.eliminarServicioDeCotizacion(
-          conversationId,
-          tallerId,
-          pieza,
-        );
-        result = r as Record<string, unknown>;
-        break;
+      if (name === 'notificarLlegadaCliente') {
+        if (preview) {
+          return this.executeNotificarLlegadaClienteToolPlayground();
+        }
+        return this.executeNotificarLlegadaClienteTool(conversation);
       }
-      case 'obtenerResumenCotizacion': {
-        const r = await this.draftQuoteService.obtenerResumenCotizacion(
-          conversationId,
-          tallerId,
-          conversation.contactName ?? undefined,
-        );
-        result = r as Record<string, unknown>;
-        break;
-      }
-      default:
-        return { success: false, error: `Función de cotización desconocida: ${name}` };
+      return {
+        success: false,
+        error: preview
+          ? `Función no soportada: ${name}`
+          : `Función desconocida: ${name}`,
+      };
+    } catch (err) {
+      console.error(`[executeAutopilotToolSafely] ${name}:`, err);
+      return {
+        success: false,
+        error: `Error interno en herramienta ${name}. No congelar la conversación: informa al cliente amablemente y ofrece reintentar.`,
+      };
     }
-
-    if (preview) {
-      return { ...result, preview: true };
-    }
-    return result;
   }
 
   private isProgressiveQuoteToolName(name: string): boolean {
@@ -6151,70 +6229,99 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     argsJson: string,
     conversation: Conversation,
   ): Promise<Record<string, unknown>> {
-    const awaitingBanio = await this.findBanioAwaitingVehicleDraft(
-      conversation.id,
-    );
-    if (awaitingBanio?.damageAnalysis?.banioPinturaGate) {
-      const gate = awaitingBanio.damageAnalysis.banioPinturaGate;
-      return {
-        success: false,
-        SOLICITAR_MODELO_BANIO: true,
-        error:
-          'No cotizar todavía: falta marca y modelo del vehículo. Pregunta al cliente de forma natural. El peritaje visual ya está guardado.',
-        resumenDanosVisuales: gate.resumenDanosVisuales,
-      };
-    }
-
-    let raw: Record<string, unknown>;
     try {
-      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
-    } catch {
-      return { success: false, error: 'Argumentos inválidos (JSON).' };
-    }
+      const awaitingBanio = await this.findBanioAwaitingVehicleDraft(
+        conversation.id,
+      );
+      if (awaitingBanio?.damageAnalysis?.banioPinturaGate) {
+        const gate = awaitingBanio.damageAnalysis.banioPinturaGate;
+        return {
+          success: false,
+          SOLICITAR_MODELO_BANIO: true,
+          error:
+            'No cotizar todavía: falta marca y modelo del vehículo. Pregunta al cliente de forma natural. El peritaje visual ya está guardado.',
+          resumenDanosVisuales: gate.resumenDanosVisuales,
+        };
+      }
 
-    const serviciosRaw = raw.servicios ?? raw.services ?? raw.piezas;
-    const servicios = Array.isArray(serviciosRaw)
-      ? serviciosRaw.map((s) => String(s ?? '').trim()).filter(Boolean)
-      : typeof serviciosRaw === 'string' && serviciosRaw.trim()
-        ? [serviciosRaw.trim()]
-        : [];
+      let raw: Record<string, unknown>;
+      try {
+        raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+      } catch {
+        return { success: false, error: 'Argumentos inválidos (JSON).' };
+      }
 
-    const modeloVehiculo = pickFirstNonEmptyTrimmedString(
-      raw.modeloVehiculo,
-      raw.modelo_vehiculo,
-      raw.vehicleModel,
-      raw.vehicleDescription,
-    );
+      const serviciosRaw = raw.servicios ?? raw.services ?? raw.piezas;
+      const servicios = Array.isArray(serviciosRaw)
+        ? serviciosRaw.map((s) => String(s ?? '').trim()).filter(Boolean)
+        : typeof serviciosRaw === 'string' && serviciosRaw.trim()
+          ? [serviciosRaw.trim()]
+          : [];
 
-    const categoriaRaw = pickFirstNonEmptyTrimmedString(
-      raw.categoriaTamaño,
-      raw.categoriaTamano,
-      raw.categoria_tamano,
-    );
-    const categoriaTamaño = normalizeCategoriaTamanoExpress(categoriaRaw);
-    if (!categoriaTamaño) {
+      const modeloVehiculo = pickFirstNonEmptyTrimmedString(
+        raw.modeloVehiculo,
+        raw.modelo_vehiculo,
+        raw.vehicleModel,
+        raw.vehicleDescription,
+      );
+
+      const categoriaRaw = pickFirstNonEmptyTrimmedString(
+        raw.categoriaTamaño,
+        raw.categoriaTamano,
+        raw.categoria_tamano,
+      );
+      const categoriaTamaño = normalizeCategoriaTamanoExpress(categoriaRaw);
+      if (!categoriaTamaño) {
+        return {
+          success: false,
+          error:
+            'Falta categoriaTamaño válida (Chico, Mediano, Grande o Premium).',
+        };
+      }
+
+      const snap = await this.catalogService.getMatrixPricingSnapshot(
+        conversation.tallerId ?? undefined,
+      );
+      const isAgendado =
+        String(conversation.status ?? '').toLowerCase().trim() === 'agendado';
+
+      const result = buildObtenerCotizacionExpressPayload(
+        snap,
+        servicios,
+        modeloVehiculo,
+        categoriaTamaño,
+        { leadAgendado: isAgendado },
+      );
+
+      if (
+        result.success &&
+        Array.isArray(result.desglose) &&
+        result.desglose.length > 0 &&
+        conversation.id
+      ) {
+        try {
+          await this.draftQuoteService.persistExpressCotizacion(
+            conversation.id,
+            conversation.tallerId ?? null,
+            result.desglose,
+          );
+        } catch (persistErr) {
+          console.error(
+            '[obtenerCotizacionExpress] no se pudo persistir borrador:',
+            persistErr,
+          );
+        }
+      }
+
+      return result as Record<string, unknown>;
+    } catch (err) {
+      console.error('[executeObtenerCotizacionExpressTool]:', err);
       return {
         success: false,
         error:
-          'Falta categoriaTamaño válida (Chico, Mediano, Grande o Premium).',
+          'Error al consultar precios del catálogo. Pide disculpas al cliente e intenta de nuevo.',
       };
     }
-
-    const snap = await this.catalogService.getMatrixPricingSnapshot(
-      conversation.tallerId ?? undefined,
-    );
-    const isAgendado =
-      String(conversation.status ?? '').toLowerCase().trim() === 'agendado';
-
-    const result = buildObtenerCotizacionExpressPayload(
-      snap,
-      servicios,
-      modeloVehiculo,
-      categoriaTamaño,
-      { leadAgendado: isAgendado },
-    );
-
-    return result as Record<string, unknown>;
   }
 
   private resolveCreateAppointmentScheduledAt(raw: Record<string, unknown>): {
@@ -6441,30 +6548,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             continue;
           }
           const name = tc.function.name;
-          let payload: Record<string, unknown>;
-          if (name === 'createAppointment') {
-            const r = await this.executeCreateAppointmentToolPlayground(
-              tc.function.arguments ?? '{}',
-            );
-            payload = { ...r };
-            if (r.success && r.scheduledAt) {
-              lastConfirmedIso = r.scheduledAt;
-            }
-          } else if (name === 'obtenerCotizacionExpress') {
-            payload = await this.executeObtenerCotizacionExpressToolPlayground(
-              tc.function.arguments ?? '{}',
-            );
-          } else if (this.isProgressiveQuoteToolName(name)) {
-            payload = await this.executeProgressiveQuoteTool(
-              name,
-              tc.function.arguments ?? '{}',
-              playgroundConversation,
-              true,
-            );
-          } else if (name === 'notificarLlegadaCliente') {
-            payload = await this.executeNotificarLlegadaClienteToolPlayground();
-          } else {
-            payload = { success: false, error: `Función no soportada: ${name}` };
+          const payload = await this.executeAutopilotToolSafely(
+            name,
+            tc.function.arguments ?? '{}',
+            playgroundConversation,
+            true,
+          );
+          if (
+            name === 'createAppointment' &&
+            payload.success &&
+            typeof payload.scheduledAt === 'string'
+          ) {
+            lastConfirmedIso = payload.scheduledAt;
           }
           messages.push({
             role: 'tool',
@@ -6698,7 +6793,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const banioModelAppend = await this.buildBanioSolicitarModeloAutopilotAppend(
       conversation.id,
     );
-    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}${banioModelAppend}`;
+    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}${banioModelAppend}${AUTOPILOT_COTIZACION_MATH_APPEND}`;
     if (conversation.status !== 'agendado') {
       return head;
     }
@@ -6842,37 +6937,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             }
             const name = tc.function.name;
             const args = tc.function.arguments ?? '{}';
-            let payload: Record<string, unknown>;
-            if (name === 'createAppointment') {
-              const aptPayload = await this.executeCreateAppointmentTool(
-                args,
-                conversation,
-              );
-              payload = aptPayload as Record<string, unknown>;
-              if (aptPayload.success && aptPayload.scheduledAt) {
-                lastConfirmedIso = aptPayload.scheduledAt;
-              }
-            } else if (name === 'obtenerCotizacionExpress') {
-              payload = await this.executeObtenerCotizacionExpressTool(
-                args,
-                conversation,
-              );
-            } else if (this.isProgressiveQuoteToolName(name)) {
-              payload = await this.executeProgressiveQuoteTool(
-                name,
-                args,
-                conversation,
-                false,
-              );
-            } else if (name === 'notificarLlegadaCliente') {
-              payload = await this.executeNotificarLlegadaClienteTool(
-                conversation,
-              );
-            } else {
-              payload = {
-                success: false,
-                error: `Función desconocida: ${name}`,
-              };
+            const payload = await this.executeAutopilotToolSafely(
+              name,
+              args,
+              conversation,
+              false,
+            );
+            if (
+              name === 'createAppointment' &&
+              payload.success &&
+              typeof payload.scheduledAt === 'string'
+            ) {
+              lastConfirmedIso = payload.scheduledAt;
             }
             messages.push({
               role: 'tool',

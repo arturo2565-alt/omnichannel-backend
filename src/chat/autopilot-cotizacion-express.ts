@@ -1,5 +1,10 @@
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import { AUTO_FIX_CURRENCY, normalizeTextForMatch } from './autofix-config';
+import {
+  buildCotizacionToolEnvelope,
+  desgloseFromExpressLines,
+  type CotizacionDesgloseLine,
+} from './cotizacion-tool-envelope';
 import { coerceBañoSeveridadToCatalog } from './baño-pintura-llm';
 import {
   inferBañoVehicleDisplayLabel,
@@ -103,6 +108,10 @@ export type ObtenerCotizacionExpressResult = {
   extras?: { label: string; amount: number }[];
   subtotalMx?: number;
   totalMx?: number;
+  /** Desglose autoritativo — el LLM debe usar totalGlobal, no sumar. */
+  desglose?: CotizacionDesgloseLine[];
+  totalGlobal?: number;
+  instruccionParaModelo?: string;
   diasEntrega?: number;
   leadAgendado?: boolean;
   notaAgendado?: string;
@@ -259,9 +268,10 @@ export function buildObtenerCotizacionExpressPayload(
   const subtotalMx = lines.reduce((s, l) => s + l.precioLineaMx, 0);
   const extrasTotal = extras.reduce((s, e) => s + e.amount, 0);
   const totalMx = subtotalMx + extrasTotal;
+  const desglose = desgloseFromExpressLines(lines, extras);
 
   const leadAgendado = options?.leadAgendado === true;
-  const result: ObtenerCotizacionExpressResult = {
+  const envelope = buildCotizacionToolEnvelope(desglose, {
     success: true,
     categoriaTamaño,
     severidadCatalogo: lines.find((l) => l.tipo === 'bano_pintura')?.severidad,
@@ -275,8 +285,10 @@ export function buildObtenerCotizacionExpressPayload(
     diasEntrega,
     leadAgendado,
     formatoRedaccion:
-      'Redacta al cliente con emojis 🛠️ por línea, total en negritas, Materiales premium Sikkens, Acabado Espejo y garantía por escrito cuando encaje.',
-  };
+      'Redacta al cliente con emojis 🛠️ por línea usando desglose (pieza + precio), totalGlobal en negritas tal cual, Materiales premium Sikkens, Acabado Espejo y garantía por escrito cuando encaje.',
+  });
+
+  const result = envelope as ObtenerCotizacionExpressResult;
 
   if (leadAgendado) {
     result.notaAgendado =
