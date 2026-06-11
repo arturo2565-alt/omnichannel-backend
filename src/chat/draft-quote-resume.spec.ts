@@ -1,4 +1,5 @@
 import {
+  buildDamagePhotoIntroForCliente,
   filterLineRowsForPiezaCodes,
   lineRowMatchesPiezaCode,
   resolvePiezaDisplayLabel,
@@ -32,5 +33,24 @@ describe('draft-quote-resume pieza matching', () => {
     expect(filtered).toHaveLength(1);
     expect(filtered[0]?.pieza).toBe('Cofre');
     expect(filtered[0]?.precioMx).toBe(4500);
+  });
+
+  it('buildDamagePhotoIntroForCliente usa nombres legibles sin duplicar códigos', () => {
+    const intro = buildDamagePhotoIntroForCliente(
+      {
+        inventory: [
+          { pieza: 'FD' },
+          { pieza: 'FT' },
+          { pieza: 'PDI' },
+          { pieza: 'Cofre' },
+        ],
+        pieza: 'FD + FT (+2 más)',
+      },
+      2,
+    );
+    expect(intro).toContain('Fascia delantera');
+    expect(intro).toContain('Fascia trasera');
+    expect(intro).not.toContain('FD + FT');
+    expect(intro).not.toMatch(/FD.*FD/);
   });
 });

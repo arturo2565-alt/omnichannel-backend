@@ -1,9 +1,14 @@
 import type { DraftQuoteLine } from './autofix-config';
 import { coerceDamageLevelCode } from './autofix-config';
+import type { DetectedDamageItem } from './entities/chat.entity';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import {
+  findPanelPiezaOption,
   isInternalDamageRangePieza,
   isRefaccionPieza,
+  isSpecialPanelPieza,
+  normalizePanelPiezaCode,
+  resolveCatalogPiezaForMatrixLookup,
   resolveMatrixServicioRaw,
 } from '../catalog/panel-pieza-catalog';
 
@@ -111,13 +116,57 @@ export function buildDraftQuoteLineFromQuoteRow(
   const matrixRaw = resolveMatrixServicioRaw(String(line.pieza).trim());
   const canonical = snap.matchServicio(matrixRaw) ?? matrixRaw;
   const lev = coerceDamageLevelCode(String(line.severidad));
+  const displayName =
+    findPanelPiezaOption(String(line.pieza).trim())?.fullName ?? canonical;
   return {
     priceItemId: `panel:${idx}:${canonical}:${lev}`,
-    description: `${canonical} — nivel ${lev} (panel)`,
+    description: `${displayName} — nivel ${lev} (panel)`,
     quantity: 1,
     unitPrice: u,
     subtotal: u,
   };
+}
+
+/**
+ * Una fila de cotización por código de panel (FD, FT, PDI…), sin colapsar Fascia.
+ * Misma lógica que QuoteCartService.rebuildAndPersist.
+ */
+export function quoteRowsFromDamageInventory(
+  inventory: readonly DetectedDamageItem[],
+  snap: MatrixPricingSnapshot,
+): QuoteRowInput[] {
+  const rows: QuoteRowInput[] = [];
+  for (const it of inventory) {
+    const panelCode = normalizePanelPiezaCode(it.pieza) || String(it.pieza ?? '').trim();
+    if (!panelCode) continue;
+    const sev = coerceDamageLevelCode(it.severidad);
+    let precio = 0;
+    if (!isSpecialPanelPieza(panelCode)) {
+      const catalogPieza =
+        resolveCatalogPiezaForMatrixLookup(panelCode) ??
+        snap.matchServicio(it.pieza) ??
+        it.pieza;
+      precio = snap.getPriceForCanonical(catalogPieza, sev);
+      if (precio <= 0) {
+        precio = snap.getAmount(it.pieza, sev);
+      }
+    }
+    rows.push({
+      pieza: panelCode,
+      severidad: sev,
+      precioMx: Math.max(0, Math.round(precio)),
+    });
+  }
+  return rows;
+}
+
+export function buildDraftQuoteLinesFromDamageInventory(
+  inventory: readonly DetectedDamageItem[],
+  snap: MatrixPricingSnapshot,
+): DraftQuoteLine[] {
+  return quoteRowsFromDamageInventory(inventory, snap).map((row, idx) =>
+    buildDraftQuoteLineFromQuoteRow(row, idx, snap),
+  );
 }
 
 function isSpecialPanelPiezaForMatrix(pieza: string): boolean {

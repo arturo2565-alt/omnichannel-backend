@@ -37,7 +37,8 @@ import {
 import { resolveMatrixServicioRaw, normalizePanelPiezaCode } from '../catalog/panel-pieza-catalog';
 import {
   buildDraftQuoteLineFromQuoteRow,
-  matrixServicioInputsWithCatalogResolve,
+  buildDraftQuoteLinesFromDamageInventory,
+  quoteRowsFromDamageInventory,
   sumQuoteRowsSubtotal,
   type QuoteRowInput,
 } from './draft-quote-inventory-pricing';
@@ -1604,11 +1605,9 @@ export class ChatService implements OnModuleDestroy {
       if (unit > 0) return unit;
     }
     if (analysis.inventory?.length) {
-      const matrixItems = matrixServicioInputsWithCatalogResolve(
-        analysis.inventory,
-      );
-      if (matrixItems.length > 0) {
-        const sum = snap.inventoryMaxTotal(matrixItems);
+      const perItemRows = quoteRowsFromDamageInventory(analysis.inventory, snap);
+      if (perItemRows.length > 0) {
+        const sum = sumQuoteRowsSubtotal(perItemRows);
         if (sum > 0) return sum;
       }
     }
@@ -5062,19 +5061,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       resolvedLevel = pickWorstDamageLevel(
         analysis.inventory.map((i) => i.severidad),
       );
-      const grouped = snap.matrixInventoryMaxLines(
-        matrixServicioInputsWithCatalogResolve(analysis.inventory),
+      lines.push(
+        ...buildDraftQuoteLinesFromDamageInventory(analysis.inventory, snap),
       );
-      for (const g of grouped) {
-        if (g.unitPrice <= 0) continue;
-        lines.push({
-          priceItemId: `matrix:${g.canonical}:${g.damageLevel}`,
-          description: `${g.canonical} — nivel ${g.damageLevel} (catálogo; mayor costo entre filas de este servicio)`,
-          quantity: 1,
-          unitPrice: g.unitPrice,
-          subtotal: g.unitPrice,
-        });
-      }
     } else {
       const partes =
         analysis.partesAfectadas?.length > 0

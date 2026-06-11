@@ -24,12 +24,11 @@ import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { CatalogService } from '../catalog/catalog.service';
 import {
   findPanelPiezaOption,
-  isSpecialPanelPieza,
   normalizePanelPiezaCode,
-  resolveCatalogPiezaForMatrixLookup,
 } from '../catalog/panel-pieza-catalog';
 import {
   buildDraftQuoteLineFromQuoteRow,
+  quoteRowsFromDamageInventory,
   sumQuoteRowsSubtotal,
   type QuoteRowInput,
 } from './draft-quote-inventory-pricing';
@@ -659,27 +658,7 @@ export class QuoteCartService {
       analysis.quoteCartMeta = { cartRole: 'primary' };
     }
 
-    const quoteRows: QuoteRowInput[] = [];
-    for (const it of inventory) {
-      const panelCode = normalizePanelPiezaCode(it.pieza) || it.pieza;
-      const sev = coerceDamageLevelCode(it.severidad);
-      let precio = 0;
-      if (!isSpecialPanelPieza(panelCode)) {
-        const catalogPieza =
-          resolveCatalogPiezaForMatrixLookup(panelCode) ??
-          snap.matchServicio(it.pieza) ??
-          it.pieza;
-        precio = snap.getPriceForCanonical(catalogPieza, sev);
-        if (precio <= 0) {
-          precio = snap.getAmount(it.pieza, sev);
-        }
-      }
-      quoteRows.push({
-        pieza: panelCode,
-        severidad: sev,
-        precioMx: Math.max(0, Math.round(precio)),
-      });
-    }
+    const quoteRows = quoteRowsFromDamageInventory(inventory, snap);
 
     let lines = quoteRows.map((r, i) =>
       buildDraftQuoteLineFromQuoteRow(r, i, snap),

@@ -190,18 +190,20 @@ export function buildDamagePhotoIntroForCliente(
   imageCount: number,
 ): string {
   const fromInv = (analysis.inventory ?? [])
-    .map((i) => String(i.pieza ?? '').trim())
+    .map((i) => resolvePiezaDisplayLabel(String(i.pieza ?? '').trim()))
     .filter(Boolean);
-  const fromPartes = (analysis.partesAfectadas ?? [])
-    .map((p) => String(p).trim())
-    .filter(Boolean);
-  const unique = dedupeStringListCaseInsensitive([...fromInv, ...fromPartes]);
-  const piezaTop = String(analysis.pieza ?? '').trim();
-  if (
-    piezaTop &&
-    !unique.some((p) => p.toLowerCase() === piezaTop.toLowerCase())
-  ) {
-    unique.unshift(piezaTop);
+  let unique = dedupeStringListCaseInsensitive(fromInv);
+  if (unique.length === 0) {
+    const fromPartes = (analysis.partesAfectadas ?? [])
+      .map((p) => resolvePiezaDisplayLabel(String(p).trim()))
+      .filter(Boolean);
+    unique = dedupeStringListCaseInsensitive(fromPartes);
+  }
+  if (unique.length === 0) {
+    const piezaTop = resolvePiezaDisplayLabel(String(analysis.pieza ?? '').trim());
+    if (piezaTop && piezaTop !== 'Servicio') {
+      unique = [piezaTop];
+    }
   }
   if (unique.length === 1) {
     const p = unique[0]!.toLowerCase();
@@ -227,10 +229,13 @@ export function draftQuoteLinesToClientePiezaRows(
 ): { pieza: string; precioMx: number }[] {
   return lines
     .filter((l) => l.subtotal > 0)
-    .map((l) => ({
-      pieza: piezaLabelFromDraftLineDescription(l.description),
-      precioMx: Math.round(l.subtotal),
-    }));
+    .map((l) => {
+      const rawLabel = piezaLabelFromDraftLineDescription(l.description);
+      return {
+        pieza: resolvePiezaDisplayLabel(rawLabel),
+        precioMx: Math.round(l.subtotal),
+      };
+    });
 }
 
 function formatClientePiezaLineExtra(pieza: string, precioMx: number): string {
