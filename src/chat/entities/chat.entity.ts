@@ -57,6 +57,8 @@ export interface VehicleDamageAnalysis {
   quoteCartMeta?: {
     cartRole: 'primary' | 'complement';
     complementOfDraftId?: string;
+    /** bpc = baño completo; piezas = repintado por panel. */
+    pricingMode?: 'bpc' | 'piezas';
   };
 }
 

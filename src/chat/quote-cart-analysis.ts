@@ -6,8 +6,13 @@ import {
 import type { DetectedDamageItem, VehicleDamageAnalysis } from './entities/chat.entity';
 import {
   isBanioPinturaCompletoVisionInventory,
+  isVisionBpcPiezaCode,
   pickVehicleLabelFromDamageInventory,
 } from './vision-bpc-inventory';
+import {
+  detectCartPricingMode,
+  sanitizeCartInventoryForPricing,
+} from './quote-cart-inventory-mode';
 import {
   findPanelPiezaOption,
   normalizePanelPiezaCode,
@@ -248,11 +253,19 @@ export function mergeVisionIntoPriorInventory(
       newInventory,
       (raw) => normalizePanelPiezaCode(raw) || raw,
     );
+    const mergedInventory = sanitizeCartInventoryForPricing(mergedInv.merged);
+    const mode = detectCartPricingMode(mergedInventory);
+    let previousPiezas = mergedInv.previousPiezas;
+    let newPiezas = mergedInv.newPiezas;
+    if (mode === 'piezas') {
+      previousPiezas = previousPiezas.filter((p) => !isVisionBpcPiezaCode(p));
+      newPiezas = newPiezas.filter((p) => !isVisionBpcPiezaCode(p));
+    }
     return {
-      mergedInventory: mergedInv.merged,
+      mergedInventory,
       complementMeta: {
-        previousPiezas: mergedInv.previousPiezas,
-        newPiezas: mergedInv.newPiezas,
+        previousPiezas,
+        newPiezas,
       },
     };
   }

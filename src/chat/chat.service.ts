@@ -80,10 +80,12 @@ import {
   banioCompletoNeedsHeavyBodyworkDisclaimer,
   collapseVisionItemsToBpcIfNeeded,
   isBanioPinturaCompletoVisionInventory,
+  isVisionBpcPiezaCode,
   pickVehicleLabelFromDamageInventory,
   visionItemsIndicateBanioCompleto,
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
+import { detectCartPricingMode } from './quote-cart-inventory-mode';
 import {
   extractMetaWhatsAppInboundEvents,
   extractWaIdFromRawWhatsAppPayload,
@@ -3639,8 +3641,16 @@ export class ChatService implements OnModuleDestroy {
         ? 'el día acordado para tu visita'
         : '';
 
+    const previousPiezasRelevant =
+      (analysis.quoteCartMeta?.pricingMode ?? detectCartPricingMode(analysis.inventory ?? [])) ===
+      'piezas'
+        ? (complement?.previousPiezas ?? []).filter(
+            (p) => !isVisionBpcPiezaCode(String(p ?? '')),
+          )
+        : [...(complement?.previousPiezas ?? [])];
+
     const previousCanon = new Set(
-      (complement?.previousPiezas ?? [])
+      previousPiezasRelevant
         .map((p) => String(p ?? '').trim().toLowerCase())
         .filter(Boolean),
     );
@@ -3659,7 +3669,7 @@ export class ChatService implements OnModuleDestroy {
       const newLineRows = filterLineRowsForPiezaCodes(lineRows, newDistinct);
       fallbackNarrative = buildClienteFormalNarrativeComplement({
         contactName,
-        previousPiezas: complement!.previousPiezas,
+        previousPiezas: previousPiezasRelevant,
         newPiezas: newDistinct,
         newLineRows,
         total,

@@ -244,7 +244,7 @@ function formatClientePiezaLineExtra(pieza: string, precioMx: number): string {
   return `🛠️ Reparación y Pintura de ${label}: $${amt.toLocaleString('es-MX')} MXN`;
 }
 
-/** Mensaje al cliente cuando ya tiene cita (preview / formalNarrative). */
+/** Mensaje al cliente cuando ya tiene cita (orden principal, no complemento). */
 export function buildClienteFormalNarrativeAgendado(opts: {
   contactName: string;
   lineRows: readonly { pieza: string; precioMx: number }[];
@@ -253,19 +253,21 @@ export function buildClienteFormalNarrativeAgendado(opts: {
   damageIntro: string;
 }): string {
   const name = sanitizeClienteDisplayName(opts.contactName) || 'cliente';
-  const linesText = opts.lineRows.map((r) => formatClientePiezaLineExtra(r.pieza, r.precioMx)).join('\n');
+  const linesText = opts.lineRows
+    .map((r) => formatDraftQuoteLineToolEmoji(r.pieza, r.precioMx))
+    .join('\n');
   const total = Math.max(0, Math.round(Number(opts.total) || 0));
   const when = String(opts.appointmentFormatted ?? '').trim() || 'el día acordado para tu visita';
   return [
     `👋 ¡Listo, ${name}! ${opts.damageIntro}`,
-    `Aquí tienes el desglose del costo extra para dejar esa zona impecable:`,
+    `Aquí tienes el desglose de tu cotización:`,
     ``,
     linesText,
-    `💰 **Inversión Extra Estimada: $${total.toLocaleString('es-MX')} MXN** *(Sujeto a revisión física. Incluye materiales premium Sikkens y garantía).*`,
+    `💰 **Inversión Total Estimada: $${total.toLocaleString('es-MX')} MXN** *(Sujeto a revisión física. Incluye materiales premium Sikkens y garantía).*`,
     ``,
-    `Anotamos estos conceptos como un extra en tu orden de servicio. **Los realizaremos este mismo ${when} que ingresas tu vehículo al taller.**`,
+    `**Te esperamos este ${when} con tu vehículo en el taller.**`,
     ``,
-    `¿Tienes alguna duda con las piezas o prefieres que lo sumemos al presupuesto inicial? 😊✨`,
+    `¿Tienes alguna duda con las piezas o quieres ajustar algo antes de tu visita? 😊✨`,
   ].join('\n');
 }
 

@@ -9,7 +9,6 @@ import {
 import {
   inventoryItemsToVehicleAnalysis,
   mapPanelInventoryLinesToItems,
-  mergeCartInventoryItem,
   mergeVisionIntoPriorInventory,
   parseDraftImageUrls,
   persistDraftImageUrlField,
@@ -17,6 +16,11 @@ import {
   extractPriorInventoryFromDraft,
   type VisionInventoryMergeResult,
 } from './quote-cart-analysis';
+import {
+  detectCartPricingMode,
+  mergeCartInventoryWithPricingMode,
+  sanitizeCartInventoryForPricing,
+} from './quote-cart-inventory-mode';
 import type { PatchCartInventoryLineDto } from './quote-cart.types';
 import type { DetectedDamageItem, VehicleDamageAnalysis } from './entities/chat.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
@@ -33,6 +37,8 @@ import {
   type QuoteRowInput,
 } from './draft-quote-inventory-pricing';
 import type { ObtenerCotizacionExpressResult } from './autopilot-cotizacion-express';
+import { isBañoDePinturaServicio } from './instant-quote-from-text';
+import { VISION_BPC_PIEZA_CODE } from './vision-bpc-inventory';
 import { ChatGateway } from './chat.gateway';
 import {
   buildActiveCartViewFromEntity,
@@ -418,7 +424,7 @@ export class QuoteCartService {
 
     const cart = await this.resolveMutableCart(conversationId, tallerId);
     const inventory = cart.damageAnalysis?.inventory ?? [];
-    const merged = mergeCartInventoryItem(inventory, item);
+    const merged = mergeCartInventoryWithPricingMode(inventory, item);
     const saved = await this.rebuildAndPersist(cart, merged, tallerId);
     return this.getCartSummaryEnvelope(conversationId, tallerId);
   }
@@ -647,15 +653,20 @@ export class QuoteCartService {
     let inventory = [...(cart.damageAnalysis?.inventory ?? [])];
 
     for (const line of express.lines ?? []) {
+      const isBano =
+        line.tipo === 'bano_pintura' ||
+        isBañoDePinturaServicio(String(line.canonical ?? ''));
       const panelOpt = findPanelPiezaOption(line.servicio);
-      const storedPieza = panelOpt?.code ?? line.servicio;
+      const storedPieza = isBano
+        ? VISION_BPC_PIEZA_CODE
+        : panelOpt?.code ?? line.canonical ?? line.servicio;
       const item: DetectedDamageItem = {
         pieza: storedPieza,
         severidad: coerceDamageLevelCode(line.severidad),
         descripcionTecnica: `Cotización express — ${line.servicio}.`,
         urls_origen: [],
       };
-      inventory = mergeCartInventoryItem(inventory, item);
+      inventory = mergeCartInventoryWithPricingMode(inventory, item);
     }
 
     await this.rebuildAndPersist(
@@ -679,18 +690,25 @@ export class QuoteCartService {
     tallerId?: string | null,
     extras?: ReadonlyArray<{ label: string; amount: number }>,
   ): Promise<DraftQuoteEntity> {
+    const sanitized = sanitizeCartInventoryForPricing(inventory);
     const snap = await this.catalogService.getMatrixPricingSnapshot(
       tallerId ?? undefined,
     );
     const imageUrls = parseDraftImageUrls(row.imageUrl ?? '');
-    const analysis = inventoryItemsToVehicleAnalysis(inventory, imageUrls);
-    if (row.damageAnalysis?.quoteCartMeta) {
-      analysis.quoteCartMeta = { ...row.damageAnalysis.quoteCartMeta };
-    } else if (!analysis.quoteCartMeta) {
-      analysis.quoteCartMeta = { cartRole: 'primary' };
-    }
+    const analysis = inventoryItemsToVehicleAnalysis(sanitized, imageUrls);
+    const pricingMode = detectCartPricingMode(sanitized);
+    analysis.quoteCartMeta = {
+      cartRole: row.damageAnalysis?.quoteCartMeta?.cartRole ?? 'primary',
+      ...(row.damageAnalysis?.quoteCartMeta?.complementOfDraftId
+        ? {
+            complementOfDraftId:
+              row.damageAnalysis.quoteCartMeta.complementOfDraftId,
+          }
+        : {}),
+      ...(pricingMode !== 'vacio' ? { pricingMode } : {}),
+    };
 
-    const quoteRows = quoteRowsFromDamageInventory(inventory, snap);
+    const quoteRows = quoteRowsFromDamageInventory(sanitized, snap);
 
     let lines = quoteRows.map((r, i) =>
       buildDraftQuoteLineFromQuoteRow(r, i, snap),
