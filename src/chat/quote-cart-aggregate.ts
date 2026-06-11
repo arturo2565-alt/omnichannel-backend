@@ -3,6 +3,7 @@ import {
   COTIZACION_INSTRUCCION_PARA_MODELO,
   type CotizacionDesgloseLine,
 } from './cotizacion-tool-envelope';
+import type { QuoteSendSnapshot } from './autofix-config';
 import type { DraftQuoteEntity } from './entities/draft-quote.entity';
 import type { QuoteCartEstado } from './quote-cart.types';
 import { findPanelPiezaOption } from '../catalog/panel-pieza-catalog';
@@ -12,7 +13,9 @@ type CartRow = Pick<
   'id' | 'estimateAmount' | 'damageAnalysis' | 'items' | 'quotePayload'
 >;
 
-function desgloseFromEntity(row: Pick<DraftQuoteEntity, 'items' | 'quotePayload'>): CotizacionDesgloseLine[] {
+export function desgloseFromCartEntity(
+  row: Pick<DraftQuoteEntity, 'items' | 'quotePayload'>,
+): CotizacionDesgloseLine[] {
   const labelForPieza = (code: string) =>
     findPanelPiezaOption(code)?.fullName ?? code;
 
@@ -30,52 +33,96 @@ function desgloseFromEntity(row: Pick<DraftQuoteEntity, 'items' | 'quotePayload'
   }));
 }
 
-/** Vista agregada aprobado + complemento/pendiente. */
-export function buildAggregatedCartViewFromEntities(
-  pending: CartRow | null,
-  approved: readonly CartRow[],
-): Record<string, unknown> {
-  const desgloseAprobado = approved.flatMap((r) => desgloseFromEntity(r));
-  const isComplement =
-    pending?.damageAnalysis?.quoteCartMeta?.cartRole === 'complement';
-  const desglosePendiente = pending ? desgloseFromEntity(pending) : [];
+function desgloseSignature(lines: readonly CotizacionDesgloseLine[]): string {
+  return [...lines]
+    .map(
+      (l) =>
+        `${String(l.pieza).trim().toLowerCase()}|${String(l.severidad).trim()}|${Math.round(Number(l.precioMx) || 0)}`,
+    )
+    .sort()
+    .join(';');
+}
 
-  const totalAprobado = approved.reduce(
-    (acc, r) => acc + Math.max(0, Math.round(Number(r.estimateAmount) || 0)),
-    0,
-  );
-  const totalPendiente = pending
-    ? Math.max(0, Math.round(Number(pending.estimateAmount) || 0))
+export function cartDiffersFromSendSnapshot(
+  cart: {
+    estimateAmount: number;
+    items?: readonly { pieza: string; severidad: string; precioMx: number }[];
+    quotePayload?: DraftQuoteEntity['quotePayload'] | null;
+  },
+  snapshot: QuoteSendSnapshot | undefined,
+): boolean {
+  if (!snapshot) return false;
+  const current = desgloseFromCartEntity(cart);
+  const currentTotal = Math.max(0, Math.round(Number(cart.estimateAmount) || 0));
+  const snapTotal = Math.max(0, Math.round(Number(snapshot.total) || 0));
+  if (currentTotal !== snapTotal) return true;
+  return desgloseSignature(current) !== desgloseSignature(snapshot.desglose ?? []);
+}
+
+/** Vista del carrito activo (siempre editable; envío = snapshot, no congelación). */
+export function buildActiveCartViewFromEntity(
+  cart: CartRow | null,
+): Record<string, unknown> {
+  const desglose = cart ? desgloseFromCartEntity(cart) : [];
+  const totalGlobal = cart
+    ? Math.max(0, Math.round(Number(cart.estimateAmount) || 0))
     : 0;
+  const lastSendSnapshot = cart?.quotePayload?.lastSendSnapshot;
+  const sendCount = Math.max(0, Number(cart?.quotePayload?.sendCount) || 0);
+  const hayCambiosDesdeUltimoEnvio = Boolean(
+    cart && lastSendSnapshot && cartDiffersFromSendSnapshot(cart, lastSendSnapshot),
+  );
 
   let estadoCarrito: QuoteCartEstado = 'vacio';
-  if (pending && isComplement) estadoCarrito = 'complemento_pendiente';
-  else if (pending) estadoCarrito = 'pendiente_aprobacion';
-  else if (approved.length > 0) estadoCarrito = 'aprobado';
+  if (cart && desglose.length > 0) {
+    estadoCarrito = hayCambiosDesdeUltimoEnvio ? 'activo_modificado' : 'activo';
+  }
 
-  const desglose = [...desgloseAprobado, ...desglosePendiente];
+  const instruccionBase =
+    estadoCarrito === 'activo_modificado'
+      ? `${COTIZACION_INSTRUCCION_PARA_MODELO} El carrito cambió desde el último envío al cliente; usa desglose y totalGlobal actuales. Si el cliente pidió quitar o agregar piezas, confirma el nuevo total.`
+      : sendCount > 0
+        ? `${COTIZACION_INSTRUCCION_PARA_MODELO} La cotización ya se envió al cliente; el carrito sigue editable. Si pide cambios, usa quitarDelCarrito o agregarAlCarrito y responde con el total actualizado.`
+        : COTIZACION_INSTRUCCION_PARA_MODELO;
 
   return buildCotizacionToolEnvelope(
     {
       success: true,
       desglose,
-      totalGlobal: totalAprobado + totalPendiente,
-      draftQuoteId: pending?.id ?? approved.at(-1)?.id,
+      totalGlobal,
+      draftQuoteId: cart?.id,
     },
     {
       estadoCarrito,
-      desgloseAprobado,
-      desgloseComplemento: isComplement ? desglosePendiente : [],
-      desglosePendiente: !isComplement ? desglosePendiente : [],
-      totalAprobado,
-      totalComplemento: isComplement ? totalPendiente : 0,
-      totalPendiente,
-      pendingDraftQuoteId: pending?.id ?? null,
+      lastSendSnapshot: lastSendSnapshot ?? null,
+      sendCount,
+      hayCambiosDesdeUltimoEnvio,
+      /** Compat: ya no hay carrito aprobado separado. */
+      desgloseAprobado: [],
+      desgloseComplemento: [],
+      desglosePendiente: desglose,
+      totalAprobado: 0,
+      totalComplemento: 0,
+      totalPendiente: totalGlobal,
+      pendingDraftQuoteId: cart?.id ?? null,
       cantidadLineas: desglose.length,
-      instruccionParaModelo:
-        estadoCarrito === 'complemento_pendiente'
-          ? `${COTIZACION_INSTRUCCION_PARA_MODELO} Presenta por separado lo ya aprobado (desgloseAprobado) y el complemento nuevo (desgloseComplemento); usa totalGlobal como gran total.`
-          : COTIZACION_INSTRUCCION_PARA_MODELO,
+      instruccionParaModelo: instruccionBase,
     },
   );
+}
+
+/**
+ * @deprecated Usar buildActiveCartViewFromEntity. Mantenido para tests legacy.
+ */
+export function buildAggregatedCartViewFromEntities(
+  pending: CartRow | null,
+  approved: readonly CartRow[],
+): Record<string, unknown> {
+  if (pending) {
+    return buildActiveCartViewFromEntity(pending);
+  }
+  if (approved.length > 0) {
+    return buildActiveCartViewFromEntity(approved[approved.length - 1]!);
+  }
+  return buildActiveCartViewFromEntity(null);
 }

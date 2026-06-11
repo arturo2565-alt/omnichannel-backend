@@ -664,7 +664,7 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: 'actualizarCarrito',
       description:
-        'Modifica una pieza ya en el carrito editable (severidad, nombre o descripción). No modifica líneas ya aprobadas por el operador.',
+        'Modifica una pieza en el carrito activo (severidad, nombre o descripción).',
       parameters: {
         type: 'object',
         properties: {
@@ -2416,7 +2416,13 @@ export class ChatService implements OnModuleDestroy {
       } else {
         conversation.status = 'cotizado';
       }
-      await this.approvePendingDraftQuotesForConversation(conversation.id);
+      await this.quoteCartService.recordQuoteSendSnapshot(
+        conversation.id,
+        conversation.tallerId,
+        {
+          formalNarrative: contentToSave || undefined,
+        },
+      );
     }
 
     await this.conversationRepository.save(conversation);
@@ -4154,28 +4160,8 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * Marca borradores pendientes como aprobados para que el autopilot no quede silenciado.
-   */
-  private async approvePendingDraftQuotesForConversation(
-    conversationId: string,
-  ): Promise<void> {
-    const pending = await this.draftQuoteRepository.find({
-      where: { conversationId, status: 'PENDING_APPROVAL' },
-    });
-    for (const row of pending) {
-      const quotePayload = row.quotePayload
-        ? { ...row.quotePayload, status: 'APPROVED' as const }
-        : row.quotePayload;
-      await this.draftQuoteRepository.update(row.id, {
-        status: 'APPROVED',
-        quotePayload,
-      });
-    }
-  }
-
-  /**
-   * Producción: tras aprobar/enviar un DraftQuote, primera respuesta IA al cliente
-   * (misma lógica que playground, con historial y cita desde BD).
+   * Tras enviar cotización: registra snapshot (carrito sigue editable) y prepara
+   * respuesta IA post-envío si aplica.
    */
   async resumeConversationAfterDraft(
     conversationId: string,
@@ -4186,12 +4172,7 @@ export class ChatService implements OnModuleDestroy {
     },
     tallerId: string,
   ): Promise<{ assistantMessage: string }> {
-    const conv = await this.assertConversationForTaller(
-      conversationId,
-      tallerId,
-    );
-
-    await this.approvePendingDraftQuotesForConversation(conversationId);
+    await this.assertConversationForTaller(conversationId, tallerId);
 
     const chatAppointmentPrompt = await this.aiConfigService.getValue(
       AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,

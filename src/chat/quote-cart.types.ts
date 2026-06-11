@@ -17,6 +17,13 @@ export type PatchConversationCartBody = {
 
 export type QuoteCartEstado =
   | 'vacio'
+  /** Carrito activo editable (express + visión + chat). */
+  | 'activo'
+  /** Enviado al cliente y modificado desde entonces. */
+  | 'activo_modificado'
+  /** @deprecated usar activo */
   | 'pendiente_aprobacion'
+  /** @deprecated complemento post-aprobación */
   | 'complemento_pendiente'
+  /** @deprecated carrito ya no se congela al enviar */
   | 'aprobado';

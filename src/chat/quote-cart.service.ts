@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
-import type { DraftQuote } from './autofix-config';
+import type { DraftQuote, QuoteSendSnapshot } from './autofix-config';
 import { coerceDamageLevelCode } from './autofix-config';
 import {
   buildCotizacionToolEnvelope,
@@ -34,7 +34,10 @@ import {
 } from './draft-quote-inventory-pricing';
 import type { ObtenerCotizacionExpressResult } from './autopilot-cotizacion-express';
 import { ChatGateway } from './chat.gateway';
-import { buildAggregatedCartViewFromEntities } from './quote-cart-aggregate';
+import {
+  buildActiveCartViewFromEntity,
+  desgloseFromCartEntity,
+} from './quote-cart-aggregate';
 
 const ACTIVE_CART_STATUS = 'PENDING_APPROVAL';
 const APPROVED_CART_STATUS = 'APPROVED';
@@ -92,7 +95,7 @@ export class QuoteCartService {
     conversationId: string,
     tallerId?: string | null,
   ): Promise<DraftQuoteEntity> {
-    const existing = await this.getActiveCart(conversationId, tallerId);
+    const existing = await this.resolveActiveCart(conversationId, tallerId);
     if (existing) {
       existing.items?.sort((a, b) => a.sortOrder - b.sortOrder);
       return existing;
@@ -114,26 +117,59 @@ export class QuoteCartService {
     return this.draftQuoteRepository.save(row);
   }
 
-  /** Carrito editable: PENDING activo, o complemento nuevo si ya hay cotización aprobada. */
+  /** Carrito editable: siempre el activo (reactiva legacy APPROVED si hace falta). */
   async resolveMutableCart(
     conversationId: string,
     tallerId?: string | null,
   ): Promise<DraftQuoteEntity> {
+    const active = await this.resolveActiveCart(conversationId, tallerId);
+    if (active) {
+      active.items?.sort((a, b) => a.sortOrder - b.sortOrder);
+      return active;
+    }
+    return this.getOrCreateActiveCart(conversationId, tallerId);
+  }
+
+  /** Carrito activo para lectura/escritura; null si aún no hay borrador. */
+  async resolveActiveCart(
+    conversationId: string,
+    tallerId?: string | null,
+  ): Promise<DraftQuoteEntity | null> {
     const pending = await this.getActiveCart(conversationId, tallerId);
     if (pending) {
       pending.items?.sort((a, b) => a.sortOrder - b.sortOrder);
       return pending;
     }
+    return this.reactivateLatestApprovedCart(conversationId, tallerId);
+  }
 
-    const approvedParent = await this.getLatestApprovedCart(
-      conversationId,
-      tallerId,
-    );
-    if (approvedParent) {
-      return this.createComplementCart(conversationId, tallerId, approvedParent);
+  private async reactivateLatestApprovedCart(
+    conversationId: string,
+    tallerId?: string | null,
+  ): Promise<DraftQuoteEntity | null> {
+    const approved = await this.getLatestApprovedCart(conversationId, tallerId);
+    if (!approved) {
+      return null;
     }
-
-    return this.getOrCreateActiveCart(conversationId, tallerId);
+    approved.status = ACTIVE_CART_STATUS;
+    if (approved.quotePayload) {
+      approved.quotePayload = {
+        ...approved.quotePayload,
+        status: 'PENDING_APPROVAL',
+      };
+    }
+    if (approved.damageAnalysis?.quoteCartMeta?.cartRole === 'complement') {
+      approved.damageAnalysis = {
+        ...approved.damageAnalysis,
+        quoteCartMeta: { cartRole: 'primary' },
+      };
+    }
+    const saved = await this.draftQuoteRepository.save(approved);
+    this.logger.log(
+      `[CARRITO] legacy APPROVED reactivado como editable conversation=${conversationId} id=${saved.id}`,
+    );
+    saved.items?.sort((a, b) => a.sortOrder - b.sortOrder);
+    return saved;
   }
 
   async getLatestApprovedCart(
@@ -151,93 +187,82 @@ export class QuoteCartService {
     });
   }
 
-  private async loadApprovedCarts(
-    conversationId: string,
-    tallerId?: string | null,
-  ): Promise<DraftQuoteEntity[]> {
-    const rows = await this.draftQuoteRepository.find({
-      where: {
-        conversationId,
-        status: APPROVED_CART_STATUS,
-        tallerId: tallerId ?? IsNull(),
-      },
-      order: { createdAt: 'ASC' },
-      relations: { items: true },
-    });
-    for (const r of rows) {
-      r.items?.sort((a, b) => a.sortOrder - b.sortOrder);
-    }
-    return rows;
-  }
-
-  private async createComplementCart(
+  async recordQuoteSendSnapshot(
     conversationId: string,
     tallerId: string | null | undefined,
-    approvedParent: DraftQuoteEntity,
-  ): Promise<DraftQuoteEntity> {
-    const parentUrls = parseDraftImageUrls(approvedParent.imageUrl ?? '');
-    const analysis = inventoryItemsToVehicleAnalysis([], parentUrls);
-    analysis.quoteCartMeta = {
-      cartRole: 'complement',
-      complementOfDraftId: approvedParent.id,
-    };
-    const vehiculo =
-      approvedParent.damageAnalysis?.vehiculoDetectado ??
-      approvedParent.quotePayload?.analysisBasis?.pieza;
-    if (vehiculo?.trim()) {
-      analysis.vehiculoDetectado = vehiculo.trim();
+    opts?: { formalNarrative?: string },
+  ): Promise<void> {
+    let cart = await this.resolveActiveCart(conversationId, tallerId);
+    if (!cart) {
+      cart = await this.getOrCreateActiveCart(conversationId, tallerId);
+    }
+    const desglose = desgloseFromCartEntity(cart);
+    if (!desglose.length) {
+      return;
     }
 
-    const row = this.draftQuoteRepository.create({
-      conversationId,
-      tallerId: tallerId ?? null,
-      messageId: approvedParent.messageId,
-      imageUrl: approvedParent.imageUrl || '[]',
-      damageAnalysis: analysis,
-      estimateAmount: 0,
-      quotePayload: {
-        ...emptyPayloadFallback(),
-        reference: approvedParent.quotePayload?.reference ?? '',
-      },
-      status: ACTIVE_CART_STATUS,
-    });
-    const saved = await this.draftQuoteRepository.save(row);
+    const narrative =
+      String(opts?.formalNarrative ?? '').trim() ||
+      String(
+        cart.quotePayload?.formalNarrative ??
+          cart.quotePayload?.clientMessage ??
+          '',
+      ).trim();
+
+    const snapshot: QuoteSendSnapshot = {
+      sentAt: new Date().toISOString(),
+      total: Math.max(0, Math.round(Number(cart.estimateAmount) || 0)),
+      subtotal: Math.max(
+        0,
+        Math.round(
+          Number(cart.quotePayload?.subtotal ?? cart.estimateAmount) || 0,
+        ),
+      ),
+      desglose,
+      ...(narrative ? { formalNarrative: narrative } : {}),
+    };
+
+    const payload = cart.quotePayload ?? emptyPayloadFallback();
+    const sendCount = Math.max(0, Number(payload.sendCount) || 0) + 1;
+    cart.quotePayload = {
+      ...payload,
+      status: 'PENDING_APPROVAL',
+      lastSendSnapshot: snapshot,
+      sendHistory: [...(payload.sendHistory ?? []), snapshot].slice(-20),
+      sendCount,
+    };
+    cart.status = ACTIVE_CART_STATUS;
+    await this.draftQuoteRepository.save(cart);
     this.logger.log(
-      `[CARRITO] complemento creado conversation=${conversationId} parent=${approvedParent.id}`,
+      `[CARRITO] snapshot envío conversation=${conversationId} total=${snapshot.total} sendCount=${sendCount}`,
     );
-    return saved;
   }
 
   async getConversationCartDetail(
     conversationId: string,
     tallerId: string,
   ): Promise<Record<string, unknown>> {
-    const pending = await this.getActiveCart(conversationId, tallerId);
-    const approved = await this.loadApprovedCarts(conversationId, tallerId);
-    const aggregated = this.buildAggregatedCartView(pending, approved);
+    const active =
+      (await this.resolveActiveCart(conversationId, tallerId)) ??
+      (await this.getOrCreateActiveCart(conversationId, tallerId));
+    active.items?.sort((a, b) => a.sortOrder - b.sortOrder);
+    const view = buildActiveCartViewFromEntity(active);
+    const draftSummary = {
+      id: active.id,
+      status: active.status,
+      estimateAmount: active.estimateAmount,
+      quotePayload: active.quotePayload,
+      damageAnalysis: active.damageAnalysis,
+      items: active.items ?? [],
+      messageId: active.messageId,
+      createdAt: active.createdAt,
+    };
     return {
-      ...aggregated,
+      ...view,
       conversationId,
-      pendingDraft: pending
-        ? {
-            id: pending.id,
-            status: pending.status,
-            estimateAmount: pending.estimateAmount,
-            quotePayload: pending.quotePayload,
-            damageAnalysis: pending.damageAnalysis,
-            items: pending.items ?? [],
-            messageId: pending.messageId,
-            createdAt: pending.createdAt,
-          }
-        : null,
-      approvedDrafts: approved.map((r) => ({
-        id: r.id,
-        status: r.status,
-        estimateAmount: r.estimateAmount,
-        quotePayload: r.quotePayload,
-        items: r.items ?? [],
-        createdAt: r.createdAt,
-      })),
+      activeDraft: draftSummary,
+      pendingDraft: draftSummary,
+      approvedDrafts: [],
     };
   }
 
@@ -245,9 +270,8 @@ export class QuoteCartService {
     conversationId: string,
     tallerId?: string | null,
   ): Promise<Record<string, unknown>> {
-    const pending = await this.getActiveCart(conversationId, tallerId);
-    const approved = await this.loadApprovedCarts(conversationId, tallerId);
-    return this.buildAggregatedCartView(pending, approved);
+    const active = await this.resolveActiveCart(conversationId, tallerId);
+    return buildActiveCartViewFromEntity(active);
   }
 
   async getCartEnvelope(
@@ -271,7 +295,7 @@ export class QuoteCartService {
       existingCart: DraftQuoteEntity | null;
     }
   > {
-    const existingCart = await this.getActiveCart(conversationId, tallerId);
+    const existingCart = await this.resolveActiveCart(conversationId, tallerId);
     const priorInventory = extractPriorInventoryFromDraft(existingCart);
     const priorUrls = existingCart
       ? parseDraftImageUrls(existingCart.imageUrl ?? '')
@@ -423,12 +447,11 @@ export class QuoteCartService {
     const inventory = [...(cart.damageAnalysis?.inventory ?? [])];
     const idx = inventory.findIndex((it) => piezaMatchesQuery(it.pieza, query));
     if (idx < 0) {
-      const approved = await this.loadApprovedCarts(conversationId, tallerId);
-      const aggregated = this.buildAggregatedCartView(cart, approved);
+      const view = buildActiveCartViewFromEntity(cart);
       return {
-        ...aggregated,
+        ...view,
         success: false,
-        error: `No encontré "${query}" en el carrito editable. Las líneas ya aprobadas no se modifican; agrega un complemento.`,
+        error: `No encontré "${query}" en el carrito.`,
       };
     }
 
@@ -504,9 +527,19 @@ export class QuoteCartService {
       throw new NotFoundException(`DraftQuote no encontrada: ${draftId}`);
     }
     if (row.status !== ACTIVE_CART_STATUS) {
-      throw new BadRequestException(
-        'Solo se puede editar el carrito en estado PENDING_APPROVAL.',
-      );
+      if (row.status === APPROVED_CART_STATUS) {
+        row.status = ACTIVE_CART_STATUS;
+        if (row.quotePayload) {
+          row.quotePayload = {
+            ...row.quotePayload,
+            status: 'PENDING_APPROVAL',
+          };
+        }
+      } else {
+        throw new BadRequestException(
+          'Solo se puede editar el carrito activo de la conversación.',
+        );
+      }
     }
 
     for (let i = 0; i < linesDto.length; i++) {
@@ -579,12 +612,11 @@ export class QuoteCartService {
     const inventory = cart.damageAnalysis?.inventory ?? [];
     const idx = inventory.findIndex((it) => piezaMatchesQuery(it.pieza, query));
     if (idx < 0) {
-      const approved = await this.loadApprovedCarts(conversationId, tallerId);
-      const aggregated = this.buildAggregatedCartView(cart, approved);
+      const view = buildActiveCartViewFromEntity(cart);
       return {
-        ...aggregated,
+        ...view,
         success: false,
-        error: `No encontré "${query}" en el carrito editable.`,
+        error: `No encontré "${query}" en el carrito.`,
       };
     }
 
@@ -779,13 +811,6 @@ export class QuoteCartService {
     const finalRow = reloaded ?? saved;
     finalRow.items?.sort((a, b) => a.sortOrder - b.sortOrder);
     return finalRow;
-  }
-
-  private buildAggregatedCartView(
-    pending: DraftQuoteEntity | null,
-    approved: readonly DraftQuoteEntity[],
-  ): Record<string, unknown> {
-    return buildAggregatedCartViewFromEntities(pending, approved);
   }
 
   private async syncLineItems(

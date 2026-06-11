@@ -190,6 +190,19 @@ export type DraftQuoteStatus =
   | 'APPROVED'
   | 'SENT';
 
+/** Snapshot de una cotización enviada al cliente (el carrito sigue editable). */
+export type QuoteSendSnapshot = {
+  sentAt: string;
+  total: number;
+  subtotal: number;
+  desglose: {
+    pieza: string;
+    severidad: string;
+    precioMx: number;
+  }[];
+  formalNarrative?: string;
+};
+
 export interface DraftQuote {
   status: DraftQuoteStatus;
   currency: typeof AUTO_FIX_CURRENCY;
@@ -198,6 +211,12 @@ export interface DraftQuote {
   lines: DraftQuoteLine[];
   subtotal: number;
   total: number;
+  /** Última versión enviada al cliente por WhatsApp/panel. */
+  lastSendSnapshot?: QuoteSendSnapshot;
+  /** Historial reciente de envíos (máx. ~20 en backend). */
+  sendHistory?: QuoteSendSnapshot[];
+  /** Contador de envíos al cliente. */
+  sendCount?: number;
   /** Mensaje al cliente (plantilla premium / variante A-B-C). */
   formalNarrative: string;
   /** Alias de `formalNarrative` para el panel y sockets. */
