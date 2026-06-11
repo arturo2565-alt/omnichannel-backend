@@ -89,7 +89,6 @@ import {
   normalizeWhatsAppRecipientWaId,
 } from './whatsapp-config';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
-import { DraftQuoteService } from './draft-quote.service';
 import {
   buildAutopilotSolicitarModeloBanioAppend,
   buildBanioVisualDamageSummary,
@@ -600,53 +599,6 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
-      name: 'obtenerCotizacionActual',
-      description:
-        'Obtiene el estado actual de la cotización en borrador de esta conversación. Úsala siempre antes de agregar o quitar piezas para conocer el presupuesto actual.',
-      parameters: { type: 'object', properties: {} },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'agregarServicioLeve',
-      description:
-        'Agrega una pieza de daño leve (rayón, raspón, pintar, pulir) a la cotización activa de la conversación actual.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pieza: {
-            type: 'string',
-            description:
-              'Nombre de la pieza (ej: "Fascia trasera", "Toldo", "Puerta delantera izquierda").',
-          },
-        },
-        required: ['pieza'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'eliminarItemCotizacion',
-      description:
-        'Elimina una pieza o servicio de la cotización activa usando el nombre de la pieza. NO envíes IDs ni UUIDs.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pieza: {
-            type: 'string',
-            description:
-              'Nombre de la pieza a remover (ej: "Toldo", "Fascia delantera").',
-          },
-        },
-        required: ['pieza'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
       name: 'createAppointment',
       description:
         'Registra una cita en la base de datos del taller. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. En el panel de simulación (playground), la misma llamada solo valida horario y devuelve vista previa sin persistir en BD.',
@@ -691,15 +643,6 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     },
   },
 ];
-
-const AUTOPILOT_PROGRESSIVE_QUOTE_APPEND = [
-  '',
-  '[COTIZACIÓN PROGRESIVA]',
-  'Nunca pidas ni envíes UUIDs ni IDs de base de datos. Todo se resuelve con el contexto de la conversación y el nombre de la pieza.',
-  'Antes de agregar, quitar o presentar un presupuesto modificado, llama obtenerCotizacionActual si no tienes el desglose fresco.',
-  'PROHIBIDO calcular totales: usa EXACTAMENTE desglose y totalGlobal de las herramientas.',
-  'Si el cliente dice "sin el…", "quita", "cancela" o "mejor no", usa eliminarItemCotizacion con el nombre de la pieza.',
-].join('\n');
 
 /** Cuerpo del panel para enviar mensaje outbound con JWT (`tallerId` viene del token). */
 export type SendAgentMessageBody = {
@@ -794,8 +737,6 @@ export class ChatService implements OnModuleDestroy {
     private readonly tallerService: TallerService,
 
     private readonly twilioService: TwilioService,
-
-    private readonly draftQuoteService: DraftQuoteService,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -6049,69 +5990,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       { leadAgendado: isAgendado },
     );
 
-    if (result.success && conversation.id) {
-      try {
-        await this.draftQuoteService.importFromExpressResult(
-          conversation.id,
-          result,
-          conversation.tallerId ?? null,
-        );
-      } catch (err) {
-        console.error('[obtenerCotizacionExpress] import borrador:', err);
-      }
-    }
-
     return result as Record<string, unknown>;
-  }
-
-  private isProgressiveQuoteToolName(name: string): boolean {
-    return (
-      name === 'obtenerCotizacionActual' ||
-      name === 'agregarServicioLeve' ||
-      name === 'eliminarItemCotizacion'
-    );
-  }
-
-  private async executeProgressiveQuoteTool(
-    name: string,
-    argsJson: string,
-    conversationId: string,
-  ): Promise<Record<string, unknown>> {
-    let args: Record<string, unknown> = {};
-    if (argsJson?.trim()) {
-      try {
-        args = JSON.parse(argsJson) as Record<string, unknown>;
-      } catch {
-        return { success: false, error: 'Argumentos inválidos (JSON).' };
-      }
-    }
-
-    const pieza = String(args.pieza ?? '').trim();
-
-    switch (name) {
-      case 'obtenerCotizacionActual':
-        return this.draftQuoteService.getCurrentQuoteState(conversationId);
-      case 'agregarServicioLeve':
-        return this.draftQuoteService.addLightService(conversationId, pieza);
-      case 'eliminarItemCotizacion':
-        return this.draftQuoteService.removeQuoteItem(conversationId, pieza);
-      default:
-        return { success: false, error: `Herramienta desconocida: ${name}` };
-    }
-  }
-
-  /** Playground: cotización progresiva con id efímero (no ligado a conversación real). */
-  private async executeProgressiveQuoteToolPlayground(
-    name: string,
-    argsJson: string,
-  ): Promise<Record<string, unknown>> {
-    const stubConversationId = `playground-${randomUUID()}`;
-    const result = await this.executeProgressiveQuoteTool(
-      name,
-      argsJson,
-      stubConversationId,
-    );
-    return { ...result, preview: true };
   }
 
   private resolveCreateAppointmentScheduledAt(raw: Record<string, unknown>): {
@@ -6340,11 +6219,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             }
           } else if (name === 'obtenerCotizacionExpress') {
             payload = await this.executeObtenerCotizacionExpressToolPlayground(
-              tc.function.arguments ?? '{}',
-            );
-          } else if (this.isProgressiveQuoteToolName(name)) {
-            payload = await this.executeProgressiveQuoteToolPlayground(
-              name,
               tc.function.arguments ?? '{}',
             );
           } else if (name === 'notificarLlegadaCliente') {
@@ -6584,7 +6458,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const banioModelAppend = await this.buildBanioSolicitarModeloAutopilotAppend(
       conversation.id,
     );
-    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}${banioModelAppend}${AUTOPILOT_PROGRESSIVE_QUOTE_APPEND}`;
+    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}${banioModelAppend}`;
     if (conversation.status !== 'agendado') {
       return head;
     }
@@ -6743,29 +6617,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
                 args,
                 conversation,
               );
-            } else if (this.isProgressiveQuoteToolName(name)) {
-              try {
-                payload = await this.executeProgressiveQuoteTool(
-                  name,
-                  args,
-                  conversation.id,
-                );
-              } catch (toolErr) {
-                console.error(
-                  '[BUG CRÍTICO AUTOPILOT] herramienta cotización progresiva',
-                  { name, conversationId: conversation.id, toolErr },
-                );
-                payload = {
-                  success: false,
-                  message:
-                    'No se encontró la pieza a eliminar en tu presupuesto actual.',
-                  desglose: [],
-                  totalGlobal: 0,
-                  moneda: 'MXN',
-                  instruccionParaModelo:
-                    'Informa al cliente amablemente; no te quedes en silencio.',
-                };
-              }
             } else if (name === 'notificarLlegadaCliente') {
               payload = await this.executeNotificarLlegadaClienteTool(
                 conversation,
@@ -6801,17 +6652,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             return 'Tu cita ha quedado registrada. ¡Te esperamos!';
           }
         }
-
-        // Evita chat mudo si el modelo devuelve contenido vacío tras ejecutar tools
-        if (step < 5) {
-          continue;
-        }
-        return 'Gracias por tu mensaje. ¿Te confirmo el presupuesto actualizado o hay algo más que quieras ajustar?';
+        return null;
       }
 
       return lastConfirmedIso
         ? 'Tu cita ha quedado registrada. ¡Te esperamos!'
-        : 'Gracias por tu mensaje. ¿Te confirmo el presupuesto actualizado o hay algo más que quieras ajustar?';
+        : null;
     } catch (err) {
       console.error('composeAutopilotReplyWithTools:', err);
       return null;

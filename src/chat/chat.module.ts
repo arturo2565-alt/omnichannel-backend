@@ -16,7 +16,6 @@ import { ArrivalAlarmController } from './arrival-alarm.controller';
 import { CatalogModule } from '../catalog/catalog.module';
 import { TallerModule } from '../taller/taller.module';
 import { AuthModule } from '../auth/auth.module';
-import { DraftQuoteService } from './draft-quote.service';
 
 @Module({
   imports: [
@@ -34,8 +33,8 @@ import { DraftQuoteService } from './draft-quote.service';
     ]),
   ],
   controllers: [ChatController, ArrivalAlarmController],
-  providers: [ChatService, ChatGateway, AiConfigService, TwilioService, DraftQuoteService],
-  exports: [ChatService, AiConfigService, TwilioService, DraftQuoteService],
+  providers: [ChatService, ChatGateway, AiConfigService, TwilioService],
+  exports: [ChatService, AiConfigService, TwilioService],
 })
 
 export class ChatModule {}
