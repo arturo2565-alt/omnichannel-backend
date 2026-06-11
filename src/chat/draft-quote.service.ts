@@ -166,24 +166,54 @@ export class DraftQuoteService {
     });
   }
 
-  /** Elimina item por nombre de pieza (match flexible). */
+  /** Elimina item por nombre de pieza (match flexible, sin distinguir mayúsculas). */
   async removeQuoteItem(
     conversationId: string,
     pieza: string,
   ): Promise<QuoteToolResult> {
-    return this.safe(async () => {
-      const piezaTrim = String(pieza ?? '').trim();
+    const piezaTrim = String(pieza ?? '').trim();
+    const NOT_FOUND_MESSAGE =
+      'No se encontró la pieza a eliminar en tu presupuesto actual.';
+
+    const buildNotFoundResponse = async (): Promise<QuoteToolResult> => {
+      try {
+        const summary = await this.getQuoteSummary(conversationId);
+        return {
+          ...summary,
+          success: false,
+          message: NOT_FOUND_MESSAGE,
+          instruccionParaModelo:
+            'Informa al cliente cordialmente que esa pieza no está en el presupuesto actual. Muestra el desglose y totalGlobal de esta respuesta.',
+        };
+      } catch (summaryErr) {
+        console.error(
+          '[DraftQuoteService.removeQuoteItem] getQuoteSummary fallback',
+          summaryErr,
+        );
+        return {
+          success: false,
+          message: NOT_FOUND_MESSAGE,
+          desglose: [],
+          totalGlobal: 0,
+          moneda: 'MXN',
+          instruccionParaModelo:
+            'Informa al cliente amablemente; no te quedes en silencio.',
+        };
+      }
+    };
+
+    try {
       if (!piezaTrim) {
-        return { success: false, error: 'Falta el parámetro pieza.' };
+        return buildNotFoundResponse();
       }
 
       const quote = await this.findActiveQuote(conversationId);
       if (!quote) {
-        return {
-          success: false,
-          error:
-            'No hay cotización activa. Usa obtenerCotizacionActual o cotiza primero con obtenerCotizacionExpress.',
-        };
+        console.warn('[DraftQuoteService.removeQuoteItem] sin borrador activo', {
+          conversationId,
+          pieza: piezaTrim,
+        });
+        return buildNotFoundResponse();
       }
 
       const tallerId = await this.resolveTallerId(conversationId);
@@ -201,20 +231,39 @@ export class DraftQuoteService {
         );
       }
 
-      const idx = this.findItemIndexByPieza(items, piezaTrim, snap);
+      let idx = this.findItemIndexByPieza(items, piezaTrim, snap);
+
+      if (idx < 0 && quote.quotePayload?.lines?.length) {
+        const fromPayload = quote.quotePayload.lines.map((line, sortOrder) =>
+          this.draftQuoteItemRepository.create({
+            draftQuoteId: quote.id,
+            sortOrder,
+            pieza:
+              String(line.description ?? '').split('—')[0]?.trim() || 'Servicio',
+            severidad: 'DL',
+            precioMx: Math.round(
+              Number(line.subtotal ?? line.unitPrice ?? 0),
+            ),
+            descripcionTecnica: null,
+            urlsOrigen: null,
+          }),
+        );
+        idx = this.findItemIndexByPieza(fromPayload, piezaTrim, snap);
+        if (idx >= 0) {
+          items = fromPayload;
+        }
+      }
+
       if (idx < 0) {
-        const current = await this.recalculateTotal(quote);
-        return this.toToolResponse(current, {
-          success: true,
-          noEncontrada: true,
-          error: `No encontré "${piezaTrim}" en la cotización actual.`,
+        console.warn('[DraftQuoteService.removeQuoteItem] pieza no encontrada', {
+          conversationId,
+          pieza: piezaTrim,
+          itemLabels: items.map((it) => this.displayPiezaLabel(it.pieza)),
         });
+        return buildNotFoundResponse();
       }
 
       const removed = items[idx]!;
-      if (removed.id) {
-        await this.draftQuoteItemRepository.delete({ id: removed.id });
-      }
       items.splice(idx, 1);
 
       const inventory = items.map((it) => ({
@@ -224,13 +273,22 @@ export class DraftQuoteService {
         urls_origen: [...(it.urlsOrigen ?? [])],
       }));
 
-      const saved = await this.persistInventory(quote, inventory, tallerId);
-      return this.toToolResponse(saved, {
+      await this.persistInventory(quote, inventory, tallerId);
+
+      const summary = await this.getQuoteSummary(conversationId);
+      return {
+        ...summary,
         success: true,
         accion: 'quitar',
         piezaEliminada: this.displayPiezaLabel(removed.pieza),
+      };
+    } catch (err) {
+      console.error('[DraftQuoteService.removeQuoteItem]', err, {
+        conversationId,
+        pieza: piezaTrim,
       });
-    });
+      return buildNotFoundResponse();
+    }
   }
 
   /** Recalcula total desde items y persiste quotePayload + estimateAmount. */
@@ -546,6 +604,15 @@ export class DraftQuoteService {
     return normalizeTextForMatch(code || raw);
   }
 
+  /** Comparación directa sin distinguir mayúsculas ni acentos. */
+  private piezaTextEquals(a: string, b: string): boolean {
+    const left = String(a ?? '').trim();
+    const right = String(b ?? '').trim();
+    if (!left || !right) return false;
+    if (left.toLowerCase() === right.toLowerCase()) return true;
+    return normalizeTextForMatch(left) === normalizeTextForMatch(right);
+  }
+
   private findItemIndexByPieza(
     items: readonly DraftQuoteItem[],
     piezaSearch: string,
@@ -553,14 +620,21 @@ export class DraftQuoteService {
   ): number {
     const searchKey = this.piezaMatchKey(piezaSearch);
     const searchNorm = normalizeTextForMatch(piezaSearch);
+    const searchLower = String(piezaSearch ?? '').trim().toLowerCase();
     const searchCanonical =
       snap.matchServicio(resolveMatrixServicioRaw(piezaSearch)) ?? '';
 
     return items.findIndex((it) => {
+      const storedRaw = String(it.pieza ?? '').trim();
+      if (this.piezaTextEquals(storedRaw, piezaSearch)) return true;
+
       const storedKey = this.piezaMatchKey(it.pieza);
       if (storedKey === searchKey) return true;
+
       const label = normalizeTextForMatch(this.displayPiezaLabel(it.pieza));
       if (label === searchNorm) return true;
+      if (label.toLowerCase() === searchLower) return true;
+
       if (searchCanonical) {
         const storedCanon =
           snap.matchServicio(resolveMatrixServicioRaw(it.pieza)) ?? '';
@@ -574,11 +648,22 @@ export class DraftQuoteService {
           if (!searchOpt || !storedOpt || searchOpt.code === storedOpt.code) {
             return true;
           }
+          if (
+            this.piezaTextEquals(storedCanon, searchCanonical) ||
+            this.piezaTextEquals(storedCanon, piezaSearch)
+          ) {
+            return true;
+          }
         }
       }
+
       return (
         label.includes(searchNorm) ||
-        (searchNorm.length >= 4 && searchNorm.includes(label))
+        searchNorm.includes(label) ||
+        (searchLower.length >= 3 &&
+          storedRaw.toLowerCase().includes(searchLower)) ||
+        (searchLower.length >= 3 &&
+          searchLower.includes(storedRaw.toLowerCase()))
       );
     });
   }

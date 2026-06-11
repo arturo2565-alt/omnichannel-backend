@@ -6744,11 +6744,28 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
                 conversation,
               );
             } else if (this.isProgressiveQuoteToolName(name)) {
-              payload = await this.executeProgressiveQuoteTool(
-                name,
-                args,
-                conversation.id,
-              );
+              try {
+                payload = await this.executeProgressiveQuoteTool(
+                  name,
+                  args,
+                  conversation.id,
+                );
+              } catch (toolErr) {
+                console.error(
+                  '[BUG CRÍTICO AUTOPILOT] herramienta cotización progresiva',
+                  { name, conversationId: conversation.id, toolErr },
+                );
+                payload = {
+                  success: false,
+                  message:
+                    'No se encontró la pieza a eliminar en tu presupuesto actual.',
+                  desglose: [],
+                  totalGlobal: 0,
+                  moneda: 'MXN',
+                  instruccionParaModelo:
+                    'Informa al cliente amablemente; no te quedes en silencio.',
+                };
+              }
             } else if (name === 'notificarLlegadaCliente') {
               payload = await this.executeNotificarLlegadaClienteTool(
                 conversation,
@@ -6784,12 +6801,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             return 'Tu cita ha quedado registrada. ¡Te esperamos!';
           }
         }
-        return null;
+
+        // Evita chat mudo si el modelo devuelve contenido vacío tras ejecutar tools
+        if (step < 5) {
+          continue;
+        }
+        return 'Gracias por tu mensaje. ¿Te confirmo el presupuesto actualizado o hay algo más que quieras ajustar?';
       }
 
       return lastConfirmedIso
         ? 'Tu cita ha quedado registrada. ¡Te esperamos!'
-        : null;
+        : 'Gracias por tu mensaje. ¿Te confirmo el presupuesto actualizado o hay algo más que quieras ajustar?';
     } catch (err) {
       console.error('composeAutopilotReplyWithTools:', err);
       return null;
