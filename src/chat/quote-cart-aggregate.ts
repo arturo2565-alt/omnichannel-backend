@@ -13,8 +13,13 @@ type CartRow = Pick<
   'id' | 'estimateAmount' | 'damageAnalysis' | 'items' | 'quotePayload'
 >;
 
+type DesgloseCartSource = {
+  items?: DraftQuoteEntity['items'];
+  quotePayload?: DraftQuoteEntity['quotePayload'] | null;
+};
+
 export function desgloseFromCartEntity(
-  row: Pick<DraftQuoteEntity, 'items' | 'quotePayload'>,
+  row: DesgloseCartSource,
 ): CotizacionDesgloseLine[] {
   const labelForPieza = (code: string) =>
     findPanelPiezaOption(code)?.fullName ?? code;
@@ -44,11 +49,7 @@ function desgloseSignature(lines: readonly CotizacionDesgloseLine[]): string {
 }
 
 export function cartDiffersFromSendSnapshot(
-  cart: {
-    estimateAmount: number;
-    items?: readonly { pieza: string; severidad: string; precioMx: number }[];
-    quotePayload?: DraftQuoteEntity['quotePayload'] | null;
-  },
+  cart: DesgloseCartSource & { estimateAmount: number },
   snapshot: QuoteSendSnapshot | undefined,
 ): boolean {
   if (!snapshot) return false;
