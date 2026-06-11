@@ -124,6 +124,7 @@ import {
   normalizeCategoriaTamanoExpress,
 } from './autopilot-cotizacion-express';
 import { QuoteCartService } from './quote-cart.service';
+import { shouldSuppressAutopilotForPendingDraft } from './quote-cart-autopilot-policy';
 import {
   assistantMessageIsBañoVehiclePrompt,
   type InstantQuoteResolution,
@@ -6543,7 +6544,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
   /**
    * El autopilot de texto no debe competir con valuación por imagen ni con borrador
-   * aún en revisión humana (solo `PENDING_APPROVAL`; `APPROVED`/`SENT` no bloquean).
+   * de visión en revisión humana. Los carritos chat/express con autopilot ON siguen activos.
    */
   private async shouldSuppressAutopilotForVisionPipeline(
     conversationId: string,
@@ -6554,7 +6555,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       where: { conversationId, status: 'PENDING_APPROVAL' },
     });
     if (pendingHumanReviewDraft) {
-      return true;
+      const conv = await this.conversationRepository.findOne({
+        where: { id: conversationId },
+        select: ['isAutoPilotActive'],
+      });
+      if (
+        shouldSuppressAutopilotForPendingDraft(
+          true,
+          Boolean(conv?.isAutoPilotActive),
+        )
+      ) {
+        return true;
+      }
     }
 
     const awaitingVehicleDraft = await this.findBanioAwaitingVehicleDraft(
