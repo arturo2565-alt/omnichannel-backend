@@ -4,6 +4,7 @@ import {
   buildObtenerCotizacionExpressPayload,
   resolveExpressLineServicioLabel,
 } from './autopilot-cotizacion-express';
+import { resolveVehiclePricingProfile } from '../catalog/vehicle-pricing-profile';
 
 function matrixRows(
   entries: Array<{ servicio: string; severidad: string; precio: number }>,
@@ -37,20 +38,24 @@ describe('autopilot-cotizacion-express', () => {
     );
   });
 
-  it('Toldo + Fascia ×2 suma $10,300 (sin dedup por canonical)', () => {
+  it('Toldo + Fascia ×2 aplica tier Mediano sobre base compacto', () => {
+    const profile = resolveVehiclePricingProfile({
+      modeloVehiculo: 'Nissan March 2018',
+      sizeTier: 'Mediano',
+      isPremium: false,
+    });
     const result = buildObtenerCotizacionExpressPayload(
       snap,
       ['Toldo', 'Fascia', 'Fascia'],
-      'Nissan March 2018',
-      'Mediano',
+      profile,
     );
 
     expect(result.success).toBe(true);
-    expect(result.totalMx).toBe(10300);
+    expect(result.totalMx).toBe(10650);
     expect(result.desglose).toEqual([
-      { pieza: 'Toldo', severidad: 'DL', precioMx: 4500 },
-      { pieza: 'Fascia delantera', severidad: 'DL', precioMx: 2900 },
-      { pieza: 'Fascia trasera', severidad: 'DL', precioMx: 2900 },
+      { pieza: 'Toldo', severidad: 'DL', precioMx: 4650 },
+      { pieza: 'Fascia delantera', severidad: 'DL', precioMx: 3000 },
+      { pieza: 'Fascia trasera', severidad: 'DL', precioMx: 3000 },
     ]);
   });
 });

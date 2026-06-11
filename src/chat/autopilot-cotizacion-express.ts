@@ -1,6 +1,14 @@
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
+import { resolvePiecePriceForVehicleProfile } from '../catalog/vehicle-piece-pricing';
+import {
+  normalizeVehicleSizeTier,
+  parseExpressVehicleSizingArgs,
+  resolveBañoSeveridadFromVehicleProfile,
+  resolveVehiclePricingProfile,
+  type VehiclePricingProfile,
+  type VehicleSizeTier,
+} from '../catalog/vehicle-pricing-profile';
 import { AUTO_FIX_CURRENCY, normalizeTextForMatch } from './autofix-config';
-import { coerceBañoSeveridadToCatalog } from './baño-pintura-llm';
 import {
   inferBañoVehicleDisplayLabel,
   isBañoDePinturaServicio,
@@ -16,74 +24,51 @@ import {
 
 const PIEZA_DL = 'DL';
 
-/** Tamaño de carrocería que define la fila de PriceMatrix (lo envía OpenAI). */
-export type CategoriaTamanoExpress = 'Chico' | 'Mediano' | 'Grande' | 'Premium';
+/** Tamaño de carrocería (eje 1). Premium es multiplicador aparte (`esPremium`). */
+export type CategoriaTamanoExpress = 'Chico' | 'Mediano' | 'Grande' | 'XL';
 
 const CATEGORIA_TAMANO_VALUES: readonly CategoriaTamanoExpress[] = [
   'Chico',
   'Mediano',
   'Grande',
-  'Premium',
+  'XL',
 ];
 
 export function normalizeCategoriaTamanoExpress(
   raw: unknown,
 ): CategoriaTamanoExpress | null {
-  const t = String(raw ?? '').trim();
-  if (CATEGORIA_TAMANO_VALUES.includes(t as CategoriaTamanoExpress)) {
-    return t as CategoriaTamanoExpress;
+  const tier = normalizeVehicleSizeTier(raw);
+  if (!tier) {
+    if (normalizeTextForMatch(String(raw ?? '')) === 'premium') {
+      return null;
+    }
+    return null;
   }
-  const key = normalizeTextForMatch(t);
-  const byNorm: Record<string, CategoriaTamanoExpress> = {
-    chico: 'Chico',
-    mediano: 'Mediano',
-    grande: 'Grande',
-    premium: 'Premium',
+  const map: Record<VehicleSizeTier, CategoriaTamanoExpress> = {
+    Compacto: 'Chico',
+    Mediano: 'Mediano',
+    Grande: 'Grande',
+    XL: 'XL',
   };
-  return byNorm[key] ?? null;
+  return map[tier];
 }
 
 /**
- * Mapea categoriaTamaño del modelo → severidad literal en catálogo (sin heurística de texto).
+ * @deprecated Premium ya no es categoría de tamaño. Usar {@link resolveBañoSeveridadFromVehicleProfile}.
  */
 export function resolveCategoriaTamanoToBañoSeveridad(
-  categoria: CategoriaTamanoExpress,
+  categoria: CategoriaTamanoExpress | 'Premium',
   allowed: readonly string[],
 ): string | null {
-  const candidates: string[] = [];
-  switch (categoria) {
-    case 'Chico':
-      candidates.push('Chico', 'Chico Premium');
-      break;
-    case 'Mediano':
-      candidates.push('Mediano', 'Mediano Premium');
-      break;
-    case 'Grande':
-      candidates.push('Grande', 'XL', 'Grande Premium', 'XL Premium');
-      break;
-    case 'Premium':
-      candidates.push(
-        'Grande Premium',
-        'XL Premium',
-        'Mediano Premium',
-        'Chico Premium',
-        'Premium',
-      );
-      break;
-    default:
-      break;
-  }
-  for (const c of candidates) {
-    const hit = coerceBañoSeveridadToCatalog(c, allowed);
-    if (hit) return hit;
-  }
-  const needle = normalizeTextForMatch(categoria);
-  for (const a of allowed) {
-    if (normalizeTextForMatch(a).includes(needle)) {
-      return a;
-    }
-  }
-  return allowed[0] ?? null;
+  const sizeTier =
+    normalizeVehicleSizeTier(categoria) ?? 'Mediano';
+  const profile = resolveVehiclePricingProfile({
+    modeloVehiculo: 'legacy',
+    sizeTier,
+    isPremium: String(categoria) === 'Premium',
+    tierSource: 'llm',
+  });
+  return resolveBañoSeveridadFromVehicleProfile(profile, allowed);
 }
 
 export type CotizacionExpressLineDto = {
@@ -106,6 +91,8 @@ export type ObtenerCotizacionExpressResult = {
   success: boolean;
   error?: string;
   categoriaTamaño?: CategoriaTamanoExpress;
+  /** Perfil vehicular aplicado (tamaño + premium). */
+  vehiclePricingProfile?: VehiclePricingProfile;
   severidadCatalogo?: string;
   modeloVehiculo?: string;
   vehicleDisplayLabel?: string;
@@ -169,27 +156,24 @@ export function resolveExpressLineServicioLabel(
 }
 
 /**
- * Consulta PriceMatrix para cotización express (piezas DL o baño por tamaño del vehículo).
+ * Consulta PriceMatrix para cotización express (piezas por tier vehicular o baño por tamaño).
  */
 export function buildObtenerCotizacionExpressPayload(
   snap: MatrixPricingSnapshot,
   servicios: readonly string[],
-  modeloVehiculo: string,
-  categoriaTamaño: CategoriaTamanoExpress,
+  vehicleProfile: VehiclePricingProfile,
   options?: { leadAgendado?: boolean },
 ): ObtenerCotizacionExpressResult {
-  const modelo = String(modeloVehiculo ?? '').trim();
+  const modelo = String(vehicleProfile.vehicleLabel ?? '').trim();
   if (!modelo) {
     return { success: false, error: 'Falta modeloVehiculo (marca y modelo del auto).' };
   }
 
-  if (!normalizeCategoriaTamanoExpress(categoriaTamaño)) {
-    return {
-      success: false,
-      error:
-        'categoriaTamaño inválida. Debe ser Chico, Mediano, Grande o Premium.',
-    };
-  }
+  const categoriaTamaño =
+    normalizeCategoriaTamanoExpress(vehicleProfile.sizeTier) ??
+    (vehicleProfile.sizeTier === 'Compacto'
+      ? 'Chico'
+      : vehicleProfile.sizeTier);
 
   const servicioList = servicios
     .map((s) => String(s ?? '').trim())
@@ -230,7 +214,7 @@ export function buildObtenerCotizacionExpressPayload(
       };
     }
     const sevFinal =
-      resolveCategoriaTamanoToBañoSeveridad(categoriaTamaño, allowed) ??
+      resolveBañoSeveridadFromVehicleProfile(vehicleProfile, allowed) ??
       allowed[0]!;
 
     const resolution = materializeInstantQuoteResolution(snap, {
@@ -284,7 +268,12 @@ export function buildObtenerCotizacionExpressPayload(
     occurrenceByCanonical.set(canonical, occ + 1);
 
     const label = resolveExpressLineServicioLabel(rawPieza, canonical, occ);
-    const unit = snap.getPriceForCanonical(canonical, PIEZA_DL);
+    const unit = resolvePiecePriceForVehicleProfile(
+      snap,
+      canonical,
+      PIEZA_DL,
+      vehicleProfile,
+    );
     if (unit <= 0) continue;
 
     lines.push({
@@ -320,6 +309,7 @@ export function buildObtenerCotizacionExpressPayload(
   const result: ObtenerCotizacionExpressResult = {
     success: true,
     categoriaTamaño,
+    vehiclePricingProfile: vehicleProfile,
     severidadCatalogo: lines.find((l) => l.tipo === 'bano_pintura')?.severidad,
     modeloVehiculo: modelo,
     vehicleDisplayLabel,
@@ -332,7 +322,7 @@ export function buildObtenerCotizacionExpressPayload(
     diasEntrega,
     leadAgendado,
     formatoRedaccion:
-      'Redacta al cliente con emojis 🛠️ por línea, total en negritas, Materiales premium Sikkens, Acabado Espejo y garantía por escrito cuando encaje.',
+      'Redacta al cliente con emojis 🛠️ por línea, total en negritas, Materiales premium Sikkens, Acabado Espejo y garantía por escrito cuando encaje. Menciona el vehículo y si aplica segmento premium.',
   };
 
   if (leadAgendado) {

@@ -2,6 +2,8 @@ import type { DraftQuoteLine } from './autofix-config';
 import { coerceDamageLevelCode } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
+import { resolvePiecePriceForVehicleProfile } from '../catalog/vehicle-piece-pricing';
+import type { VehiclePricingProfile } from '../catalog/vehicle-pricing-profile';
 import {
   findPanelPiezaOption,
   isInternalDamageRangePieza,
@@ -134,6 +136,7 @@ export function buildDraftQuoteLineFromQuoteRow(
 export function quoteRowsFromDamageInventory(
   inventory: readonly DetectedDamageItem[],
   snap: MatrixPricingSnapshot,
+  vehicleProfile?: VehiclePricingProfile | null,
 ): QuoteRowInput[] {
   const rows: QuoteRowInput[] = [];
   for (const it of inventory) {
@@ -146,9 +149,22 @@ export function quoteRowsFromDamageInventory(
         resolveCatalogPiezaForMatrixLookup(panelCode) ??
         snap.matchServicio(it.pieza) ??
         it.pieza;
-      precio = snap.getPriceForCanonical(catalogPieza, sev);
+      precio = resolvePiecePriceForVehicleProfile(
+        snap,
+        catalogPieza,
+        sev,
+        vehicleProfile,
+      );
       if (precio <= 0) {
         precio = snap.getAmount(it.pieza, sev);
+        if (precio > 0 && vehicleProfile) {
+          precio = resolvePiecePriceForVehicleProfile(
+            snap,
+            snap.matchServicio(it.pieza) ?? it.pieza,
+            sev,
+            vehicleProfile,
+          );
+        }
       }
     }
     rows.push({
@@ -163,9 +179,10 @@ export function quoteRowsFromDamageInventory(
 export function buildDraftQuoteLinesFromDamageInventory(
   inventory: readonly DetectedDamageItem[],
   snap: MatrixPricingSnapshot,
+  vehicleProfile?: VehiclePricingProfile | null,
 ): DraftQuoteLine[] {
-  return quoteRowsFromDamageInventory(inventory, snap).map((row, idx) =>
-    buildDraftQuoteLineFromQuoteRow(row, idx, snap),
+  return quoteRowsFromDamageInventory(inventory, snap, vehicleProfile).map(
+    (row, idx) => buildDraftQuoteLineFromQuoteRow(row, idx, snap),
   );
 }
 

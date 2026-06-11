@@ -10,6 +10,7 @@ import {
 import { Conversation } from './conversation.entity';
 import { Taller } from '../../taller/entities/taller.entity';
 import type { DraftQuote } from '../autofix-config';
+import type { VehiclePricingProfile } from '../../catalog/vehicle-pricing-profile';
 
 /**
  * Daño único dentro del resultado de visión IA (analiza grupo de fotos sesión/conversación).
@@ -59,6 +60,8 @@ export interface VehicleDamageAnalysis {
     complementOfDraftId?: string;
     /** bpc = baño completo; piezas = repintado por panel. */
     pricingMode?: 'bpc' | 'piezas';
+    /** Perfil vehicular para precios por tamaño + premium. */
+    vehiclePricingProfile?: VehiclePricingProfile;
   };
 }
 

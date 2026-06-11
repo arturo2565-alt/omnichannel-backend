@@ -21,6 +21,8 @@ import {
   mergeCartInventoryWithPricingMode,
   sanitizeCartInventoryForPricing,
 } from './quote-cart-inventory-mode';
+import type { VehiclePricingProfile } from '../catalog/vehicle-pricing-profile';
+import { vehiclePricingProfileFromAnalysis } from '../catalog/vehicle-pricing-profile';
 import type { PatchCartInventoryLineDto } from './quote-cart.types';
 import type { DetectedDamageItem, VehicleDamageAnalysis } from './entities/chat.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
@@ -674,6 +676,7 @@ export class QuoteCartService {
       inventory,
       tallerId,
       express.extras,
+      express.vehiclePricingProfile ?? null,
     );
     return {
       ...(await this.getCartSummaryEnvelope(conversationId, tallerId)),
@@ -689,6 +692,7 @@ export class QuoteCartService {
     inventory: DetectedDamageItem[],
     tallerId?: string | null,
     extras?: ReadonlyArray<{ label: string; amount: number }>,
+    vehicleProfileOverride?: VehiclePricingProfile | null,
   ): Promise<DraftQuoteEntity> {
     const sanitized = sanitizeCartInventoryForPricing(inventory);
     const snap = await this.catalogService.getMatrixPricingSnapshot(
@@ -697,6 +701,10 @@ export class QuoteCartService {
     const imageUrls = parseDraftImageUrls(row.imageUrl ?? '');
     const analysis = inventoryItemsToVehicleAnalysis(sanitized, imageUrls);
     const pricingMode = detectCartPricingMode(sanitized);
+    const vehicleProfile =
+      vehicleProfileOverride ??
+      vehiclePricingProfileFromAnalysis(row.damageAnalysis) ??
+      vehiclePricingProfileFromAnalysis(analysis);
     analysis.quoteCartMeta = {
       cartRole: row.damageAnalysis?.quoteCartMeta?.cartRole ?? 'primary',
       ...(row.damageAnalysis?.quoteCartMeta?.complementOfDraftId
@@ -706,9 +714,17 @@ export class QuoteCartService {
           }
         : {}),
       ...(pricingMode !== 'vacio' ? { pricingMode } : {}),
+      ...(vehicleProfile ? { vehiclePricingProfile: vehicleProfile } : {}),
     };
+    if (vehicleProfile?.vehicleLabel && !analysis.vehiculoDetectado) {
+      analysis.vehiculoDetectado = vehicleProfile.vehicleLabel;
+    }
 
-    const quoteRows = quoteRowsFromDamageInventory(sanitized, snap);
+    const quoteRows = quoteRowsFromDamageInventory(
+      sanitized,
+      snap,
+      vehicleProfile,
+    );
 
     let lines = quoteRows.map((r, i) =>
       buildDraftQuoteLineFromQuoteRow(r, i, snap),

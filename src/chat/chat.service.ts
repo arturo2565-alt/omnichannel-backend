@@ -136,6 +136,12 @@ import {
   buildObtenerCotizacionExpressPayload,
   normalizeCategoriaTamanoExpress,
 } from './autopilot-cotizacion-express';
+import {
+  parseExpressVehicleSizingArgs,
+  resolveBañoSeveridadFromVehicleProfile,
+  resolveVehiclePricingProfile,
+  vehiclePricingProfileFromAnalysis,
+} from '../catalog/vehicle-pricing-profile';
 import { QuoteCartService } from './quote-cart.service';
 import { shouldSuppressAutopilotForPendingDraft } from './quote-cart-autopilot-policy';
 import {
@@ -602,9 +608,14 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
           },
           categoriaTamaño: {
             type: 'string',
-            enum: ['Chico', 'Mediano', 'Grande', 'Premium'],
+            enum: ['Chico', 'Mediano', 'Grande', 'XL'],
             description:
-              'Tamaño de carrocería para la fila de PriceMatrix del baño de pintura. Pick-up/SUV grande/camioneta de carga (F-150, F-250, Silverado, Ram, Lobo, Suburban) → Grande. Marcas de lujo (BMW, Audi, Mercedes, etc.) → Premium. Sedán compacto → Mediano. Muy chico → Chico.',
+              'Tamaño de carrocería (NO confundir con premium). Pick-up/SUV grande (F-150, Silverado, Suburban) → Grande. SUV full-size (Escalade, Tahoe, Expedition) → XL. Sedán compacto (Aveo, March) → Chico. Sedán mediano → Mediano.',
+          },
+          esPremium: {
+            type: 'boolean',
+            description:
+              'true si es marca premium (BMW, Mercedes, Audi, Lexus, Porsche, Land Rover, Mini, etc.). El sistema aplica un multiplicador sobre el precio base del tamaño. También puedes inferirlo del modelo.',
           },
         },
         required: ['servicios', 'modeloVehiculo', 'categoriaTamaño'],
@@ -1599,6 +1610,7 @@ export class ChatService implements OnModuleDestroy {
     tallerId?: string | null,
   ): Promise<number> {
     const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
+    const vehicleProfile = vehiclePricingProfileFromAnalysis(analysis);
     if (
       analysis.inventory?.length &&
       isBanioPinturaCompletoVisionInventory(analysis.inventory)
@@ -1606,17 +1618,29 @@ export class ChatService implements OnModuleDestroy {
       const bpc = analysis.inventory[0]!;
       const canonical =
         resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
-      const tier = String(bpc.severidad ?? '').trim() || inferBañoTierSeveridad(
-        [analysis.descripcionTecnica, analysis.justificacion]
-          .filter(Boolean)
-          .join(' '),
-      );
+      let tier = String(bpc.severidad ?? '').trim();
+      if (!tier && vehicleProfile) {
+        const allowed = snap.listSeveridadesForCanonical(canonical);
+        tier =
+          resolveBañoSeveridadFromVehicleProfile(vehicleProfile, allowed) ?? '';
+      }
+      if (!tier) {
+        tier = inferBañoTierSeveridad(
+          [analysis.descripcionTecnica, analysis.justificacion]
+            .filter(Boolean)
+            .join(' '),
+        );
+      }
       const unit = snap.getPriceForCanonical(canonical, tier);
       this.logDebugBpcPrecio(analysis, canonical, tier, unit);
       if (unit > 0) return unit;
     }
     if (analysis.inventory?.length) {
-      const perItemRows = quoteRowsFromDamageInventory(analysis.inventory, snap);
+      const perItemRows = quoteRowsFromDamageInventory(
+        analysis.inventory,
+        snap,
+        vehicleProfile,
+      );
       if (perItemRows.length > 0) {
         const sum = sumQuoteRowsSubtotal(perItemRows);
         if (sum > 0) return sum;
@@ -5030,17 +5054,26 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     console.log('¿Se detectó intención de baño completo?:', intencionBanioGen);
     console.log('¿El inventario final colapsado es BPC?:', esInventarioBPCGen);
 
+    const vehicleProfile = vehiclePricingProfileFromAnalysis(analysis);
+
     if (analysis.inventory?.length && esInventarioBPCGen) {
       const bpc = analysis.inventory[0]!;
       const canonical =
         resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
-      const tierLiteral =
-        String(bpc.severidad ?? '').trim() ||
-        inferBañoTierSeveridad(
+      let tierLiteral = String(bpc.severidad ?? '').trim();
+      if (!tierLiteral && vehicleProfile) {
+        const allowed = snap.listSeveridadesForCanonical(canonical);
+        tierLiteral =
+          resolveBañoSeveridadFromVehicleProfile(vehicleProfile, allowed) ??
+          '';
+      }
+      if (!tierLiteral) {
+        tierLiteral = inferBañoTierSeveridad(
           [analysis.descripcionTecnica, analysis.justificacion]
             .filter(Boolean)
             .join(' '),
         );
+      }
       const unit = snap.getPriceForCanonical(canonical, tierLiteral);
       this.logDebugBpcPrecio(analysis, canonical, tierLiteral, unit);
       resolvedLevel = 'N/A';
@@ -5062,7 +5095,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         analysis.inventory.map((i) => i.severidad),
       );
       lines.push(
-        ...buildDraftQuoteLinesFromDamageInventory(analysis.inventory, snap),
+        ...buildDraftQuoteLinesFromDamageInventory(
+          analysis.inventory,
+          snap,
+          vehicleProfile,
+        ),
       );
     } else {
       const partes =
@@ -5406,7 +5443,33 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       analysisForQuote,
       visionTallerId,
     );
-    let draftQuoteDoc = await this.generateDraftQuote(analysisForQuote, visionTallerId);
+
+    const cartStoredProfile = vehiclePricingProfileFromAnalysis(
+      existingCart?.damageAnalysis,
+    );
+    const visionDetectedProfile = analysisForQuote.vehiculoDetectado
+      ? resolveVehiclePricingProfile({
+          modeloVehiculo: analysisForQuote.vehiculoDetectado,
+          tierSource: 'vision',
+        })
+      : null;
+    const vehicleProfileForQuote =
+      cartStoredProfile ?? visionDetectedProfile ?? null;
+    if (vehicleProfileForQuote) {
+      analysisForQuote = {
+        ...analysisForQuote,
+        quoteCartMeta: {
+          cartRole: 'primary',
+          ...analysisForQuote.quoteCartMeta,
+          vehiclePricingProfile: vehicleProfileForQuote,
+        },
+      };
+    }
+
+    let draftQuoteDoc = await this.generateDraftQuote(
+      analysisForQuote,
+      visionTallerId,
+    );
 
     if (existingCart?.quotePayload?.reference) {
       draftQuoteDoc = {
@@ -6002,17 +6065,23 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       raw.vehicleDescription,
     );
 
-    const categoriaRaw = pickFirstNonEmptyTrimmedString(
-      raw.categoriaTamaño,
-      raw.categoriaTamano,
-      raw.categoria_tamano,
-    );
-    const categoriaTamaño = normalizeCategoriaTamanoExpress(categoriaRaw);
-    if (!categoriaTamaño) {
+    const vehicleProfile =
+      parseExpressVehicleSizingArgs({
+        ...raw,
+        modeloVehiculo,
+      }) ??
+      (modeloVehiculo
+        ? resolveVehiclePricingProfile({
+            modeloVehiculo,
+            tierSource: 'llm',
+          })
+        : null);
+
+    if (!vehicleProfile) {
       return {
         success: false,
         error:
-          'Falta categoriaTamaño válida (Chico, Mediano, Grande o Premium).',
+          'Falta categoriaTamaño válida (Chico, Mediano, Grande o XL) o modeloVehiculo.',
       };
     }
 
@@ -6025,8 +6094,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const result = buildObtenerCotizacionExpressPayload(
       snap,
       servicios,
-      modeloVehiculo,
-      categoriaTamaño,
+      vehicleProfile,
       { leadAgendado: isAgendado },
     );
 
