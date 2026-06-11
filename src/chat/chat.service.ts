@@ -111,6 +111,7 @@ import {
   buildDraftResumeAgendadoCriticalContext,
   buildDraftResumeSinCitaSystemAppend,
   draftQuoteLinesToClientePiezaRows,
+  filterLineRowsForPiezaCodes,
   formatAppointmentHumanDate,
   formatDraftAppointmentCitaLong,
   mergeDamageInventoryAccumulative,
@@ -3641,8 +3642,7 @@ export class ChatService implements OnModuleDestroy {
     let fallbackNarrative = '';
 
     if (isComplement) {
-      const newSet = new Set(newDistinct);
-      const newLineRows = lineRows.filter((r) => newSet.has(r.pieza));
+      const newLineRows = filterLineRowsForPiezaCodes(lineRows, newDistinct);
       fallbackNarrative = buildClienteFormalNarrativeComplement({
         contactName,
         previousPiezas: complement!.previousPiezas,
@@ -3700,6 +3700,49 @@ export class ChatService implements OnModuleDestroy {
     if (normalized) {
       Object.assign(draft, normalized);
     }
+  }
+
+  /**
+   * Regenera formalNarrative/clientMessage desde el inventario y líneas actuales del borrador.
+   * Usa desglose completo (sin plantilla de complemento congelada).
+   */
+  private async refreshClientNarrativeOnDraftQuote(
+    row: DraftQuoteEntity,
+    narrativeOptions?: { forceRandomVariant?: boolean; temperature?: number },
+  ): Promise<DraftQuoteEntity> {
+    const draft = row.quotePayload;
+    const analysis = row.damageAnalysis;
+    const urls = parseDraftImageUrls(row.imageUrl ?? '');
+    const imageCount = Math.max(1, urls.length);
+
+    await this.applyClientFacingFormalNarrativeToDraft(
+      draft,
+      analysis,
+      row.conversationId,
+      imageCount,
+      null,
+      narrativeOptions,
+    );
+
+    const draftForClient = normalizeDraftQuoteForClient(draft) ?? draft;
+    row.quotePayload = draftForClient;
+    const saved = await this.draftQuoteRepository.save(row);
+
+    if (saved.messageId) {
+      await this.messageRepository.update(
+        { id: saved.messageId },
+        {
+          damageAnalysis: saved.damageAnalysis,
+          draftQuote: draftForClient,
+        },
+      );
+    }
+
+    const reloaded = await this.draftQuoteRepository.findOne({
+      where: { id: saved.id },
+      relations: { items: true },
+    });
+    return reloaded ?? saved;
   }
 
   /**
@@ -3856,42 +3899,24 @@ export class ChatService implements OnModuleDestroy {
     }
     row = existing;
 
-    const draft = row.quotePayload;
-    const analysis = row.damageAnalysis;
-    const urls = parseDraftImageUrls(row.imageUrl ?? '');
-    const imageCount = Math.max(1, urls.length);
-
     console.log(
       '[regenerateDraftQuoteClientNarrative] Forzando nueva llamada gpt-4o (no cache)',
       { draftQuoteId, conversationId: row.conversationId },
     );
 
-    await this.applyClientFacingFormalNarrativeToDraft(
-      draft,
-      analysis,
-      row.conversationId,
-      imageCount,
-      null,
-      { forceRandomVariant: true, temperature: 0.75 },
-    );
+    const refreshed = await this.refreshClientNarrativeOnDraftQuote(row, {
+      forceRandomVariant: true,
+      temperature: 0.75,
+    });
 
-    const draftForClient = normalizeDraftQuoteForClient(draft) ?? draft;
-    row.quotePayload = draftForClient;
-    await this.draftQuoteRepository.save(row);
-
-    if (row.messageId) {
-      await this.messageRepository.update(
-        { id: row.messageId },
-        { draftQuote: draftForClient },
-      );
-    }
+    const draftForClient = refreshed.quotePayload;
 
     return {
       narrative:
         draftForClient.clientMessage ??
         draftForClient.generatedMessage ??
         draftForClient.formalNarrative,
-      messageId: row.messageId,
+      messageId: refreshed.messageId,
       quotePayload: draftForClient,
       generatedMessage: draftForClient.generatedMessage,
       clientMessage: draftForClient.clientMessage,
@@ -5344,7 +5369,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
     const {
       mergedInventory,
-      complementMeta,
       allImageUrls,
       existingCart,
     } = visionMerge;
@@ -5408,7 +5432,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       analysisForQuote,
       conversationId,
       imageUrls.length,
-      complementMeta,
+      null,
     );
     const draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
@@ -5491,15 +5515,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       tallerId,
       body.inventoryLines,
     );
-    if (saved.messageId) {
-      await this.messageRepository.update(
-        { id: saved.messageId },
-        {
-          damageAnalysis: saved.damageAnalysis,
-          draftQuote: saved.quotePayload,
-        },
-      );
-    }
+    await this.refreshClientNarrativeOnDraftQuote(saved);
     return this.loadDraftQuoteWithItemsOrThrow(saved.id, tallerId);
   }
 

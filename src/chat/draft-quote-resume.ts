@@ -2,6 +2,8 @@ import type { DraftQuoteLine } from './autofix-config';
 import { coerceDamageLevelCode, damageLevelRank } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { WORKSHOP_TIMEZONE } from './appointment-intent';
+import { findPanelPiezaOption } from '../catalog/panel-pieza-catalog';
+import { piezaMatchesQuery } from './quote-cart-analysis';
 
 function dedupeStringListCaseInsensitive(values: readonly string[]): string[] {
   const out: string[] = [];
@@ -113,6 +115,45 @@ export function formatPiezasListForCliente(piezas: readonly string[]): string {
   if (list.length === 1) return list[0]!;
   if (list.length === 2) return `${list[0]} y ${list[1]}`;
   return `${list.slice(0, -1).join(', ')} y ${list[list.length - 1]}`;
+}
+
+/** Código de panel → nombre legible para el cliente (ej. FD → Fascia delantera). */
+export function resolvePiezaDisplayLabel(codeOrLabel: string): string {
+  const raw = String(codeOrLabel ?? '').trim();
+  if (!raw) return 'Servicio';
+  return findPanelPiezaOption(raw)?.fullName ?? raw;
+}
+
+export function lineRowMatchesPiezaCode(
+  row: { pieza: string },
+  code: string,
+): boolean {
+  const codeTrim = String(code ?? '').trim();
+  if (!codeTrim) return false;
+  const label = String(row.pieza ?? '').trim();
+  if (!label) return false;
+  if (label.toLowerCase() === codeTrim.toLowerCase()) return true;
+  const opt = findPanelPiezaOption(codeTrim);
+  if (opt?.fullName && opt.fullName.toLowerCase() === label.toLowerCase()) {
+    return true;
+  }
+  if (opt?.code && opt.code.toLowerCase() === label.toLowerCase()) {
+    return true;
+  }
+  return (
+    piezaMatchesQuery(codeTrim, label) || piezaMatchesQuery(label, codeTrim)
+  );
+}
+
+export function filterLineRowsForPiezaCodes(
+  lineRows: readonly { pieza: string; precioMx: number }[],
+  piezaCodes: readonly string[],
+): { pieza: string; precioMx: number }[] {
+  const codes = piezaCodes.map((c) => String(c ?? '').trim()).filter(Boolean);
+  if (!codes.length) return [];
+  return lineRows.filter((row) =>
+    codes.some((code) => lineRowMatchesPiezaCode(row, code)),
+  );
 }
 
 /** Narrativa legal del borrador (no es mensaje al cliente). */
@@ -268,8 +309,12 @@ export function buildClienteFormalNarrativeComplement(opts: {
   const newUnique = newUniqueRaw.filter(
     (p) => !previousUnique.some((x) => x.toLowerCase() === p.toLowerCase()),
   );
-  const prevLabel = formatPiezasListForCliente(previousUnique);
-  const newLabel = formatPiezasListForCliente(newUnique);
+  const prevLabel = formatPiezasListForCliente(
+    previousUnique.map(resolvePiezaDisplayLabel),
+  );
+  const newLabel = formatPiezasListForCliente(
+    newUnique.map(resolvePiezaDisplayLabel),
+  );
   const total = Math.max(0, Math.round(Number(opts.total) || 0));
   const newLinesText = opts.newLineRows
     .map((r) => formatClientePiezaLineExtra(r.pieza, r.precioMx))
