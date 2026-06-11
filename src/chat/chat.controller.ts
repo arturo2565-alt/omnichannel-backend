@@ -12,6 +12,7 @@ import {
   UseInterceptors,
   UploadedFile,
   ForbiddenException,
+  BadRequestException,
   Res,
   Req,
   UseGuards,
@@ -166,6 +167,35 @@ export class ChatController {
       success: true,
       message: 'Conversación eliminada correctamente',
     };
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('conversations/:conversationId/cart')
+  async getConversationCart(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('conversationId') conversationId: string,
+  ) {
+    return await this.chatService.findConversationCart(
+      conversationId,
+      user.tallerId,
+    );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('conversations/:conversationId/cart')
+  async patchConversationCart(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('conversationId') conversationId: string,
+    @Body() body: { inventoryLines?: PatchDraftQuoteBody['inventoryLines'] },
+  ) {
+    if (!body.inventoryLines?.length) {
+      throw new BadRequestException('inventoryLines es obligatorio');
+    }
+    return await this.chatService.patchConversationCart(
+      conversationId,
+      user.tallerId,
+      { inventoryLines: body.inventoryLines },
+    );
   }
 
   @UseGuards(JwtAuthGuard)

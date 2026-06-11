@@ -123,6 +123,7 @@ import {
   buildObtenerCotizacionExpressPayload,
   normalizeCategoriaTamanoExpress,
 } from './autopilot-cotizacion-express';
+import { QuoteCartService } from './quote-cart.service';
 import {
   assistantMessageIsBañoVehiclePrompt,
   type InstantQuoteResolution,
@@ -599,6 +600,108 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'obtenerCarritoActual',
+      description:
+        'Devuelve el carrito/cotización acumulada de esta conversación (fotos + chat). Úsala cuando el cliente pida el total actual o antes de agregar o quitar piezas.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'agregarAlCarrito',
+      description:
+        'Agrega una pieza o servicio al carrito global de la conversación (rayones, repintado express por chat, etc.).',
+      parameters: {
+        type: 'object',
+        properties: {
+          pieza: {
+            type: 'string',
+            description:
+              'Nombre de la pieza (Toldo, Fascia delantera, Puerta, Salpicadera, etc.).',
+          },
+          severidad: {
+            type: 'string',
+            description:
+              'Opcional. Nivel de daño (DL, DML, DM, …). Por defecto DL para repintado express.',
+          },
+          descripcion: {
+            type: 'string',
+            description: 'Detalle opcional para el operador.',
+          },
+        },
+        required: ['pieza'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'quitarDelCarrito',
+      description:
+        'Quita una pieza del carrito cuando el cliente diga que ya no la quiere (ej. "mejor sin el toldo").',
+      parameters: {
+        type: 'object',
+        properties: {
+          pieza: {
+            type: 'string',
+            description:
+              'Pieza a quitar; coincidencia parcial (toldo, fascia, puerta, etc.).',
+          },
+        },
+        required: ['pieza'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'actualizarCarrito',
+      description:
+        'Modifica una pieza ya en el carrito editable (severidad, nombre o descripción). No modifica líneas ya aprobadas por el operador.',
+      parameters: {
+        type: 'object',
+        properties: {
+          piezaActual: {
+            type: 'string',
+            description: 'Pieza a modificar (coincidencia parcial).',
+          },
+          piezaNueva: {
+            type: 'string',
+            description:
+              'Opcional. Nuevo nombre de pieza (ej. cambiar Puerta por Puerta delantera derecha).',
+          },
+          severidad: {
+            type: 'string',
+            description: 'Opcional. Nuevo nivel de daño (DL, DML, DM, …).',
+          },
+          descripcion: {
+            type: 'string',
+            description: 'Opcional. Nueva descripción técnica.',
+          },
+        },
+        required: ['piezaActual'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'obtenerResumenCarrito',
+      description:
+        'Resumen completo del carrito: estado (pendiente, complemento, aprobado), desglose aprobado vs complemento, totales parciales y totalGlobal.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'createAppointment',
       description:
         'Registra una cita en la base de datos del taller. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. En el panel de simulación (playground), la misma llamada solo valida horario y devuelve vista previa sin persistir en BD.',
@@ -643,6 +746,9 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
     },
   },
 ];
+
+const AUTOPILOT_TECHNICAL_FALLBACK_REPLY =
+  'Gracias por tu mensaje. Estoy revisando tu solicitud; en un momento te respondo con la cotización actualizada.';
 
 /** Cuerpo del panel para enviar mensaje outbound con JWT (`tallerId` viene del token). */
 export type SendAgentMessageBody = {
@@ -737,6 +843,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly tallerService: TallerService,
 
     private readonly twilioService: TwilioService,
+
+    private readonly quoteCartService: QuoteCartService,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -2758,40 +2866,6 @@ export class ChatService implements OnModuleDestroy {
       take: 1,
     });
     return rows[0] ?? null;
-  }
-
-  /** Inventario previo del borrador PENDING_APPROVAL (para acumular golpes). */
-  private extractPriorInventoryFromDraft(
-    existingDraft: DraftQuoteEntity,
-  ): DetectedDamageItem[] {
-    const fromAnalysis = existingDraft.damageAnalysis?.inventory;
-    if (Array.isArray(fromAnalysis) && fromAnalysis.length > 0) {
-      return fromAnalysis.map((it) => ({
-        pieza: it.pieza,
-        severidad: it.severidad,
-        descripcionTecnica: it.descripcionTecnica,
-        urls_origen: [...(it.urls_origen ?? [])],
-      }));
-    }
-    const fromBasis = existingDraft.quotePayload?.analysisBasis?.inventory;
-    if (Array.isArray(fromBasis) && fromBasis.length > 0) {
-      return fromBasis.map((it) => ({
-        pieza: it.pieza,
-        severidad: it.severidad,
-        descripcionTecnica: it.descripcionTecnica,
-        urls_origen: [...(it.urls_origen ?? [])],
-      }));
-    }
-    const lines = existingDraft.quotePayload?.lines ?? [];
-    if (lines.length > 0) {
-      return lines.map((line) => ({
-        pieza: piezaLabelFromDraftLineDescription(line.description),
-        severidad: 'DL',
-        descripcionTecnica: line.description,
-        urls_origen: [],
-      }));
-    }
-    return [];
   }
 
   /** Tras nuevo borrador: `por_cotizar` salvo lead con cita activa (permanece `agendado`). */
@@ -5235,11 +5309,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const conversationTextHistory =
       await this.buildVisionTextHistoryForConversation(conversationId);
 
-    const existingDraft = await this.draftQuoteRepository.findOne({
-      where: { conversationId, status: 'PENDING_APPROVAL' },
-      order: { createdAt: 'DESC' },
-    });
-
     const newInventory = await this.analyzeDamageImageInSequentialChunks(
       imageUrls,
       {
@@ -5266,51 +5335,29 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       newInventory.map((i) => i.pieza),
     );
 
-    let analysis: VehicleDamageAnalysis;
-    let complementMeta: Pick<
-      DamageInventoryMergeResult,
-      'previousPiezas' | 'newPiezas'
-    > | null = null;
-    let allImageUrls = imageUrls;
+    const visionMerge = await this.quoteCartService.mergeVisionInventory(
+      conversationId,
+      visionTallerId,
+      newInventory,
+      imageUrls,
+    );
+    const {
+      mergedInventory,
+      complementMeta,
+      allImageUrls,
+      existingCart,
+    } = visionMerge;
 
-    if (existingDraft) {
-      const priorInventory =
-        this.extractPriorInventoryFromDraft(existingDraft);
-      const priorUrls = parseDraftImageUrls(existingDraft.imageUrl ?? '');
-      allImageUrls = [
-        ...new Set([...priorUrls, ...imageUrls]),
-      ];
-
-      if (isBanioPinturaCompletoVisionInventory(newInventory)) {
-        analysis = inventoryItemsToVehicleAnalysis(newInventory, allImageUrls);
-      } else if (priorInventory.length > 0) {
-        const mergedInv = mergeDamageInventoryAccumulative(
-          priorInventory,
-          newInventory,
-          (raw) => normalizePanelPiezaCode(raw) || raw,
-        );
-        complementMeta = {
-          previousPiezas: mergedInv.previousPiezas,
-          newPiezas: mergedInv.newPiezas,
-        };
-        analysis = inventoryItemsToVehicleAnalysis(
-          mergedInv.merged,
-          allImageUrls,
-        );
-      } else {
-        analysis = inventoryItemsToVehicleAnalysis(
-          newInventory,
-          allImageUrls,
-        );
-      }
-    } else {
-      analysis = inventoryItemsToVehicleAnalysis(newInventory, imageUrls);
-    }
+    const analysis = inventoryItemsToVehicleAnalysis(
+      mergedInventory,
+      allImageUrls,
+    );
 
     const banioIntent = visionItemsIndicateBanioCompleto(newInventory);
+    let analysisForQuote = analysis;
     if (banioIntent) {
       const vehicleGate = await this.inferBpcVehicleForPricingGate(
-        analysis,
+        analysisForQuote,
         conversationId,
       );
       if (!vehicleGate.usable) {
@@ -5325,39 +5372,39 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         await this.persistBanioAwaitingVehicleDraft(
           conversationId,
           attachingMessageId,
-          analysis,
+          analysisForQuote,
           allImageUrls,
           visionTallerId,
           gate,
         );
         return;
       }
-      analysis = {
-        ...analysis,
+      analysisForQuote = {
+        ...analysisForQuote,
         vehiculoDetectado: vehicleGate.vehicleLabel ?? undefined,
       };
-      if (analysis.inventory?.[0] && vehicleGate.vehicleLabel) {
-        analysis.inventory[0].vehiculoDetectado = vehicleGate.vehicleLabel;
+      if (analysisForQuote.inventory?.[0] && vehicleGate.vehicleLabel) {
+        analysisForQuote.inventory[0].vehiculoDetectado = vehicleGate.vehicleLabel;
       }
     }
 
     const estimateAmount = await this.computePrimaryMatrixEstimate(
-      analysis,
+      analysisForQuote,
       visionTallerId,
     );
-    let draftQuoteDoc = await this.generateDraftQuote(analysis, visionTallerId);
+    let draftQuoteDoc = await this.generateDraftQuote(analysisForQuote, visionTallerId);
 
-    if (existingDraft?.quotePayload?.reference) {
+    if (existingCart?.quotePayload?.reference) {
       draftQuoteDoc = {
         ...draftQuoteDoc,
-        reference: existingDraft.quotePayload.reference,
-        generatedAt: existingDraft.quotePayload.generatedAt,
+        reference: existingCart.quotePayload.reference,
+        generatedAt: existingCart.quotePayload.generatedAt,
       };
     }
 
     await this.applyClientFacingFormalNarrativeToDraft(
       draftQuoteDoc,
-      analysis,
+      analysisForQuote,
       conversationId,
       imageUrls.length,
       complementMeta,
@@ -5365,87 +5412,40 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
 
-    const persistedImageUrl = persistDraftImageUrlField(allImageUrls);
-
     const messageId = attachingMessageId;
 
-    if (existingDraft) {
-      const priorMessageId = existingDraft.messageId;
-      existingDraft.messageId = messageId;
-      existingDraft.imageUrl = persistedImageUrl;
-      existingDraft.damageAnalysis = analysis;
-      existingDraft.estimateAmount = estimateAmount;
-      existingDraft.quotePayload = draftQuoteForClient;
-      existingDraft.tallerId = visionTallerId;
-      const savedDraft = await this.draftQuoteRepository.save(existingDraft);
-      await this.syncDraftQuoteLineItems(
-        savedDraft.id,
-        analysis,
-        draftQuoteForClient,
-        allImageUrls,
-        visionTallerId,
-      );
-
-      if (priorMessageId && priorMessageId !== messageId) {
-        await this.messageRepository.update(
-          { id: priorMessageId },
-          { damageAnalysis: null, draftQuote: null },
-        );
-      }
-      await this.messageRepository.update(
-        { id: messageId },
-        { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
-      );
-
-      await this.markConversationDraftPendingReview(conversationId);
-
-      this.chatGateway.emitDraftQuoteReady({
-        draftQuoteId: savedDraft.id,
+    const { savedDraft, priorMessageId } =
+      await this.quoteCartService.persistVisionQuote({
         conversationId,
+        tallerId: visionTallerId,
         messageId,
-        damageAnalysis: analysis,
-        draftQuote: draftQuoteForClient,
+        analysis: analysisForQuote,
+        draftQuoteDoc: draftQuoteForClient,
         estimateAmount,
-        isAutoPilotActive: false,
+        allImageUrls,
+        existingCart,
       });
-      return;
-    }
 
-    const row = this.draftQuoteRepository.create({
-      conversationId,
-      tallerId: visionTallerId,
-      messageId,
-      imageUrl: persistedImageUrl,
-      damageAnalysis: analysis,
-      estimateAmount,
-      quotePayload: draftQuoteForClient,
-      status: 'PENDING_APPROVAL',
-    });
-    const savedDraft = await this.draftQuoteRepository.save(row);
     await this.syncDraftQuoteLineItems(
       savedDraft.id,
-      analysis,
+      analysisForQuote,
       draftQuoteForClient,
       allImageUrls,
       visionTallerId,
     );
 
+    if (priorMessageId && priorMessageId !== messageId) {
+      await this.messageRepository.update(
+        { id: priorMessageId },
+        { damageAnalysis: null, draftQuote: null },
+      );
+    }
     await this.messageRepository.update(
       { id: messageId },
-      { damageAnalysis: analysis, draftQuote: draftQuoteForClient },
+      { damageAnalysis: analysisForQuote, draftQuote: draftQuoteForClient },
     );
 
     await this.markConversationDraftPendingReview(conversationId);
-
-    this.chatGateway.emitDraftQuoteReady({
-      draftQuoteId: savedDraft.id,
-      conversationId,
-      messageId,
-      damageAnalysis: analysis,
-      draftQuote: draftQuoteForClient,
-      estimateAmount,
-      isAutoPilotActive: false,
-    });
   }
 
   async findDraftQuotesByConversation(
@@ -5466,6 +5466,40 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       }
     }
     return rows;
+  }
+
+  async findConversationCart(conversationId: string, tallerId: string) {
+    await this.assertConversationForTaller(conversationId, tallerId);
+    return this.quoteCartService.getConversationCartDetail(
+      conversationId,
+      tallerId,
+    );
+  }
+
+  async patchConversationCart(
+    conversationId: string,
+    tallerId: string,
+    body: { inventoryLines: PatchInventoryLineDto[] },
+  ) {
+    await this.assertConversationForTaller(conversationId, tallerId);
+    if (!body.inventoryLines?.length) {
+      throw new BadRequestException('inventoryLines es obligatorio');
+    }
+    const saved = await this.quoteCartService.patchInventoryLines(
+      conversationId,
+      tallerId,
+      body.inventoryLines,
+    );
+    if (saved.messageId) {
+      await this.messageRepository.update(
+        { id: saved.messageId },
+        {
+          damageAnalysis: saved.damageAnalysis,
+          draftQuote: saved.quotePayload,
+        },
+      );
+    }
+    return this.loadDraftQuoteWithItemsOrThrow(saved.id, tallerId);
   }
 
   /**
@@ -5990,7 +6024,183 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       { leadAgendado: isAgendado },
     );
 
-    return result as Record<string, unknown>;
+    if (!result.success) {
+      return result as Record<string, unknown>;
+    }
+
+    try {
+      const cartEnvelope = await this.quoteCartService.persistExpressQuote(
+        conversation.id,
+        conversation.tallerId,
+        result,
+      );
+      return { ...result, ...cartEnvelope };
+    } catch (err) {
+      console.error('[CARRITO] persistExpressQuote:', err);
+      return {
+        ...result,
+        cartPersisted: false,
+        error:
+          'Cotización calculada pero no se pudo guardar en el carrito global.',
+      };
+    }
+  }
+
+  private async executeObtainCarritoActualTool(
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    return this.quoteCartService.getCartEnvelope(
+      conversation.id,
+      conversation.tallerId,
+    );
+  }
+
+  private async executeAgregarAlCarritoTool(
+    argsJson: string,
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+    const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+    const severidad = pickFirstNonEmptyTrimmedString(raw.severidad, raw.nivel);
+    const descripcion = pickFirstNonEmptyTrimmedString(
+      raw.descripcion,
+      raw.descripcionTecnica,
+    );
+    return this.quoteCartService.addTextItem(
+      conversation.id,
+      conversation.tallerId,
+      pieza,
+      severidad || undefined,
+      descripcion || undefined,
+    );
+  }
+
+  private async executeQuitarDelCarritoTool(
+    argsJson: string,
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+    const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.servicio);
+    if (!pieza) {
+      return { success: false, error: 'Indica qué pieza quitar del carrito.' };
+    }
+    try {
+      return await this.quoteCartService.removeItem(
+        conversation.id,
+        conversation.tallerId,
+        pieza,
+      );
+    } catch (err) {
+      console.error('[BUG CRÍTICO AUTOPILOT] quitarDelCarrito:', err);
+      return {
+        success: false,
+        error: 'No se pudo quitar la pieza del carrito. Intenta de nuevo.',
+      };
+    }
+  }
+
+  private async executeObtainCarritoResumenTool(
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    return this.quoteCartService.getCartSummaryEnvelope(
+      conversation.id,
+      conversation.tallerId,
+    );
+  }
+
+  private async executeActualizarCarritoTool(
+    argsJson: string,
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+    const piezaActual = pickFirstNonEmptyTrimmedString(
+      raw.piezaActual,
+      raw.pieza,
+      raw.servicio,
+    );
+    if (!piezaActual) {
+      return {
+        success: false,
+        error: 'Indica piezaActual: qué pieza del carrito modificar.',
+      };
+    }
+    const piezaNueva = pickFirstNonEmptyTrimmedString(
+      raw.piezaNueva,
+      raw.nuevaPieza,
+    );
+    const severidad = pickFirstNonEmptyTrimmedString(raw.severidad, raw.nivel);
+    const descripcion = pickFirstNonEmptyTrimmedString(
+      raw.descripcion,
+      raw.descripcionTecnica,
+    );
+    return this.quoteCartService.updateItem(
+      conversation.id,
+      conversation.tallerId,
+      piezaActual,
+      {
+        piezaNueva: piezaNueva || undefined,
+        severidad: severidad || undefined,
+        descripcion: descripcion || undefined,
+      },
+    );
+  }
+
+  private async executeAutopilotToolSafely(
+    name: string,
+    args: string,
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    try {
+      if (name === 'createAppointment') {
+        return (await this.executeCreateAppointmentTool(
+          args,
+          conversation,
+        )) as Record<string, unknown>;
+      }
+      if (name === 'obtenerCotizacionExpress') {
+        return await this.executeObtenerCotizacionExpressTool(args, conversation);
+      }
+      if (name === 'obtenerCarritoActual') {
+        return await this.executeObtainCarritoActualTool(conversation);
+      }
+      if (name === 'agregarAlCarrito') {
+        return await this.executeAgregarAlCarritoTool(args, conversation);
+      }
+      if (name === 'quitarDelCarrito') {
+        return await this.executeQuitarDelCarritoTool(args, conversation);
+      }
+      if (name === 'actualizarCarrito') {
+        return await this.executeActualizarCarritoTool(args, conversation);
+      }
+      if (name === 'obtenerResumenCarrito') {
+        return await this.executeObtainCarritoResumenTool(conversation);
+      }
+      if (name === 'notificarLlegadaCliente') {
+        return await this.executeNotificarLlegadaClienteTool(conversation);
+      }
+      return { success: false, error: `Función desconocida: ${name}` };
+    } catch (err) {
+      console.error(`[AUTOPILOT] tool ${name} failed:`, err);
+      return {
+        success: false,
+        error: `Error interno ejecutando ${name}.`,
+      };
+    }
   }
 
   private resolveCreateAppointmentScheduledAt(raw: Record<string, unknown>): {
@@ -6220,6 +6430,29 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           } else if (name === 'obtenerCotizacionExpress') {
             payload = await this.executeObtenerCotizacionExpressToolPlayground(
               tc.function.arguments ?? '{}',
+            );
+          } else if (name === 'obtenerCarritoActual') {
+            payload = await this.executeObtainCarritoActualTool(
+              { status: 'nuevo' } as Conversation,
+            );
+          } else if (name === 'agregarAlCarrito') {
+            payload = await this.executeAgregarAlCarritoTool(
+              tc.function.arguments ?? '{}',
+              { status: 'nuevo' } as Conversation,
+            );
+          } else if (name === 'quitarDelCarrito') {
+            payload = await this.executeQuitarDelCarritoTool(
+              tc.function.arguments ?? '{}',
+              { status: 'nuevo' } as Conversation,
+            );
+          } else if (name === 'actualizarCarrito') {
+            payload = await this.executeActualizarCarritoTool(
+              tc.function.arguments ?? '{}',
+              { status: 'nuevo' } as Conversation,
+            );
+          } else if (name === 'obtenerResumenCarrito') {
+            payload = await this.executeObtainCarritoResumenTool(
+              { status: 'nuevo' } as Conversation,
             );
           } else if (name === 'notificarLlegadaCliente') {
             payload = await this.executeNotificarLlegadaClienteToolPlayground();
@@ -6602,30 +6835,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             }
             const name = tc.function.name;
             const args = tc.function.arguments ?? '{}';
-            let payload: Record<string, unknown>;
-            if (name === 'createAppointment') {
-              const aptPayload = await this.executeCreateAppointmentTool(
-                args,
-                conversation,
-              );
-              payload = aptPayload as Record<string, unknown>;
-              if (aptPayload.success && aptPayload.scheduledAt) {
-                lastConfirmedIso = aptPayload.scheduledAt;
-              }
-            } else if (name === 'obtenerCotizacionExpress') {
-              payload = await this.executeObtenerCotizacionExpressTool(
-                args,
-                conversation,
-              );
-            } else if (name === 'notificarLlegadaCliente') {
-              payload = await this.executeNotificarLlegadaClienteTool(
-                conversation,
-              );
-            } else {
-              payload = {
-                success: false,
-                error: `Función desconocida: ${name}`,
-              };
+            const payload = await this.executeAutopilotToolSafely(
+              name,
+              args,
+              conversation,
+            );
+            if (
+              name === 'createAppointment' &&
+              payload.success &&
+              payload.scheduledAt
+            ) {
+              lastConfirmedIso = String(payload.scheduledAt);
             }
             messages.push({
               role: 'tool',
@@ -6652,15 +6872,15 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
             return 'Tu cita ha quedado registrada. ¡Te esperamos!';
           }
         }
-        return null;
+        return AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
       }
 
       return lastConfirmedIso
         ? 'Tu cita ha quedado registrada. ¡Te esperamos!'
-        : null;
+        : AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
     } catch (err) {
       console.error('composeAutopilotReplyWithTools:', err);
-      return null;
+      return AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
     }
   }
 

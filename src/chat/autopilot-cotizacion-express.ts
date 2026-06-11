@@ -8,6 +8,11 @@ import {
   mentionsBañoDePinturaIntent,
   resolveBañoCanonicalFromSnap,
 } from './instant-quote-from-text';
+import {
+  findPanelPiezaOption,
+  PANEL_PIEZA_OPTIONS,
+  type PanelPiezaOption,
+} from '../catalog/panel-pieza-catalog';
 
 const PIEZA_DL = 'DL';
 
@@ -91,6 +96,12 @@ export type CotizacionExpressLineDto = {
   precioLineaMx: number;
 };
 
+export type CotizacionExpressDesgloseLine = {
+  pieza: string;
+  severidad: string;
+  precioMx: number;
+};
+
 export type ObtenerCotizacionExpressResult = {
   success: boolean;
   error?: string;
@@ -100,6 +111,7 @@ export type ObtenerCotizacionExpressResult = {
   vehicleDisplayLabel?: string;
   moneda?: typeof AUTO_FIX_CURRENCY;
   lines?: CotizacionExpressLineDto[];
+  desglose?: CotizacionExpressDesgloseLine[];
   extras?: { label: string; amount: number }[];
   subtotalMx?: number;
   totalMx?: number;
@@ -117,6 +129,43 @@ export function servicioSolicitudLooksLikeBano(raw: string): boolean {
   return /\b(bano de pintura|bano pintura|bano completo|bano integral|pintura exterior completa|baño de pintura|baño completo)\b/.test(
     n,
   );
+}
+
+/** Variantes del panel que comparten catalogPieza (Fascia → FD/FT, Puerta → PDI/PDD/…). */
+function panelVariantsForCatalogPieza(
+  catalogPieza: string,
+): PanelPiezaOption[] {
+  return PANEL_PIEZA_OPTIONS.filter(
+    (o) =>
+      o.catalogPieza === catalogPieza &&
+      !o.internalDamageRange &&
+      !o.refaccionManual,
+  );
+}
+
+/**
+ * Etiqueta de línea express: si el LLM repite un nombre genérico (Fascia × 2),
+ * rota variantes del panel (delantera / trasera).
+ */
+export function resolveExpressLineServicioLabel(
+  rawPieza: string,
+  canonical: string,
+  occurrenceIndex: number,
+): string {
+  const opt = findPanelPiezaOption(rawPieza);
+  const rawNorm = normalizeTextForMatch(rawPieza);
+  const canonNorm = normalizeTextForMatch(canonical);
+
+  if (opt && rawNorm !== canonNorm) {
+    return opt.fullName;
+  }
+
+  const variants = panelVariantsForCatalogPieza(canonical);
+  if (variants.length > 1) {
+    return variants[occurrenceIndex % variants.length]!.fullName;
+  }
+
+  return opt?.fullName ?? canonical;
 }
 
 /**
@@ -217,7 +266,7 @@ export function buildObtenerCotizacionExpressPayload(
     diasEntrega = Math.max(diasEntrega, resolution.diasEntrega);
   }
 
-  const usedPiezas = new Set<string>();
+  const occurrenceByCanonical = new Map<string, number>();
   for (const rawPieza of piezaRequests) {
     const canonical = snap.matchServicio(rawPieza);
     if (!canonical) {
@@ -230,14 +279,16 @@ export function buildObtenerCotizacionExpressPayload(
     if (k.includes('ceramico') || (k.includes('estetica') && k.includes('automotriz'))) {
       continue;
     }
-    if (usedPiezas.has(canonical)) continue;
 
+    const occ = occurrenceByCanonical.get(canonical) ?? 0;
+    occurrenceByCanonical.set(canonical, occ + 1);
+
+    const label = resolveExpressLineServicioLabel(rawPieza, canonical, occ);
     const unit = snap.getPriceForCanonical(canonical, PIEZA_DL);
     if (unit <= 0) continue;
 
-    usedPiezas.add(canonical);
     lines.push({
-      servicio: canonical,
+      servicio: label,
       canonical,
       tipo: 'pieza',
       severidad: PIEZA_DL,
@@ -259,6 +310,11 @@ export function buildObtenerCotizacionExpressPayload(
   const subtotalMx = lines.reduce((s, l) => s + l.precioLineaMx, 0);
   const extrasTotal = extras.reduce((s, e) => s + e.amount, 0);
   const totalMx = subtotalMx + extrasTotal;
+  const desglose: CotizacionExpressDesgloseLine[] = lines.map((l) => ({
+    pieza: l.servicio,
+    severidad: l.severidad,
+    precioMx: l.precioLineaMx,
+  }));
 
   const leadAgendado = options?.leadAgendado === true;
   const result: ObtenerCotizacionExpressResult = {
@@ -269,6 +325,7 @@ export function buildObtenerCotizacionExpressPayload(
     vehicleDisplayLabel,
     moneda: AUTO_FIX_CURRENCY,
     lines,
+    desglose,
     extras: extras.length > 0 ? extras : undefined,
     subtotalMx,
     totalMx,

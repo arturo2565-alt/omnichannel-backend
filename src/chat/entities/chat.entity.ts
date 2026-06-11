@@ -53,6 +53,11 @@ export interface VehicleDamageAnalysis {
     inventarioVisual: DetectedDamageItem[];
     guardadoEn: string;
   };
+  /** Metadatos del carrito global (complemento post-aprobación, etc.). */
+  quoteCartMeta?: {
+    cartRole: 'primary' | 'complement';
+    complementOfDraftId?: string;
+  };
 }
 
 @Entity()
