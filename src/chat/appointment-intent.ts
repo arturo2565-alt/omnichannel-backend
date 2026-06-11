@@ -232,6 +232,61 @@ export function parseWorkshopScheduledAtIso(
   return { ok: true, date: d };
 }
 
+const NAIVE_ISO_HOUR_COERCE_RE =
+  /^(\d{4}-\d{2}-\d{2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d{1,3})?$/;
+
+/**
+ * Igual que {@link parseWorkshopScheduledAtIso} pero si la hora 01:00–07:59
+ * cae fuera de horario y +12h sí es válido, asume tarde (ej. 03:30 → 15:30).
+ */
+export function parseWorkshopScheduledAtIsoForBooking(
+  iso: string,
+):
+  | { ok: true; date: Date; coercedFromPmAmbiguity?: boolean }
+  | { ok: false; error: string } {
+  const first = parseWorkshopScheduledAtIso(iso);
+  if (!first.ok) return first;
+
+  const slot = validateWorkshopSlotUtcDetailed(first.date);
+  if (slot.valid) {
+    return { ok: true, date: first.date };
+  }
+
+  const s = String(iso ?? '').trim();
+  if (hasExplicitTimezoneInIso(s)) {
+    return { ok: false, error: slot.error };
+  }
+
+  const m = NAIVE_ISO_HOUR_COERCE_RE.exec(s);
+  if (!m) {
+    return { ok: false, error: slot.error };
+  }
+
+  const ymd = m[1]!;
+  const hour = Number(m[2]);
+  const minute = Number(m[3]);
+  if (
+    !Number.isFinite(hour) ||
+    hour < 1 ||
+    hour > 7 ||
+    !Number.isFinite(minute)
+  ) {
+    return { ok: false, error: slot.error };
+  }
+
+  const pmHour = hour + 12;
+  if (!isWithinBusinessHours(ymd, pmHour, minute)) {
+    return { ok: false, error: slot.error };
+  }
+
+  const utc = mexicoCityLocalToUtc(ymd, pmHour, minute);
+  if (!utc || Number.isNaN(utc.getTime())) {
+    return { ok: false, error: slot.error };
+  }
+
+  return { ok: true, date: utc, coercedFromPmAmbiguity: true };
+}
+
 function parseLlmJson(content: string): LlmExtract {
   try {
     const o = JSON.parse(content) as Record<string, unknown>;
@@ -311,8 +366,9 @@ Reglas:
 - isBookingIntent = true solo si el usuario quiere RESERVAR / AGENDAR / CITA / VISITA / PASAR / VER AL TALLER / QUE LO ATIENDAN en fecha u hora (incluye \"¿tienen el martes?\", \"¿me agendan mañana a las 10?\").
 - Si solo pregunta si trabajan fines de semana sin pedir cita concreta, isBookingIntent puede ser false.
 - Si dice \"mañana\", relativeDay debe ser \"mañana\" (la fecha exacta la calcula el servidor sumando 1 día civil al día de referencia en ${WORKSHOP_TIMEZONE}).
-- Si da día de la semana o fecha explícita, usa explicitDateYmd cuando puedas (año actual implícito si no lo dice; usa la fecha de referencia ${refIso} como guía).
-- hour24 y minute en formato 24h; si no indicó hora, null en ambos.
+- Si da día de la semana (lunes…domingo) sin fecha numérica, pon explicitDateYmd al próximo día con ese nombre en el calendario del taller (respecto a la fecha de referencia).
+- hour24 y minute en formato 24h. Si el cliente dice "3:30" o "3:30 pm" para una cita de taller, interpreta como tarde (15:30) salvo que diga explícitamente AM/mañana.
+- Si no indicó hora, null en ambos.
 - needsClarification true si falta hora o hay ambigüedad fuerte (ej. \"algún día esta semana\" sin más datos).`,
       },
       {
@@ -355,7 +411,7 @@ Reglas:
     needsClarification = true;
   }
 
-  const hour =
+  let hour =
     ext.hour24 != null &&
     Number.isFinite(ext.hour24) &&
     ext.hour24 >= 0 &&
@@ -372,6 +428,19 @@ Reglas:
 
   if (hour === null || minute === null) {
     needsClarification = true;
+  }
+
+  if (
+    targetYmd &&
+    hour !== null &&
+    minute !== null &&
+    hour >= 1 &&
+    hour <= 7 &&
+    !isWithinBusinessHours(targetYmd, hour, minute) &&
+    hour + 12 <= 23 &&
+    isWithinBusinessHours(targetYmd, hour + 12, minute)
+  ) {
+    hour = hour + 12;
   }
 
   if (!targetYmd || hour === null || minute === null) {

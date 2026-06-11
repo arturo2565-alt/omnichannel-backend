@@ -57,6 +57,18 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.emit('draftPeritajeAwaitingVehicle', payload);
   }
 
+  emitAppointmentCreated(payload: {
+    id: string;
+    conversationId: string | null;
+    clientName: string;
+    vehicle: string | null;
+    phone: string | null;
+    scheduledAt: string;
+    status: string;
+  }) {
+    this.server.emit('appointmentCreated', payload);
+  }
+
   /** Actualización de estado de lead / bandeja sin nuevo mensaje */
   emitConversationLeadUpdated(payload: {
     conversationId: string;

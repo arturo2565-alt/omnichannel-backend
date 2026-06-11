@@ -51,8 +51,17 @@ import {
   WORKSHOP_TIMEZONE,
   buildLlmServerTimeSystemPrefix,
   parseWorkshopScheduledAtIso,
+  parseWorkshopScheduledAtIsoForBooking,
   validateWorkshopSlotUtcDetailed,
+  parseAppointmentIntent,
 } from './appointment-intent';
+import {
+  buildSchedulingContextFromTurns,
+  formatAppointmentConfirmedMessage,
+  stripAppointmentConfirmationClaims,
+  textClaimsAppointmentBooked,
+  workshopNaiveIsoFromUtc,
+} from './appointment-scheduling-helpers';
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { DEFAULT_CHAT_APPOINTMENT_PROMPT } from './ai-config-defaults';
 import { AiConfigService } from './ai-config.service';
@@ -714,7 +723,7 @@ const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
           scheduledAtIso: {
             type: 'string',
             description:
-              'Fecha y hora del turno en America/Mexico_City. Preferido: YYYY-MM-DDTHH:mm sin sufijo Z (ej. 2026-05-26T14:00:00 = 2:00 PM CDMX). También acepta offset -06:00. Horario: lun–vie 09:00–18:00, sáb 09:00–14:00. No uses 14:00Z si el cliente dijo las 2 PM en CDMX.',
+              'Fecha y hora del turno en America/Mexico_City. Preferido: YYYY-MM-DDTHH:mm sin sufijo Z (ej. 2026-05-26T15:30:00 = 3:30 PM CDMX). Si el cliente dice "3:30" sin AM/PM, usa 15:30. Horario: lun–vie 09:00–18:00, sáb 09:00–14:00.',
           },
           clientName: {
             type: 'string',
@@ -6210,7 +6219,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           'Falta scheduledAtIso. Ejemplo cita 14:00 en CDMX: 2026-05-26T14:00:00 (hora del taller, sin Z).',
       };
     }
-    const parsed = parseWorkshopScheduledAtIso(iso);
+    const parsed = parseWorkshopScheduledAtIsoForBooking(iso);
     if (!parsed.ok) {
       return { ok: false, error: parsed.error };
     }
@@ -6247,6 +6256,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     }
     const d = resolved.date;
 
+    const existingActive = await this.loadActiveAppointmentForConversation(
+      conversation.id,
+    );
+    if (existingActive) {
+      return {
+        success: true,
+        appointmentId: existingActive.id,
+        scheduledAt: existingActive.scheduledAt.toISOString(),
+      };
+    }
+
     const clientName =
       pickFirstNonEmptyTrimmedString(
         raw.clientName,
@@ -6275,6 +6295,16 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     conversation.status = 'agendado';
     await this.conversationRepository.save(conversation);
+
+    this.chatGateway.emitAppointmentCreated({
+      id: saved.id,
+      conversationId: conversation.id,
+      clientName: saved.clientName,
+      vehicle: saved.vehicle,
+      phone: saved.phone,
+      scheduledAt: saved.scheduledAt.toISOString(),
+      status: saved.status,
+    });
 
     this.chatGateway.emitConversationLeadUpdated({
       conversationId: conversation.id,
@@ -6696,6 +6726,111 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     return `${head}\n\n[Estado del lead: AGENDADO — El cliente ya tiene cita confirmada. Prioriza responder sus dudas sobre la visita, el taller o el vehículo. Cualquier pieza o servicio extra que cotices con obtenerCotizacionExpress debe presentarse como complemento de su orden para el día acordado; no presiones nueva agenda, no envíes ubicación del taller ni cierres de venta genéricos salvo que lo pida. Si solo agradece o saluda sin pregunta nueva, responde una frase cordial y cierra.]`;
   }
 
+  /** Fallback: extrae fecha/hora del chat y persiste cita si el LLM no llamó la tool. */
+  private async tryPersistAppointmentFromChatContext(
+    conversation: Conversation,
+    historyTurns: ReadonlyArray<{ role: string; text: string }>,
+    currentUserText: string,
+  ): Promise<{ success: boolean; scheduledAt?: string }> {
+    const active = await this.loadActiveAppointmentForConversation(
+      conversation.id,
+    );
+    if (active) {
+      return { success: true, scheduledAt: active.scheduledAt.toISOString() };
+    }
+
+    const context = buildSchedulingContextFromTurns([
+      ...historyTurns,
+      { role: 'user', text: currentUserText },
+    ]);
+    if (!context.trim()) {
+      return { success: false };
+    }
+
+    try {
+      const intent = await parseAppointmentIntent(
+        context,
+        new Date(),
+        this.openai,
+      );
+      if (
+        !intent.isBookingIntent ||
+        intent.needsClarification ||
+        !intent.confirmedDate
+      ) {
+        return { success: false };
+      }
+
+      const naiveIso = workshopNaiveIsoFromUtc(new Date(intent.confirmedDate));
+      if (!naiveIso) {
+        return { success: false };
+      }
+
+      const result = await this.executeCreateAppointmentTool(
+        JSON.stringify({
+          scheduledAtIso: naiveIso,
+          clientName: conversation.contactName,
+        }),
+        conversation,
+      );
+      if (result.success && result.scheduledAt) {
+        console.log('[createAppointment] fallback persist OK', {
+          conversationId: conversation.id,
+          scheduledAt: result.scheduledAt,
+        });
+        return { success: true, scheduledAt: result.scheduledAt };
+      }
+    } catch (err) {
+      console.error('[createAppointment] fallback persist failed:', err);
+    }
+    return { success: false };
+  }
+
+  private async finalizeAutopilotReplyWithAppointmentGuard(
+    conversation: Conversation,
+    draftText: string | null,
+    lastConfirmedIso: string | null,
+    historyTurns: ReadonlyArray<{ role: string; text: string }>,
+    currentUserText: string,
+  ): Promise<string> {
+    let confirmedIso = lastConfirmedIso;
+
+    if (!confirmedIso) {
+      const fallback = await this.tryPersistAppointmentFromChatContext(
+        conversation,
+        historyTurns,
+        currentUserText,
+      );
+      if (fallback.success && fallback.scheduledAt) {
+        confirmedIso = fallback.scheduledAt;
+      }
+    }
+
+    let text = String(draftText ?? '').trim();
+
+    if (text && textClaimsAppointmentBooked(text) && !confirmedIso) {
+      console.warn('[createAppointment] bloqueada confirmación sin persistencia', {
+        conversationId: conversation.id,
+      });
+      text = stripAppointmentConfirmationClaims(text);
+      const tail =
+        'Para registrar tu cita en el sistema, ¿me confirmas el día y la hora exacta? (Por ejemplo: martes a las 3:30 PM)';
+      text = text ? `${text}\n\n${tail}` : tail;
+    }
+
+    if (confirmedIso) {
+      const confirmation = formatAppointmentConfirmedMessage(confirmedIso);
+      if (!text) {
+        return confirmation;
+      }
+      if (!textClaimsAppointmentBooked(text)) {
+        text = `${text}\n\n${confirmation}`;
+      }
+    }
+
+    return text || AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
+  }
+
   /** Autopilot con historial + tool `createAppointment`. */
   private async composeAutopilotReplyWithTools(
     conversation: Conversation,
@@ -6855,27 +6990,35 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         }
 
         const txt = choice.content?.trim();
-        if (txt) return txt;
+        if (txt) {
+          return await this.finalizeAutopilotReplyWithAppointmentGuard(
+            conversation,
+            txt,
+            lastConfirmedIso,
+            interceptorTurns,
+            mergedForInstant,
+          );
+        }
 
         if (lastConfirmedIso) {
-          try {
-            const d = new Date(lastConfirmedIso);
-            const human = d.toLocaleString('es-MX', {
-              timeZone: WORKSHOP_TIMEZONE,
-              dateStyle: 'medium',
-              timeStyle: 'short',
-            });
-            return `¡Listo! Tu cita quedó registrada para el ${human}. ¡Te esperamos en el taller!`;
-          } catch {
-            return 'Tu cita ha quedado registrada. ¡Te esperamos!';
-          }
+          return await this.finalizeAutopilotReplyWithAppointmentGuard(
+            conversation,
+            null,
+            lastConfirmedIso,
+            interceptorTurns,
+            mergedForInstant,
+          );
         }
         return AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
       }
 
-      return lastConfirmedIso
-        ? 'Tu cita ha quedado registrada. ¡Te esperamos!'
-        : AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
+      return await this.finalizeAutopilotReplyWithAppointmentGuard(
+        conversation,
+        null,
+        lastConfirmedIso,
+        interceptorTurns,
+        mergedForInstant,
+      );
     } catch (err) {
       console.error('composeAutopilotReplyWithTools:', err);
       return AUTOPILOT_TECHNICAL_FALLBACK_REPLY;

@@ -40,7 +40,7 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   'Carrito global: obtenerCarritoActual muestra la cotización acumulada (fotos + chat). agregarAlCarrito, quitarDelCarrito y actualizarCarrito modifican el carrito activo en cualquier momento, incluso después de enviar la cotización al cliente.',
   'Si el cliente pide quitar o agregar piezas tras recibir la cotización, usa quitarDelCarrito o agregarAlCarrito y responde con el desglose y totalGlobal actualizados (no congelamos el carrito al enviar).',
   '',
-  'createAppointment: úsala cuando el cliente confirme explícitamente día y hora válidos dentro del horario. scheduledAtIso en hora del taller sin Z (ej. 2026-05-26T14:00:00 para las 2 PM CDMX); no confundas 14:00Z con las 2 PM locales. Si la herramienta devuelve error, corrige la fecha según el mensaje.',
+  'createAppointment: úsala SIEMPRE que el cliente confirme día y hora válidos dentro del horario. scheduledAtIso en hora del taller sin Z (ej. 2026-05-26T15:30:00 para las 3:30 PM CDMX). Si dice "3:30" sin AM/PM, usa 15:30 (tarde). NUNCA digas al cliente que la cita quedó agendada si createAppointment no devolvió success:true.',
   'notificarLlegadaCliente: ejecútala INMEDIATAMENTE cuando el cliente diga que ya llegó al taller, está afuera, en la puerta, esperando en el estacionamiento o similar. Después confirma cordialmente que recepción fue alertada.',
   'Si falta algún dato imprescindible, pregunta de forma breve y cordial.',
   'Respuestas profesionales y naturales; concisas salvo que el cliente pida más detalle.',
