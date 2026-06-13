@@ -119,3 +119,30 @@ export function openAiChatCompletionParams(input: {
 
   return params;
 }
+
+export type OpenAiResponsesBaseParams = {
+  model: string;
+  max_output_tokens?: number;
+  reasoning?: { effort: ReasoningEffort };
+};
+
+/** Parámetros base para `openai.responses.create` (GPT-5.5 + tools + reasoning). */
+export function openAiResponsesParams(input: {
+  tier: OpenAiModelTier;
+  maxOutputTokens?: number;
+}): OpenAiResponsesBaseParams {
+  const model = resolveOpenAiModel(input.tier);
+  const effort = resolveOpenAiReasoningEffort(input.tier);
+
+  const params: OpenAiResponsesBaseParams = { model };
+
+  if (input.maxOutputTokens != null) {
+    params.max_output_tokens = input.maxOutputTokens;
+  }
+
+  if (effort != null && isReasoningCapableModel(model)) {
+    params.reasoning = { effort };
+  }
+
+  return params;
+}

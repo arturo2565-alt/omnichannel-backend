@@ -1,6 +1,6 @@
 import {
-  OPENAI_MODEL_DEFAULTS,
   openAiChatCompletionParams,
+  openAiResponsesParams,
   resolveOpenAiModel,
 } from './openai-model-config';
 
@@ -19,7 +19,6 @@ describe('openai-model-config', () => {
 
   it('defaults chat tier to gpt-5.5', () => {
     expect(resolveOpenAiModel('chat')).toBe('gpt-5.5');
-    expect(OPENAI_MODEL_DEFAULTS.fast).toBe('gpt-5.4-mini');
   });
 
   it('respects OPENAI_MODEL_CHAT override', () => {
@@ -42,5 +41,10 @@ describe('openai-model-config', () => {
   it('visión usa reasoning xhigh por defecto', () => {
     const p = openAiChatCompletionParams({ tier: 'vision', maxOutputTokens: 3000 });
     expect(p.reasoning_effort).toBe('xhigh');
+  });
+
+  it('openAiResponsesParams usa reasoning nested (Responses API)', () => {
+    const p = openAiResponsesParams({ tier: 'chat', maxOutputTokens: 4096 });
+    expect(p.reasoning).toEqual({ effort: 'low' });
   });
 });

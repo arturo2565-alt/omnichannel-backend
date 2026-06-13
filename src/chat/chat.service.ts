@@ -45,7 +45,6 @@ import {
 import { TallerService } from '../taller/taller.service';
 import type {
   ChatCompletionMessageParam,
-  ChatCompletionTool,
 } from 'openai/resources/chat/completions';
 import {
   WORKSHOP_TIMEZONE,
@@ -174,6 +173,11 @@ import {
   userLatestMessageLooksLikeVehicleModelReply,
 } from './instant-quote-from-text';
 import { openAiChatCompletionParams } from './openai-model-config';
+import { AUTOPILOT_RESPONSES_TOOLS } from './autopilot-tools';
+import {
+  runOpenAiResponsesToolLoop,
+  type OpenAiDialogueTurn,
+} from './openai-responses-tool-loop';
 
 /** Canales internos del panel: no deben sobrescribir el canal real del cliente en la conversación */
 const AGENT_ONLY_PLATFORMS = new Set(['web-dashboard', 'test']);
@@ -585,194 +589,6 @@ export interface PreviewDraftQuoteNarrativeBody {
   /** Si está agendado, opcional para formatear día de cita. */
   conversationId?: string;
 }
-
-/** Herramientas del autopilot (Chat Completions `tools`). */
-const AUTOPILOT_TOOLS: ChatCompletionTool[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'obtenerCotizacionExpress',
-      description:
-        'Úsala cuando el cliente solicite el precio de un baño de pintura o el repintado express de piezas específicas y ya conozcas el modelo del vehículo. Esta función consultará la base de datos real del taller y te devolverá los precios oficiales para que se los presentes al cliente.',
-      parameters: {
-        type: 'object',
-        properties: {
-          servicios: {
-            type: 'array',
-            items: { type: 'string' },
-            description:
-              'Piezas a repintar (ej. Puerta, Fascia, Salpicadera) o "baño de pintura" / pintura exterior completa.',
-          },
-          modeloVehiculo: {
-            type: 'string',
-            description:
-              'Marca y modelo del vehículo del cliente (ej. Volkswagen Bora 2012, Nissan March 2018). Obligatorio antes de cotizar.',
-          },
-          categoriaTamaño: {
-            type: 'string',
-            enum: ['Chico', 'Mediano', 'Grande', 'XL'],
-            description:
-              'Tamaño de carrocería (NO confundir con premium). Pick-up/SUV grande (F-150, Silverado, Suburban) → Grande. SUV full-size (Escalade, Tahoe, Expedition) → XL. Sedán compacto (Aveo, March) → Chico. Sedán mediano → Mediano.',
-          },
-          esPremium: {
-            type: 'boolean',
-            description:
-              'true si es marca premium (BMW, Mercedes, Audi, Lexus, Porsche, Land Rover, Mini, etc.). El sistema aplica un multiplicador sobre el precio base del tamaño. También puedes inferirlo del modelo.',
-          },
-        },
-        required: ['servicios', 'modeloVehiculo', 'categoriaTamaño'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'obtenerCarritoActual',
-      description:
-        'Devuelve el carrito/cotización acumulada de esta conversación (fotos + chat). Úsala cuando el cliente pida el total actual o antes de agregar o quitar piezas.',
-      parameters: {
-        type: 'object',
-        properties: {},
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'agregarAlCarrito',
-      description:
-        'Agrega una pieza o servicio al carrito global de la conversación (rayones, repintado express por chat, etc.).',
-      parameters: {
-        type: 'object',
-        properties: {
-          pieza: {
-            type: 'string',
-            description:
-              'Nombre de la pieza (Toldo, Fascia delantera, Puerta, Salpicadera, etc.).',
-          },
-          severidad: {
-            type: 'string',
-            description:
-              'Opcional. Nivel de daño (DL, DML, DM, …). Por defecto DL para repintado express.',
-          },
-          descripcion: {
-            type: 'string',
-            description: 'Detalle opcional para el operador.',
-          },
-        },
-        required: ['pieza'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'quitarDelCarrito',
-      description:
-        'Quita una pieza del carrito cuando el cliente diga que ya no la quiere (ej. "mejor sin el toldo").',
-      parameters: {
-        type: 'object',
-        properties: {
-          pieza: {
-            type: 'string',
-            description:
-              'Pieza a quitar; coincidencia parcial (toldo, fascia, puerta, etc.).',
-          },
-        },
-        required: ['pieza'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'actualizarCarrito',
-      description:
-        'Modifica una pieza en el carrito activo (severidad, nombre o descripción).',
-      parameters: {
-        type: 'object',
-        properties: {
-          piezaActual: {
-            type: 'string',
-            description: 'Pieza a modificar (coincidencia parcial).',
-          },
-          piezaNueva: {
-            type: 'string',
-            description:
-              'Opcional. Nuevo nombre de pieza (ej. cambiar Puerta por Puerta delantera derecha).',
-          },
-          severidad: {
-            type: 'string',
-            description: 'Opcional. Nuevo nivel de daño (DL, DML, DM, …).',
-          },
-          descripcion: {
-            type: 'string',
-            description: 'Opcional. Nueva descripción técnica.',
-          },
-        },
-        required: ['piezaActual'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'obtenerResumenCarrito',
-      description:
-        'Resumen completo del carrito: estado (pendiente, complemento, aprobado), desglose aprobado vs complemento, totales parciales y totalGlobal.',
-      parameters: {
-        type: 'object',
-        properties: {},
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'createAppointment',
-      description:
-        'Registra una cita en la base de datos del taller. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. En el panel de simulación (playground), la misma llamada solo valida horario y devuelve vista previa sin persistir en BD.',
-      parameters: {
-        type: 'object',
-        properties: {
-          scheduledAtIso: {
-            type: 'string',
-            description:
-              'Fecha y hora del turno en America/Mexico_City. Preferido: YYYY-MM-DDTHH:mm sin sufijo Z (ej. 2026-05-26T15:30:00 = 3:30 PM CDMX). Si el cliente dice "3:30" sin AM/PM, usa 15:30. Horario: lun–vie 09:00–18:00, sáb 09:00–14:00.',
-          },
-          clientName: {
-            type: 'string',
-            description:
-              'Nombre del cliente si se menciona; si omites, se usará el nombre de la conversación.',
-          },
-          vehicleDescription: {
-            type: 'string',
-            description:
-              'Modelo o datos del vehículo si el cliente los dio en el chat.',
-          },
-          phone: {
-            type: 'string',
-            description:
-              'Teléfono del cliente si consta en el mensaje (solo dígitos o formato típico).',
-          },
-        },
-        required: ['scheduledAtIso'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'notificarLlegadaCliente',
-      description:
-        'Ejecuta esta herramienta inmediatamente cuando el cliente indique que ya llegó al taller o está esperando afuera.',
-      parameters: {
-        type: 'object',
-        properties: {},
-      },
-    },
-  },
-];
 
 const AUTOPILOT_TECHNICAL_FALLBACK_REPLY =
   'Gracias por tu mensaje. Estoy revisando tu solicitud; en un momento te respondo con la cotización actualizada.';
@@ -6478,111 +6294,82 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     historyTurns: { role: 'user' | 'assistant'; text: string }[];
     userContentForTurn: string;
   }): Promise<string> {
-    const messages: ChatCompletionMessageParam[] = [
-      { role: 'system', content: params.baseSystem },
-      ...params.historyTurns.map((h) => ({ role: h.role, content: h.text })),
+    const dialogue: OpenAiDialogueTurn[] = [
+      ...params.historyTurns.map((h) => ({
+        role: h.role,
+        content: h.text,
+      })),
       { role: 'user', content: params.userContentForTurn },
     ];
 
     let lastConfirmedIso: string | null = null;
-    for (let step = 0; step < 6; step++) {
-      const completion = await this.openai.chat.completions.create({
-        ...openAiChatCompletionParams({
-          tier: 'chat',
-          maxOutputTokens: AUTOPILOT_CHAT_MAX_OUTPUT_TOKENS,
-          temperature: 0.35,
-        }),
-        messages,
-        tools: AUTOPILOT_TOOLS,
-        tool_choice: 'auto',
-      });
 
-      const choice = completion.choices[0]?.message;
-      if (!choice) break;
-
-      const toolCalls = choice.tool_calls;
-      if (toolCalls?.length) {
-        messages.push(choice as ChatCompletionMessageParam);
-        for (const tc of toolCalls) {
-          if (tc.type !== 'function') {
-            messages.push({
-              role: 'tool',
-              tool_call_id: tc.id,
-              content: JSON.stringify({
-                success: false,
-                error: 'Tipo de herramienta no soportado.',
-              }),
-            });
-            continue;
+    const loop = await runOpenAiResponsesToolLoop(this.openai, {
+      resolveInstructions: async () => params.baseSystem,
+      dialogue,
+      tools: AUTOPILOT_RESPONSES_TOOLS,
+      maxOutputTokens: AUTOPILOT_CHAT_MAX_OUTPUT_TOKENS,
+      handleToolCall: async (name, argsJson) => {
+        if (name === 'createAppointment') {
+          const r = await this.executeCreateAppointmentToolPlayground(argsJson);
+          if (r.success && r.scheduledAt) {
+            lastConfirmedIso = r.scheduledAt;
           }
-          const name = tc.function.name;
-          let payload: Record<string, unknown>;
-          if (name === 'createAppointment') {
-            const r = await this.executeCreateAppointmentToolPlayground(
-              tc.function.arguments ?? '{}',
-            );
-            payload = { ...r };
-            if (r.success && r.scheduledAt) {
-              lastConfirmedIso = r.scheduledAt;
-            }
-          } else if (name === 'obtenerCotizacionExpress') {
-            payload = await this.executeObtenerCotizacionExpressToolPlayground(
-              tc.function.arguments ?? '{}',
-            );
-          } else if (name === 'obtenerCarritoActual') {
-            payload = await this.executeObtainCarritoActualTool(
-              { status: 'nuevo' } as Conversation,
-            );
-          } else if (name === 'agregarAlCarrito') {
-            payload = await this.executeAgregarAlCarritoTool(
-              tc.function.arguments ?? '{}',
-              { status: 'nuevo' } as Conversation,
-            );
-          } else if (name === 'quitarDelCarrito') {
-            payload = await this.executeQuitarDelCarritoTool(
-              tc.function.arguments ?? '{}',
-              { status: 'nuevo' } as Conversation,
-            );
-          } else if (name === 'actualizarCarrito') {
-            payload = await this.executeActualizarCarritoTool(
-              tc.function.arguments ?? '{}',
-              { status: 'nuevo' } as Conversation,
-            );
-          } else if (name === 'obtenerResumenCarrito') {
-            payload = await this.executeObtainCarritoResumenTool(
-              { status: 'nuevo' } as Conversation,
-            );
-          } else if (name === 'notificarLlegadaCliente') {
-            payload = await this.executeNotificarLlegadaClienteToolPlayground();
-          } else {
-            payload = { success: false, error: `Función no soportada: ${name}` };
-          }
-          messages.push({
-            role: 'tool',
-            tool_call_id: tc.id,
-            content: JSON.stringify(payload),
-          });
+          return { ...r };
         }
-        continue;
-      }
-
-      const txt = choice.content?.trim();
-      if (txt) return txt;
-
-      if (lastConfirmedIso) {
-        try {
-          const d = new Date(lastConfirmedIso);
-          const human = d.toLocaleString('es-MX', {
-            timeZone: WORKSHOP_TIMEZONE,
-            dateStyle: 'medium',
-            timeStyle: 'short',
-          });
-          return `(Simulador) Quedó acordada la visita para el ${human}. En este panel no se guardó en base de datos; es solo prueba.`;
-        } catch {
-          return '(Simulador) Cita en vista previa. No persistida en BD.';
+        if (name === 'obtenerCotizacionExpress') {
+          return this.executeObtenerCotizacionExpressToolPlayground(argsJson);
         }
+        if (name === 'obtenerCarritoActual') {
+          return this.executeObtainCarritoActualTool(
+            { status: 'nuevo' } as Conversation,
+          );
+        }
+        if (name === 'agregarAlCarrito') {
+          return this.executeAgregarAlCarritoTool(
+            argsJson,
+            { status: 'nuevo' } as Conversation,
+          );
+        }
+        if (name === 'quitarDelCarrito') {
+          return this.executeQuitarDelCarritoTool(
+            argsJson,
+            { status: 'nuevo' } as Conversation,
+          );
+        }
+        if (name === 'actualizarCarrito') {
+          return this.executeActualizarCarritoTool(
+            argsJson,
+            { status: 'nuevo' } as Conversation,
+          );
+        }
+        if (name === 'obtenerResumenCarrito') {
+          return this.executeObtainCarritoResumenTool(
+            { status: 'nuevo' } as Conversation,
+          );
+        }
+        if (name === 'notificarLlegadaCliente') {
+          return this.executeNotificarLlegadaClienteToolPlayground();
+        }
+        return { success: false, error: `Función no soportada: ${name}` };
+      },
+    });
+
+    const txt = loop.assistantText?.trim();
+    if (txt) return txt;
+
+    if (lastConfirmedIso) {
+      try {
+        const d = new Date(lastConfirmedIso);
+        const human = d.toLocaleString('es-MX', {
+          timeZone: WORKSHOP_TIMEZONE,
+          dateStyle: 'medium',
+          timeStyle: 'short',
+        });
+        return `(Simulador) Quedó acordada la visita para el ${human}. En este panel no se guardó en base de datos; es solo prueba.`;
+      } catch {
+        return '(Simulador) Cita en vista previa. No persistida en BD.';
       }
-      break;
     }
 
     return lastConfirmedIso
@@ -6994,106 +6781,62 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         dialogue.push({ role: 'user', content: t });
       }
 
-      const messages: ChatCompletionMessageParam[] = [...dialogue];
+      const responseDialogue: OpenAiDialogueTurn[] = dialogue
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          content: String(m.content ?? ''),
+        }));
 
       let lastConfirmedIso: string | null = null;
 
-      for (let step = 0; step < 6; step++) {
-        const freshChatPrompt = await this.aiConfigService.getValue(
-          AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
-        );
-        const systemContent = await this.buildAutopilotSystemSection(
-          conversation,
-          freshChatPrompt,
-          skipInstantQuoteInterceptors
-            ? {
-                postQuoteScheduling: true,
-                userMentionedWeekday:
-                  playgroundUserMessageMentionsWeekdayOnlyRough(
-                    mergedForInstant,
-                  ),
-              }
-            : undefined,
-        );
-        if (messages[0]?.role === 'system') {
-          messages[0] = { role: 'system', content: systemContent };
-        } else {
-          messages.unshift({ role: 'system', content: systemContent });
-        }
-
-        const completion = await this.openai.chat.completions.create({
-          ...openAiChatCompletionParams({
-            tier: 'chat',
-            maxOutputTokens: AUTOPILOT_CHAT_MAX_OUTPUT_TOKENS,
-            temperature: 0.4,
-          }),
-          messages,
-          tools: AUTOPILOT_TOOLS,
-          tool_choice: 'auto',
-        });
-
-        const choice = completion.choices[0]?.message;
-        if (!choice) break;
-
-        const toolCalls = choice.tool_calls;
-        if (toolCalls?.length) {
-          messages.push(choice as ChatCompletionMessageParam);
-          for (const tc of toolCalls) {
-            if (tc.type !== 'function') {
-              messages.push({
-                role: 'tool',
-                tool_call_id: tc.id,
-                content: JSON.stringify({
-                  success: false,
-                  error: 'Tipo de herramienta no soportado.',
-                }),
-              });
-              continue;
-            }
-            const name = tc.function.name;
-            const args = tc.function.arguments ?? '{}';
-            const payload = await this.executeAutopilotToolSafely(
-              name,
-              args,
-              conversation,
-            );
-            if (
-              name === 'createAppointment' &&
-              payload.success &&
-              payload.scheduledAt
-            ) {
-              lastConfirmedIso = String(payload.scheduledAt);
-            }
-            messages.push({
-              role: 'tool',
-              tool_call_id: tc.id,
-              content: JSON.stringify(payload),
-            });
+      const loop = await runOpenAiResponsesToolLoop(this.openai, {
+        resolveInstructions: async () => {
+          const freshChatPrompt = await this.aiConfigService.getValue(
+            AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
+          );
+          return this.buildAutopilotSystemSection(
+            conversation,
+            freshChatPrompt,
+            skipInstantQuoteInterceptors
+              ? {
+                  postQuoteScheduling: true,
+                  userMentionedWeekday:
+                    playgroundUserMessageMentionsWeekdayOnlyRough(
+                      mergedForInstant,
+                    ),
+                }
+              : undefined,
+          );
+        },
+        dialogue: responseDialogue,
+        tools: AUTOPILOT_RESPONSES_TOOLS,
+        maxOutputTokens: AUTOPILOT_CHAT_MAX_OUTPUT_TOKENS,
+        handleToolCall: async (name, argsJson) => {
+          const payload = await this.executeAutopilotToolSafely(
+            name,
+            argsJson,
+            conversation,
+          );
+          if (
+            name === 'createAppointment' &&
+            payload.success &&
+            payload.scheduledAt
+          ) {
+            lastConfirmedIso = String(payload.scheduledAt);
           }
-          continue;
-        }
+          return payload;
+        },
+      });
 
-        const txt = choice.content?.trim();
-        if (txt) {
-          return await this.finalizeAutopilotReplyWithAppointmentGuard(
-            conversation,
-            txt,
-            lastConfirmedIso,
-            interceptorTurns,
-            mergedForInstant,
-          );
-        }
-
-        if (lastConfirmedIso) {
-          return await this.finalizeAutopilotReplyWithAppointmentGuard(
-            conversation,
-            null,
-            lastConfirmedIso,
-            interceptorTurns,
-            mergedForInstant,
-          );
-        }
-        return AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
+      if (loop.assistantText?.trim()) {
+        return await this.finalizeAutopilotReplyWithAppointmentGuard(
+          conversation,
+          loop.assistantText.trim(),
+          lastConfirmedIso,
+          interceptorTurns,
+          mergedForInstant,
+        );
       }
 
       return await this.finalizeAutopilotReplyWithAppointmentGuard(
