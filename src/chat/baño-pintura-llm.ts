@@ -1,5 +1,6 @@
 import type { OpenAI } from 'openai';
 import type { InstantQuoteResolution } from './instant-quote-from-text';
+import { openAiChatCompletionParams } from './openai-model-config';
 import {
   extractBañoColorDetailHeuristic,
   flattenBañoTierSource,
@@ -120,9 +121,11 @@ export async function inferBañoVehicleDisplayLabelWithLlm(
   });
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    temperature: 0.1,
-    max_tokens: 160,
+    ...openAiChatCompletionParams({
+      tier: 'narrative',
+      maxOutputTokens: 160,
+      temperature: 0.1,
+    }),
     response_format: { type: 'json_object' },
     messages: [
       { role: 'system', content: INFER_VEHICLE_SYSTEM },
@@ -413,9 +416,11 @@ export async function composeBañoDraftMessageWithLlm(
   const temperature = Math.max(0.7, Number(options?.temperature) || 0.75);
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    temperature,
-    max_tokens: 900,
+    ...openAiChatCompletionParams({
+      tier: 'narrative',
+      maxOutputTokens: 900,
+      temperature,
+    }),
     messages: [
       { role: 'system', content: buildBañoDraftSystemMessage(chatAppointmentSystemPrompt) },
       {
@@ -475,9 +480,11 @@ export async function classifyBañoPinturaTierWithLlm(
   }
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    temperature: 0.15,
-    max_tokens: 220,
+    ...openAiChatCompletionParams({
+      tier: 'fast',
+      maxOutputTokens: 220,
+      temperature: 0.15,
+    }),
     response_format: { type: 'json_object' },
     messages: [
       { role: 'system', content: CLASSIFY_SYSTEM },
@@ -543,9 +550,11 @@ export async function extractBañoPersonalizedColorDetail(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0.15,
-      max_tokens: 140,
+      ...openAiChatCompletionParams({
+        tier: 'fast',
+        maxOutputTokens: 140,
+        temperature: 0.15,
+      }),
       response_format: { type: 'json_object' },
       messages: [
         {
