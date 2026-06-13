@@ -698,6 +698,7 @@ export class QuoteCartService {
     const snap = await this.catalogService.getMatrixPricingSnapshot(
       tallerId ?? undefined,
     );
+    const pricingRules = await this.catalogService.getPricingRules(tallerId);
     const imageUrls = parseDraftImageUrls(row.imageUrl ?? '');
     const analysis = inventoryItemsToVehicleAnalysis(sanitized, imageUrls);
     const pricingMode = detectCartPricingMode(sanitized);
@@ -724,6 +725,7 @@ export class QuoteCartService {
       sanitized,
       snap,
       vehicleProfile,
+      pricingRules,
     );
 
     let lines = quoteRows.map((r, i) =>

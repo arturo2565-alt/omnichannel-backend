@@ -77,6 +77,6 @@ describe('vehicle-piece-pricing', () => {
     ).toBe(3300);
     expect(
       resolvePiecePriceForVehicleProfile(snap, 'Fascia', 'DL', escalade),
-    ).toBe(roundCommercialMx(3700 * 1.1));
+    ).toBe(4050);
   });
 });

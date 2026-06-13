@@ -1610,6 +1610,7 @@ export class ChatService implements OnModuleDestroy {
     tallerId?: string | null,
   ): Promise<number> {
     const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
+    const pricingRules = await this.catalogService.getPricingRules(tallerId);
     const vehicleProfile = vehiclePricingProfileFromAnalysis(analysis);
     if (
       analysis.inventory?.length &&
@@ -1640,6 +1641,7 @@ export class ChatService implements OnModuleDestroy {
         analysis.inventory,
         snap,
         vehicleProfile,
+        pricingRules,
       );
       if (perItemRows.length > 0) {
         const sum = sumQuoteRowsSubtotal(perItemRows);
@@ -5041,6 +5043,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     tallerId?: string | null,
   ): Promise<DraftQuote> {
     const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
+    const pricingRules = await this.catalogService.getPricingRules(tallerId);
     const lines: DraftQuoteLine[] = [];
     let resolvedLevel: DamageLevel;
 
@@ -5099,6 +5102,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           analysis.inventory,
           snap,
           vehicleProfile,
+          pricingRules,
         ),
       );
     } else {
@@ -6095,7 +6099,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       snap,
       servicios,
       vehicleProfile,
-      { leadAgendado: isAgendado },
+      {
+        leadAgendado: isAgendado,
+        pricingRules: await this.catalogService.getPricingRules(
+          conversation.tallerId,
+        ),
+      },
     );
 
     if (!result.success) {

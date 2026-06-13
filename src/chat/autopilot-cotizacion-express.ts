@@ -1,4 +1,5 @@
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
+import type { CatalogPricingRules } from '../catalog/catalog-pricing-rules';
 import { resolvePiecePriceForVehicleProfile } from '../catalog/vehicle-piece-pricing';
 import {
   normalizeVehicleSizeTier,
@@ -162,7 +163,7 @@ export function buildObtenerCotizacionExpressPayload(
   snap: MatrixPricingSnapshot,
   servicios: readonly string[],
   vehicleProfile: VehiclePricingProfile,
-  options?: { leadAgendado?: boolean },
+  options?: { leadAgendado?: boolean; pricingRules?: CatalogPricingRules | null },
 ): ObtenerCotizacionExpressResult {
   const modelo = String(vehicleProfile.vehicleLabel ?? '').trim();
   if (!modelo) {
@@ -273,6 +274,7 @@ export function buildObtenerCotizacionExpressPayload(
       canonical,
       PIEZA_DL,
       vehicleProfile,
+      options?.pricingRules,
     );
     if (unit <= 0) continue;
 

@@ -12,12 +12,21 @@ import {
   upsertInstantQuoteMatrixRows,
 } from './instant-quote-matrix-sync';
 import { TallerService } from '../taller/taller.service';
+import {
+  aggregatePieceBaseRows,
+  mergeCatalogPricingRules,
+  PIECE_BASE_SEVERITY,
+  type CatalogPricingRules,
+} from './catalog-pricing-rules';
+import { CatalogPricingRulesEntity } from './entities/catalog-pricing-rules.entity';
 
 @Injectable()
 export class CatalogService {
   constructor(
     @InjectRepository(PriceMatrix)
     private readonly priceMatrixRepository: Repository<PriceMatrix>,
+    @InjectRepository(CatalogPricingRulesEntity)
+    private readonly pricingRulesRepository: Repository<CatalogPricingRulesEntity>,
     private readonly tallerService: TallerService,
   ) {}
 
@@ -59,6 +68,128 @@ export class CatalogService {
   ): Promise<MatrixPricingSnapshot> {
     const rows = await this.findAllPriceMatrixRows(tallerId);
     return createMatrixPricingSnapshot(rows);
+  }
+
+  async getPricingRules(tallerId?: string | null): Promise<CatalogPricingRules> {
+    const tid = await this.resolveTallerId(tallerId);
+    const row = await this.pricingRulesRepository.findOne({
+      where: { tallerId: tid },
+    });
+    if (!row?.rulesJson?.trim()) {
+      return mergeCatalogPricingRules(null);
+    }
+    try {
+      const parsed = JSON.parse(row.rulesJson) as Partial<CatalogPricingRules>;
+      return mergeCatalogPricingRules(parsed);
+    } catch {
+      return mergeCatalogPricingRules(null);
+    }
+  }
+
+  async savePricingRules(
+    tallerId: string,
+    rules: Partial<CatalogPricingRules>,
+  ): Promise<CatalogPricingRules> {
+    const tid = await this.resolveTallerId(tallerId);
+    const merged = mergeCatalogPricingRules(rules);
+    const existing = await this.pricingRulesRepository.findOne({
+      where: { tallerId: tid },
+    });
+    const payload = JSON.stringify(merged);
+    if (existing) {
+      existing.rulesJson = payload;
+      await this.pricingRulesRepository.save(existing);
+    } else {
+      await this.pricingRulesRepository.save(
+        this.pricingRulesRepository.create({
+          tallerId: tid,
+          rulesJson: payload,
+        }),
+      );
+    }
+    return merged;
+  }
+
+  async getPieceBaseCatalog(tallerId?: string | null) {
+    const tid = await this.resolveTallerId(tallerId);
+    const rows = await this.findAllPriceMatrixRows(tid);
+    const rules = await this.getPricingRules(tid);
+    const pieceBases = aggregatePieceBaseRows(rows);
+    const baseIds = new Set(
+      pieceBases
+        .flatMap((p) => [p.matrixRowId, p.legacyRowId])
+        .filter((id): id is string => !!id),
+    );
+    const instantRows = rows
+      .filter((r) => !baseIds.has(r.id))
+      .map((r) => ({
+        id: r.id,
+        servicio: r.servicio,
+        severidad: r.severidad,
+        precio: r.precio,
+        diasEntrega: r.diasEntrega,
+        isInstantService: r.isInstantService,
+      }));
+    return { rules, pieceBases, instantRows };
+  }
+
+  async upsertPieceBase(
+    tallerId: string,
+    dto: {
+      servicio: string;
+      basePrice: number;
+      diasEntrega: number;
+      matrixRowId?: string | null;
+    },
+  ): Promise<PriceMatrix> {
+    const tid = await this.resolveTallerId(tallerId);
+    const servicio = String(dto.servicio ?? '').trim().slice(0, 120);
+    if (!servicio) throw new BadRequestException('servicio obligatorio');
+    const precio = Math.max(0, Math.round(Number(dto.basePrice) || 0));
+    const diasEntrega = Math.max(
+      0,
+      Math.round(Number(dto.diasEntrega) || 0),
+    );
+
+    const rowId = String(dto.matrixRowId ?? '').trim();
+    if (rowId) {
+      const existing = await this.priceMatrixRepository.findOne({
+        where: { id: rowId, tallerId: tid },
+      });
+      if (existing) {
+        existing.precio = precio;
+        existing.diasEntrega = diasEntrega;
+        existing.severidad = PIECE_BASE_SEVERITY.slice(0, 32);
+        return this.priceMatrixRepository.save(existing);
+      }
+    }
+
+    const byLeve = await this.priceMatrixRepository.findOne({
+      where: { tallerId: tid, servicio, severidad: PIECE_BASE_SEVERITY },
+    });
+    if (byLeve) {
+      byLeve.precio = precio;
+      byLeve.diasEntrega = diasEntrega;
+      return this.priceMatrixRepository.save(byLeve);
+    }
+
+    const byDl = await this.priceMatrixRepository.findOne({
+      where: { tallerId: tid, servicio, severidad: 'DL' },
+    });
+    if (byDl) {
+      byDl.precio = precio;
+      byDl.diasEntrega = diasEntrega;
+      byDl.severidad = PIECE_BASE_SEVERITY;
+      return this.priceMatrixRepository.save(byDl);
+    }
+
+    return this.createRow(tid, {
+      servicio,
+      severidad: PIECE_BASE_SEVERITY,
+      precio,
+      diasEntrega,
+      isInstantService: false,
+    });
   }
 
   async bulkUpdatePrecioDias(

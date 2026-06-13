@@ -3,6 +3,7 @@ import { coerceDamageLevelCode } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import { resolvePiecePriceForVehicleProfile } from '../catalog/vehicle-piece-pricing';
+import type { CatalogPricingRules } from '../catalog/catalog-pricing-rules';
 import type { VehiclePricingProfile } from '../catalog/vehicle-pricing-profile';
 import {
   findPanelPiezaOption,
@@ -137,6 +138,7 @@ export function quoteRowsFromDamageInventory(
   inventory: readonly DetectedDamageItem[],
   snap: MatrixPricingSnapshot,
   vehicleProfile?: VehiclePricingProfile | null,
+  pricingRules?: CatalogPricingRules | null,
 ): QuoteRowInput[] {
   const rows: QuoteRowInput[] = [];
   for (const it of inventory) {
@@ -154,17 +156,16 @@ export function quoteRowsFromDamageInventory(
         catalogPieza,
         sev,
         vehicleProfile,
+        pricingRules,
       );
       if (precio <= 0) {
-        precio = snap.getAmount(it.pieza, sev);
-        if (precio > 0 && vehicleProfile) {
-          precio = resolvePiecePriceForVehicleProfile(
-            snap,
-            snap.matchServicio(it.pieza) ?? it.pieza,
-            sev,
-            vehicleProfile,
-          );
-        }
+        precio = resolvePiecePriceForVehicleProfile(
+          snap,
+          snap.matchServicio(it.pieza) ?? it.pieza,
+          sev,
+          vehicleProfile,
+          pricingRules,
+        );
       }
     }
     rows.push({
@@ -180,10 +181,14 @@ export function buildDraftQuoteLinesFromDamageInventory(
   inventory: readonly DetectedDamageItem[],
   snap: MatrixPricingSnapshot,
   vehicleProfile?: VehiclePricingProfile | null,
+  pricingRules?: CatalogPricingRules | null,
 ): DraftQuoteLine[] {
-  return quoteRowsFromDamageInventory(inventory, snap, vehicleProfile).map(
-    (row, idx) => buildDraftQuoteLineFromQuoteRow(row, idx, snap),
-  );
+  return quoteRowsFromDamageInventory(
+    inventory,
+    snap,
+    vehicleProfile,
+    pricingRules,
+  ).map((row, idx) => buildDraftQuoteLineFromQuoteRow(row, idx, snap));
 }
 
 function isSpecialPanelPiezaForMatrix(pieza: string): boolean {
