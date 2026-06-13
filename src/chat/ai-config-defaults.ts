@@ -1,8 +1,5 @@
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 
-/** Modelo OpenAI usado en visión, chat, citas, baño BPC y clasificadores. */
-export const AUTOFIX_LLM_MODEL = 'gpt-5.5';
-
 /** Prompt de sistema para análisis de daños por visión (lote de imágenes). */
 export const DEFAULT_VISION_PROMPT = `Eres un perito experto de AutoFix para hojalatería y pintura.
 

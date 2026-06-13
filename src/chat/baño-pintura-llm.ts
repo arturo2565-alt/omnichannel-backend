@@ -1,5 +1,4 @@
 import type { OpenAI } from 'openai';
-import { AUTOFIX_LLM_MODEL } from './ai-config-defaults';
 import type { InstantQuoteResolution } from './instant-quote-from-text';
 import {
   extractBañoColorDetailHeuristic,
@@ -107,7 +106,7 @@ function normalizeVehicleConfidence(
 }
 
 /**
- * Inferencia pura por IA (GPT-5.5): aísla marca, modelo y año para plantillas BPC.
+ * Inferencia pura por IA (gpt-4o): aísla marca, modelo y año para plantillas BPC.
  */
 export async function inferBañoVehicleDisplayLabelWithLlm(
   openai: OpenAI,
@@ -121,7 +120,7 @@ export async function inferBañoVehicleDisplayLabelWithLlm(
   });
 
   const completion = await openai.chat.completions.create({
-    model: AUTOFIX_LLM_MODEL,
+    model: 'gpt-4o',
     temperature: 0.1,
     max_tokens: 160,
     response_format: { type: 'json_object' },
@@ -355,7 +354,7 @@ function buildBañoDraftSystemMessage(chatAppointmentSystemPrompt: string): stri
 }
 
 /**
- * Redacción dinámica del mensaje BPC (GPT-5.5) con SystemPrompt como system principal.
+ * Redacción dinámica del mensaje BPC (gpt-4o) con chatAppointmentPrompt como system principal.
  */
 export async function composeBañoDraftMessageWithLlm(
   openai: OpenAI,
@@ -414,7 +413,7 @@ export async function composeBañoDraftMessageWithLlm(
   const temperature = Math.max(0.7, Number(options?.temperature) || 0.75);
 
   const completion = await openai.chat.completions.create({
-    model: AUTOFIX_LLM_MODEL,
+    model: 'gpt-4o',
     temperature,
     max_tokens: 900,
     messages: [
@@ -476,7 +475,7 @@ export async function classifyBañoPinturaTierWithLlm(
   }
 
   const completion = await openai.chat.completions.create({
-    model: AUTOFIX_LLM_MODEL,
+    model: 'gpt-4o-mini',
     temperature: 0.15,
     max_tokens: 220,
     response_format: { type: 'json_object' },
@@ -544,7 +543,7 @@ export async function extractBañoPersonalizedColorDetail(
 
   try {
     const completion = await openai.chat.completions.create({
-      model: AUTOFIX_LLM_MODEL,
+      model: 'gpt-4o-mini',
       temperature: 0.15,
       max_tokens: 140,
       response_format: { type: 'json_object' },
@@ -582,7 +581,7 @@ export type ComposeBañoNaturalInstantReplyOptions = {
 };
 
 /**
- * Mensaje al cliente para baño de pintura: GPT-5.5 + SystemPrompt (variantes A/B/C).
+ * Mensaje al cliente para baño de pintura: gpt-4o + chatAppointmentPrompt (variantes A/B/C).
  */
 export async function composeBañoNaturalInstantReply(
   openai: OpenAI,
@@ -598,7 +597,7 @@ export async function composeBañoNaturalInstantReply(
         options?.variantSalt ?? facts.severidadLiteral,
       ));
 
-  console.log('[BañoDraftCliente] LLM GPT-5.5', {
+  console.log('[BañoDraftCliente] LLM gpt-4o', {
     variant,
     forceRandomVariant: options?.forceRandomVariant === true,
     vehiculo: facts.vehicleLabel,
