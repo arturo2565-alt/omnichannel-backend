@@ -1,5 +1,18 @@
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import {
+  isIntegralServiceName,
+  type CatalogPricingRules,
+} from '../catalog/catalog-pricing-rules';
+import {
+  inferVehicleProfileFromLegacyBañoSeveridad,
+  resolveIntegralPriceForVehicleProfile,
+} from '../catalog/vehicle-integral-pricing';
+import {
+  resolveVehiclePricingProfile,
+  type VehiclePricingProfile,
+  type VehicleSizeTier,
+} from '../catalog/vehicle-pricing-profile';
+import {
   AUTO_FIX_CURRENCY,
   formatAutoFixMoney,
   matchServicioFromCatalog,
@@ -99,11 +112,15 @@ export function threadHasBañoOrPaintIntent(text: string): boolean {
   return mentionsBañoDePinturaIntent(text) || mentionsPaintBodyIntent(text);
 }
 
-function isCeramicoCanonical(canonical: string): boolean {
+export function isIntegralServiceCanonical(canonical: string): boolean {
+  return isIntegralServiceName(canonical);
+}
+
+export function isCeramicoCanonical(canonical: string): boolean {
   return normalizeTextForMatch(canonical).includes('ceramico');
 }
 
-function isEsteticaAutomotrizCanonical(canonical: string): boolean {
+export function isEsteticaAutomotrizCanonical(canonical: string): boolean {
   const k = normalizeTextForMatch(canonical);
   return k.includes('estetica') && k.includes('automotriz');
 }
@@ -1178,11 +1195,123 @@ export function cambioDeColorAddonMx(severidadBaño: string): number {
   return 8_000;
 }
 
+export function cambioDeColorAddonMxForSizeTier(sizeTier: VehicleSizeTier): number {
+  if (sizeTier === 'Grande' || sizeTier === 'XL') return 10_000;
+  return 8_000;
+}
+
 function logInstantResolution(payload: Record<string, unknown>): void {
   console.log('[InstantQuote]', JSON.stringify(payload));
 }
 
 type CanonicalVia = 'direct' | 'bano_pintura_synonym';
+
+function resolveIntegralVehicleProfileForQuote(
+  tierSource: string,
+  canonical: string,
+  severidadLiteral?: string,
+): VehiclePricingProfile {
+  const fromText = resolveVehiclePricingProfile({
+    modeloVehiculo: tierSource.slice(0, 120) || 'cliente',
+    tierSource: 'inferido',
+  });
+  if (fromText.sizeTier !== 'Mediano' || fromText.isPremium) {
+    return fromText;
+  }
+  if (isBañoDePinturaServicio(canonical) && severidadLiteral) {
+    return inferVehicleProfileFromLegacyBañoSeveridad(
+      severidadLiteral,
+      tierSource.slice(0, 80),
+    );
+  }
+  return fromText;
+}
+
+/** Cotización de servicio integral vía motor (base × tamaño × premium). */
+export function materializeIntegralQuoteResolution(
+  snap: MatrixPricingSnapshot,
+  params: {
+    canonical: string;
+    vehicleProfile?: VehiclePricingProfile | null;
+    pricingRules?: CatalogPricingRules | null;
+    tierSourceForCambioColor: string;
+    resolveVia: CanonicalVia;
+    latestPreview: string;
+    fullCtxPreview: string;
+  },
+): InstantQuoteResolution | null {
+  const {
+    canonical,
+    vehicleProfile,
+    pricingRules,
+    tierSourceForCambioColor,
+    resolveVia,
+    latestPreview,
+    fullCtxPreview,
+  } = params;
+
+  if (!isIntegralServiceName(canonical)) return null;
+
+  const profile =
+    vehicleProfile ??
+    resolveIntegralVehicleProfileForQuote(tierSourceForCambioColor, canonical);
+
+  const resolved = resolveIntegralPriceForVehicleProfile(
+    snap,
+    canonical,
+    profile,
+    pricingRules,
+  );
+  if (!resolved) {
+    logInstantResolution({
+      matched: false,
+      reason: 'integral_base_missing',
+      inputPreview: latestPreview.slice(0, 400),
+      contextPreview: fullCtxPreview.slice(0, 400),
+      resolveVia,
+      canonicalServicioDb: canonical,
+    });
+    return null;
+  }
+
+  logInstantResolution({
+    matched: true,
+    inputPreview: latestPreview.slice(0, 400),
+    contextPreview: fullCtxPreview.slice(0, 400),
+    resolveVia,
+    canonicalServicioDb: canonical,
+    precioMx: resolved.unitPrice,
+    basePrice: resolved.basePrice,
+    sizeTier: profile.sizeTier,
+    isPremium: profile.isPremium,
+    isInstantService: true,
+  });
+
+  const lines: InstantQuoteLine[] = [
+    { label: canonical, amount: resolved.unitPrice },
+  ];
+  const extras: InstantQuoteLine[] = [];
+  let add = 0;
+  if (
+    isBañoDePinturaServicio(canonical) &&
+    mentionsCambioDeColor(tierSourceForCambioColor)
+  ) {
+    add = cambioDeColorAddonMxForSizeTier(profile.sizeTier);
+    extras.push({ label: 'Cambio de color', amount: add });
+  }
+
+  const subtotal = resolved.unitPrice;
+  const total = resolved.unitPrice + add;
+  return {
+    lines,
+    extras,
+    subtotal,
+    total,
+    precioMx: resolved.unitPrice,
+    diasEntrega: resolved.diasEntrega > 0 ? resolved.diasEntrega : 3,
+    currency: AUTO_FIX_CURRENCY,
+  };
+}
 
 /** Construye la resolución instantánea si la celda existe en catálogo (precio + instant). */
 export function materializeInstantQuoteResolution(
@@ -1194,6 +1323,8 @@ export function materializeInstantQuoteResolution(
     resolveVia: CanonicalVia;
     latestPreview: string;
     fullCtxPreview: string;
+    vehicleProfile?: VehiclePricingProfile | null;
+    pricingRules?: CatalogPricingRules | null;
   },
 ): InstantQuoteResolution | null {
   const {
@@ -1203,7 +1334,28 @@ export function materializeInstantQuoteResolution(
     resolveVia,
     latestPreview,
     fullCtxPreview,
+    vehicleProfile,
+    pricingRules,
   } = params;
+
+  if (isIntegralServiceName(canonical)) {
+    const profile =
+      vehicleProfile ??
+      resolveIntegralVehicleProfileForQuote(
+        tierSourceForCambioColor,
+        canonical,
+        severidadLiteral,
+      );
+    return materializeIntegralQuoteResolution(snap, {
+      canonical,
+      vehicleProfile: profile,
+      pricingRules,
+      tierSourceForCambioColor,
+      resolveVia,
+      latestPreview,
+      fullCtxPreview,
+    });
+  }
 
   const base = snap.getPriceForCanonical(canonical, severidadLiteral);
   const isInstant = snap.isInstantForCanonical(canonical, severidadLiteral);
@@ -1293,6 +1445,39 @@ export function tryResolveInstantQuoteFromUserText(
     return null;
   }
   const { canonical, via } = resolved;
+
+  if (isIntegralServiceCanonical(canonical)) {
+    if (
+      isBañoDePinturaServicio(canonical) &&
+      shouldAskVehicleBeforeBañoQuote(tierNorm, latest)
+    ) {
+      logInstantResolution({
+        matched: false,
+        reason: 'bano_requires_vehicle_model',
+        inputPreview: latest.slice(0, 400),
+        contextPreview: fullCtxRaw.slice(0, 400),
+        canonicalServicioDb: canonical,
+      });
+      return null;
+    }
+    const severidadLiteral =
+      isBañoDePinturaServicio(canonical) ?
+        inferBañoTierSeveridad(tierSource)
+      : undefined;
+    const profile = resolveIntegralVehicleProfileForQuote(
+      tierSource,
+      canonical,
+      severidadLiteral,
+    );
+    return materializeIntegralQuoteResolution(snap, {
+      canonical,
+      vehicleProfile: profile,
+      tierSourceForCambioColor: tierSource,
+      resolveVia: via,
+      latestPreview: latest,
+      fullCtxPreview: fullCtxRaw,
+    });
+  }
 
   let severidadLiteral: string;
   if (canonical === 'Estética Automotriz') {

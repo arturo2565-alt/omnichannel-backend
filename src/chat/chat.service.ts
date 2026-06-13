@@ -142,6 +142,7 @@ import {
   resolveVehiclePricingProfile,
   vehiclePricingProfileFromAnalysis,
 } from '../catalog/vehicle-pricing-profile';
+import { resolveIntegralPriceForVehicleProfile } from '../catalog/vehicle-integral-pricing';
 import { QuoteCartService } from './quote-cart.service';
 import { shouldSuppressAutopilotForPendingDraft } from './quote-cart-autopilot-policy';
 import {
@@ -1619,21 +1620,19 @@ export class ChatService implements OnModuleDestroy {
       const bpc = analysis.inventory[0]!;
       const canonical =
         resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
-      let tier = String(bpc.severidad ?? '').trim();
-      if (!tier && vehicleProfile) {
-        const allowed = snap.listSeveridadesForCanonical(canonical);
-        tier =
-          resolveBañoSeveridadFromVehicleProfile(vehicleProfile, allowed) ?? '';
-      }
-      if (!tier) {
-        tier = inferBañoTierSeveridad(
-          [analysis.descripcionTecnica, analysis.justificacion]
-            .filter(Boolean)
-            .join(' '),
-        );
-      }
-      const unit = snap.getPriceForCanonical(canonical, tier);
-      this.logDebugBpcPrecio(analysis, canonical, tier, unit);
+      const integral = resolveIntegralPriceForVehicleProfile(
+        snap,
+        canonical,
+        vehicleProfile,
+        pricingRules,
+      );
+      const unit = integral?.unitPrice ?? 0;
+      this.logDebugBpcPrecio(
+        analysis,
+        canonical,
+        vehicleProfile?.sizeTier ?? 'Compacto',
+        unit,
+      );
       if (unit > 0) return unit;
     }
     if (analysis.inventory?.length) {
@@ -5063,27 +5062,20 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const bpc = analysis.inventory[0]!;
       const canonical =
         resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
-      let tierLiteral = String(bpc.severidad ?? '').trim();
-      if (!tierLiteral && vehicleProfile) {
-        const allowed = snap.listSeveridadesForCanonical(canonical);
-        tierLiteral =
-          resolveBañoSeveridadFromVehicleProfile(vehicleProfile, allowed) ??
-          '';
-      }
-      if (!tierLiteral) {
-        tierLiteral = inferBañoTierSeveridad(
-          [analysis.descripcionTecnica, analysis.justificacion]
-            .filter(Boolean)
-            .join(' '),
-        );
-      }
-      const unit = snap.getPriceForCanonical(canonical, tierLiteral);
-      this.logDebugBpcPrecio(analysis, canonical, tierLiteral, unit);
+      const integral = resolveIntegralPriceForVehicleProfile(
+        snap,
+        canonical,
+        vehicleProfile,
+        pricingRules,
+      );
+      const unit = integral?.unitPrice ?? 0;
+      const tierLabel = vehicleProfile?.sizeTier ?? 'Compacto';
+      this.logDebugBpcPrecio(analysis, canonical, tierLabel, unit);
       resolvedLevel = 'N/A';
       if (unit > 0) {
         lines.push({
-          priceItemId: `matrix:${canonical}:${tierLiteral}:bpc`,
-          description: `${canonical} (${VISION_BPC_PIEZA_CODE}) — tamaño ${tierLiteral}`,
+          priceItemId: `matrix:${canonical}:${tierLabel}:bpc`,
+          description: `${canonical} (${VISION_BPC_PIEZA_CODE}) — ${tierLabel}${vehicleProfile?.isPremium ? ' premium' : ''}`,
           quantity: 1,
           unitPrice: unit,
           subtotal: unit,

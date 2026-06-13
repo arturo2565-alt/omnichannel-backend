@@ -13,7 +13,9 @@ import { AUTO_FIX_CURRENCY, normalizeTextForMatch } from './autofix-config';
 import {
   inferBañoVehicleDisplayLabel,
   isBañoDePinturaServicio,
-  materializeInstantQuoteResolution,
+  isCeramicoCanonical,
+  isEsteticaAutomotrizCanonical,
+  materializeIntegralQuoteResolution,
   mentionsBañoDePinturaIntent,
   resolveBañoCanonicalFromSnap,
 } from './instant-quote-from-text';
@@ -75,7 +77,7 @@ export function resolveCategoriaTamanoToBañoSeveridad(
 export type CotizacionExpressLineDto = {
   servicio: string;
   canonical: string;
-  tipo: 'pieza' | 'bano_pintura';
+  tipo: 'pieza' | 'bano_pintura' | 'servicio_integral';
   severidad: string;
   cantidad: number;
   precioUnitarioMx: number;
@@ -207,20 +209,11 @@ export function buildObtenerCotizacionExpressPayload(
         error: 'Baño de pintura no disponible en el catálogo actual.',
       };
     }
-    const allowed = snap.listSeveridadesForCanonical(banoCanonical);
-    if (!allowed.length) {
-      return {
-        success: false,
-        error: 'Sin severidades de catálogo para baño de pintura.',
-      };
-    }
-    const sevFinal =
-      resolveBañoSeveridadFromVehicleProfile(vehicleProfile, allowed) ??
-      allowed[0]!;
 
-    const resolution = materializeInstantQuoteResolution(snap, {
+    const resolution = materializeIntegralQuoteResolution(snap, {
       canonical: banoCanonical,
-      severidadLiteral: sevFinal,
+      vehicleProfile,
+      pricingRules: options?.pricingRules,
       tierSourceForCambioColor: tierCtx,
       resolveVia: 'bano_pintura_synonym',
       latestPreview: modelo,
@@ -239,7 +232,7 @@ export function buildObtenerCotizacionExpressPayload(
         servicio: line.label,
         canonical: banoCanonical,
         tipo: 'bano_pintura',
-        severidad: sevFinal,
+        severidad: vehicleProfile.sizeTier,
         cantidad: 1,
         precioUnitarioMx: Math.round(line.amount),
         precioLineaMx: Math.round(line.amount),
@@ -260,8 +253,33 @@ export function buildObtenerCotizacionExpressPayload(
     if (isBañoDePinturaServicio(canonical)) {
       continue;
     }
-    const k = normalizeTextForMatch(canonical);
-    if (k.includes('ceramico') || (k.includes('estetica') && k.includes('automotriz'))) {
+
+    if (isCeramicoCanonical(canonical) || isEsteticaAutomotrizCanonical(canonical)) {
+      const resolution = materializeIntegralQuoteResolution(snap, {
+        canonical,
+        vehicleProfile,
+        pricingRules: options?.pricingRules,
+        tierSourceForCambioColor: tierCtx,
+        resolveVia: 'direct',
+        latestPreview: modelo,
+        fullCtxPreview: tierCtx,
+      });
+      if (!resolution) continue;
+      for (const line of resolution.lines) {
+        lines.push({
+          servicio: line.label,
+          canonical,
+          tipo: 'servicio_integral',
+          severidad: vehicleProfile.sizeTier,
+          cantidad: 1,
+          precioUnitarioMx: Math.round(line.amount),
+          precioLineaMx: Math.round(line.amount),
+        });
+      }
+      for (const ex of resolution.extras) {
+        extras.push({ label: ex.label, amount: Math.round(ex.amount) });
+      }
+      diasEntrega = Math.max(diasEntrega, resolution.diasEntrega);
       continue;
     }
 

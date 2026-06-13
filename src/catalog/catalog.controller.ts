@@ -89,6 +89,38 @@ export class CatalogController {
     return { ok: true, ...view };
   }
 
+  @Patch('integral-bases')
+  @HttpCode(HttpStatus.OK)
+  async patchIntegralBases(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body()
+    body: {
+      updates?: Array<{
+        servicio?: string;
+        basePrice?: unknown;
+        diasEntrega?: unknown;
+        matrixRowId?: string | null;
+      }>;
+    },
+  ) {
+    const updates = body?.updates;
+    if (!Array.isArray(updates) || !updates.length) {
+      throw new BadRequestException(
+        'Envía updates con al menos un servicio integral.',
+      );
+    }
+    for (const u of updates) {
+      await this.catalogService.upsertIntegralBase(user.tallerId, {
+        servicio: String(u.servicio ?? ''),
+        basePrice: Number(u.basePrice),
+        diasEntrega: Number(u.diasEntrega),
+        matrixRowId: u.matrixRowId ?? null,
+      });
+    }
+    const view = await this.catalogService.getPieceBaseCatalog(user.tallerId);
+    return { ok: true, ...view };
+  }
+
   @Get('price-matrix')
   async listPriceMatrix(@CurrentUser() user: AuthenticatedUser) {
     const rows = await this.catalogService.findAllPriceMatrixRows(user.tallerId);

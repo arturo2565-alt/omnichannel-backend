@@ -24,6 +24,26 @@ export const DAMAGE_MAGNITUDE_LABELS: Record<DamageMagnitude, string> = {
 /** Severidad almacenada en matriz para precio base de pieza. */
 export const PIECE_BASE_SEVERITY = 'LEVE';
 
+/** Severidad almacenada en matriz para precio base de servicio integral. */
+export const INTEGRAL_BASE_SEVERITY = 'BASE';
+
+function normalizeIntegralServiceKey(raw: string): string {
+  return String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+/** Baño de pintura, estética automotriz o cerámico (sin severidad de daño). */
+export function isIntegralServiceName(servicio: string): boolean {
+  const k = normalizeIntegralServiceKey(servicio);
+  if (!k) return false;
+  if (k.includes('bano de pintura') || k.includes('bano pintura')) return true;
+  if (k.includes('estetica') && k.includes('automotriz')) return true;
+  return k.includes('ceramico');
+}
+
 export interface CatalogPricingRules {
   sizeTierFactors: Record<VehicleSizeTier, number>;
   premiumFactor: number;
@@ -128,6 +148,22 @@ export function computeCatalogPiecePrice(input: {
   return roundCatalogPrice(price, rules.roundToMx);
 }
 
+/** Servicio integral: base × tamaño × premium (sin magnitud de daño). */
+export function computeCatalogIntegralPrice(input: {
+  basePrice: number;
+  sizeTier: VehicleSizeTier;
+  isPremium: boolean;
+  rules?: CatalogPricingRules;
+}): number {
+  const rules = mergeCatalogPricingRules(input.rules);
+  const base = Math.max(0, Math.round(Number(input.basePrice) || 0));
+  if (base <= 0) return 0;
+  let price = base;
+  price *= rules.sizeTierFactors[input.sizeTier] ?? 1;
+  if (input.isPremium) price *= rules.premiumFactor;
+  return roundCatalogPrice(price, rules.roundToMx);
+}
+
 const INSTANT_SEVERIDAD_RE =
   /^(N\/A|CHICO|MEDIANO|GRANDE|XL|PREMIUM|CERAMICO|ESTETICA)/i;
 
@@ -210,5 +246,76 @@ export function aggregatePieceBaseRows(
 
   return [...byServicio.values()]
     .filter((p) => p.basePrice > 0)
+    .sort((a, b) => a.servicio.localeCompare(b.servicio, 'es'));
+}
+
+export type IntegralBaseRow = {
+  servicio: string;
+  basePrice: number;
+  diasEntrega: number;
+  matrixRowId: string | null;
+  legacyRowId: string | null;
+};
+
+function integralBaseSeverityScore(severidad: string): number {
+  const raw = String(severidad ?? '').trim();
+  const k = normalizeDamageMagnitudeKey(raw);
+  if (k === 'BASE') return 100;
+  if (k === 'N/A' || raw === 'N/A') return 90;
+  if (k === 'LEVE') return 80;
+  if (k === 'CHICO' && !/premium/i.test(raw)) return 70;
+  return 0;
+}
+
+/** Una base por servicio integral (baño, estética, cerámico). */
+export function aggregateIntegralBaseRows(
+  rows: ReadonlyArray<{
+    id: string;
+    servicio: string;
+    severidad: string;
+    precio: number;
+    diasEntrega: number;
+    isInstantService?: boolean;
+  }>,
+): IntegralBaseRow[] {
+  const byServicio = new Map<
+    string,
+    IntegralBaseRow & { bestScore: number }
+  >();
+
+  for (const row of rows) {
+    const svc = String(row.servicio ?? '').trim();
+    if (!svc || !isIntegralServiceName(svc)) continue;
+
+    let entry = byServicio.get(svc);
+    if (!entry) {
+      entry = {
+        servicio: svc,
+        basePrice: 0,
+        diasEntrega: row.diasEntrega ?? 5,
+        matrixRowId: null,
+        legacyRowId: null,
+        bestScore: -1,
+      };
+      byServicio.set(svc, entry);
+    }
+
+    const score = integralBaseSeverityScore(row.severidad);
+    if (score <= 0) continue;
+    if (score > entry.bestScore || (score === entry.bestScore && row.precio > 0)) {
+      entry.bestScore = score;
+      entry.basePrice = row.precio;
+      entry.diasEntrega = row.diasEntrega;
+      entry.matrixRowId = row.id;
+      entry.legacyRowId =
+        normalizeDamageMagnitudeKey(row.severidad) === 'BASE'
+          ? null
+          : row.id;
+    }
+  }
+
+  return [...byServicio.values()]
+    .filter((p) => p.basePrice > 0)
+    .map(({ bestScore: _s, ...rest }) => rest)
     .sort((a, b) => a.servicio.localeCompare(b.servicio, 'es'));
 }

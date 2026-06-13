@@ -13,7 +13,9 @@ import {
 } from './instant-quote-matrix-sync';
 import { TallerService } from '../taller/taller.service';
 import {
+  aggregateIntegralBaseRows,
   aggregatePieceBaseRows,
+  INTEGRAL_BASE_SEVERITY,
   mergeCatalogPricingRules,
   PIECE_BASE_SEVERITY,
   type CatalogPricingRules,
@@ -115,22 +117,70 @@ export class CatalogService {
     const rows = await this.findAllPriceMatrixRows(tid);
     const rules = await this.getPricingRules(tid);
     const pieceBases = aggregatePieceBaseRows(rows);
-    const baseIds = new Set(
-      pieceBases
-        .flatMap((p) => [p.matrixRowId, p.legacyRowId])
-        .filter((id): id is string => !!id),
+    const integralBases = aggregateIntegralBaseRows(rows);
+    return { rules, pieceBases, integralBases };
+  }
+
+  async upsertIntegralBase(
+    tallerId: string,
+    dto: {
+      servicio: string;
+      basePrice: number;
+      diasEntrega: number;
+      matrixRowId?: string | null;
+    },
+  ): Promise<PriceMatrix> {
+    const tid = await this.resolveTallerId(tallerId);
+    const servicio = String(dto.servicio ?? '').trim().slice(0, 120);
+    if (!servicio) throw new BadRequestException('servicio obligatorio');
+    const precio = Math.max(0, Math.round(Number(dto.basePrice) || 0));
+    const diasEntrega = Math.max(
+      0,
+      Math.round(Number(dto.diasEntrega) || 0),
     );
-    const instantRows = rows
-      .filter((r) => !baseIds.has(r.id))
-      .map((r) => ({
-        id: r.id,
-        servicio: r.servicio,
-        severidad: r.severidad,
-        precio: r.precio,
-        diasEntrega: r.diasEntrega,
-        isInstantService: r.isInstantService,
-      }));
-    return { rules, pieceBases, instantRows };
+
+    const rowId = String(dto.matrixRowId ?? '').trim();
+    if (rowId) {
+      const existing = await this.priceMatrixRepository.findOne({
+        where: { id: rowId, tallerId: tid },
+      });
+      if (existing) {
+        existing.precio = precio;
+        existing.diasEntrega = diasEntrega;
+        existing.severidad = INTEGRAL_BASE_SEVERITY.slice(0, 32);
+        existing.isInstantService = true;
+        return this.priceMatrixRepository.save(existing);
+      }
+    }
+
+    const byBase = await this.priceMatrixRepository.findOne({
+      where: { tallerId: tid, servicio, severidad: INTEGRAL_BASE_SEVERITY },
+    });
+    if (byBase) {
+      byBase.precio = precio;
+      byBase.diasEntrega = diasEntrega;
+      byBase.isInstantService = true;
+      return this.priceMatrixRepository.save(byBase);
+    }
+
+    const byNa = await this.priceMatrixRepository.findOne({
+      where: { tallerId: tid, servicio, severidad: 'N/A' },
+    });
+    if (byNa) {
+      byNa.precio = precio;
+      byNa.diasEntrega = diasEntrega;
+      byNa.severidad = INTEGRAL_BASE_SEVERITY;
+      byNa.isInstantService = true;
+      return this.priceMatrixRepository.save(byNa);
+    }
+
+    return this.createRow(tid, {
+      servicio,
+      severidad: INTEGRAL_BASE_SEVERITY,
+      precio,
+      diasEntrega,
+      isInstantService: true,
+    });
   }
 
   async upsertPieceBase(

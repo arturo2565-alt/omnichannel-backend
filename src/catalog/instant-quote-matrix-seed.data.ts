@@ -1,6 +1,6 @@
 /**
- * Filas de cotización inmediata (InstantQuote): baños de pintura por tamaño, estética.
- * `severidad` almacena el tamaño/tipo (hasta 32 caracteres en BD).
+ * Filas base de servicios integrales (baño, estética, cerámico).
+ * El precio final = base × tamaño × premium (sin severidad de daño).
  */
 export type InstantQuoteMatrixSeedRow = {
   servicio: string;
@@ -11,68 +11,27 @@ export type InstantQuoteMatrixSeedRow = {
 };
 
 const DIAS_DEFAULT = 5;
+const BASE = 'BASE';
 
 export const INSTANT_QUOTE_MATRIX_SEED_ROWS: InstantQuoteMatrixSeedRow[] = [
   {
     servicio: 'Baño de Pintura Exterior',
-    severidad: 'Chico',
+    severidad: BASE,
     precio: 28000,
     diasEntrega: DIAS_DEFAULT,
     isInstantService: true,
   },
   {
-    servicio: 'Baño de Pintura Exterior',
-    severidad: 'Chico Premium',
-    precio: 30000,
-    diasEntrega: DIAS_DEFAULT,
-    isInstantService: true,
-  },
-  {
-    servicio: 'Baño de Pintura Exterior',
-    severidad: 'Mediano',
-    precio: 29000,
-    diasEntrega: DIAS_DEFAULT,
-    isInstantService: true,
-  },
-  {
-    servicio: 'Baño de Pintura Exterior',
-    severidad: 'Mediano Premium',
-    precio: 32000,
-    diasEntrega: DIAS_DEFAULT,
-    isInstantService: true,
-  },
-  {
-    servicio: 'Baño de Pintura Exterior',
-    severidad: 'Grande',
-    precio: 33000,
-    diasEntrega: DIAS_DEFAULT,
-    isInstantService: true,
-  },
-  {
-    servicio: 'Baño de Pintura Exterior',
-    severidad: 'Grande Premium',
-    precio: 36000,
-    diasEntrega: DIAS_DEFAULT,
-    isInstantService: true,
-  },
-  {
-    servicio: 'Baño de Pintura Exterior',
-    severidad: 'XL',
-    precio: 36000,
-    diasEntrega: DIAS_DEFAULT,
-    isInstantService: true,
-  },
-  {
-    servicio: 'Baño de Pintura Exterior',
-    severidad: 'XL Premium',
-    precio: 39000,
-    diasEntrega: DIAS_DEFAULT,
-    isInstantService: true,
-  },
-  {
     servicio: 'Estética Automotriz',
-    severidad: 'N/A',
+    severidad: BASE,
     precio: 3500,
+    diasEntrega: DIAS_DEFAULT,
+    isInstantService: true,
+  },
+  {
+    servicio: 'Cerámico Automotriz',
+    severidad: BASE,
+    precio: 4500,
     diasEntrega: DIAS_DEFAULT,
     isInstantService: true,
   },
