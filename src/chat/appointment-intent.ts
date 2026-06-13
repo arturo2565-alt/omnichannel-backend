@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { AUTOFIX_LLM_MODEL } from './ai-config-defaults';
 
 /** Zona del taller para interpretar «mañana» y validar día/hora */
 export const WORKSHOP_TIMEZONE = 'America/Mexico_City';
@@ -343,7 +344,7 @@ export async function parseAppointmentIntent(
   const refIso = referenceDate.toISOString();
 
   const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: AUTOFIX_LLM_MODEL,
     response_format: { type: 'json_object' },
     messages: [
       {
