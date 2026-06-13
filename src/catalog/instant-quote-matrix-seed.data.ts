@@ -31,7 +31,7 @@ export const INSTANT_QUOTE_MATRIX_SEED_ROWS: InstantQuoteMatrixSeedRow[] = [
   {
     servicio: 'Cerámico Automotriz',
     severidad: BASE,
-    precio: 4500,
+    precio: 7000,
     diasEntrega: DIAS_DEFAULT,
     isInstantService: true,
   },
