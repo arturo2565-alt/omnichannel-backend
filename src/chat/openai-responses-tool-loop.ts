@@ -57,6 +57,10 @@ export async function runOpenAiResponsesToolLoop(
       name: string,
       argsJson: string,
     ) => Promise<Record<string, unknown>>;
+    /** Tras procesar todas las tools de un paso (p. ej. parchear salidas multi-vehículo). */
+    onToolBatchComplete?: (
+      batch: Array<{ name: string; output: string }>,
+    ) => void;
     tier?: OpenAiModelTier;
     maxSteps?: number;
     maxOutputTokens?: number;
@@ -104,16 +108,23 @@ export async function runOpenAiResponsesToolLoop(
     const functionCalls = listFunctionCalls(response);
     if (functionCalls.length > 0) {
       pendingToolOutputs = [];
+      const batchMeta: { name: string; output: string }[] = [];
       for (const call of functionCalls) {
         const payload = await options.handleToolCall(
           call.name,
           call.arguments ?? '{}',
         );
+        const output = JSON.stringify(payload);
+        batchMeta.push({ name: call.name, output });
         pendingToolOutputs.push({
           type: 'function_call_output',
           call_id: call.call_id,
-          output: JSON.stringify(payload),
+          output,
         });
+      }
+      options.onToolBatchComplete?.(batchMeta);
+      for (let i = 0; i < batchMeta.length; i++) {
+        pendingToolOutputs[i]!.output = batchMeta[i]!.output;
       }
       continue;
     }

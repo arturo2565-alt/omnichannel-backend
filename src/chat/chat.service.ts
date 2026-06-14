@@ -180,6 +180,7 @@ import {
 import { openAiChatCompletionParams } from './openai-model-config';
 import { createVisionDamageAnalysisCompletion } from './openai-vision-completion';
 import { AUTOPILOT_RESPONSES_TOOLS } from './autopilot-tools';
+import { MultiVehicleExpressTracker } from './autopilot-multi-vehicle-express';
 import {
   runOpenAiResponsesToolLoop,
   type OpenAiDialogueTurn,
@@ -5985,6 +5986,16 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
   }
 
+  private enrichAutopilotToolPayloadForMultiVehicleExpress(
+    name: string,
+    argsJson: string,
+    payload: Record<string, unknown>,
+    tracker: MultiVehicleExpressTracker,
+  ): Record<string, unknown> {
+    if (name !== 'obtenerCotizacionExpress') return payload;
+    return tracker.enrichPayload(payload, argsJson);
+  }
+
   private async executeAutopilotToolSafely(
     name: string,
     args: string,
@@ -6237,55 +6248,61 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     ];
 
     let lastConfirmedIso: string | null = null;
+    const multiVehicleExpressTracker = new MultiVehicleExpressTracker();
 
     const loop = await runOpenAiResponsesToolLoop(this.openai, {
       resolveInstructions: async () => params.baseSystem,
       dialogue,
       tools: AUTOPILOT_RESPONSES_TOOLS,
       maxOutputTokens: AUTOPILOT_CHAT_MAX_OUTPUT_TOKENS,
+      onToolBatchComplete: (batch) =>
+        multiVehicleExpressTracker.patchBatchOutputs(batch),
       handleToolCall: async (name, argsJson) => {
+        let payload: Record<string, unknown>;
         if (name === 'createAppointment') {
           const r = await this.executeCreateAppointmentToolPlayground(argsJson);
           if (r.success && r.scheduledAt) {
             lastConfirmedIso = r.scheduledAt;
           }
-          return { ...r };
-        }
-        if (name === 'obtenerCotizacionExpress') {
-          return this.executeObtenerCotizacionExpressToolPlayground(argsJson);
-        }
-        if (name === 'obtenerCarritoActual') {
-          return this.executeObtainCarritoActualTool(
+          payload = { ...r };
+        } else if (name === 'obtenerCotizacionExpress') {
+          payload = await this.executeObtenerCotizacionExpressToolPlayground(
+            argsJson,
+          );
+        } else if (name === 'obtenerCarritoActual') {
+          payload = await this.executeObtainCarritoActualTool(
             { status: 'nuevo' } as Conversation,
           );
-        }
-        if (name === 'agregarAlCarrito') {
-          return this.executeAgregarAlCarritoTool(
+        } else if (name === 'agregarAlCarrito') {
+          payload = await this.executeAgregarAlCarritoTool(
             argsJson,
             { status: 'nuevo' } as Conversation,
           );
-        }
-        if (name === 'quitarDelCarrito') {
-          return this.executeQuitarDelCarritoTool(
+        } else if (name === 'quitarDelCarrito') {
+          payload = await this.executeQuitarDelCarritoTool(
             argsJson,
             { status: 'nuevo' } as Conversation,
           );
-        }
-        if (name === 'actualizarCarrito') {
-          return this.executeActualizarCarritoTool(
+        } else if (name === 'actualizarCarrito') {
+          payload = await this.executeActualizarCarritoTool(
             argsJson,
             { status: 'nuevo' } as Conversation,
           );
-        }
-        if (name === 'obtenerResumenCarrito') {
-          return this.executeObtainCarritoResumenTool(
+        } else if (name === 'obtenerResumenCarrito') {
+          payload = await this.executeObtainCarritoResumenTool(
             { status: 'nuevo' } as Conversation,
           );
+        } else if (name === 'notificarLlegadaCliente') {
+          payload = await this.executeNotificarLlegadaClienteToolPlayground();
+        } else {
+          payload = { success: false, error: `Función no soportada: ${name}` };
         }
-        if (name === 'notificarLlegadaCliente') {
-          return this.executeNotificarLlegadaClienteToolPlayground();
-        }
-        return { success: false, error: `Función no soportada: ${name}` };
+        return this.enrichAutopilotToolPayloadForMultiVehicleExpress(
+          name,
+          argsJson,
+          payload,
+          multiVehicleExpressTracker,
+        );
       },
     });
 
@@ -6723,6 +6740,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         }));
 
       let lastConfirmedIso: string | null = null;
+      const multiVehicleExpressTracker = new MultiVehicleExpressTracker();
 
       const loop = await runOpenAiResponsesToolLoop(this.openai, {
         resolveInstructions: async () => {
@@ -6746,6 +6764,8 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         dialogue: responseDialogue,
         tools: AUTOPILOT_RESPONSES_TOOLS,
         maxOutputTokens: AUTOPILOT_CHAT_MAX_OUTPUT_TOKENS,
+        onToolBatchComplete: (batch) =>
+          multiVehicleExpressTracker.patchBatchOutputs(batch),
         handleToolCall: async (name, argsJson) => {
           const payload = await this.executeAutopilotToolSafely(
             name,
@@ -6759,7 +6779,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           ) {
             lastConfirmedIso = String(payload.scheduledAt);
           }
-          return payload;
+          return this.enrichAutopilotToolPayloadForMultiVehicleExpress(
+            name,
+            argsJson,
+            payload,
+            multiVehicleExpressTracker,
+          );
         },
       });
 

@@ -31,6 +31,7 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   '',
   'Regla de Oro: Si te piden pintar el auto o una pieza, pero NO conoces el vehículo, NO inventes precios. Usa tu conversación de forma natural para preguntar amablemente la marca y modelo.',
   'Una vez que tengas el vehículo, ejecuta obtenerCotizacionExpress con servicios (lista de piezas o "baño de pintura"), modeloVehiculo, categoriaTamaño (Chico, Mediano, Grande o XL) y esPremium (true/false si es marca premium).',
+  'REGLA DE COTIZACIÓN MÚLTIPLE SIMULTÁNEA: Si el cliente pide cotizar el mismo servicio para dos o más vehículos distintos en el mismo mensaje, ejecuta obtenerCotizacionExpress de forma independiente para cada vehículo (una llamada por auto, con su modeloVehiculo, categoriaTamaño y esPremium). Cuando tengas todos los resultados, redacta un único mensaje con cada presupuesto desglosado y claro por vehículo. PROHIBIDO sumar totales mentalmente: si la herramienta devuelve cotizacionMultiVehiculo, usa exactamente totalCombinadoMx como gran total; si aún no aparece, espera a completar todas las llamadas antes de dar el total combinado.',
   'categoriaTamaño — tamaño de carrocería (NO es lo mismo que premium):',
   '• Pick-up, SUV mediano, camioneta (F-150, Silverado, Tacoma, CR-V): Grande.',
   '• SUV full-size (Escalade, Suburban, Tahoe, Expedition, Navigator): XL.',

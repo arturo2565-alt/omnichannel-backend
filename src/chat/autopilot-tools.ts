@@ -6,7 +6,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
     type: 'function',
     name: 'obtenerCotizacionExpress',
     description:
-      'Úsala cuando el cliente solicite el precio de un baño de pintura o el repintado express de piezas específicas y ya conozcas el modelo del vehículo. Esta función consultará la base de datos real del taller y te devolverá los precios oficiales para que se los presentes al cliente.',
+      'Úsala cuando el cliente solicite el precio de un baño de pintura o el repintado express de piezas específicas y ya conozcas el modelo del vehículo. Si pide cotizar el mismo servicio para varios autos en un mensaje, llama esta herramienta una vez por cada vehículo (modeloVehiculo distinto). El backend devolverá cotizacionMultiVehiculo.totalCombinadoMx cuando haya dos o más vehículos en el turno; usa ese total, no sumes mentalmente.',
     parameters: {
       type: 'object',
       properties: {
