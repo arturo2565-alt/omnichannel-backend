@@ -38,9 +38,10 @@ describe('openai-model-config', () => {
     expect(p.temperature).toBeUndefined();
   });
 
-  it('visión usa reasoning xhigh por defecto', () => {
-    const p = openAiChatCompletionParams({ tier: 'vision', maxOutputTokens: 3000 });
-    expect(p.reasoning_effort).toBe('xhigh');
+  it('visión usa reasoning high por defecto', () => {
+    delete process.env.OPENAI_REASONING_EFFORT_VISION;
+    const p = openAiChatCompletionParams({ tier: 'vision', maxOutputTokens: 12_000 });
+    expect(p.reasoning_effort).toBe('high');
   });
 
   it('openAiResponsesParams usa reasoning nested (Responses API)', () => {

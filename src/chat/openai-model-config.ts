@@ -9,7 +9,8 @@ import type { ReasoningEffort } from 'openai/resources/shared';
  * OPENAI_MODEL_NARRATIVE   — redacción cotización / baño (default gpt-5.5)
  * OPENAI_MODEL_FAST        — clasificación / probes (default gpt-5.4-mini)
  *
- * OPENAI_REASONING_EFFORT_* — none | low | medium | high | xhigh (por tier; visión default xhigh)
+ * OPENAI_REASONING_EFFORT_* — none | low | medium | high | xhigh (por tier; visión default high)
+ * OPENAI_VISION_MAX_OUTPUT_TOKENS — cupo salida visión (default 12000; reasoning + JSON)
  * OPENAI_REASONING_EFFORT   — fallback global
  */
 export type OpenAiModelTier = 'vision' | 'chat' | 'narrative' | 'fast';
@@ -48,7 +49,7 @@ export const OPENAI_REASONING_EFFORT_DEFAULTS: Record<
   OpenAiModelTier,
   ReasoningEffort
 > = {
-  vision: 'xhigh',
+  vision: 'high',
   chat: 'low',
   narrative: 'low',
   fast: 'none',
@@ -96,9 +97,12 @@ export function openAiChatCompletionParams(input: {
   tier: OpenAiModelTier;
   maxOutputTokens?: number;
   temperature?: number;
+  /** Override puntual (p. ej. reintento visión con effort menor). */
+  reasoningEffortOverride?: ReasoningEffort;
 }): OpenAiChatCompletionBaseParams {
   const model = resolveOpenAiModel(input.tier);
-  const effort = resolveOpenAiReasoningEffort(input.tier);
+  const effort =
+    input.reasoningEffortOverride ?? resolveOpenAiReasoningEffort(input.tier);
 
   const params: OpenAiChatCompletionBaseParams = { model };
 

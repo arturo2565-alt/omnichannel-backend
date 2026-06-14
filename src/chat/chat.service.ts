@@ -178,6 +178,7 @@ import {
   userLatestMessageLooksLikeVehicleModelReply,
 } from './instant-quote-from-text';
 import { openAiChatCompletionParams } from './openai-model-config';
+import { createVisionDamageAnalysisCompletion } from './openai-vision-completion';
 import { AUTOPILOT_RESPONSES_TOOLS } from './autopilot-tools';
 import {
   runOpenAiResponsesToolLoop,
@@ -2512,19 +2513,23 @@ export class ChatService implements OnModuleDestroy {
       { role: 'user', content: userContent },
     ];
 
-    const completion = await this.openai.chat.completions.create({
-      ...openAiChatCompletionParams({ tier: 'vision', maxOutputTokens: 3000 }),
-      response_format: { type: 'json_object' },
-      messages: visionMessages,
-    });
-
-    const visionResponse = completion.choices[0]?.message?.content?.trim() ?? '';
+    const visionMeta = await createVisionDamageAnalysisCompletion(
+      this.openai,
+      visionMessages,
+    );
+    const visionResponse = visionMeta.content;
     console.log(
       '[Vision] Respuesta cruda',
       JSON.stringify({
         imageCount: urls.length,
         historyTurns: historyTurns.length,
         responseChars: visionResponse.length,
+        finishReason: visionMeta.finishReason,
+        reasoningEffort: visionMeta.reasoningEffort,
+        attempt: visionMeta.attempt,
+        maxOutputTokens: visionMeta.maxOutputTokens,
+        completionTokens: visionMeta.completionTokens,
+        reasoningTokens: visionMeta.reasoningTokens,
         preview: visionResponse.slice(0, 1200),
       }),
     );
