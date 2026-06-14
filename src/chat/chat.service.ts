@@ -1149,6 +1149,17 @@ export class ChatService implements OnModuleDestroy {
 
     const inv = analysis.inventory ?? [];
 
+    console.log(
+      '[DraftQuoteItems] buildDraftQuoteLineRowsForPersist',
+      JSON.stringify({
+        invCount: inv.length,
+        lineCount: lines.length,
+        analysisPieza: analysis.pieza,
+        fallbackUrlCount: fallbackUrls.length,
+        invPiezas: inv.map((i) => i.pieza),
+      }),
+    );
+
     if (inv.length > 0 && inv.length === lines.length) {
       return lines.map((line, idx) => {
         const row = inv[idx];
@@ -1170,6 +1181,14 @@ export class ChatService implements OnModuleDestroy {
     }
 
     if (inv.length > 0 && lines.length === 1) {
+      console.warn(
+        '[DraftQuoteItems] Rama colapsada: inventario multi-pieza → 1 línea de cotización; todas las fotos van al Daño 1',
+        JSON.stringify({
+          invCount: inv.length,
+          analysisPieza: analysis.pieza,
+          fallbackUrlCount: fallbackUrls.length,
+        }),
+      );
       const line0only = lines[0];
       return [
         {
@@ -2500,7 +2519,15 @@ export class ChatService implements OnModuleDestroy {
     });
 
     const visionResponse = completion.choices[0]?.message?.content?.trim() ?? '';
-    console.log('Respuesta cruda de Vision:', visionResponse);
+    console.log(
+      '[Vision] Respuesta cruda',
+      JSON.stringify({
+        imageCount: urls.length,
+        historyTurns: historyTurns.length,
+        responseChars: visionResponse.length,
+        preview: visionResponse.slice(0, 1200),
+      }),
+    );
 
     if (!visionResponse) {
       if (options?.allowEmptyInventory) {
@@ -2520,10 +2547,35 @@ export class ChatService implements OnModuleDestroy {
 
     if (options?.allowEmptyInventory) {
       const items = parseDetectedDamageItemsAllowEmpty(parsed);
-      return collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
+      const collapsed = collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
+      console.log(
+        '[Vision] Inventario parseado (allowEmpty)',
+        JSON.stringify({
+          rawItems: items.length,
+          collapsedItems: collapsed.length,
+          piezas: collapsed.map((i) => ({
+            pieza: i.pieza,
+            severidad: i.severidad,
+            urls: (i.urls_origen ?? []).length,
+          })),
+          vehiculo_detectado:
+            parsed && typeof parsed === 'object'
+              ? String((parsed as { vehiculo_detectado?: string }).vehiculo_detectado ?? '')
+              : '',
+        }),
+      );
+      return collapsed;
     }
     const items = normalizeDetectedDamagesJson(parsed);
-    return collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
+    const collapsed = collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
+    console.log(
+      '[Vision] Inventario parseado',
+      JSON.stringify({
+        items: collapsed.length,
+        piezas: collapsed.map((i) => i.pieza),
+      }),
+    );
+    return collapsed;
   }
 
   /** Parte URLs en lotes de hasta {@link ChatService.VISION_IMAGE_CHUNK_SIZE}. */
@@ -2585,7 +2637,18 @@ export class ChatService implements OnModuleDestroy {
         allowEmptyInventory: true,
       });
 
+      console.log(
+        `[VisionChunk] Lote ${idx + 1} resultado`,
+        JSON.stringify({
+          items: batchItems.length,
+          piezas: batchItems.map((i) => i.pieza),
+        }),
+      );
+
       if (!batchItems.length) {
+        console.warn(
+          `[VisionChunk] Lote ${idx + 1}/${lotes.length} sin ítems válidos (pieza+severidad)`,
+        );
         continue;
       }
 
@@ -3204,6 +3267,18 @@ export class ChatService implements OnModuleDestroy {
     newPiezas: string[];
     narrativeOptions?: { temperature?: number };
   }): Promise<string | null> {
+    const started = Date.now();
+    console.log(
+      '[DraftClientNarrative] Inicio compositor',
+      JSON.stringify({
+        conversationId: input.conversationId,
+        pricingMode: this.resolvePricingModeForClientNarrative(input.analysis),
+        lineRows: input.lineRows.length,
+        total: input.total,
+        imageCount: input.imageCount,
+        invCount: input.analysis.inventory?.length ?? 0,
+      }),
+    );
     try {
       const chatPrompt = await this.getChatAppointmentSystemPrompt();
       const historyRows = await this.loadRecentMessagesForLlm(
@@ -3211,7 +3286,7 @@ export class ChatService implements OnModuleDestroy {
       );
       const dialogue = this.messagesToChatCompletionTurns(historyRows);
 
-      return await composeDraftClientMessageWithLlm(
+      const text = await composeDraftClientMessageWithLlm(
         this.openai,
         chatPrompt,
         {
@@ -3240,8 +3315,22 @@ export class ChatService implements OnModuleDestroy {
         dialogue,
         { temperature: input.narrativeOptions?.temperature },
       );
+      console.log(
+        '[DraftClientNarrative] OK',
+        JSON.stringify({
+          ms: Date.now() - started,
+          chars: text.length,
+        }),
+      );
+      return text;
     } catch (err) {
-      console.error('composeDraftClientNarrativeWithChatAppointment:', err);
+      console.error(
+        '[DraftClientNarrative] Falló LLM; se usará plantilla fallback',
+        JSON.stringify({
+          ms: Date.now() - started,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
       return null;
     }
   }
@@ -3362,6 +3451,16 @@ export class ChatService implements OnModuleDestroy {
         narrativeOptions,
       });
     draft.formalNarrative = llmNarrative || fallbackNarrative;
+    console.log(
+      '[DraftClientNarrative] applyClientFacingFormalNarrativeToDraft',
+      JSON.stringify({
+        conversationId,
+        usedLlm: Boolean(llmNarrative),
+        usedFallback: !llmNarrative,
+        chars: draft.formalNarrative.length,
+        lineRows: lineRows.length,
+      }),
+    );
     const normalized = normalizeDraftQuoteForClient(draft);
     if (normalized) {
       Object.assign(draft, normalized);
@@ -3436,6 +3535,24 @@ export class ChatService implements OnModuleDestroy {
         'pieces debe incluir al menos una pieza con nombre y precio.',
       );
     }
+
+    console.log(
+      '[DraftClientNarrative] preview-narrative request',
+      JSON.stringify({
+        conversationId: String(body.conversationId ?? '').trim(),
+        pieceCount: pieces.length,
+        piezas: pieces.map((p) => p.pieza),
+        total: sumQuoteRowsSubtotal(
+          pieces.map((p) => ({
+            pieza: p.pieza,
+            severidad: 'N/A',
+            precioMx: p.precioMx,
+            precioMaximo: p.precioMaximo,
+            detallesRefaccion: p.detallesRefaccion,
+          })),
+        ),
+      }),
+    );
 
     const lineRows = pieces.map((p) => ({
       pieza: p.pieza,
@@ -5094,6 +5211,24 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
     const draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
+
+    console.log(
+      '[VisionPipeline] Borrador listo para panel',
+      JSON.stringify({
+        conversationId,
+        imageCount: imageUrls.length,
+        invCount: mergedInventory.length,
+        lineCount: draftQuoteDoc.lines?.length ?? 0,
+        total: draftQuoteDoc.total,
+        clientMessageChars: String(
+          draftQuoteForClient.clientMessage ?? '',
+        ).length,
+        formalIsLegalDoc:
+          String(draftQuoteForClient.formalNarrative ?? '').includes(
+            'PROPUESTA DE COTIZACIÓN',
+          ),
+      }),
+    );
 
     const messageId = attachingMessageId;
 
