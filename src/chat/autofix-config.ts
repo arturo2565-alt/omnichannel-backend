@@ -199,6 +199,8 @@ export type QuoteSendSnapshot = {
     pieza: string;
     severidad: string;
     precioMx: number;
+    /** Rango superior — posibles daños internos. */
+    precioMaximo?: number;
   }[];
   formalNarrative?: string;
 };

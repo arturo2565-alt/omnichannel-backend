@@ -47,6 +47,10 @@ import {
   buildActiveCartViewFromEntity,
   desgloseFromCartEntity,
 } from './quote-cart-aggregate';
+import {
+  quoteRowsPreservingLastSend,
+  type RebuildPriceOpts,
+} from './quote-cart-send-price-preservation';
 
 const ACTIVE_CART_STATUS = 'PENDING_APPROVAL';
 const APPROVED_CART_STATUS = 'APPROVED';
@@ -432,7 +436,9 @@ export class QuoteCartService {
     const cart = await this.resolveMutableCart(conversationId, tallerId);
     const inventory = cart.damageAnalysis?.inventory ?? [];
     const merged = mergeCartInventoryWithPricingMode(inventory, item);
-    const saved = await this.rebuildAndPersist(cart, merged, tallerId);
+    const saved = await this.rebuildAndPersist(cart, merged, tallerId, undefined, null, {
+      matrixPricePiezaCodes: [storedPieza],
+    });
     return this.getCartSummaryEnvelope(conversationId, tallerId);
   }
 
@@ -483,7 +489,11 @@ export class QuoteCartService {
       urls_origen: [...(existing.urls_origen ?? [])],
     };
 
-    await this.rebuildAndPersist(cart, inventory, tallerId);
+    const updatedCode =
+      panelOpt?.code ?? (piezaNueva || existing.pieza);
+    await this.rebuildAndPersist(cart, inventory, tallerId, undefined, null, {
+      matrixPricePiezaCodes: [updatedCode],
+    });
     return this.getCartSummaryEnvelope(conversationId, tallerId);
   }
 
@@ -658,6 +668,7 @@ export class QuoteCartService {
 
     const cart = await this.resolveMutableCart(conversationId, tallerId);
     let inventory = [...(cart.damageAnalysis?.inventory ?? [])];
+    const expressPiezaCodes: string[] = [];
 
     for (const line of express.lines ?? []) {
       const isBano =
@@ -667,6 +678,7 @@ export class QuoteCartService {
       const storedPieza = isBano
         ? VISION_BPC_PIEZA_CODE
         : panelOpt?.code ?? line.canonical ?? line.servicio;
+      expressPiezaCodes.push(storedPieza);
       const item: DetectedDamageItem = {
         pieza: storedPieza,
         severidad: coerceDamageLevelCode(line.severidad),
@@ -682,6 +694,7 @@ export class QuoteCartService {
       tallerId,
       express.extras,
       express.vehiclePricingProfile ?? null,
+      { matrixPricePiezaCodes: expressPiezaCodes },
     );
     return {
       ...(await this.getCartSummaryEnvelope(conversationId, tallerId)),
@@ -698,6 +711,7 @@ export class QuoteCartService {
     tallerId?: string | null,
     extras?: ReadonlyArray<{ label: string; amount: number }>,
     vehicleProfileOverride?: VehiclePricingProfile | null,
+    priceOpts?: RebuildPriceOpts,
   ): Promise<DraftQuoteEntity> {
     const sanitized = sanitizeCartInventoryForPricing(inventory);
     const snap = await this.catalogService.getMatrixPricingSnapshot(
@@ -726,12 +740,29 @@ export class QuoteCartService {
       analysis.vehiculoDetectado = vehicleProfile.vehicleLabel;
     }
 
-    const quoteRows = quoteRowsFromDamageInventory(
-      sanitized,
-      snap,
-      vehicleProfile,
-      pricingRules,
-    );
+    const priorPayload = row.quotePayload ?? emptyPayloadFallback();
+    const sentSnapshot = priorPayload.lastSendSnapshot;
+    const useSentPreservation =
+      sentSnapshot != null &&
+      Array.isArray(sentSnapshot.desglose) &&
+      sentSnapshot.desglose.length > 0;
+
+    const quoteRows = useSentPreservation
+      ? quoteRowsPreservingLastSend(
+          sanitized,
+          snap,
+          vehicleProfile,
+          pricingRules,
+          sentSnapshot,
+          priorPayload.lines,
+          priceOpts,
+        )
+      : quoteRowsFromDamageInventory(
+          sanitized,
+          snap,
+          vehicleProfile,
+          pricingRules,
+        );
 
     let lines = quoteRows.map((r, i) =>
       buildDraftQuoteLineFromQuoteRow(r, i, snap),
@@ -754,7 +785,6 @@ export class QuoteCartService {
       subtotal += amt;
     }
 
-    const priorPayload = row.quotePayload ?? emptyPayloadFallback();
     const doc: DraftQuote = {
       ...priorPayload,
       lines,

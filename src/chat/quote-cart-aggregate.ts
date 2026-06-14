@@ -6,7 +6,11 @@ import {
 import type { QuoteSendSnapshot } from './autofix-config';
 import type { DraftQuoteEntity } from './entities/draft-quote.entity';
 import type { QuoteCartEstado } from './quote-cart.types';
-import { findPanelPiezaOption } from '../catalog/panel-pieza-catalog';
+import { findPanelPiezaOption, isInternalDamageRangePieza } from '../catalog/panel-pieza-catalog';
+import {
+  enrichDesgloseWithInternalRanges,
+  resolvePrecioMaximoFromDraftLines,
+} from './quote-cart-send-price-preservation';
 
 type CartRow = Pick<
   DraftQuoteEntity,
@@ -24,18 +28,35 @@ export function desgloseFromCartEntity(
   const labelForPieza = (code: string) =>
     findPanelPiezaOption(code)?.fullName ?? code;
 
+  const draftLines = row.quotePayload?.lines ?? [];
+  const fallbackInternalMax = resolvePrecioMaximoFromDraftLines(draftLines);
+
   if (row.items?.length) {
-    return row.items.map((it) => ({
-      pieza: labelForPieza(it.pieza),
-      severidad: String(it.severidad ?? '').trim() || 'DL',
-      precioMx: Math.max(0, Math.round(Number(it.precioMx) || 0)),
-    }));
+    const base = row.items.map((it) => {
+      const label = labelForPieza(it.pieza);
+      const precioMx = Math.max(0, Math.round(Number(it.precioMx) || 0));
+      const line: CotizacionDesgloseLine = {
+        pieza: label,
+        severidad: String(it.severidad ?? '').trim() || 'DL',
+        precioMx,
+      };
+      if (
+        isInternalDamageRangePieza(it.pieza) &&
+        fallbackInternalMax != null &&
+        fallbackInternalMax > precioMx
+      ) {
+        line.precioMaximo = fallbackInternalMax;
+      }
+      return line;
+    });
+    return enrichDesgloseWithInternalRanges(base, draftLines);
   }
-  return (row.quotePayload?.lines ?? []).map((line) => ({
+  const base = (draftLines ?? []).map((line) => ({
     pieza: String(line.description ?? '').split('—')[0]?.trim() || 'Servicio',
     severidad: 'DL',
     precioMx: Math.round(Number(line.subtotal ?? line.unitPrice) || 0),
   }));
+  return enrichDesgloseWithInternalRanges(base, draftLines);
 }
 
 function desgloseSignature(lines: readonly CotizacionDesgloseLine[]): string {
@@ -81,7 +102,7 @@ export function buildActiveCartViewFromEntity(
 
   const instruccionBase =
     estadoCarrito === 'activo_modificado'
-      ? `${COTIZACION_INSTRUCCION_PARA_MODELO} El carrito cambió desde el último envío al cliente; usa desglose y totalGlobal actuales. Si el cliente pidió quitar o agregar piezas, confirma el nuevo total.`
+      ? `${COTIZACION_INSTRUCCION_PARA_MODELO} El carrito cambió desde el último envío al cliente; usa desglose y totalGlobal actuales. Los precios de piezas ya enviadas se conservaron; solo cambió lo nuevo o lo que el cliente pidió quitar. Si hay precioMaximo en daños internos, redacta el rango.`
       : sendCount > 0
         ? `${COTIZACION_INSTRUCCION_PARA_MODELO} La cotización ya se envió al cliente; el carrito sigue editable. Si pide cambios, usa quitarDelCarrito o agregarAlCarrito y responde con el total actualizado.`
         : COTIZACION_INSTRUCCION_PARA_MODELO;

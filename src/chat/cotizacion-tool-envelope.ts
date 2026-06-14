@@ -2,6 +2,8 @@ export type CotizacionDesgloseLine = {
   pieza: string;
   severidad: string;
   precioMx: number;
+  /** Rango superior — posibles daños internos (sujeto a desarme). */
+  precioMaximo?: number;
 };
 
 export type CotizacionToolEnvelope = {
