@@ -27,6 +27,7 @@ import type { PatchCartInventoryLineDto } from './quote-cart.types';
 import type { DetectedDamageItem, VehicleDamageAnalysis } from './entities/chat.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
+import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import { CatalogService } from '../catalog/catalog.service';
 import {
   findPanelPiezaOption,
@@ -255,11 +256,15 @@ export class QuoteCartService {
       (await this.getOrCreateActiveCart(conversationId, tallerId));
     active.items?.sort((a, b) => a.sortOrder - b.sortOrder);
     const view = buildActiveCartViewFromEntity(active);
+    const quotePayload =
+      active.quotePayload ?
+        normalizeDraftQuoteForClient(active.quotePayload) ?? active.quotePayload
+      : active.quotePayload;
     const draftSummary = {
       id: active.id,
       status: active.status,
       estimateAmount: active.estimateAmount,
-      quotePayload: active.quotePayload,
+      quotePayload,
       damageAnalysis: active.damageAnalysis,
       items: active.items ?? [],
       messageId: active.messageId,
