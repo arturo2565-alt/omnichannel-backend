@@ -101,13 +101,6 @@ import {
 } from './whatsapp-config';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import {
-  buildDraftClientNarrativeQuote,
-  buildDraftClientNarrativeReportFromAnalysis,
-  buildDraftClientNarrativeReportFromPieces,
-  composeDraftClientMessageWithChatAppointmentPrompt,
-  type DraftClientNarrativeDialogueTurn,
-} from './draft-quote-client-narrative';
-import {
   buildAutopilotSolicitarModeloBanioAppend,
   buildBanioVisualDamageSummary,
   DRAFT_QUOTE_STATUS_AWAITING_VEHICLE,
@@ -224,6 +217,15 @@ function pickFirstNonEmptyTrimmedString(...values: unknown[]): string {
     if (s.length > 0) return s;
   }
   return '';
+}
+
+function containsClientFacingNumericId(text: string): boolean {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  return (
+    /messenger\s*[#:.-]?\s*\d{4,}/i.test(t) ||
+    /\b(?:uid|psid|id)\s*[:#-]?\s*\d{6,}\b/i.test(t)
+  );
 }
 
 /** UUID de conversación interna (panel / API). */
@@ -2746,6 +2748,18 @@ export class ChatService implements OnModuleDestroy {
     );
   }
 
+  private async buildBanioTierContextForDraft(
+    analysis: VehicleDamageAnalysis,
+    conversationId: string,
+  ): Promise<string> {
+    const visionContext =
+      await this.buildVisionTextContextForConversation(conversationId);
+    return flattenBañoTierSource(
+      [visionContext, analysis.descripcionTecnica, analysis.justificacion]
+        .filter(Boolean)
+        .join('\n'),
+    );
+  }
 
   private async findBanioAwaitingVehicleDraft(
     conversationId: string,
@@ -3118,6 +3132,91 @@ export class ChatService implements OnModuleDestroy {
     return null;
   }
 
+  /** Texto solo de mensajes del cliente (cambio de color / tier; sin logs de visión). */
+  private userChatTextFromTurns(
+    turns: readonly ChatCompletionMessageParam[],
+  ): string {
+    const parts: string[] = [];
+    for (const t of turns) {
+      if (t.role !== 'user') continue;
+      const c = typeof t.content === 'string' ? t.content.trim() : '';
+      if (c && !c.includes('cloudinary')) parts.push(c);
+    }
+    return parts.join('\n\n');
+  }
+
+  /**
+   * Fallback si la celda no está marcada instant: arma plantilla baño desde totales del borrador.
+   */
+  private async buildBanioClientMessageFromDraftLines(
+    draft: DraftQuote,
+    analysis: VehicleDamageAnalysis,
+    conversationId: string,
+    tierFlat: string,
+    options?: { forceRandomVariant?: boolean; temperature?: number },
+  ): Promise<string | null> {
+    const total = Math.round(Number(draft.total ?? draft.subtotal ?? 0));
+    const subtotal = Math.round(Number(draft.subtotal ?? total));
+    if (total <= 0 || !draft.lines?.length) return null;
+    const severidadLiteral = inferBañoTierSeveridad(tierFlat);
+    const vehicleLabel = await this.resolveBpcVehicleLabelForNarrative(
+      analysis,
+      conversationId,
+    );
+    if (!vehicleLabel) return null;
+    try {
+      const resolution = {
+        lines: draft.lines.map((l) => ({
+          label: l.description,
+          amount: l.subtotal,
+        })),
+        extras:
+          total > subtotal ?
+            [{ label: 'Complementos', amount: total - subtotal }]
+          : [],
+        subtotal,
+        total,
+        precioMx: subtotal,
+        diasEntrega: 5,
+        currency: AUTO_FIX_CURRENCY,
+      };
+      const chatPrompt = await this.getChatAppointmentSystemPrompt();
+      return await composeBañoNaturalInstantReply(
+        this.openai,
+        chatPrompt,
+        {
+          vehicleLabel,
+          segmentoEs: severidadLiteral,
+          servicioDb: 'Baño de Pintura Exterior',
+          severidadLiteral,
+          resolution,
+        },
+        {
+          inventarioDanos: (analysis.inventory ?? []).map((it) => ({
+            pieza: it.pieza,
+            severidad: it.severidad,
+            descripcionTecnica: it.descripcionTecnica,
+          })),
+          needsHeavyBodyworkDisclaimer: banioCompletoNeedsHeavyBodyworkDisclaimer(
+            analysis.inventory ?? [],
+          ),
+          conversationId,
+          variantSalt: draft.reference,
+          forceRandomVariant: options?.forceRandomVariant === true,
+          temperature: options?.temperature ?? 0.75,
+          origenVision: true,
+          servicioCode: 'BPC',
+        },
+      );
+    } catch (err) {
+      console.warn('[VisionBPC] buildBanioClientMessageFromDraftLines:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Narrativa premium de baño de pintura cuando visión devolvió BPC (una sola línea en cotización).
+   */
   /** System prompt principal (chatAppointmentPrompt) desde BD o default. */
   private async getChatAppointmentSystemPrompt(): Promise<string> {
     const fromDb = await this.aiConfigService.getValue(
@@ -3127,68 +3226,163 @@ export class ChatService implements OnModuleDestroy {
     return trimmed || DEFAULT_CHAT_APPOINTMENT_PROMPT;
   }
 
-  private async loadClientNarrativeDialogueForConversation(
+  private async composeVisionBpcFormalNarrative(
+    draft: DraftQuote,
+    analysis: VehicleDamageAnalysis,
     conversationId: string,
-  ): Promise<DraftClientNarrativeDialogueTurn[]> {
-    const cid = String(conversationId ?? '').trim();
-    if (!cid) return [];
-    const rows = await this.loadRecentMessagesForLlm(cid);
-    const turns = this.messagesToChatCompletionTurns(rows);
-    return turns
-      .filter((t) => t.role === 'user' || t.role === 'assistant')
-      .map((t) => ({
-        role: t.role as 'user' | 'assistant',
-        content: String(t.content ?? ''),
+    tallerId: string | null,
+    options?: { forceRandomVariant?: boolean; temperature?: number },
+  ): Promise<string | null> {
+    try {
+      console.log('--- [DEBUG BPC NARRATIVA] (composeVisionBpcFormalNarrative) ---');
+      console.log(
+        '¿Se detectó intención de baño completo?:',
+        visionItemsIndicateBanioCompleto(analysis.inventory ?? []),
+      );
+      console.log(
+        '¿El inventario final colapsado es BPC?:',
+        isBanioPinturaCompletoVisionInventory(analysis.inventory),
+      );
+
+      const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
+      const canonical =
+        resolveBañoCanonicalFromSnap(snap) ?? 'Baño de Pintura Exterior';
+      const bpc = analysis.inventory?.[0];
+      if (!bpc) return null;
+
+      const chatTurns = await this.buildVisionTextHistoryForConversation(
+        conversationId,
+      );
+      const userChatText = this.userChatTextFromTurns(chatTurns);
+      const tierFlat = flattenBañoTierSource(
+        [
+          userChatText,
+          analysis.descripcionTecnica,
+          analysis.justificacion,
+          String(bpc.descripcionTecnica ?? ''),
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
+      const severidadLiteral =
+        String(bpc.severidad ?? '').trim() ||
+        inferBañoTierSeveridad(tierFlat);
+
+      let resolution = materializeInstantQuoteResolution(snap, {
+        canonical,
+        severidadLiteral,
+        tierSourceForCambioColor: tierFlat,
+        resolveVia: 'bano_pintura_synonym',
+        latestPreview: tierFlat.slice(0, 400),
+        fullCtxPreview: tierFlat.slice(0, 800),
+      });
+      if (!resolution) {
+        const base = snap.getPriceForCanonical(canonical, severidadLiteral);
+        this.logDebugBpcPrecio(
+          analysis,
+          canonical,
+          severidadLiteral,
+          base,
+        );
+        if (base > 0) {
+          const add =
+            mentionsCambioDeColor(tierFlat) ?
+              cambioDeColorAddonMx(severidadLiteral)
+            : 0;
+          const dias = snap.getDiasEntregaForCanonical(
+            canonical,
+            severidadLiteral,
+          );
+          resolution = {
+            lines: [
+              { label: `${canonical} (${severidadLiteral})`, amount: base },
+            ],
+            extras:
+              add > 0 ?
+                [{ label: 'Cambio de color', amount: add }]
+              : [],
+            subtotal: base,
+            total: base + add,
+            precioMx: base,
+            diasEntrega: dias > 0 ? dias : 3,
+            currency: AUTO_FIX_CURRENCY,
+          };
+          console.log(
+            '[VisionBPC] Resolución de borrador desde precio de matriz (sin flag instant)',
+            { canonical, severidadLiteral, base },
+          );
+        } else {
+          console.warn(
+            '[VisionBPC] materializeInstantQuoteResolution sin celda en catálogo',
+            { canonical, severidadLiteral },
+          );
+          return null;
+        }
+      }
+
+      const vehicleLabel = await this.resolveBpcVehicleLabelForNarrative(
+        analysis,
+        conversationId,
+      );
+      if (!vehicleLabel) {
+        console.warn(
+          '[VisionBPC] inferBañoVehicleDisplayLabelWithLlm sin vehículo; no se arma plantilla premium',
+        );
+        return null;
+      }
+
+      let personalizedColorDetail: string | null = null;
+      if (mentionsCambioDeColor(tierFlat)) {
+        const colorCtx = userChatText || tierFlat;
+        personalizedColorDetail =
+          (await extractBañoPersonalizedColorDetail(
+            this.openai,
+            colorCtx,
+          )) ?? extractBañoColorDetailHeuristic(colorCtx);
+      }
+
+      const inventarioDanos = (
+        bpc.inventarioVisualPrevio ??
+        analysis.inventory ??
+        []
+      ).map((it) => ({
+        pieza: String(it.pieza ?? '').trim(),
+        severidad: String(it.severidad ?? '').trim(),
+        descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
       }));
-  }
 
-  private async composeDraftClientMessageForPanel(input: {
-    conversationId: string;
-    analysis: VehicleDamageAnalysis;
-    draft: DraftQuote;
-    contactName: string;
-    hasActiveAppointment: boolean;
-    appointmentFormatted: string;
-    mapsUrl: string;
-    damageIntro: string;
-    imageCount: number;
-    isComplement?: boolean;
-    previousPiezas?: string[];
-    newPiezas?: string[];
-    narrativeOptions?: { temperature?: number };
-  }): Promise<string | null> {
-    const chatPrompt = await this.getChatAppointmentSystemPrompt();
-    const dialogue = await this.loadClientNarrativeDialogueForConversation(
-      input.conversationId,
-    );
-    const report = buildDraftClientNarrativeReportFromAnalysis(input.analysis);
-    const lineRows = draftQuoteLinesToClientePiezaRows(input.draft.lines);
-    const quote = buildDraftClientNarrativeQuote({
-      reference: input.draft.reference,
-      lineRows,
-      total: input.draft.total ?? input.draft.subtotal ?? 0,
-    });
+      const chatPrompt = await this.getChatAppointmentSystemPrompt();
+      const text = await composeBañoNaturalInstantReply(
+        this.openai,
+        chatPrompt,
+        {
+          vehicleLabel,
+          segmentoEs: severidadLiteral,
+          servicioDb: canonical,
+          severidadLiteral,
+          resolution,
+          personalizedColorDetail,
+        },
+        {
+          inventarioDanos,
+          needsHeavyBodyworkDisclaimer:
+            banioCompletoNeedsHeavyBodyworkDisclaimer(
+              analysis.inventory ?? [],
+            ),
+          conversationId,
+          variantSalt: draft.reference,
+          forceRandomVariant: options?.forceRandomVariant === true,
+          temperature: options?.temperature ?? 0.75,
+          origenVision: true,
+          servicioCode: 'BPC',
+        },
+      );
 
-    return composeDraftClientMessageWithChatAppointmentPrompt(
-      this.openai,
-      chatPrompt,
-      dialogue,
-      report,
-      quote,
-      {
-        contactName: input.contactName,
-        hasActiveAppointment: input.hasActiveAppointment,
-        appointmentFormatted: input.appointmentFormatted || undefined,
-        mapsUrl: input.mapsUrl || undefined,
-        damageIntro: input.damageIntro || undefined,
-        isComplement: input.isComplement === true,
-        previousPiezas: input.previousPiezas,
-        newPiezas: input.newPiezas,
-        origenVision: true,
-        fotosAnalizadas: input.imageCount,
-      },
-      { temperature: input.narrativeOptions?.temperature ?? 0.7 },
-    );
+      return text;
+    } catch (err) {
+      console.warn('[VisionBPC] composeVisionBpcFormalNarrative:', err);
+      return null;
+    }
   }
 
   /**
@@ -3203,11 +3397,66 @@ export class ChatService implements OnModuleDestroy {
       DamageInventoryMergeResult,
       'previousPiezas' | 'newPiezas'
     > | null,
-    narrativeOptions?: { temperature?: number },
+    narrativeOptions?: { forceRandomVariant?: boolean; temperature?: number },
   ): Promise<void> {
     const conv = await this.conversationRepository.findOne({
       where: { id: conversationId },
     });
+    const tallerId = conv?.tallerId ?? null;
+
+    const intencion_banio_completo_detectada = visionItemsIndicateBanioCompleto(
+      analysis.inventory ?? [],
+    );
+    const esInventarioBPC = isBanioPinturaCompletoVisionInventory(
+      analysis.inventory,
+    );
+    console.log('--- [DEBUG BPC NARRATIVA] ---');
+    console.log(
+      '¿Se detectó intención de baño completo?:',
+      intencion_banio_completo_detectada,
+    );
+    console.log('¿El inventario final colapsado es BPC?:', esInventarioBPC);
+    console.log(
+      'Piezas en inventario:',
+      (analysis.inventory ?? []).map((i) => i.pieza),
+    );
+    console.log(
+      'Rama narrativa:',
+      esInventarioBPC ? 'plantilla baño (BPC)' : 'plantilla piezas / legal',
+    );
+
+    if (esInventarioBPC) {
+      let bañoNarrative = await this.composeVisionBpcFormalNarrative(
+        draft,
+        analysis,
+        conversationId,
+        tallerId,
+        narrativeOptions,
+      );
+      if (!bañoNarrative) {
+        const tierFlat = await this.buildBanioTierContextForDraft(
+          analysis,
+          conversationId,
+        );
+        bañoNarrative = await this.buildBanioClientMessageFromDraftLines(
+          draft,
+          analysis,
+          conversationId,
+          tierFlat,
+          narrativeOptions,
+        );
+      }
+      if (bañoNarrative) {
+        const normalized = normalizeDraftQuoteForClient({
+          ...draft,
+          formalNarrative: bañoNarrative,
+        });
+        if (normalized) {
+          Object.assign(draft, normalized);
+        }
+        return;
+      }
+    }
 
     const contactName =
       sanitizeClienteDisplayName(conv?.contactName ?? '') ||
@@ -3288,20 +3537,28 @@ export class ChatService implements OnModuleDestroy {
       });
     }
 
-    const llmNarrative = await this.composeDraftClientMessageForPanel({
-      conversationId,
-      analysis,
-      draft,
+    const llmNarrative = await this.generateDraftFormalNarrativeWithLlm({
+      fallbackNarrative,
       contactName,
+      lineRows,
+      total,
       hasActiveAppointment,
       appointmentFormatted: formattedDate,
       mapsUrl,
       damageIntro,
-      imageCount,
       isComplement,
       previousPiezas: complement?.previousPiezas ?? [],
       newPiezas: newDistinct,
-      narrativeOptions,
+      vehicleModel:
+        inferBañoVehicleDisplayLabel(
+          [
+            analysis.pieza,
+            ...(analysis.partesAfectadas ?? []),
+            analysis.descripcionTecnica,
+          ]
+            .filter(Boolean)
+            .join(' '),
+        ) || '',
     });
     draft.formalNarrative = llmNarrative || fallbackNarrative;
     const normalized = normalizeDraftQuoteForClient(draft);
@@ -3316,7 +3573,7 @@ export class ChatService implements OnModuleDestroy {
    */
   private async refreshClientNarrativeOnDraftQuote(
     row: DraftQuoteEntity,
-    narrativeOptions?: { temperature?: number },
+    narrativeOptions?: { forceRandomVariant?: boolean; temperature?: number },
   ): Promise<DraftQuoteEntity> {
     const draft = row.quotePayload;
     const analysis = row.damageAnalysis;
@@ -3354,7 +3611,7 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * Vista previa en tiempo real: narrativa al cliente vía ChatAppointmentPrompt.
+   * Vista previa en tiempo real: narrativa al cliente vía IA (variante A/B/C al azar).
    * No escribe en base de datos.
    */
   async previewDraftQuoteClientNarrative(
@@ -3447,30 +3704,26 @@ export class ChatService implements OnModuleDestroy {
           damageIntro,
         });
 
-    const llmNarrative = await composeDraftClientMessageWithChatAppointmentPrompt(
-      this.openai,
-      await this.getChatAppointmentSystemPrompt(),
-      convId
-        ? await this.loadClientNarrativeDialogueForConversation(convId)
-        : [],
-      buildDraftClientNarrativeReportFromPieces(piezaLabels, vehicleModel),
-      buildDraftClientNarrativeQuote({ lineRows: pieces, total }),
-      {
-        contactName,
-        hasActiveAppointment,
-        appointmentFormatted,
-        mapsUrl: mapsUrl || undefined,
-        damageIntro,
-        origenVision: true,
-        fotosAnalizadas: 1,
-      },
-    );
+    const llmNarrative = await this.generateDraftFormalNarrativeWithLlm({
+      fallbackNarrative,
+      contactName,
+      lineRows,
+      total,
+      hasActiveAppointment,
+      appointmentFormatted,
+      mapsUrl,
+      damageIntro,
+      isComplement: false,
+      previousPiezas: [],
+      newPiezas: piezaLabels,
+      vehicleModel,
+    });
 
     return llmNarrative || fallbackNarrative;
   }
 
   /**
-   * Panel: vuelve a generar el mensaje al cliente (`formalNarrative`) con ChatAppointmentPrompt,
+   * Panel: vuelve a generar el mensaje al cliente (`formalNarrative`) con variante IA A/B/C,
    * persiste `draft_quotes` y actualiza el mensaje vinculado.
    */
   async regenerateDraftQuoteClientNarrative(
@@ -3517,6 +3770,7 @@ export class ChatService implements OnModuleDestroy {
     );
 
     const refreshed = await this.refreshClientNarrativeOnDraftQuote(row, {
+      forceRandomVariant: true,
       temperature: 0.75,
     });
 
@@ -3532,6 +3786,65 @@ export class ChatService implements OnModuleDestroy {
       generatedMessage: draftForClient.generatedMessage,
       clientMessage: draftForClient.clientMessage,
     };
+  }
+
+  private async generateDraftFormalNarrativeWithLlm(input: {
+    fallbackNarrative: string;
+    contactName: string;
+    lineRows: { pieza: string; precioMx: number }[];
+    total: number;
+    hasActiveAppointment: boolean;
+    appointmentFormatted: string;
+    mapsUrl: string;
+    damageIntro: string;
+    isComplement: boolean;
+    previousPiezas: string[];
+    newPiezas: string[];
+    vehicleModel: string;
+  }): Promise<string | null> {
+    const chatPrompt = await this.aiConfigService.getValue(
+      AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
+    );
+    const variant = (['A', 'B', 'C'] as const)[
+      Math.floor(Math.random() * 3)
+    ]!;
+
+    const system = [
+      chatPrompt,
+      '',
+      'Genera SOLO el texto final para el cliente (sin JSON, sin explicación).',
+      'OBLIGATORIO: elegir y aplicar UNA variante premium de reparación entre A/B/C.',
+      `Variante fija para esta respuesta: ${variant}.`,
+      'OBLIGATORIO: reemplaza placeholders [Modelo], [PrecioTotal], [Nombre], [DiaCita] con valores reales provistos.',
+      'OBLIGATORIO: usar emoji 🛠️ por cada línea de pieza y una línea de total con 💰.',
+      "Si hasActiveAppointment=true, indica que se suma como extra a su orden de servicio de cita confirmada.",
+      'Si hasActiveAppointment=false, cierra invitando a elegir día de la semana para ingresar su unidad.',
+      'PROHIBIDO incluir IDs numéricos de plataforma (UID/PSID/Messenger ID).',
+      'Si no hay nombre válido, usa saludo premium genérico sin inventar identificadores.',
+    ].join('\n');
+    const user = JSON.stringify(input);
+
+    try {
+      const completion = await this.openai.chat.completions.create({
+        ...openAiChatCompletionParams({
+          tier: 'narrative',
+          maxOutputTokens: 1200,
+          temperature: 0.7,
+        }),
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      });
+      const out = String(completion.choices[0]?.message?.content ?? '').trim();
+      if (!out) return null;
+      if (containsClientFacingNumericId(out)) return null;
+      if (!out.includes('🛠️') || !out.includes('💰')) return null;
+      return out;
+    } catch (err) {
+      console.error('generateDraftFormalNarrativeWithLlm:', err);
+      return null;
+    }
   }
 
   private async resolveDraftResumeSchedulingContext(
