@@ -33,6 +33,15 @@ export function coerceDamageLevelCode(raw: string): DamageLevel {
   const t = (raw ?? '').trim();
   if (!t) return 'DM';
   if (/\bn\s*\/\s*a\b|^n\/a$/i.test(t)) return 'N/A';
+  const normalized = t
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/\s+/g, '_');
+  if (normalized === 'LEVE') return 'DL';
+  if (normalized === 'MEDIO') return 'DM';
+  if (normalized === 'FUERTE') return 'DF';
+  if (normalized === 'MUY_FUERTE' || normalized === 'MUYFUERTE') return 'DMFuerte';
   const order: DamageLevel[] = ['DMFuerte', 'DF', 'DMF', 'DM', 'DML', 'DL'];
   for (const level of order) {
     const escaped = level.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

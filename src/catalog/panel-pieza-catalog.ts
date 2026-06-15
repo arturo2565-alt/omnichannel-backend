@@ -48,6 +48,8 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
   { code: 'POI', fullName: 'Poste izquierdo', catalogPieza: 'Poste' },
   { code: 'POD', fullName: 'Poste derecho', catalogPieza: 'Poste' },
   { code: 'Cofre', fullName: 'Cofre', catalogPieza: 'Cofre' },
+  { code: 'BiCO', fullName: 'Bigote Cofre', catalogPieza: 'BiCO' },
+  { code: 'Parilla', fullName: 'Parilla', catalogPieza: 'Parilla' },
   { code: 'Tapa Cajuela', fullName: 'Tapa de cajuela', catalogPieza: 'Tapa Cajuela' },
   { code: 'Toldo', fullName: 'Toldo', catalogPieza: 'Toldo' },
   { code: 'Espejo', fullName: 'Espejo', catalogPieza: 'Espejo' },
@@ -98,6 +100,9 @@ const EXPLICIT_PIEZA_ALIASES: Readonly<Record<string, string>> = {
   'estribos derechos': 'ED',
   'poste izquierdo': 'POI',
   'poste derecho': 'POD',
+  'bigote cofre': 'BiCO',
+  bico: 'BiCO',
+  parilla: 'Parilla',
 };
 
 const catalogPiezaCodeCounts = new Map<string, number>();

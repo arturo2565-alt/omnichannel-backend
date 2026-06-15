@@ -41,4 +41,6 @@ export const LEGACY_PIEZA_DANO_PRICE_MATRIX: readonly WideLegacyPriceRow[] = [
     DF: 3500,
     DMFuerte: 3500,
   },
+  { pieza: 'BiCO', DL: 2400, DML: 2400, DM: 2688, DMF: 3120, DF: 3120, DMFuerte: 3720 },
+  { pieza: 'Parilla', DL: 2400, DML: 2400, DM: 2688, DMF: 3120, DF: 3120, DMFuerte: 3720 },
 ] as const;
