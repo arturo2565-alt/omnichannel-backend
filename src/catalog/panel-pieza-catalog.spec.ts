@@ -42,6 +42,8 @@ describe('panel-pieza-catalog', () => {
     expect(resolveCatalogPiezaForMatrixLookup('Posibles daños internos')).toBeNull();
     expect(resolveCatalogPiezaForMatrixLookup('REFACCION')).toBeNull();
     expect(resolveCatalogPiezaForMatrixLookup('Refacción: Faro')).toBeNull();
+    expect(resolveCatalogPiezaForMatrixLookup('CERAMICO')).toBeNull();
+    expect(resolveCatalogPiezaForMatrixLookup('ESTETICA_AUTO')).toBeNull();
   });
 
   it('resolveMatrixServicioRaw conserva texto libre si no hay mapeo', () => {

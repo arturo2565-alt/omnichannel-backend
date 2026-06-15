@@ -32,7 +32,10 @@ import { CatalogService } from '../catalog/catalog.service';
 import {
   findPanelPiezaOption,
   normalizePanelPiezaCode,
+  PANEL_PIEZA_CERAMICO_CODE,
+  PANEL_PIEZA_ESTETICA_AUTO_CODE,
 } from '../catalog/panel-pieza-catalog';
+import { isIntegralServiceName } from '../catalog/catalog-pricing-rules';
 import {
   buildDraftQuoteLineFromQuoteRow,
   quoteRowsFromDamageInventory,
@@ -40,7 +43,7 @@ import {
   type QuoteRowInput,
 } from './draft-quote-inventory-pricing';
 import type { ObtenerCotizacionExpressResult } from './autopilot-cotizacion-express';
-import { isBañoDePinturaServicio } from './instant-quote-from-text';
+import { isBañoDePinturaServicio, isCeramicoCanonical, isEsteticaAutomotrizCanonical } from './instant-quote-from-text';
 import { VISION_BPC_PIEZA_CODE } from './vision-bpc-inventory';
 import { ChatGateway } from './chat.gateway';
 import {
@@ -51,6 +54,36 @@ import {
   quoteRowsPreservingLastSend,
   type RebuildPriceOpts,
 } from './quote-cart-send-price-preservation';
+
+function resolveStoredPiezaFromExpressLine(
+  line: NonNullable<ObtenerCotizacionExpressResult['lines']>[number],
+): string {
+  const canonical = String(line.canonical ?? '').trim();
+  if (
+    line.tipo === 'bano_pintura' ||
+    isBañoDePinturaServicio(canonical)
+  ) {
+    return VISION_BPC_PIEZA_CODE;
+  }
+  if (isCeramicoCanonical(canonical)) {
+    return PANEL_PIEZA_CERAMICO_CODE;
+  }
+  if (isEsteticaAutomotrizCanonical(canonical)) {
+    return PANEL_PIEZA_ESTETICA_AUTO_CODE;
+  }
+  const fromCanonical = findPanelPiezaOption(canonical);
+  if (fromCanonical?.code) return fromCanonical.code;
+  const fromServicio = findPanelPiezaOption(line.servicio);
+  if (fromServicio?.code) return fromServicio.code;
+  if (isIntegralServiceName(canonical)) {
+    if (isCeramicoCanonical(canonical)) return PANEL_PIEZA_CERAMICO_CODE;
+    if (isEsteticaAutomotrizCanonical(canonical)) {
+      return PANEL_PIEZA_ESTETICA_AUTO_CODE;
+    }
+    if (isBañoDePinturaServicio(canonical)) return VISION_BPC_PIEZA_CODE;
+  }
+  return canonical || String(line.servicio ?? '').trim();
+}
 
 const ACTIVE_CART_STATUS = 'PENDING_APPROVAL';
 const APPROVED_CART_STATUS = 'APPROVED';
@@ -671,17 +704,22 @@ export class QuoteCartService {
     const expressPiezaCodes: string[] = [];
 
     for (const line of express.lines ?? []) {
-      const isBano =
+      const canonical = String(line.canonical ?? '').trim();
+      const isIntegralLine =
         line.tipo === 'bano_pintura' ||
-        isBañoDePinturaServicio(String(line.canonical ?? ''));
-      const panelOpt = findPanelPiezaOption(line.servicio);
-      const storedPieza = isBano
-        ? VISION_BPC_PIEZA_CODE
-        : panelOpt?.code ?? line.canonical ?? line.servicio;
+        line.tipo === 'servicio_integral' ||
+        isIntegralServiceName(canonical);
+      const storedPieza = resolveStoredPiezaFromExpressLine(line);
       expressPiezaCodes.push(storedPieza);
       const item: DetectedDamageItem = {
         pieza: storedPieza,
-        severidad: coerceDamageLevelCode(line.severidad),
+        severidad: isIntegralLine
+          ? String(
+              line.severidad ??
+                express.vehiclePricingProfile?.sizeTier ??
+                'Mediano',
+            )
+          : coerceDamageLevelCode(line.severidad),
         descripcionTecnica: `Cotización express — ${line.servicio}.`,
         urls_origen: [],
       };

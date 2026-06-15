@@ -4,12 +4,23 @@ export const PANEL_PIEZA_INTERNAL_DAMAGES_CODE = 'PDI_INT';
 /** Refacción con detalle y precio manual. */
 export const PANEL_PIEZA_REFACCION_CODE = 'REFACCION';
 
+/** Baño de pintura completo (servicio integral). */
+export const PANEL_PIEZA_BPC_CODE = 'BPC';
+
+/** Cerámico automotriz (servicio integral). */
+export const PANEL_PIEZA_CERAMICO_CODE = 'CERAMICO';
+
+/** Estética automotriz integral. */
+export const PANEL_PIEZA_ESTETICA_AUTO_CODE = 'ESTETICA_AUTO';
+
 export type PanelPiezaOption = {
   code: string;
   fullName: string;
   catalogPieza: string;
   internalDamageRange?: boolean;
   refaccionManual?: boolean;
+  banioCompleto?: boolean;
+  integralService?: boolean;
 };
 
 export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
@@ -63,6 +74,20 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
     code: 'BPC',
     fullName: 'Baño de Pintura Completo',
     catalogPieza: 'Baño de Pintura Exterior',
+    banioCompleto: true,
+    integralService: true,
+  },
+  {
+    code: PANEL_PIEZA_CERAMICO_CODE,
+    fullName: 'Cerámico Automotriz',
+    catalogPieza: 'Cerámico Automotriz',
+    integralService: true,
+  },
+  {
+    code: PANEL_PIEZA_ESTETICA_AUTO_CODE,
+    fullName: 'Estética Automotriz',
+    catalogPieza: 'Estética Automotriz',
+    integralService: true,
   },
 ];
 
@@ -138,6 +163,39 @@ aliasNormToCode.set(
 );
 aliasNormToCode.set(normalizePiezaText('refaccion'), PANEL_PIEZA_REFACCION_CODE);
 aliasNormToCode.set(normalizePiezaText('refacción'), PANEL_PIEZA_REFACCION_CODE);
+aliasNormToCode.set(normalizePiezaText('bpc'), PANEL_PIEZA_BPC_CODE);
+aliasNormToCode.set(
+  normalizePiezaText('bano de pintura completo'),
+  PANEL_PIEZA_BPC_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('baño de pintura completo'),
+  PANEL_PIEZA_BPC_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('bano de pintura exterior'),
+  PANEL_PIEZA_BPC_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('baño de pintura exterior'),
+  PANEL_PIEZA_BPC_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('ceramico automotriz'),
+  PANEL_PIEZA_CERAMICO_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('cerámico automotriz'),
+  PANEL_PIEZA_CERAMICO_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('estetica automotriz'),
+  PANEL_PIEZA_ESTETICA_AUTO_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('estética automotriz'),
+  PANEL_PIEZA_ESTETICA_AUTO_CODE,
+);
 
 const catalogNamesByLengthDesc = [
   ...new Set(
@@ -230,6 +288,36 @@ export function isRefaccionPieza(raw: string): boolean {
   return Boolean(findPanelPiezaOption(raw)?.refaccionManual);
 }
 
+export function isBanioPinturaCompletoPieza(raw: string): boolean {
+  const t = String(raw ?? '').trim();
+  if (t === PANEL_PIEZA_BPC_CODE) return true;
+  if (Boolean(findPanelPiezaOption(raw)?.banioCompleto)) return true;
+  const n = normalizePiezaText(t);
+  return (
+    n === 'bpc' ||
+    n.includes('bano de pintura completo') ||
+    n.includes('baño de pintura completo')
+  );
+}
+
+/** Cerámico, estética automotriz o baño de pintura (precio por tamaño). */
+export function isIntegralPanelPieza(raw: string): boolean {
+  const t = String(raw ?? '').trim();
+  if (
+    t === PANEL_PIEZA_BPC_CODE ||
+    t === PANEL_PIEZA_CERAMICO_CODE ||
+    t === PANEL_PIEZA_ESTETICA_AUTO_CODE
+  ) {
+    return true;
+  }
+  const opt = findPanelPiezaOption(raw);
+  if (opt?.integralService || opt?.banioCompleto) return true;
+  const n = normalizePiezaText(t);
+  if (n.includes('ceramico') && n.includes('automotriz')) return true;
+  if (n.includes('estetica') && n.includes('automotriz')) return true;
+  return isBanioPinturaCompletoPieza(raw);
+}
+
 export function isSpecialPanelPieza(raw: string): boolean {
   return isInternalDamageRangePieza(raw) || isRefaccionPieza(raw);
 }
@@ -238,7 +326,7 @@ export function isSpecialPanelPieza(raw: string): boolean {
  * Pieza base del catálogo (PriceMatrix) para siglas del panel: SI/SD → Salpicadera, PDI → Puerta, etc.
  */
 export function resolveCatalogPiezaForMatrixLookup(raw: string): string | null {
-  if (isSpecialPanelPieza(raw)) return null;
+  if (isSpecialPanelPieza(raw) || isIntegralPanelPieza(raw)) return null;
   const opt = findPanelPiezaOption(raw);
   if (opt?.catalogPieza) return opt.catalogPieza;
   return matchCatalogPiezaFromFreeText(raw);

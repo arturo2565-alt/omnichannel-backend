@@ -3,11 +3,17 @@ import { coerceDamageLevelCode } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import { resolvePiecePriceForVehicleProfile } from '../catalog/vehicle-piece-pricing';
+import {
+  inferVehicleProfileFromLegacyBañoSeveridad,
+  resolveIntegralPriceForVehicleProfile,
+} from '../catalog/vehicle-integral-pricing';
 import type { CatalogPricingRules } from '../catalog/catalog-pricing-rules';
 import type { VehiclePricingProfile } from '../catalog/vehicle-pricing-profile';
+import { normalizeVehicleSizeTier } from '../catalog/vehicle-pricing-profile';
 import {
   findPanelPiezaOption,
   isInternalDamageRangePieza,
+  isIntegralPanelPieza,
   isRefaccionPieza,
   isSpecialPanelPieza,
   normalizePanelPiezaCode,
@@ -44,11 +50,12 @@ export function resolveQuoteRowPrecioMaximo(
   return Number.isFinite(n) ? n : undefined;
 }
 
-export type QuoteRowKind = 'internal_damage' | 'refaccion' | 'matrix';
+export type QuoteRowKind = 'internal_damage' | 'refaccion' | 'matrix' | 'integral';
 
 export function classifyQuoteRow(line: QuoteRowInput): QuoteRowKind {
   if (isInternalDamageRangePieza(line.pieza)) return 'internal_damage';
   if (isRefaccionPieza(line.pieza)) return 'refaccion';
+  if (isIntegralPanelPieza(line.pieza)) return 'integral';
   const max = resolveQuoteRowPrecioMaximo(line);
   const min = Math.round(Number(line.precioMx) || 0);
   if (max != null && max > min) return 'internal_damage';
@@ -116,6 +123,20 @@ export function buildDraftQuoteLineFromQuoteRow(
     };
   }
 
+  if (kind === 'integral') {
+    const displayName =
+      findPanelPiezaOption(String(line.pieza).trim())?.fullName ??
+      String(line.pieza).trim();
+    const tierLabel = String(line.severidad ?? '').trim() || 'Mediano';
+    return {
+      priceItemId: `panel:${idx}:integral:${displayName}`,
+      description: `${displayName} — ${tierLabel} (panel)`,
+      quantity: 1,
+      unitPrice: u,
+      subtotal: u,
+    };
+  }
+
   const matrixRaw = resolveMatrixServicioRaw(String(line.pieza).trim());
   const canonical = snap.matchServicio(matrixRaw) ?? matrixRaw;
   const lev = coerceDamageLevelCode(String(line.severidad));
@@ -127,6 +148,30 @@ export function buildDraftQuoteLineFromQuoteRow(
     quantity: 1,
     unitPrice: u,
     subtotal: u,
+  };
+}
+
+/** Perfil vehicular para cotizar servicios integrales desde severidad guardada en inventario. */
+function resolveProfileForIntegralInventoryRow(
+  severidadStored: string,
+  vehicleProfile?: VehiclePricingProfile | null,
+): VehiclePricingProfile {
+  const tierFromSev =
+    normalizeVehicleSizeTier(severidadStored) ??
+    inferVehicleProfileFromLegacyBañoSeveridad(
+      severidadStored,
+      vehicleProfile?.vehicleLabel ?? '',
+    ).sizeTier;
+  const inferred = inferVehicleProfileFromLegacyBañoSeveridad(
+    severidadStored,
+    vehicleProfile?.vehicleLabel ?? '',
+  );
+  return {
+    vehicleLabel: vehicleProfile?.vehicleLabel ?? 'panel',
+    sizeTier: tierFromSev ?? vehicleProfile?.sizeTier ?? 'Compacto',
+    isPremium:
+      vehicleProfile?.isPremium ?? inferred.isPremium ?? false,
+    tierSource: vehicleProfile?.tierSource ?? 'inferido',
   };
 }
 
@@ -144,9 +189,31 @@ export function quoteRowsFromDamageInventory(
   for (const it of inventory) {
     const panelCode = normalizePanelPiezaCode(it.pieza) || String(it.pieza ?? '').trim();
     if (!panelCode) continue;
-    const sev = coerceDamageLevelCode(it.severidad);
+    const sevRaw = String(it.severidad ?? '').trim();
+    let storedSev = sevRaw || 'DM';
     let precio = 0;
-    if (!isSpecialPanelPieza(panelCode)) {
+
+    if (isIntegralPanelPieza(panelCode)) {
+      storedSev = sevRaw || vehicleProfile?.sizeTier || 'Mediano';
+      const opt = findPanelPiezaOption(panelCode);
+      const catalogPieza =
+        opt?.catalogPieza ??
+        snap.matchServicio(it.pieza) ??
+        it.pieza;
+      const profile = resolveProfileForIntegralInventoryRow(
+        storedSev,
+        vehicleProfile,
+      );
+      const resolution = resolveIntegralPriceForVehicleProfile(
+        snap,
+        String(catalogPieza),
+        profile,
+        pricingRules,
+      );
+      precio = resolution?.unitPrice ?? 0;
+    } else if (!isSpecialPanelPieza(panelCode)) {
+      const sev = coerceDamageLevelCode(sevRaw);
+      storedSev = sev;
       const catalogPieza =
         resolveCatalogPiezaForMatrixLookup(panelCode) ??
         snap.matchServicio(it.pieza) ??
@@ -167,10 +234,12 @@ export function quoteRowsFromDamageInventory(
           pricingRules,
         );
       }
+    } else {
+      storedSev = coerceDamageLevelCode(sevRaw);
     }
     rows.push({
       pieza: panelCode,
-      severidad: sev,
+      severidad: storedSev,
       precioMx: Math.max(0, Math.round(precio)),
     });
   }
@@ -192,7 +261,11 @@ export function buildDraftQuoteLinesFromDamageInventory(
 }
 
 function isSpecialPanelPiezaForMatrix(pieza: string): boolean {
-  return isInternalDamageRangePieza(pieza) || isRefaccionPieza(pieza);
+  return (
+    isInternalDamageRangePieza(pieza) ||
+    isRefaccionPieza(pieza) ||
+    isIntegralPanelPieza(pieza)
+  );
 }
 
 export function matrixServicioInputsWithCatalogResolve(

@@ -18,6 +18,11 @@ function mockPricingSnap(
       0,
     getAmount: (pieza: string, level: string) =>
       prices[`${pieza}|${level}`] ?? 0,
+    getDiasEntregaForCanonical: () => 5,
+    listSeveridadesForCanonical: (canonical: string) =>
+      prices[`__sev__${canonical}`]
+        ? String(prices[`__sev__${canonical}`]).split('|')
+        : ['BASE'],
   } as MatrixPricingSnapshot;
 }
 
@@ -61,7 +66,7 @@ describe('draft-quote-inventory-pricing', () => {
       snap,
     );
     expect(rows.map((r) => r.pieza)).toEqual(['FD', 'FT', 'PDI', 'Cofre']);
-    expect(sumQuoteRowsSubtotal(rows)).toBe(3600 + 2900 + 3100 + 5000);
+    expect(sumQuoteRowsSubtotal(rows)).toBe(14850);
 
     const draftLines = buildDraftQuoteLinesFromDamageInventory(
       [
@@ -73,5 +78,33 @@ describe('draft-quote-inventory-pricing', () => {
     expect(draftLines).toHaveLength(2);
     expect(draftLines[0]?.description).toContain('Fascia delantera');
     expect(draftLines[1]?.description).toContain('Fascia trasera');
+  });
+
+  it('quoteRowsFromDamageInventory cotiza servicios integrales por tamaño', () => {
+    const snap = mockPricingSnap({
+      '__sev__Cerámico Automotriz': 'BASE',
+      'Cerámico Automotriz|BASE': 7000,
+    });
+    const rows = quoteRowsFromDamageInventory(
+      [
+        {
+          pieza: 'CERAMICO',
+          severidad: 'Compacto',
+          descripcionTecnica: 'Cerámico express',
+          urls_origen: [],
+        },
+        {
+          pieza: 'FD',
+          severidad: 'DL',
+          descripcionTecnica: 'Fascia',
+          urls_origen: [],
+        },
+      ],
+      snap,
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.pieza).toBe('CERAMICO');
+    expect(rows[0]?.precioMx).toBe(7000);
+    expect(classifyQuoteRow(rows[0]!)).toBe('integral');
   });
 });
