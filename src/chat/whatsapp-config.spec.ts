@@ -85,12 +85,13 @@ describe('whatsapp-config', () => {
     expect(getWhatsAppAccessToken()).toBe('EAA-test-token');
   });
 
-  it('normalizeWhatsAppRecipientWaId quita el 1 extra en móviles MX (521→52)', () => {
-    expect(normalizeWhatsAppRecipientWaId('5215512345678')).toBe('525512345678');
-    expect(normalizeWhatsAppRecipientWaId('+52 1 55 1234 5678')).toBe('525512345678');
+  it('normalizeWhatsAppRecipientWaId conserva el 1 de celular MX del webhook (521)', () => {
+    expect(normalizeWhatsAppRecipientWaId('5215512345678')).toBe('5215512345678');
+    expect(normalizeWhatsAppRecipientWaId('5215527677274')).toBe('5215527677274');
+    expect(normalizeWhatsAppRecipientWaId('+52 1 55 1234 5678')).toBe('5215512345678');
   });
 
-  it('normalizeWhatsAppRecipientWaId no altera números ya de 12 dígitos', () => {
+  it('normalizeWhatsAppRecipientWaId no altera wa_id ya normalizado sin el 1', () => {
     expect(normalizeWhatsAppRecipientWaId('525512345678')).toBe('525512345678');
   });
 
