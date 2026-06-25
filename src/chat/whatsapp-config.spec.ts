@@ -7,6 +7,7 @@ import {
   getWhatsAppPhoneNumberId,
   buildWhatsAppMessagesUrl,
   normalizeWhatsAppRecipientWaId,
+  normalizeWhatsAppMessageBody,
 } from './whatsapp-config';
 
 describe('whatsapp-config', () => {
@@ -91,5 +92,22 @@ describe('whatsapp-config', () => {
 
   it('normalizeWhatsAppRecipientWaId no altera números ya de 12 dígitos', () => {
     expect(normalizeWhatsAppRecipientWaId('525512345678')).toBe('525512345678');
+  });
+
+  it('normalizeWhatsAppMessageBody unifica CRLF y CR a LF', () => {
+    expect(normalizeWhatsAppMessageBody('a\r\nb\rc')).toBe('a\nb\nc');
+  });
+
+  it('normalizeWhatsAppMessageBody convierte secuencias escapadas a LF', () => {
+    expect(normalizeWhatsAppMessageBody('linea1\\nlinea2')).toBe('linea1\nlinea2');
+    expect(normalizeWhatsAppMessageBody('linea1\\\\nlinea2')).toBe('linea1\nlinea2');
+    expect(normalizeWhatsAppMessageBody('a\\r\\nb')).toBe('a\nb');
+  });
+
+  it('normalizeWhatsAppMessageBody produce JSON válido con \\n escapado', () => {
+    const body = normalizeWhatsAppMessageBody('uno\\ntres\r\ncuatro');
+    const payload = JSON.stringify({ text: { body } });
+    expect(() => JSON.parse(payload)).not.toThrow();
+    expect(JSON.parse(payload).text.body).toBe('uno\ntres\ncuatro');
   });
 });

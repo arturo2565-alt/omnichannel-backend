@@ -71,6 +71,31 @@ export function normalizeWhatsAppRecipientWaId(raw: string): string {
   return digits;
 }
 
+/**
+ * Normaliza saltos de línea del cuerpo de texto WhatsApp antes de serializar a JSON.
+ * Convierte CRLF, secuencias escapadas (`\n`, `\\n`) y separadores Unicode a `\n` (LF),
+ * válido para `JSON.stringify()` y la Graph API de Meta.
+ */
+export function normalizeWhatsAppMessageBody(raw: string): string {
+  let text = String(raw ?? '');
+
+  // Secuencias escapadas como texto literal (p. ej. salida LLM: "\\n", "\\r\\n")
+  text = text.replace(/\\+r\\+n/g, '\n');
+  text = text.replace(/\\+n/g, '\n');
+  text = text.replace(/\\+r/g, '\n');
+
+  // Saltos reales y separadores Unicode → LF
+  text = text.replace(/\r\n/g, '\n');
+  text = text.replace(/\r/g, '\n');
+  text = text.replace(/\u2028/g, '\n');
+  text = text.replace(/\u2029/g, '\n');
+
+  // Caracteres de control inválidos para Graph API (conserva \n y \t)
+  text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+  return text.trim();
+}
+
 export type WhatsAppOwnershipFields = {
   wabaId?: string;
   phoneNumberId?: string;

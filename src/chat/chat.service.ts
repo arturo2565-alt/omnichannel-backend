@@ -103,6 +103,7 @@ import {
   getWhatsAppPhoneNumberId,
   buildWhatsAppMessagesUrl,
   normalizeWhatsAppRecipientWaId,
+  normalizeWhatsAppMessageBody,
 } from './whatsapp-config';
 import { normalizeDraftQuoteForClient } from './draft-quote-client-payload';
 import {
@@ -1546,7 +1547,7 @@ export class ChatService implements OnModuleDestroy {
       return;
     }
     const to = normalizeWhatsAppRecipientWaId(recipientWaId);
-    const text = String(messageText ?? '').trim();
+    const text = normalizeWhatsAppMessageBody(messageText);
     if (!to || !text) return;
 
     const url = buildWhatsAppMessagesUrl(phoneNumberId);
