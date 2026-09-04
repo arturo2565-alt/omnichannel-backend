@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { createHash } from 'crypto';
+import { applySentryAlsTags } from '../sentry/sentry-als';
 
 export type LlmAuditContext = {
   tallerId?: string | null;
@@ -49,15 +50,16 @@ export function runWithLlmAuditContext<T>(
   fn: () => T,
 ): T {
   const parent = llmAuditAls.getStore();
-  return llmAuditAls.run(
-    {
-      tallerId: ctx.tallerId ?? parent?.tallerId ?? null,
-      conversationId: ctx.conversationId ?? parent?.conversationId ?? null,
-      purpose: ctx.purpose ?? parent?.purpose,
-      provider: ctx.provider ?? parent?.provider ?? 'openai',
-    },
-    fn,
-  );
+  const merged: LlmAuditContext = {
+    tallerId: ctx.tallerId ?? parent?.tallerId ?? null,
+    conversationId: ctx.conversationId ?? parent?.conversationId ?? null,
+    purpose: ctx.purpose ?? parent?.purpose,
+    provider: ctx.provider ?? parent?.provider ?? 'openai',
+  };
+  return llmAuditAls.run(merged, () => {
+    applySentryAlsTags(merged);
+    return fn();
+  });
 }
 
 export async function runWithLlmAuditContextAsync<T>(
@@ -65,15 +67,16 @@ export async function runWithLlmAuditContextAsync<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   const parent = llmAuditAls.getStore();
-  return llmAuditAls.run(
-    {
-      tallerId: ctx.tallerId ?? parent?.tallerId ?? null,
-      conversationId: ctx.conversationId ?? parent?.conversationId ?? null,
-      purpose: ctx.purpose ?? parent?.purpose,
-      provider: ctx.provider ?? parent?.provider ?? 'openai',
-    },
-    fn,
-  );
+  const merged: LlmAuditContext = {
+    tallerId: ctx.tallerId ?? parent?.tallerId ?? null,
+    conversationId: ctx.conversationId ?? parent?.conversationId ?? null,
+    purpose: ctx.purpose ?? parent?.purpose,
+    provider: ctx.provider ?? parent?.provider ?? 'openai',
+  };
+  return llmAuditAls.run(merged, async () => {
+    applySentryAlsTags(merged);
+    return fn();
+  });
 }
 
 /** Fire-and-forget hacia el reporter Nest (si está registrado). */

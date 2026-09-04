@@ -108,7 +108,7 @@ function normalizeVehicleConfidence(
 }
 
 /**
- * Inferencia pura por IA (gpt-4o): aísla marca, modelo y año para plantillas BPC.
+ * Inferencia pura por IA (tier fast / OPENAI_MODEL_FAST): aísla marca, modelo y año para plantillas BPC.
  */
 export async function inferBañoVehicleDisplayLabelWithLlm(
   openai: OpenAI,
@@ -125,7 +125,7 @@ export async function inferBañoVehicleDisplayLabelWithLlm(
     openai,
     {
       ...openAiChatCompletionParams({
-        tier: 'narrative',
+        tier: 'fast',
         maxOutputTokens: 160,
         temperature: 0.1,
       }),
@@ -138,7 +138,7 @@ export async function inferBañoVehicleDisplayLabelWithLlm(
         },
       ],
     },
-    { purpose: 'narrative' },
+    { purpose: 'fast_path_eval' },
   );
 
   const raw = completion.choices[0]?.message?.content?.trim() ?? '';

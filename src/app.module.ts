@@ -4,6 +4,7 @@ import { ChatModule } from './chat/chat.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { AuthModule } from './auth/auth.module';
 import { TallerModule } from './taller/taller.module';
+import { DebugController } from './sentry/debug.controller';
 import { Taller } from './taller/entities/taller.entity';
 import { User } from './auth/entities/user.entity';
 import { Message } from './chat/entities/chat.entity';
@@ -51,5 +52,6 @@ const dbSynchronize =
     ChatModule,
     CatalogModule,
   ],
+  controllers: [DebugController],
 })
 export class AppModule {}

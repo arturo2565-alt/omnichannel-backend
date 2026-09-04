@@ -31,6 +31,8 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
+import * as Sentry from '@sentry/node';
+import { captureExceptionWithAls } from '../sentry/sentry-als';
 
 @Controller(['webhook', 'chat'])
 export class ChatController {
@@ -117,14 +119,25 @@ export class ChatController {
     const body = req.body;
     console.log('--- NUEVO WEBHOOK ---', JSON.stringify(body, null, 2));
 
-    void this.chatService
-      .ingestWebhookPayload(body ?? {})
-      .then((result) => {
+    void Sentry.withScope(async (scope) => {
+      scope.setTag('source', 'meta_webhook');
+      const pageHint = String(
+        body?.entry?.[0]?.id ??
+          body?.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id ??
+          '',
+      ).trim();
+      if (pageHint) {
+        scope.setContext('webhook', { pageOrPhoneHint: pageHint });
+      }
+
+      try {
+        const result = await this.chatService.ingestWebhookPayload(body ?? {});
         console.log('[webhook] procesamiento terminado:', result);
-      })
-      .catch((err) => {
+      } catch (err) {
+        captureExceptionWithAls(err, { source: 'meta_webhook' });
         console.error('[webhook] error en ingestWebhookPayload:', err);
-      });
+      }
+    });
 
     res.status(HttpStatus.OK).type('text/plain').send('EVENT_RECEIVED');
   }
