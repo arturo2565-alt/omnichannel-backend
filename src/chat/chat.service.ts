@@ -91,6 +91,11 @@ import {
 } from './vision-bpc-inventory';
 import { detectCartPricingMode } from './quote-cart-inventory-mode';
 import {
+  matchAdButtonAutoReply,
+  matchAdButtonAutoReplyForBatch,
+  type AdButtonAutoReplyMatch,
+} from './ad-button-auto-reply';
+import {
   extractMetaWhatsAppInboundEvents,
   extractWaIdFromRawWhatsAppPayload,
   extractWhatsAppWebhookMetadata,
@@ -1755,6 +1760,80 @@ export class ChatService implements OnModuleDestroy {
         : [];
 
       for (const evt of messaging) {
+        const postback =
+          evt?.postback && typeof evt.postback === 'object'
+            ? (evt.postback as { title?: unknown; payload?: unknown })
+            : null;
+
+        /** Click de menú / CTA de anuncio vía postback (sin `message`). */
+        if (postback) {
+          const threadPsid =
+            evt?.sender?.id != null ? String(evt.sender.id) : '';
+          if (!threadPsid) continue;
+          if (threadPsid === pageId || (envPage && threadPsid === envPage)) {
+            continue;
+          }
+
+          const title =
+            typeof postback.title === 'string' ? postback.title.trim() : '';
+          const payload =
+            typeof postback.payload === 'string'
+              ? postback.payload.trim()
+              : '';
+          const text = title || payload;
+          if (!text) continue;
+
+          const postbackMidRaw =
+            typeof (postback as { mid?: unknown }).mid === 'string'
+              ? String((postback as { mid: string }).mid).trim()
+              : '';
+          const ts =
+            evt?.timestamp != null ? String(evt.timestamp).trim() : '';
+          const postbackMid =
+            postbackMidRaw ||
+            (ts
+              ? `postback:${threadPsid}:${ts}:${payload || title}`
+              : '');
+
+          if (postbackMid) {
+            const dup = await this.findMessageByMetaMid(postbackMid);
+            if (dup) {
+              console.log(
+                '[Meta webhook] mid/postback duplicado, omitido:',
+                postbackMid,
+              );
+              continue;
+            }
+          }
+
+          const contactHint = pickFirstNonEmptyTrimmedString(
+            (evt.sender as { name?: string })?.name,
+          );
+
+          const saved = await this.saveMessage({
+            externalId: threadPsid,
+            tallerId,
+            metaPageId: pageId,
+            platform: 'facebook',
+            direction: 'inbound',
+            message: text,
+            ...(payload ? { buttonPayload: payload } : {}),
+            ...(postbackMid ? { metaMessageId: postbackMid } : {}),
+            ...(contactHint ? { contactName: contactHint } : {}),
+          });
+          console.log(
+            '[Meta webhook] postback inbound | PSID hilo:',
+            threadPsid,
+            '| title:',
+            title || '(sin title)',
+            '| payload:',
+            payload || '(sin payload)',
+          );
+          lastMessageId = saved.id;
+          n++;
+          continue;
+        }
+
         const msg = evt.message;
         if (!msg || typeof msg !== 'object') continue;
 
@@ -1780,6 +1859,15 @@ export class ChatService implements OnModuleDestroy {
 
         const text =
           typeof msg.text === 'string' ? msg.text.trim() : '';
+        const quickReplyPayload =
+          msg.quick_reply &&
+          typeof msg.quick_reply === 'object' &&
+          typeof (msg.quick_reply as { payload?: unknown }).payload ===
+            'string'
+            ? String(
+                (msg.quick_reply as { payload: string }).payload,
+              ).trim()
+            : '';
         const attachments = Array.isArray(msg.attachments)
           ? msg.attachments
           : [];
@@ -1857,6 +1945,9 @@ export class ChatService implements OnModuleDestroy {
             const saved = await this.saveMessage({
               ...basePayload,
               message: text,
+              ...(!isEcho && quickReplyPayload
+                ? { buttonPayload: quickReplyPayload }
+                : {}),
               ...(metaMid ? { metaMessageId: metaMid } : {}),
             });
             console.log(
@@ -2040,6 +2131,9 @@ export class ChatService implements OnModuleDestroy {
         const saved = await this.saveMessage({
           ...basePayload,
           message: evt.text,
+          ...(evt.buttonPayload
+            ? { buttonPayload: evt.buttonPayload }
+            : {}),
           ...(evt.messageId ? { metaMessageId: evt.messageId } : {}),
         });
         console.log(
@@ -2363,7 +2457,36 @@ export class ChatService implements OnModuleDestroy {
         where: { id: conversationIdForSockets },
       });
       if (convRow?.isAutoPilotActive) {
-        if (shouldDebounceAutopilotInboundText(convRow.platform)) {
+        const buttonPayload = pickFirstNonEmptyTrimmedString(
+          data.buttonPayload,
+          data.payload,
+        );
+        const adButtonHit = matchAdButtonAutoReply({
+          text: String(saved.content ?? ''),
+          payload: buttonPayload,
+        });
+        if (adButtonHit && shouldDebounceAutopilotInboundText(convRow.platform)) {
+          const unanswered =
+            await this.findUnansweredInboundTextMessages(
+              conversationIdForSockets,
+            );
+          const onlyThisButton =
+            unanswered.length === 1 && unanswered[0]?.id === saved.id;
+          if (onlyThisButton) {
+            this.clearAutopilotTextDebounce(conversationIdForSockets);
+            void this.sendAdButtonAutoReply(
+              saved,
+              convRow,
+              adButtonHit,
+            ).catch((err) =>
+              console.error('sendAdButtonAutoReply:', err),
+            );
+          } else {
+            this.scheduleDebouncedAutopilotTextReply(
+              conversationIdForSockets,
+            );
+          }
+        } else if (shouldDebounceAutopilotInboundText(convRow.platform)) {
           this.scheduleDebouncedAutopilotTextReply(conversationIdForSockets);
         } else if (
           !(await this.shouldSuppressAutopilotForVisionPipeline(
@@ -6452,6 +6575,64 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
   }
 
+  /** Cancela el temporizador de debounce de autopilot de texto (p. ej. tras auto-reply de botón). */
+  private clearAutopilotTextDebounce(conversationId: string): void {
+    const prev = this.autopilotTextDebounceTimers.get(conversationId);
+    if (prev !== undefined) {
+      clearTimeout(prev);
+      this.autopilotTextDebounceTimers.delete(conversationId);
+    }
+  }
+
+  /**
+   * Respuesta fija de botones de publicidad: sin LLM ni debounce de 60s.
+   * Persiste outbound + despacha al canal (Messenger / WhatsApp).
+   */
+  private async sendAdButtonAutoReply(
+    inboundMsg: Message,
+    conversation: Conversation,
+    hit: AdButtonAutoReplyMatch,
+  ): Promise<void> {
+    const text = String(hit.reply ?? '').trim();
+    if (!text) return;
+
+    console.log(
+      '[AdButtonAutoReply]',
+      JSON.stringify({
+        conversationId: conversation.id,
+        platform: conversation.platform ?? null,
+        intent: hit.intent,
+        matchedVia: hit.matchedVia,
+        inboundPreview: String(inboundMsg.content ?? '').slice(0, 80),
+      }),
+    );
+
+    const autopilotTallerId =
+      conversation.tallerId ??
+      inboundMsg.tallerId ??
+      (await this.tallerService.findDefaultTallerId());
+    const outbound = this.messageRepository.create({
+      content: text,
+      channelType: inboundMsg.channelType || conversation.platform || 'test',
+      senderName: 'Asistente IA',
+      direction: 'outbound',
+      externalId: conversation.externalId,
+      conversationId: conversation.id,
+      conversation,
+      tallerId: autopilotTallerId,
+    });
+    const savedOut = await this.messageRepository.save(outbound);
+
+    conversation.lastMessageAt = new Date();
+    const preview =
+      text.length > 120 ? `${text.slice(0, 117)}…` : text;
+    conversation.lastMessage = preview;
+    await this.conversationRepository.save(conversation);
+
+    this.chatGateway.emitNewMessage(savedOut);
+    this.dispatchOutboundChannelMessage(conversation, text, false);
+  }
+
   /** Reinicia el temporizador: un solo envío de autopilot al cabo del silencio. */
   private scheduleDebouncedAutopilotTextReply(conversationId: string): void {
     const prev = this.autopilotTextDebounceTimers.get(conversationId);
@@ -6483,10 +6664,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return;
     }
 
-    const mergedText = batch
+    const batchTexts = batch
       .map((m) => String(m.content ?? '').trim())
-      .filter(Boolean)
-      .join('\n\n');
+      .filter(Boolean);
+    const adButtonBatchHit = matchAdButtonAutoReplyForBatch(batchTexts);
+    if (adButtonBatchHit) {
+      const anchor = batch[batch.length - 1]!;
+      await this.sendAdButtonAutoReply(anchor, conv, adButtonBatchHit);
+      return;
+    }
+
+    const mergedText = batchTexts.join('\n\n');
     const finalizedBanio = await this.tryFinalizeBanioDraftAfterVehicleReply(
       conversationId,
       mergedText,

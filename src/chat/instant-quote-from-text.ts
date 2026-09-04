@@ -18,6 +18,7 @@ import {
   matchServicioFromCatalog,
   normalizeTextForMatch,
 } from './autofix-config';
+import { AD_BUTTON_AUTO_REPLIES } from './ad-button-auto-reply';
 
 export type InstantQuoteLine = { label: string; amount: number };
 
@@ -964,6 +965,9 @@ export function assistantMessageIsBañoVehiclePrompt(text: string): boolean {
   const n = normalizeTextForMatch(String(text ?? '').trim());
   if (!n) return false;
   if (n.includes(normalizeTextForMatch(BAÑO_PINTURA_VEHICLE_PROMPT_REPLY))) return true;
+  if (n.includes(normalizeTextForMatch(AD_BUTTON_AUTO_REPLIES.banio_pintura))) {
+    return true;
+  }
   return (
     /\bque\s+auto\b/.test(n) &&
     (/\bcamioneta\b/.test(n) || /\bcoche\b/.test(n) || /\bvehiculo\b/.test(n))

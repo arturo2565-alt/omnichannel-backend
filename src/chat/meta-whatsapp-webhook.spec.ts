@@ -107,4 +107,91 @@ describe('meta-whatsapp-webhook', () => {
     };
     expect(extractMetaWhatsAppInboundEvents(statusOnly)).toEqual([]);
   });
+
+  it('extrae botón de plantilla con texto y payload', () => {
+    const payload = {
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          id: 'WABA-1',
+          changes: [
+            {
+              field: 'messages',
+              value: {
+                messaging_product: 'whatsapp',
+                metadata: {
+                  display_phone_number: '15550001111',
+                  phone_number_id: 'PN-1',
+                },
+                contacts: [{ profile: { name: 'Lead' }, wa_id: '5215512345678' }],
+                messages: [
+                  {
+                    from: '5215512345678',
+                    id: 'wamid.BTN',
+                    timestamp: '1504902988',
+                    type: 'button',
+                    button: {
+                      text: 'Ubicación 📍',
+                      payload: 'BTN_UBICACION',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const events = extractMetaWhatsAppInboundEvents(payload);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      text: 'Ubicación 📍',
+      buttonPayload: 'BTN_UBICACION',
+    });
+  });
+
+  it('extrae interactive button_reply title + id', () => {
+    const payload = {
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          id: 'WABA-1',
+          changes: [
+            {
+              field: 'messages',
+              value: {
+                messaging_product: 'whatsapp',
+                metadata: {
+                  display_phone_number: '15550001111',
+                  phone_number_id: 'PN-1',
+                },
+                contacts: [{ profile: { name: 'Lead' }, wa_id: '5215512345678' }],
+                messages: [
+                  {
+                    from: '5215512345678',
+                    id: 'wamid.INT',
+                    timestamp: '1504902988',
+                    type: 'interactive',
+                    interactive: {
+                      type: 'button_reply',
+                      button_reply: {
+                        id: 'BTN_BANIO_PINTURA',
+                        title: 'Baño de pintura',
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const events = extractMetaWhatsAppInboundEvents(payload);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      text: 'Baño de pintura',
+      buttonPayload: 'BTN_BANIO_PINTURA',
+    });
+  });
 });

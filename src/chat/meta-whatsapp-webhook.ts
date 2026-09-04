@@ -9,6 +9,11 @@ export type MetaWhatsAppInboundEvent = {
   contactName: string;
   messageId: string;
   text: string;
+  /**
+   * Payload / id del botón interactivo (si Meta lo envía aparte del título).
+   * Vacío en mensajes de texto libre.
+   */
+  buttonPayload: string;
   /** URL directa si el payload ya trae enlace (p. ej. reenvío legacy). */
   imageUrl: string;
   /** true = webhook de entrega/lectura (sin mensaje entrante). */
@@ -62,6 +67,7 @@ function contactNameFromMap(
 function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
   text: string;
   imageUrl: string;
+  buttonPayload: string;
 } {
   const type = String(msg.type ?? 'text').toLowerCase().trim();
   if (type === 'text') {
@@ -71,7 +77,7 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
       (msg.text as Record<string, unknown>).body != null
         ? String((msg.text as Record<string, unknown>).body).trim()
         : '';
-    return { text: body, imageUrl: '' };
+    return { text: body, imageUrl: '', buttonPayload: '' };
   }
   if (type === 'image') {
     const image =
@@ -83,6 +89,7 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
     return {
       text: caption,
       imageUrl: link,
+      buttonPayload: '',
     };
   }
   if (type === 'button') {
@@ -90,7 +97,12 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
       msg.button && typeof msg.button === 'object'
         ? (msg.button as Record<string, unknown>)
         : null;
-    return { text: pickTrimmed(button?.text, button?.payload), imageUrl: '' };
+    const buttonPayload = pickTrimmed(button?.payload);
+    return {
+      text: pickTrimmed(button?.text, button?.payload),
+      imageUrl: '',
+      buttonPayload,
+    };
   }
   if (type === 'interactive') {
     const interactive =
@@ -107,6 +119,7 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
       typeof interactive.list_reply === 'object'
         ? (interactive.list_reply as Record<string, unknown>)
         : null;
+    const buttonPayload = pickTrimmed(buttonReply?.id, listReply?.id);
     return {
       text: pickTrimmed(
         buttonReply?.title,
@@ -115,9 +128,10 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
         listReply?.id,
       ),
       imageUrl: '',
+      buttonPayload,
     };
   }
-  return { text: '', imageUrl: '' };
+  return { text: '', imageUrl: '', buttonPayload: '' };
 }
 
 /** Metadatos del primer change (validación de cuenta / número). */
@@ -232,7 +246,8 @@ export function extractMetaWhatsAppInboundEvents(
         if (!threadWaId) continue;
 
         const messageId = pickTrimmed(msg.id);
-        const { text, imageUrl } = parseWhatsAppMessageContent(msg);
+        const { text, imageUrl, buttonPayload } =
+          parseWhatsAppMessageContent(msg);
         if (!text && !imageUrl) continue;
 
         out.push({
@@ -244,6 +259,7 @@ export function extractMetaWhatsAppInboundEvents(
           contactName: contactNameFromMap(threadWaId, contactByWaId),
           messageId,
           text,
+          buttonPayload,
           imageUrl,
         });
       }
