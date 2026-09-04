@@ -1,36 +1,18 @@
 import OpenAI from 'openai';
 import { openAiChatCompletionParams } from './openai-model-config';
 import { createTrackedChatCompletion } from './tracked-chat-completion';
+import {
+  buildLlmDynamicServerTimeBlock,
+} from './llm-prompt-layers';
 
 /** Zona del taller para interpretar «mañana» y validar día/hora */
 export const WORKSHOP_TIMEZONE = 'America/Mexico_City';
 
-/**
- * Fragmento para system prompts: instante del servidor (ISO UTC en UTC + calendario legible en inglés en zona del taller).
- * Necesario para interpretar «este miércoles», mañana, etc.
- *
- * @param now Por defecto `new Date()`; en tests puedes fijar el instante de referencia.
- */
-export function buildLlmServerTimeSystemPrefix(now = new Date()): string {
-  const isoUtc = now.toISOString();
-  const humanWorkshop = now.toLocaleString('en-US', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
-    timeZone: WORKSHOP_TIMEZONE,
-    timeZoneName: 'short',
-  });
-  return [
-    `Current time is ${humanWorkshop} (workshop calendar in ${WORKSHOP_TIMEZONE}).`,
-    `Server instant ISO 8601 (UTC): ${isoUtc}.`,
-    `Treat these lines as authoritative “now” when resolving relative dates (“this Wednesday”, “tomorrow”, “este miércoles”).`,
-  ].join('\n');
-}
+/** Re-export: mantener compat; el bloque de tiempo va en contexto dinámico, no al inicio. */
+export {
+  buildLlmServerTimeSystemPrefix,
+  buildLlmDynamicServerTimeBlock,
+} from './llm-prompt-layers';
 
 export type AppointmentIntentResult = {
   isBookingIntent: boolean;
@@ -352,9 +334,7 @@ export async function parseAppointmentIntent(
     messages: [
       {
         role: 'system',
-        content: `${buildLlmServerTimeSystemPrefix(referenceDate)}
-
-Eres un extractor de intención de CITA / AGENDAR para un taller automotriz en México (zona horaria ${WORKSHOP_TIMEZONE}).
+        content: `Eres un extractor de intención de CITA / AGENDAR para un taller automotriz en México (zona horaria ${WORKSHOP_TIMEZONE}).
 
 Devuelve SOLO un JSON con esta forma:
 {
@@ -377,7 +357,13 @@ Reglas:
       },
       {
         role: 'user',
-        content: `Fecha/hora de referencia (ISO): ${refIso}\nDía civil actual en ${WORKSHOP_TIMEZONE}: ${refYmd}\n\nMensaje del cliente:\n"""${trimmed}"""`,
+        content: `${buildLlmDynamicServerTimeBlock(referenceDate)}
+
+Fecha/hora de referencia (ISO): ${refIso}
+Día civil actual en ${WORKSHOP_TIMEZONE}: ${refYmd}
+
+Mensaje del cliente:
+"""${trimmed}"""`,
       },
     ],
   },

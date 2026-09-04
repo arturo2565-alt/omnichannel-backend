@@ -10,9 +10,14 @@ import {
   type OpenAiModelTier,
 } from './openai-model-config';
 import {
+  buildPromptCacheKeyForTaller,
   extractResponsesApiUsage,
+  getLlmAuditContext,
+  logStablePromptPrefixAudit,
   reportLlmUsage,
 } from './llm-audit-context';
+import { LLM_PROMPT_DYNAMIC_MARKER } from './llm-prompt-layers';
+import { sortFunctionToolsByName } from './autopilot-tools';
 
 export type OpenAiDialogueTurn = {
   role: 'user' | 'assistant';
@@ -47,14 +52,41 @@ function listFunctionCalls(response: Response): ResponseFunctionToolCall[] {
   );
 }
 
+function buildFirstTurnInput(
+  dialogue: OpenAiDialogueTurn[],
+  dynamicContext: string,
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const input: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  const dynamic = String(dynamicContext ?? '').trim();
+  if (dynamic) {
+    input.push({
+      role: 'user',
+      content: dynamic.startsWith(LLM_PROMPT_DYNAMIC_MARKER)
+        ? dynamic
+        : `${LLM_PROMPT_DYNAMIC_MARKER}\n${dynamic}`,
+    });
+  }
+  for (const turn of dialogue) {
+    input.push({ role: turn.role, content: turn.content });
+  }
+  return input;
+}
+
 /**
  * Loop de autopilot vía Responses API (`/v1/responses`).
- * Compatible con GPT-5.5 + tools + reasoning.effort.
+ * `instructions` debe ser el prefijo ESTABLE (sin timestamps); el contexto
+ * dinámico va en el primer input para no invalidar Prompt Caching.
  */
 export async function runOpenAiResponsesToolLoop(
   openai: OpenAI,
   options: {
+    /** Prefijo estático + tenant (sin Date.now / IDs / gates volátiles). */
     resolveInstructions: () => Promise<string>;
+    /**
+     * Bloque 3 efímero (hora, estado lead, baño gate…). Solo en el primer turno.
+     * Se reevalúa una vez al inicio del loop.
+     */
+    resolveDynamicContext?: () => Promise<string>;
     dialogue: OpenAiDialogueTurn[];
     tools: FunctionTool[];
     handleToolCall: (
@@ -77,31 +109,39 @@ export async function runOpenAiResponsesToolLoop(
   const maxOutputTokens = options.maxOutputTokens ?? 4096;
   const llmPurpose = options.llmPurpose || 'orchestrator';
 
+  /** Instructions estables: una sola resolución (mismo bytes en todos los steps). */
+  const instructions = await options.resolveInstructions();
+  logStablePromptPrefixAudit(`responses:${llmPurpose}`, instructions);
+  const dynamicContext = options.resolveDynamicContext
+    ? await options.resolveDynamicContext()
+    : '';
+  const tools = sortFunctionToolsByName(options.tools);
+  const promptCacheKey =
+    buildPromptCacheKeyForTaller(getLlmAuditContext()?.tallerId) ??
+    'taller:default:autopilot-v1';
+
   let previousResponseId: string | null = null;
   let pendingToolOutputs: ResponseInputItem.FunctionCallOutput[] | null = null;
 
   for (let step = 0; step < maxSteps; step++) {
-    const instructions = await options.resolveInstructions();
     const baseParams = openAiResponsesParams({ tier, maxOutputTokens });
 
     const t0 = Date.now();
     const response = await openai.responses.create({
       ...baseParams,
       instructions,
-      tools: options.tools,
+      tools,
       tool_choice: 'auto',
       parallel_tool_calls: false,
       store: true,
+      prompt_cache_key: promptCacheKey,
       ...(previousResponseId && pendingToolOutputs
         ? {
             previous_response_id: previousResponseId,
             input: pendingToolOutputs,
           }
         : {
-            input: options.dialogue.map((turn) => ({
-              role: turn.role,
-              content: turn.content,
-            })),
+            input: buildFirstTurnInput(options.dialogue, dynamicContext),
           }),
     });
     const durationMs = Date.now() - t0;
@@ -115,6 +155,7 @@ export async function runOpenAiResponsesToolLoop(
       completionTokens: usage.completionTokens,
       totalTokens: usage.totalTokens,
       cachedTokens: usage.cachedTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
       durationMs,
     });
 
@@ -124,6 +165,8 @@ export async function runOpenAiResponsesToolLoop(
       console.warn('[ResponsesToolLoop] respuesta incomplete', {
         step,
         reason: response.incomplete_details?.reason,
+        cachedTokens: usage.cachedTokens,
+        promptTokens: usage.promptTokens,
       });
     }
 

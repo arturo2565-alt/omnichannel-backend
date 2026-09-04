@@ -74,7 +74,9 @@ export function estimateLlmCostUsd(input: {
     );
     return 0;
   }
-  const cachedRate = rates.cachedInput ?? rates.input;
+  // Prompt Caching: tokens cacheados ≈ 50% del precio de input (salvo override explícito).
+  const cachedRate =
+    rates.cachedInput != null ? rates.cachedInput : rates.input * 0.5;
   const uncachedPrompt = Math.max(0, prompt - cached);
   const usd =
     (uncachedPrompt * rates.input) / 1_000_000 +

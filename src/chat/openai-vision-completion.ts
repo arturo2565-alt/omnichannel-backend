@@ -7,6 +7,7 @@ import {
 } from './openai-model-config';
 import {
   extractChatCompletionUsage,
+  logStablePromptPrefixAudit,
   reportLlmUsage,
 } from './llm-audit-context';
 
@@ -115,6 +116,15 @@ export async function createVisionDamageAnalysisCompletion(
       reasoningEffortOverride: effort,
     });
 
+    if (i === 0) {
+      const sys = messages.find((m) => m.role === 'system');
+      const sysText =
+        sys && typeof sys.content === 'string' ? sys.content : '';
+      if (sysText) {
+        logStablePromptPrefixAudit('chat:vision_peritaje', sysText);
+      }
+    }
+
     const t0 = Date.now();
     const completion = await openai.chat.completions.create({
       ...base,
@@ -150,6 +160,7 @@ export async function createVisionDamageAnalysisCompletion(
       completionTokens: extracted.completionTokens,
       totalTokens: extracted.totalTokens,
       cachedTokens: extracted.cachedTokens,
+      cacheWriteTokens: extracted.cacheWriteTokens,
       durationMs,
     });
 

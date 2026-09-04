@@ -5,6 +5,7 @@ import type {
 } from 'openai/resources/chat/completions';
 import {
   extractChatCompletionUsage,
+  logStablePromptPrefixAudit,
   reportLlmUsage,
 } from './llm-audit-context';
 
@@ -16,6 +17,23 @@ export async function createTrackedChatCompletion(
   params: ChatCompletionCreateParamsNonStreaming,
   options: { purpose: string },
 ): Promise<ChatCompletion> {
+  const systemMsg = params.messages?.find((m) => m.role === 'system');
+  const systemText =
+    systemMsg && typeof systemMsg.content === 'string'
+      ? systemMsg.content
+      : Array.isArray(systemMsg?.content)
+        ? systemMsg.content
+            .map((p) =>
+              p && typeof p === 'object' && 'text' in p
+                ? String((p as { text?: string }).text ?? '')
+                : '',
+            )
+            .join('')
+        : '';
+  if (systemText) {
+    logStablePromptPrefixAudit(`chat:${options.purpose}`, systemText);
+  }
+
   const t0 = Date.now();
   const completion = await openai.chat.completions.create(params);
   const durationMs = Date.now() - t0;
@@ -29,6 +47,7 @@ export async function createTrackedChatCompletion(
     completionTokens: usage.completionTokens,
     totalTokens: usage.totalTokens,
     cachedTokens: usage.cachedTokens,
+    cacheWriteTokens: usage.cacheWriteTokens,
     durationMs,
   });
   return completion;

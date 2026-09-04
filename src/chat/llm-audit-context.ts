@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'async_hooks';
+import { createHash } from 'crypto';
 
 export type LlmAuditContext = {
   tallerId?: string | null;
@@ -16,6 +17,8 @@ export type LlmUsageReportInput = {
   completionTokens?: number;
   totalTokens?: number;
   cachedTokens?: number;
+  /** Tokens escritos a caché (si el modelo/API lo reporta). */
+  cacheWriteTokens?: number;
   durationMs?: number;
   tallerId?: string | null;
   conversationId?: string | null;
@@ -25,6 +28,12 @@ type LlmUsageReporter = (input: LlmUsageReportInput) => void;
 
 const llmAuditAls = new AsyncLocalStorage<LlmAuditContext>();
 let reporter: LlmUsageReporter | null = null;
+
+/** Activo por defecto; `LLM_CACHE_DEBUG=false` lo apaga. */
+export function isLlmCacheDebugEnabled(): boolean {
+  const raw = String(process.env.LLM_CACHE_DEBUG ?? 'true').trim().toLowerCase();
+  return raw !== '0' && raw !== 'false' && raw !== 'off';
+}
 
 export function registerLlmUsageReporter(fn: LlmUsageReporter | null): void {
   reporter = fn;
@@ -80,6 +89,7 @@ export function reportLlmUsage(input: LlmUsageReportInput): void {
       completionTokens: input.completionTokens ?? 0,
       totalTokens: input.totalTokens,
       cachedTokens: input.cachedTokens ?? 0,
+      cacheWriteTokens: input.cacheWriteTokens ?? 0,
       durationMs: input.durationMs ?? 0,
       tallerId:
         input.tallerId !== undefined ? input.tallerId : (ctx?.tallerId ?? null),
@@ -93,58 +103,193 @@ export function reportLlmUsage(input: LlmUsageReportInput): void {
   }
 }
 
-export function extractChatCompletionUsage(usage: unknown): {
+/**
+ * Lee el primer número finito >= 0; no usa `||` (evitar saltar un `0` legítimo).
+ */
+export function pickNonNegativeInt(...candidates: unknown[]): number {
+  for (const c of candidates) {
+    if (c === undefined || c === null || c === '') continue;
+    const n = typeof c === 'number' ? c : Number(c);
+    if (Number.isFinite(n) && n >= 0) {
+      return Math.floor(n);
+    }
+  }
+  return 0;
+}
+
+export type ExtractedLlmUsage = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
   cachedTokens: number;
-} {
+  cacheWriteTokens: number;
+};
+
+function logUsageAudit(
+  api: 'chat_completions' | 'responses',
+  usage: unknown,
+  extracted: ExtractedLlmUsage,
+): void {
+  if (!isLlmCacheDebugEnabled()) return;
+  console.log(
+    '[LlmCacheDebug] usage raw',
+    JSON.stringify(
+      {
+        api,
+        usage: usage ?? null,
+        extracted,
+        pathsTried:
+          api === 'chat_completions'
+            ? [
+                'usage.prompt_tokens_details.cached_tokens',
+                'usage.input_tokens_details.cached_tokens',
+                'usage.cached_tokens',
+              ]
+            : [
+                'usage.input_tokens_details.cached_tokens',
+                'usage.prompt_tokens_details.cached_tokens',
+                'usage.cached_tokens',
+              ],
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+/** Fingerprint del prefijo estable para comparar llamadas consecutivas. */
+export function logStablePromptPrefixAudit(
+  source: string,
+  stablePrefix: string,
+): void {
+  if (!isLlmCacheDebugEnabled()) return;
+  const text = String(stablePrefix ?? '');
+  const head = text.slice(0, 300);
+  const hash = createHash('sha256').update(text).digest('hex').slice(0, 16);
+  const leadingWs = text.match(/^\s*/)?.[0] ?? '';
+  console.log(
+    '[LlmCacheDebug] stable prefix',
+    JSON.stringify(
+      {
+        source,
+        charLength: text.length,
+        sha256_16: hash,
+        leadingWhitespaceCodes: [...leadingWs].map((ch) => ch.charCodeAt(0)),
+        first300: head,
+        startsWithDynamicMarker: text.includes('[CONTEXTO_DINAMICO_SERVIDOR]'),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+export function extractChatCompletionUsage(usage: unknown): ExtractedLlmUsage {
   const u = usage as
     | {
         prompt_tokens?: number;
         completion_tokens?: number;
         total_tokens?: number;
-        prompt_tokens_details?: { cached_tokens?: number };
+        prompt_tokens_details?: {
+          cached_tokens?: number;
+          cache_write_tokens?: number;
+        };
+        input_tokens_details?: {
+          cached_tokens?: number;
+          cache_write_tokens?: number;
+        };
+        cached_tokens?: number;
       }
     | null
     | undefined;
-  const promptTokens = Math.max(0, Number(u?.prompt_tokens) || 0);
-  const completionTokens = Math.max(0, Number(u?.completion_tokens) || 0);
-  const totalTokens = Math.max(
-    0,
-    Number(u?.total_tokens) || promptTokens + completionTokens,
+
+  const promptTokens = pickNonNegativeInt(u?.prompt_tokens);
+  const completionTokens = pickNonNegativeInt(u?.completion_tokens);
+  const totalTokens = pickNonNegativeInt(
+    u?.total_tokens,
+    promptTokens + completionTokens,
   );
-  const cachedTokens = Math.max(
-    0,
-    Number(u?.prompt_tokens_details?.cached_tokens) || 0,
+  const cachedTokens = pickNonNegativeInt(
+    u?.prompt_tokens_details?.cached_tokens,
+    u?.input_tokens_details?.cached_tokens,
+    u?.cached_tokens,
   );
-  return { promptTokens, completionTokens, totalTokens, cachedTokens };
+  const cacheWriteTokens = pickNonNegativeInt(
+    u?.prompt_tokens_details?.cache_write_tokens,
+    u?.input_tokens_details?.cache_write_tokens,
+  );
+
+  const extracted = {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    cachedTokens,
+    cacheWriteTokens,
+  };
+  logUsageAudit('chat_completions', usage, extracted);
+  return extracted;
 }
 
-export function extractResponsesApiUsage(usage: unknown): {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  cachedTokens: number;
-} {
+export function extractResponsesApiUsage(usage: unknown): ExtractedLlmUsage {
   const u = usage as
     | {
         input_tokens?: number;
         output_tokens?: number;
         total_tokens?: number;
-        input_tokens_details?: { cached_tokens?: number };
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        input_tokens_details?: {
+          cached_tokens?: number;
+          cache_write_tokens?: number;
+        };
+        prompt_tokens_details?: {
+          cached_tokens?: number;
+          cache_write_tokens?: number;
+        };
+        cached_tokens?: number;
       }
     | null
     | undefined;
-  const promptTokens = Math.max(0, Number(u?.input_tokens) || 0);
-  const completionTokens = Math.max(0, Number(u?.output_tokens) || 0);
-  const totalTokens = Math.max(
-    0,
-    Number(u?.total_tokens) || promptTokens + completionTokens,
+
+  const promptTokens = pickNonNegativeInt(u?.input_tokens, u?.prompt_tokens);
+  const completionTokens = pickNonNegativeInt(
+    u?.output_tokens,
+    u?.completion_tokens,
   );
-  const cachedTokens = Math.max(
-    0,
-    Number(u?.input_tokens_details?.cached_tokens) || 0,
+  const totalTokens = pickNonNegativeInt(
+    u?.total_tokens,
+    promptTokens + completionTokens,
   );
-  return { promptTokens, completionTokens, totalTokens, cachedTokens };
+  // Responses API (docs): usage.input_tokens_details.cached_tokens
+  const cachedTokens = pickNonNegativeInt(
+    u?.input_tokens_details?.cached_tokens,
+    u?.prompt_tokens_details?.cached_tokens,
+    u?.cached_tokens,
+  );
+  const cacheWriteTokens = pickNonNegativeInt(
+    u?.input_tokens_details?.cache_write_tokens,
+    u?.prompt_tokens_details?.cache_write_tokens,
+  );
+
+  const extracted = {
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    cachedTokens,
+    cacheWriteTokens,
+  };
+  logUsageAudit('responses', usage, extracted);
+  return extracted;
+}
+
+/** Clave estable por taller para routing de Prompt Caching (Responses API). */
+export function buildPromptCacheKeyForTaller(
+  tallerId?: string | null,
+): string | undefined {
+  const tid = String(tallerId ?? '').trim();
+  if (tid) return `taller:${tid}:autopilot-v1`;
+  const ctx = llmAuditAls.getStore();
+  const fromCtx = String(ctx?.tallerId ?? '').trim();
+  if (fromCtx) return `taller:${fromCtx}:autopilot-v1`;
+  return undefined;
 }

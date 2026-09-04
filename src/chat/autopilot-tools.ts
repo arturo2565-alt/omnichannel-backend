@@ -170,3 +170,15 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
     strict: false,
   },
 ];
+
+/** Orden estable (alfabético) para maximizar prompt caching del prefijo de tools. */
+export function sortFunctionToolsByName(
+  tools: readonly FunctionTool[],
+): FunctionTool[] {
+  return [...tools].sort((a, b) =>
+    String(a.name ?? '').localeCompare(String(b.name ?? ''), 'en'),
+  );
+}
+
+export const AUTOPILOT_RESPONSES_TOOLS_SORTED: FunctionTool[] =
+  sortFunctionToolsByName(AUTOPILOT_RESPONSES_TOOLS);

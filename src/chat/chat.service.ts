@@ -48,12 +48,15 @@ import type {
 } from 'openai/resources/chat/completions';
 import {
   WORKSHOP_TIMEZONE,
-  buildLlmServerTimeSystemPrefix,
   parseWorkshopScheduledAtIso,
   parseWorkshopScheduledAtIsoForBooking,
   validateWorkshopSlotUtcDetailed,
   parseAppointmentIntent,
 } from './appointment-intent';
+import {
+  buildLlmDynamicServerTimeBlock,
+  type LlmPromptLayers,
+} from './llm-prompt-layers';
 import {
   buildSchedulingContextFromTurns,
   formatAppointmentConfirmedMessage,
@@ -6415,6 +6418,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     const loop = await runOpenAiResponsesToolLoop(this.openai, {
       resolveInstructions: async () => params.baseSystem,
+      resolveDynamicContext: async () => buildLlmDynamicServerTimeBlock(),
       dialogue,
       tools: AUTOPILOT_RESPONSES_TOOLS,
       maxOutputTokens: AUTOPILOT_CHAT_MAX_OUTPUT_TOKENS,
@@ -6746,9 +6750,51 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   }
 
   /**
-   * System prompt del autopilot + bloque opcional cuando el lead ya está agendado
-   * (agradecimientos cortos vs dudas).
+   * Capas de prompt del autopilot para Prompt Caching:
+   * - stablePrefix: rol/reglas + catálogo del taller (sin Date/IDs)
+   * - dynamicContext: hora servidor, scheduling, baño gate, estado agendado
    */
+  private async buildAutopilotPromptLayers(
+    conversation: Conversation,
+    baseChatPrompt: string,
+    options?: {
+      postQuoteScheduling?: boolean;
+      userMentionedWeekday?: boolean;
+    },
+  ): Promise<LlmPromptLayers> {
+    const catalogAppend = await this.loadCatalogPromptAppendForLlm(
+      conversation.tallerId,
+    );
+    const stablePrefix = `${String(baseChatPrompt ?? '').trim()}${catalogAppend}`.trim();
+
+    const dynamicParts: string[] = [buildLlmDynamicServerTimeBlock()];
+    if (options?.postQuoteScheduling) {
+      dynamicParts.push(
+        buildPlaygroundPostQuoteSchedulingSystemAppend({
+          userMentionedWeekday: options.userMentionedWeekday === true,
+          forAutopilot: true,
+        }).trim(),
+      );
+    }
+    const banioModelAppend = await this.buildBanioSolicitarModeloAutopilotAppend(
+      conversation.id,
+    );
+    if (banioModelAppend.trim()) {
+      dynamicParts.push(banioModelAppend.trim());
+    }
+    if (conversation.status === 'agendado') {
+      dynamicParts.push(
+        '[Estado del lead: AGENDADO — El cliente ya tiene cita confirmada. Prioriza responder sus dudas sobre la visita, el taller o el vehículo. Cualquier pieza o servicio extra que cotices con obtenerCotizacionExpress debe presentarse como complemento de su orden para el día acordado; no presiones nueva agenda, no envíes ubicación del taller ni cierres de venta genéricos salvo que lo pida. Si solo agradece o saluda sin pregunta nueva, responde una frase cordial y cierra.]',
+      );
+    }
+
+    return {
+      stablePrefix,
+      dynamicContext: dynamicParts.filter(Boolean).join('\n\n'),
+    };
+  }
+
+  /** @deprecated Prefer {@link buildAutopilotPromptLayers}; une capas (solo para callers legacy). */
   private async buildAutopilotSystemSection(
     conversation: Conversation,
     baseChatPrompt: string,
@@ -6757,21 +6803,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       userMentionedWeekday?: boolean;
     },
   ): Promise<string> {
-    const catalogAppend = await this.loadCatalogPromptAppendForLlm();
-    const schedulingAppend = options?.postQuoteScheduling
-      ? buildPlaygroundPostQuoteSchedulingSystemAppend({
-          userMentionedWeekday: options.userMentionedWeekday === true,
-          forAutopilot: true,
-        })
-      : '';
-    const banioModelAppend = await this.buildBanioSolicitarModeloAutopilotAppend(
-      conversation.id,
+    const layers = await this.buildAutopilotPromptLayers(
+      conversation,
+      baseChatPrompt,
+      options,
     );
-    const head = `${buildLlmServerTimeSystemPrefix()}\n\n${baseChatPrompt}${catalogAppend}${schedulingAppend}${banioModelAppend}`;
-    if (conversation.status !== 'agendado') {
-      return head;
-    }
-    return `${head}\n\n[Estado del lead: AGENDADO — El cliente ya tiene cita confirmada. Prioriza responder sus dudas sobre la visita, el taller o el vehículo. Cualquier pieza o servicio extra que cotices con obtenerCotizacionExpress debe presentarse como complemento de su orden para el día acordado; no presiones nueva agenda, no envíes ubicación del taller ni cierres de venta genéricos salvo que lo pida. Si solo agradece o saluda sin pregunta nueva, responde una frase cordial y cierra.]`;
+    return `${layers.stablePrefix}\n\n${layers.dynamicContext}`.trim();
   }
 
   /** Fallback: extrae fecha/hora del chat y persiste cita si el LLM no llamó la tool. */
@@ -6991,25 +7028,26 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       let lastConfirmedIso: string | null = null;
       const multiVehicleExpressTracker = new MultiVehicleExpressTracker();
 
+      const freshChatPrompt = await this.aiConfigService.getValue(
+        AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
+      );
+      const promptLayers = await this.buildAutopilotPromptLayers(
+        conversation,
+        freshChatPrompt,
+        skipInstantQuoteInterceptors
+          ? {
+              postQuoteScheduling: true,
+              userMentionedWeekday:
+                playgroundUserMessageMentionsWeekdayOnlyRough(
+                  mergedForInstant,
+                ),
+            }
+          : undefined,
+      );
+
       const loop = await runOpenAiResponsesToolLoop(this.openai, {
-        resolveInstructions: async () => {
-          const freshChatPrompt = await this.aiConfigService.getValue(
-            AI_CONFIG_KEYS.DEFAULT_CHAT_APPOINTMENT_PROMPT,
-          );
-          return this.buildAutopilotSystemSection(
-            conversation,
-            freshChatPrompt,
-            skipInstantQuoteInterceptors
-              ? {
-                  postQuoteScheduling: true,
-                  userMentionedWeekday:
-                    playgroundUserMessageMentionsWeekdayOnlyRough(
-                      mergedForInstant,
-                    ),
-                }
-              : undefined,
-          );
-        },
+        resolveInstructions: async () => promptLayers.stablePrefix,
+        resolveDynamicContext: async () => promptLayers.dynamicContext,
         dialogue: responseDialogue,
         tools: AUTOPILOT_RESPONSES_TOOLS,
         maxOutputTokens: AUTOPILOT_CHAT_MAX_OUTPUT_TOKENS,
@@ -7241,9 +7279,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         messages: [
           {
             role: 'system',
-            content: `${buildLlmServerTimeSystemPrefix()}
-
-${closerPrompt}${catalogAppend}`,
+            content: `${closerPrompt}${catalogAppend}`.trim(),
+          },
+          {
+            role: 'user',
+            content: buildLlmDynamicServerTimeBlock(),
           },
           ...contextMessages,
         ],
