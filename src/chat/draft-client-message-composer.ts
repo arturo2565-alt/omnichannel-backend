@@ -1,6 +1,7 @@
 import type OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { openAiChatCompletionParams } from './openai-model-config';
+import { createTrackedChatCompletion } from './tracked-chat-completion';
 
 export type DraftClientMessageLineRow = {
   pieza: string;
@@ -168,29 +169,33 @@ export async function composeDraftClientMessageWithLlm(
 
   const temperature = Math.max(0.5, Number(options?.temperature) || 0.7);
 
-  const completion = await openai.chat.completions.create({
-    ...openAiChatCompletionParams({
-      tier: 'narrative',
-      maxOutputTokens: 1200,
-      temperature,
-    }),
-    messages: [
-      {
-        role: 'system',
-        content: buildDraftClientMessageSystemPrompt(chatAppointmentSystemPrompt),
-      },
-      ...history,
-      {
-        role: 'user',
-        content: [
-          'Redacta el mensaje NUEVO al cliente para este borrador de cotización.',
-          'Usa el historial de conversación para continuidad de tono y contexto.',
-          'Datos estructurados (NO inventes precios ni piezas fuera de este JSON):',
-          JSON.stringify(payload, null, 2),
-        ].join('\n\n'),
-      },
-    ],
-  });
+  const completion = await createTrackedChatCompletion(
+    openai,
+    {
+      ...openAiChatCompletionParams({
+        tier: 'narrative',
+        maxOutputTokens: 1200,
+        temperature,
+      }),
+      messages: [
+        {
+          role: 'system',
+          content: buildDraftClientMessageSystemPrompt(chatAppointmentSystemPrompt),
+        },
+        ...history,
+        {
+          role: 'user',
+          content: [
+            'Redacta el mensaje NUEVO al cliente para este borrador de cotización.',
+            'Usa el historial de conversación para continuidad de tono y contexto.',
+            'Datos estructurados (NO inventes precios ni piezas fuera de este JSON):',
+            JSON.stringify(payload, null, 2),
+          ].join('\n\n'),
+        },
+      ],
+    },
+    { purpose: 'narrative' },
+  );
 
   const text = String(completion.choices[0]?.message?.content ?? '').trim();
   if (!validateDraftClientMessageOutput(text)) {

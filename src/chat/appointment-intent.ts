@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { openAiChatCompletionParams } from './openai-model-config';
+import { createTrackedChatCompletion } from './tracked-chat-completion';
 
 /** Zona del taller para interpretar «mañana» y validar día/hora */
 export const WORKSHOP_TIMEZONE = 'America/Mexico_City';
@@ -343,7 +344,9 @@ export async function parseAppointmentIntent(
   const refYmd = ymdInTimezone(referenceDate, WORKSHOP_TIMEZONE);
   const refIso = referenceDate.toISOString();
 
-  const completion = await openai.chat.completions.create({
+  const completion = await createTrackedChatCompletion(
+    openai,
+    {
     ...openAiChatCompletionParams({ tier: 'fast', maxOutputTokens: 400 }),
     response_format: { type: 'json_object' },
     messages: [
@@ -377,7 +380,9 @@ Reglas:
         content: `Fecha/hora de referencia (ISO): ${refIso}\nDía civil actual en ${WORKSHOP_TIMEZONE}: ${refYmd}\n\nMensaje del cliente:\n"""${trimmed}"""`,
       },
     ],
-  });
+  },
+    { purpose: 'fast_path_eval' },
+  );
 
   const raw = completion.choices[0]?.message?.content ?? '{}';
   const ext = parseLlmJson(raw);

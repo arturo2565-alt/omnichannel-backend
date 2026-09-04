@@ -9,6 +9,10 @@ import {
   openAiResponsesParams,
   type OpenAiModelTier,
 } from './openai-model-config';
+import {
+  extractResponsesApiUsage,
+  reportLlmUsage,
+} from './llm-audit-context';
 
 export type OpenAiDialogueTurn = {
   role: 'user' | 'assistant';
@@ -64,20 +68,25 @@ export async function runOpenAiResponsesToolLoop(
     tier?: OpenAiModelTier;
     maxSteps?: number;
     maxOutputTokens?: number;
+    /** Propósito de auditoría (default orchestrator). */
+    llmPurpose?: string;
   },
 ): Promise<OpenAiResponsesToolLoopResult> {
   const tier = options.tier ?? 'chat';
   const maxSteps = Math.max(1, options.maxSteps ?? 6);
   const maxOutputTokens = options.maxOutputTokens ?? 4096;
+  const llmPurpose = options.llmPurpose || 'orchestrator';
 
   let previousResponseId: string | null = null;
   let pendingToolOutputs: ResponseInputItem.FunctionCallOutput[] | null = null;
 
   for (let step = 0; step < maxSteps; step++) {
     const instructions = await options.resolveInstructions();
+    const baseParams = openAiResponsesParams({ tier, maxOutputTokens });
 
+    const t0 = Date.now();
     const response = await openai.responses.create({
-      ...openAiResponsesParams({ tier, maxOutputTokens }),
+      ...baseParams,
       instructions,
       tools: options.tools,
       tool_choice: 'auto',
@@ -94,6 +103,19 @@ export async function runOpenAiResponsesToolLoop(
               content: turn.content,
             })),
           }),
+    });
+    const durationMs = Date.now() - t0;
+
+    const usage = extractResponsesApiUsage(response.usage);
+    reportLlmUsage({
+      provider: 'openai',
+      model: String(response.model || baseParams.model || '').trim(),
+      purpose: llmPurpose,
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      totalTokens: usage.totalTokens,
+      cachedTokens: usage.cachedTokens,
+      durationMs,
     });
 
     previousResponseId = response.id;

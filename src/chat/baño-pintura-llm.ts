@@ -1,6 +1,7 @@
 import type { OpenAI } from 'openai';
 import type { InstantQuoteResolution } from './instant-quote-from-text';
 import { openAiChatCompletionParams } from './openai-model-config';
+import { createTrackedChatCompletion } from './tracked-chat-completion';
 import {
   extractBañoColorDetailHeuristic,
   flattenBañoTierSource,
@@ -120,21 +121,25 @@ export async function inferBañoVehicleDisplayLabelWithLlm(
     vehiculo_detectado_vision: String(input.visionDetectedVehicle ?? '').trim(),
   });
 
-  const completion = await openai.chat.completions.create({
-    ...openAiChatCompletionParams({
-      tier: 'narrative',
-      maxOutputTokens: 160,
-      temperature: 0.1,
-    }),
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: INFER_VEHICLE_SYSTEM },
-      {
-        role: 'user',
-        content: `Datos estructurados para inferir el vehículo:\n${payload.slice(0, 14_000)}`,
-      },
-    ],
-  });
+  const completion = await createTrackedChatCompletion(
+    openai,
+    {
+      ...openAiChatCompletionParams({
+        tier: 'narrative',
+        maxOutputTokens: 160,
+        temperature: 0.1,
+      }),
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: INFER_VEHICLE_SYSTEM },
+        {
+          role: 'user',
+          content: `Datos estructurados para inferir el vehículo:\n${payload.slice(0, 14_000)}`,
+        },
+      ],
+    },
+    { purpose: 'narrative' },
+  );
 
   const raw = completion.choices[0]?.message?.content?.trim() ?? '';
   const parsed = parseVehicleInferenceJson(raw);
@@ -415,20 +420,24 @@ export async function composeBañoDraftMessageWithLlm(
 
   const temperature = Math.max(0.7, Number(options?.temperature) || 0.75);
 
-  const completion = await openai.chat.completions.create({
-    ...openAiChatCompletionParams({
-      tier: 'narrative',
-      maxOutputTokens: 900,
-      temperature,
-    }),
-    messages: [
-      { role: 'system', content: buildBañoDraftSystemMessage(chatAppointmentSystemPrompt) },
-      {
-        role: 'user',
-        content: `Redacta un mensaje NUEVO al cliente para este borrador de cotización.\n\nVariables obligatorias:\n${JSON.stringify(userVariables, null, 2)}\n\nContexto completo:\n${JSON.stringify(contextPayload, null, 2)}`,
-      },
-    ],
-  });
+  const completion = await createTrackedChatCompletion(
+    openai,
+    {
+      ...openAiChatCompletionParams({
+        tier: 'narrative',
+        maxOutputTokens: 900,
+        temperature,
+      }),
+      messages: [
+        { role: 'system', content: buildBañoDraftSystemMessage(chatAppointmentSystemPrompt) },
+        {
+          role: 'user',
+          content: `Redacta un mensaje NUEVO al cliente para este borrador de cotización.\n\nVariables obligatorias:\n${JSON.stringify(userVariables, null, 2)}\n\nContexto completo:\n${JSON.stringify(contextPayload, null, 2)}`,
+        },
+      ],
+    },
+    { purpose: 'narrative' },
+  );
 
   const text = String(completion.choices[0]?.message?.content ?? '').trim();
   if (!text || text.length < 80) {
@@ -479,21 +488,25 @@ export async function classifyBañoPinturaTierWithLlm(
     };
   }
 
-  const completion = await openai.chat.completions.create({
-    ...openAiChatCompletionParams({
-      tier: 'fast',
-      maxOutputTokens: 220,
-      temperature: 0.15,
-    }),
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: CLASSIFY_SYSTEM },
-      {
-        role: 'user',
-        content: `Valores permitidos para severidadLiteral (elige uno, copia exacto):\n${allowed.map((s) => `- ${s}`).join('\n')}\n\nTexto del cliente:\n${contextFlat.slice(0, 8000)}`,
-      },
-    ],
-  });
+  const completion = await createTrackedChatCompletion(
+    openai,
+    {
+      ...openAiChatCompletionParams({
+        tier: 'fast',
+        maxOutputTokens: 220,
+        temperature: 0.15,
+      }),
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: CLASSIFY_SYSTEM },
+        {
+          role: 'user',
+          content: `Valores permitidos para severidadLiteral (elige uno, copia exacto):\n${allowed.map((s) => `- ${s}`).join('\n')}\n\nTexto del cliente:\n${contextFlat.slice(0, 8000)}`,
+        },
+      ],
+    },
+    { purpose: 'fast_path_eval' },
+  );
 
   const raw = completion.choices[0]?.message?.content?.trim() ?? '';
   const parsed = parseClassificationJson(raw);
@@ -549,23 +562,27 @@ export async function extractBañoPersonalizedColorDetail(
   const heuristic = extractBañoColorDetailHeuristic(ctx);
 
   try {
-    const completion = await openai.chat.completions.create({
-      ...openAiChatCompletionParams({
-        tier: 'fast',
-        maxOutputTokens: 140,
-        temperature: 0.15,
-      }),
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: `Extrae SOLO la descripción estética del cambio de color que pidió el cliente en el hilo (colores, toldo/techo, perla, dos tonos, arriba/abajo).
+    const completion = await createTrackedChatCompletion(
+      openai,
+      {
+        ...openAiChatCompletionParams({
+          tier: 'fast',
+          maxOutputTokens: 140,
+          temperature: 0.15,
+        }),
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: `Extrae SOLO la descripción estética del cambio de color que pidió el cliente en el hilo (colores, toldo/techo, perla, dos tonos, arriba/abajo).
 Responde JSON: {"detail":"..."} en español, máximo 120 caracteres, tono elegante y concreto (ej. "Toldo negro y carrocería blanco con perla violeta").
 Sin precios, sin saludos, sin preguntas. Si no hay detalle concreto de color, {"detail":""}.`,
-        },
-        { role: 'user', content: ctx.slice(0, 8000) },
-      ],
-    });
+          },
+          { role: 'user', content: ctx.slice(0, 8000) },
+        ],
+      },
+      { purpose: 'fast_path_eval' },
+    );
     const raw = completion.choices[0]?.message?.content?.trim() ?? '';
     const fromLlm = parseColorDetailJson(raw);
     return fromLlm ?? heuristic;

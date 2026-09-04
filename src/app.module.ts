@@ -13,6 +13,7 @@ import { DraftQuoteEntity } from './chat/entities/draft-quote.entity';
 import { DraftQuoteItem } from './chat/entities/draft-quote-item.entity';
 import { AppointmentEntity } from './chat/entities/appointment.entity';
 import { AiConfigEntity } from './chat/entities/ai-config.entity';
+import { LlmCall } from './chat/entities/llm-call.entity';
 import { PriceMatrix } from './catalog/entities/price-matrix.entity';
 
 const databaseUrl = process.env.DATABASE_URL?.trim();
@@ -38,6 +39,7 @@ const dbSynchronize =
         DraftQuoteItem,
         AppointmentEntity,
         AiConfigEntity,
+        LlmCall,
         PriceMatrix,
       ],
       autoLoadEntities: true,

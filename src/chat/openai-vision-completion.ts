@@ -5,6 +5,10 @@ import {
   openAiChatCompletionParams,
   resolveOpenAiReasoningEffort,
 } from './openai-model-config';
+import {
+  extractChatCompletionUsage,
+  reportLlmUsage,
+} from './llm-audit-context';
 
 /** Presupuesto de salida para visión (reasoning + JSON). Override: OPENAI_VISION_MAX_OUTPUT_TOKENS */
 export function resolveOpenAiVisionMaxOutputTokens(): number {
@@ -23,6 +27,8 @@ export type VisionCompletionAttemptMeta = {
   maxOutputTokens: number;
   completionTokens: number | null;
   reasoningTokens: number | null;
+  promptTokens: number | null;
+  cachedTokens: number | null;
   model: string;
 };
 
@@ -45,10 +51,13 @@ function readCompletionContent(
 function usageSnapshot(completion: OpenAI.Chat.Completions.ChatCompletion): {
   completionTokens: number | null;
   reasoningTokens: number | null;
+  promptTokens: number | null;
+  cachedTokens: number | null;
 } {
   const details = completion.usage?.completion_tokens_details as
     | { reasoning_tokens?: number }
     | undefined;
+  const extracted = extractChatCompletionUsage(completion.usage);
   return {
     completionTokens:
       completion.usage?.completion_tokens != null
@@ -58,6 +67,8 @@ function usageSnapshot(completion: OpenAI.Chat.Completions.ChatCompletion): {
       details?.reasoning_tokens != null
         ? Number(details.reasoning_tokens)
         : null,
+    promptTokens: extracted.promptTokens || null,
+    cachedTokens: extracted.cachedTokens || null,
   };
 }
 
@@ -91,6 +102,8 @@ export async function createVisionDamageAnalysisCompletion(
     maxOutputTokens,
     completionTokens: null,
     reasoningTokens: null,
+    promptTokens: null,
+    cachedTokens: null,
     model: '',
   };
 
@@ -102,15 +115,18 @@ export async function createVisionDamageAnalysisCompletion(
       reasoningEffortOverride: effort,
     });
 
+    const t0 = Date.now();
     const completion = await openai.chat.completions.create({
       ...base,
       response_format: { type: 'json_object' },
       messages: [...messages],
     });
+    const durationMs = Date.now() - t0;
 
     const content = readCompletionContent(completion);
     const usage = usageSnapshot(completion);
     const finishReason = completion.choices[0]?.finish_reason ?? null;
+    const model = String(completion.model || base.model || '').trim();
 
     lastMeta = {
       content,
@@ -120,8 +136,22 @@ export async function createVisionDamageAnalysisCompletion(
       maxOutputTokens,
       completionTokens: usage.completionTokens,
       reasoningTokens: usage.reasoningTokens,
-      model: String(base.model ?? ''),
+      promptTokens: usage.promptTokens,
+      cachedTokens: usage.cachedTokens,
+      model,
     };
+
+    const extracted = extractChatCompletionUsage(completion.usage);
+    reportLlmUsage({
+      provider: 'openai',
+      model,
+      purpose: 'vision_peritaje',
+      promptTokens: extracted.promptTokens,
+      completionTokens: extracted.completionTokens,
+      totalTokens: extracted.totalTokens,
+      cachedTokens: extracted.cachedTokens,
+      durationMs,
+    });
 
     console.log(
       '[Vision] Intento OpenAI',
@@ -134,6 +164,8 @@ export async function createVisionDamageAnalysisCompletion(
         contentChars: content.length,
         completionTokens: usage.completionTokens,
         reasoningTokens: usage.reasoningTokens,
+        promptTokens: usage.promptTokens,
+        durationMs,
       }),
     );
 

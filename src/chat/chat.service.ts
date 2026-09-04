@@ -185,6 +185,8 @@ import {
 } from './instant-quote-from-text';
 import { openAiChatCompletionParams } from './openai-model-config';
 import { createVisionDamageAnalysisCompletion } from './openai-vision-completion';
+import { createTrackedChatCompletion } from './tracked-chat-completion';
+import { runWithLlmAuditContextAsync } from './llm-audit-context';
 import { AUTOPILOT_RESPONSES_TOOLS } from './autopilot-tools';
 import { MultiVehicleExpressTracker } from './autopilot-multi-vehicle-express';
 import {
@@ -2558,6 +2560,7 @@ export class ChatService implements OnModuleDestroy {
       /** Turnos recientes de chat (texto) antes del bloque con imágenes. */
       conversationTextHistory?: ChatCompletionMessageParam[];
       tallerId?: string | null;
+      conversationId?: string | null;
     },
   ): Promise<DetectedDamageItem[]> {
     const urls = [
@@ -2567,6 +2570,28 @@ export class ChatService implements OnModuleDestroy {
       throw new Error('Se requiere al menos una URL de imagen');
     }
 
+    return runWithLlmAuditContextAsync(
+      {
+        tallerId: options?.tallerId ?? null,
+        conversationId: options?.conversationId ?? null,
+        purpose: 'vision_peritaje',
+      },
+      () => this.analyzeDamageImageInner(urls, options),
+    );
+  }
+
+  private async analyzeDamageImageInner(
+    urls: string[],
+    options?: {
+      systemPrompt?: string;
+      userSchemaHint?: string;
+      allowEmptyInventory?: boolean;
+      clientContextText?: string;
+      conversationTextHistory?: ChatCompletionMessageParam[];
+      tallerId?: string | null;
+      conversationId?: string | null;
+    },
+  ): Promise<DetectedDamageItem[]> {
     const systemPrompt =
       options?.systemPrompt != null && String(options.systemPrompt).trim() !== ''
         ? String(options.systemPrompt).trim()
@@ -2736,6 +2761,7 @@ export class ChatService implements OnModuleDestroy {
       clientContextText?: string;
       conversationTextHistory?: ChatCompletionMessageParam[];
       tallerId?: string | null;
+      conversationId?: string | null;
     },
   ): Promise<DetectedDamageItem[]> {
     const lotes = this.chunkImageUrlsForVision(imageUrls);
@@ -4027,10 +4053,14 @@ export class ChatService implements OnModuleDestroy {
       { role: 'user', content: mergedUserForLlm },
     ];
 
-    const chatCompletion = await this.openai.chat.completions.create({
+    const chatCompletion = await createTrackedChatCompletion(
+      this.openai,
+      {
       ...openAiChatCompletionParams({ tier: 'chat', maxOutputTokens: 2048 }),
       messages: chatMessages,
-    });
+    },
+      { purpose: 'playground' }
+    );
     return (
       chatCompletion.choices[0]?.message?.content?.trim() ||
       '(La IA no devolvió texto.)'
@@ -4686,7 +4716,9 @@ export class ChatService implements OnModuleDestroy {
         userContentForTurn: mergedUserForLlm,
       });
     } else {
-      const chatCompletion = await this.openai.chat.completions.create({
+      const chatCompletion = await createTrackedChatCompletion(
+      this.openai,
+      {
         ...openAiChatCompletionParams({ tier: 'chat', maxOutputTokens: 2048 }),
         messages: [
           {
@@ -4696,7 +4728,9 @@ export class ChatService implements OnModuleDestroy {
           ...historyTurns.map((h) => ({ role: h.role, content: h.text })),
           { role: 'user', content: mergedUserForLlm },
         ],
-      });
+      },
+      { purpose: 'playground' }
+    );
       chatReply =
         chatCompletion.choices[0]?.message?.content?.trim() ||
         '(La IA no devolvió texto.)';
@@ -4781,11 +4815,15 @@ ${catalogAppend}`;
       { role: 'user', content: mergedUserForLlm },
     ];
 
-    const probe = await this.openai.chat.completions.create({
+    const probe = await createTrackedChatCompletion(
+      this.openai,
+      {
       ...openAiChatCompletionParams({ tier: 'fast', maxOutputTokens: 900 }),
       response_format: { type: 'json_object' },
       messages: probeMessages,
-    });
+    },
+      { purpose: 'fast_path_eval' }
+    );
     const probeText = probe.choices[0]?.message?.content?.trim();
     let probeParsed: unknown = null;
     try {
@@ -5219,6 +5257,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       {
         allowEmptyInventory: true,
         tallerId: visionTallerId,
+        conversationId,
         conversationTextHistory,
       },
     );
@@ -6379,6 +6418,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       dialogue,
       tools: AUTOPILOT_RESPONSES_TOOLS,
       maxOutputTokens: AUTOPILOT_CHAT_MAX_OUTPUT_TOKENS,
+      llmPurpose: 'playground',
       onToolBatchComplete: (batch) =>
         multiVehicleExpressTracker.patchBatchOutputs(batch),
       handleToolCall: async (name, argsJson) => {
@@ -6845,6 +6885,26 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     inboundMsg: Message,
     options?: { inboundTextBatch?: Message[] },
   ): Promise<string | null> {
+    return runWithLlmAuditContextAsync(
+      {
+        tallerId: conversation.tallerId ?? null,
+        conversationId: conversation.id,
+        purpose: 'orchestrator',
+      },
+      () =>
+        this.composeAutopilotReplyWithToolsInner(
+          conversation,
+          inboundMsg,
+          options,
+        ),
+    );
+  }
+
+  private async composeAutopilotReplyWithToolsInner(
+    conversation: Conversation,
+    inboundMsg: Message,
+    options?: { inboundTextBatch?: Message[] },
+  ): Promise<string | null> {
     try {
       const convFresh = await this.conversationRepository.findOne({
         where: { id: conversation.id },
@@ -7010,13 +7070,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         AI_CONFIG_KEYS.INBOUND_SUGGESTION_PROMPT,
       );
       const catalogAppend = await this.loadCatalogPromptAppendForLlm();
-      const completion = await this.openai.chat.completions.create({
+      const completion = await createTrackedChatCompletion(
+      this.openai,
+      {
         ...openAiChatCompletionParams({ tier: 'fast', maxOutputTokens: 400 }),
         messages: [
           { role: 'system', content: `${systemPrompt}${catalogAppend}` },
           ...turns,
         ],
-      });
+      },
+      { purpose: 'fast_path_eval' }
+    );
       const suggestion = completion.choices[0]?.message?.content?.trim();
       return suggestion || null;
     } catch (error) {
@@ -7170,7 +7234,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
       const catalogAppend = await this.loadCatalogPromptAppendForLlm();
 
-      const completion = await this.openai.chat.completions.create({
+      const completion = await createTrackedChatCompletion(
+      this.openai,
+      {
         ...openAiChatCompletionParams({ tier: 'fast', maxOutputTokens: 600 }),
         messages: [
           {
@@ -7181,7 +7247,9 @@ ${closerPrompt}${catalogAppend}`,
           },
           ...contextMessages,
         ],
-      });
+      },
+      { purpose: 'fast_path_eval' }
+    );
 
       return completion.choices[0].message.content;
     } catch (error) {

@@ -10,10 +10,13 @@ import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { AppointmentEntity } from './entities/appointment.entity';
 import { AiConfigEntity } from './entities/ai-config.entity';
+import { LlmCall } from './entities/llm-call.entity';
 import { AiConfigService } from './ai-config.service';
 import { QuoteCartService } from './quote-cart.service';
 import { TwilioService } from './twilio.service';
 import { ArrivalAlarmController } from './arrival-alarm.controller';
+import { LlmMetricsController } from './llm-metrics.controller';
+import { LlmCallTrackerService } from './llm-call-tracker.service';
 import { CatalogModule } from '../catalog/catalog.module';
 import { TallerModule } from '../taller/taller.module';
 import { AuthModule } from '../auth/auth.module';
@@ -31,11 +34,24 @@ import { AuthModule } from '../auth/auth.module';
       DraftQuoteItem,
       AppointmentEntity,
       AiConfigEntity,
+      LlmCall,
     ]),
   ],
-  controllers: [ChatController, ArrivalAlarmController],
-  providers: [ChatService, ChatGateway, AiConfigService, TwilioService, QuoteCartService],
-  exports: [ChatService, AiConfigService, TwilioService, QuoteCartService],
+  controllers: [ChatController, ArrivalAlarmController, LlmMetricsController],
+  providers: [
+    ChatService,
+    ChatGateway,
+    AiConfigService,
+    TwilioService,
+    QuoteCartService,
+    LlmCallTrackerService,
+  ],
+  exports: [
+    ChatService,
+    AiConfigService,
+    TwilioService,
+    QuoteCartService,
+    LlmCallTrackerService,
+  ],
 })
-
 export class ChatModule {}
