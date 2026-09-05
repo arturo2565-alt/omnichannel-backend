@@ -4,7 +4,7 @@ export const INCOMING_MESSAGES_QUEUE = 'incoming-messages';
 export const MESSAGING_REDIS = 'MESSAGING_REDIS';
 
 /** Debounce distribuido: silencio antes de procesar la ráfaga. */
-export const INCOMING_MESSAGE_DEBOUNCE_MS = 5000;
+export const INCOMING_MESSAGE_DEBOUNCE_MS = 25_000;
 
 export type IncomingMessageChannel =
   | 'whatsapp'

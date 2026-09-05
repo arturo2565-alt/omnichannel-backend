@@ -8,6 +8,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { IncomingMessageProducer } from '../messaging-queue/incoming-message.producer';
+import { OutgoingMessageProducer } from '../messaging-queue/outgoing-message.producer';
 import type { IncomingBufferItem } from '../messaging-queue/incoming-message.constants';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
@@ -111,9 +112,7 @@ import {
 import {
   getWhatsAppEnvConfig,
   isWhatsAppPayloadForOurAccount,
-  getWhatsAppAccessToken,
   getWhatsAppPhoneNumberId,
-  buildWhatsAppMessagesUrl,
   normalizeWhatsAppRecipientWaId,
   normalizeWhatsAppMessageBody,
 } from './whatsapp-config';
@@ -695,6 +694,9 @@ export class ChatService implements OnModuleDestroy {
 
     @Inject(forwardRef(() => IncomingMessageProducer))
     private readonly incomingMessageProducer: IncomingMessageProducer,
+
+    @Inject(forwardRef(() => OutgoingMessageProducer))
+    private readonly outgoingMessageProducer: OutgoingMessageProducer,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -1492,83 +1494,9 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * Envía texto al usuario por Send API de Messenger (Graph).
-   * Documentación: recipient PSID + mensaje de texto plano.
+   * Encola el payload Graph (sin HTTP). El worker de `outgoing-messages`
+   * hace el POST a Meta y reintenta si Graph falla.
    */
-  private async sendFacebookMessengerText(
-    recipientPsid: string,
-    messageText: string,
-  ): Promise<void> {
-    const token = process.env.FB_PAGE_ACCESS_TOKEN?.trim();
-    if (!token) {
-      console.warn(
-        'sendFacebookMessengerText: falta FB_PAGE_ACCESS_TOKEN en entorno',
-      );
-      return;
-    }
-    const text = String(messageText ?? '').trim();
-    if (!text) return;
-
-    const url = 'https://graph.facebook.com/v21.0/me/messages';
-    await axios.post(
-      url,
-      {
-        recipient: { id: recipientPsid },
-        message: { text: text.slice(0, 2000) },
-      },
-      {
-        params: { access_token: token },
-        headers: { 'Content-Type': 'application/json' },
-      },
-    );
-  }
-
-  /**
-   * Envía texto al cliente por WhatsApp Cloud API (Graph).
-   * URL: /{WHATSAPP_PHONE_NUMBER_ID}/messages + Bearer WHATSAPP_ACCESS_TOKEN.
-   */
-  private async sendWhatsAppCloudText(
-    recipientWaId: string,
-    messageText: string,
-  ): Promise<void> {
-    const phoneNumberId = getWhatsAppPhoneNumberId();
-    const token = getWhatsAppAccessToken();
-    if (!phoneNumberId) {
-      console.warn(
-        'sendWhatsAppCloudText: falta WHATSAPP_PHONE_NUMBER_ID en entorno',
-      );
-      return;
-    }
-    if (!token) {
-      console.warn(
-        'sendWhatsAppCloudText: falta WHATSAPP_ACCESS_TOKEN en entorno',
-      );
-      return;
-    }
-    const to = normalizeWhatsAppRecipientWaId(recipientWaId);
-    const text = normalizeWhatsAppMessageBody(messageText);
-    if (!to || !text) return;
-
-    const url = buildWhatsAppMessagesUrl(phoneNumberId);
-    await axios.post(
-      url,
-      {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to,
-        type: 'text',
-        text: { body: text.slice(0, 4096) },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      },
-    );
-  }
-
-  /** Despacha outbound al canal correcto (Messenger o WhatsApp). */
   private dispatchOutboundChannelMessage(
     conversation: Conversation,
     content: string,
@@ -1578,20 +1506,45 @@ export class ChatService implements OnModuleDestroy {
     const text = String(content ?? '').trim();
     if (!text) return;
 
+    const tallerId = String(conversation.tallerId ?? '').trim();
+    const conversationId = String(conversation.id ?? '').trim();
+    if (!conversationId) return;
+
+    let channel: 'whatsapp' | 'messenger' | null = null;
+    let metaPayload: Record<string, unknown> | null = null;
+
     if (isFacebookMessengerPlatform(conversation.platform)) {
-      void this.sendFacebookMessengerText(
-        conversation.externalId,
-        text,
-      ).catch((err) =>
-        console.error('sendFacebookMessengerText (outbound):', err),
-      );
-      return;
+      const psid = String(conversation.externalId ?? '').trim();
+      if (!psid) return;
+      channel = 'messenger';
+      metaPayload = {
+        recipient: { id: psid },
+        message: { text: text.slice(0, 2000) },
+      };
+    } else if (isWhatsAppPlatform(conversation.platform)) {
+      const to = normalizeWhatsAppRecipientWaId(conversation.externalId);
+      const body = normalizeWhatsAppMessageBody(text);
+      if (!to || !body) return;
+      channel = 'whatsapp';
+      metaPayload = {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to,
+        type: 'text',
+        text: { body: body.slice(0, 4096) },
+      };
     }
-    if (isWhatsAppPlatform(conversation.platform)) {
-      void this.sendWhatsAppCloudText(conversation.externalId, text).catch(
-        (err) => console.error('sendWhatsAppCloudText (outbound):', err),
+
+    if (!channel || !metaPayload) return;
+
+    void this.outgoingMessageProducer
+      .enqueueOutboundMessage(tallerId, conversationId, channel, metaPayload)
+      .catch((err) =>
+        console.error(
+          `enqueueOutboundMessage (${channel}) conversation=${conversationId}:`,
+          err,
+        ),
       );
-    }
   }
 
   /**
