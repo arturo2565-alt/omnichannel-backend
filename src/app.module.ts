@@ -1,10 +1,17 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { BullModule } from '@nestjs/bullmq';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatModule } from './chat/chat.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { AuthModule } from './auth/auth.module';
 import { TallerModule } from './taller/taller.module';
+import { MessagingQueueModule } from './messaging-queue/messaging-queue.module';
 import { DebugController } from './sentry/debug.controller';
+import {
+  buildBullMqRedisConnection,
+  validateEnv,
+} from './config/env';
 import { Taller } from './taller/entities/taller.entity';
 import { User } from './auth/entities/user.entity';
 import { Message } from './chat/entities/chat.entity';
@@ -27,6 +34,19 @@ const dbSynchronize =
 
 @Module({
   imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validate: validateEnv,
+    }),
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        connection: buildBullMqRedisConnection(
+          config.getOrThrow<string>('REDIS_URL'),
+        ),
+      }),
+    }),
     TypeOrmModule.forRoot({
       type: 'postgres',
       url: databaseUrl,
@@ -51,6 +71,7 @@ const dbSynchronize =
     TallerModule,
     ChatModule,
     CatalogModule,
+    MessagingQueueModule,
   ],
   controllers: [DebugController],
 })
