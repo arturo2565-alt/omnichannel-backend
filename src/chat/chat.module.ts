@@ -1,5 +1,6 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { MessagingQueueModule } from '../messaging-queue/messaging-queue.module';
 import { ChatService } from './chat.service';
 import { ChatController } from './chat.controller';
 import { Message } from './entities/chat.entity';
@@ -26,6 +27,7 @@ import { AuthModule } from '../auth/auth.module';
     CatalogModule,
     TallerModule,
     AuthModule,
+    forwardRef(() => MessagingQueueModule),
     TypeOrmModule.forFeature([
       Message,
       Contact,

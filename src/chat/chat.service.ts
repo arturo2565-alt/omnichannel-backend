@@ -4,7 +4,11 @@ import {
   BadRequestException,
   ForbiddenException,
   OnModuleDestroy,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
+import { IncomingMessageProducer } from '../messaging-queue/incoming-message.producer';
+import type { IncomingBufferItem } from '../messaging-queue/incoming-message.constants';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { In, IsNull, QueryFailedError, Repository } from 'typeorm';
@@ -319,6 +323,14 @@ function shouldDebounceAutopilotInboundText(
     isFacebookMessengerPlatform(s) ||
     s.includes('whatsapp')
   );
+}
+
+function inboundQueueChannel(
+  platform: string | null | undefined,
+): 'whatsapp' | 'messenger' | string {
+  if (isWhatsAppPlatform(platform)) return 'whatsapp';
+  if (isFacebookMessengerPlatform(platform)) return 'messenger';
+  return String(platform ?? 'unknown').trim() || 'unknown';
 }
 
 /**
@@ -639,23 +651,6 @@ export class ChatService implements OnModuleDestroy {
   /** Ventana histórica (p. ej. fallback / consultas) para imágenes entrantes recientes en la conversación. */
   static readonly RECENT_IMAGE_LOOKBACK_MS = 5 * 60 * 1000;
 
-  /** conversationId → timeout del análisis consolidado pendiente */
-  private readonly consolidatedImageTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >();
-
-  /** conversationId → timeout del autopilot por texto (Messenger / WhatsApp) */
-  private readonly autopilotTextDebounceTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >();
-
-  /**
-   * conversationId → URLs de la **ráfaga actual** (orden de llegada; se vacía al ejecutar el análisis tras el quiet-period).
-   */
-  private readonly pendingBurstImageUrls = new Map<string, string[]>();
-
   /** conversationId con análisis de visión en curso (entre debounce de imagen y borrador guardado). */
   private readonly consolidatedVisionInFlight = new Set<string>();
 
@@ -697,6 +692,9 @@ export class ChatService implements OnModuleDestroy {
     private readonly twilioService: TwilioService,
 
     private readonly quoteCartService: QuoteCartService,
+
+    @Inject(forwardRef(() => IncomingMessageProducer))
+    private readonly incomingMessageProducer: IncomingMessageProducer,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -704,15 +702,6 @@ export class ChatService implements OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
-    for (const t of this.consolidatedImageTimers.values()) {
-      clearTimeout(t);
-    }
-    this.consolidatedImageTimers.clear();
-    this.pendingBurstImageUrls.clear();
-    for (const t of this.autopilotTextDebounceTimers.values()) {
-      clearTimeout(t);
-    }
-    this.autopilotTextDebounceTimers.clear();
     this.consolidatedVisionInFlight.clear();
     this.conversationFindOrCreateInflight.clear();
   }
@@ -2478,7 +2467,7 @@ export class ChatService implements OnModuleDestroy {
           const onlyThisButton =
             unanswered.length === 1 && unanswered[0]?.id === saved.id;
           if (onlyThisButton) {
-            this.clearAutopilotTextDebounce(conversationIdForSockets);
+            void this.clearAutopilotTextDebounce(conversationIdForSockets);
             void this.sendAdButtonAutoReply(
               saved,
               convRow,
@@ -2487,12 +2476,10 @@ export class ChatService implements OnModuleDestroy {
               console.error('sendAdButtonAutoReply:', err),
             );
           } else {
-            this.scheduleDebouncedAutopilotTextReply(
-              conversationIdForSockets,
-            );
+            void this.enqueueDebouncedInbound(saved, convRow, 'text');
           }
         } else if (shouldDebounceAutopilotInboundText(convRow.platform)) {
-          this.scheduleDebouncedAutopilotTextReply(conversationIdForSockets);
+          void this.enqueueDebouncedInbound(saved, convRow, 'text');
         } else if (
           !(await this.shouldSuppressAutopilotForVisionPipeline(
             conversationIdForSockets,
@@ -2514,17 +2501,10 @@ export class ChatService implements OnModuleDestroy {
       incomingIsImage &&
       isIncomingImage(saved.content)
     ) {
-      const aptTimer = this.autopilotTextDebounceTimers.get(
-        conversationIdForSockets,
-      );
-      if (aptTimer !== undefined) {
-        clearTimeout(aptTimer);
-        this.autopilotTextDebounceTimers.delete(conversationIdForSockets);
-      }
-      this.scheduleConsolidatedInboundImageAnalysis(
-        conversationIdForSockets,
-        saved.id,
-        String(saved.content).trim(),
+      void this.enqueueDebouncedInbound(
+        saved,
+        conversation,
+        'image',
       );
     }
 
@@ -5146,46 +5126,68 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     };
   }
 
+  private async enqueueDebouncedInbound(
+    saved: Message,
+    conversation: Conversation,
+    kind: 'text' | 'image',
+  ): Promise<void> {
+    const conversationId = saved.conversationId ?? conversation.id;
+    const tallerId =
+      conversation.tallerId ??
+      saved.tallerId ??
+      (await this.tallerService.findDefaultTallerId());
+    const content = String(saved.content ?? '').trim();
+    if (!content) return;
+    try {
+      await this.incomingMessageProducer.enqueueMessage(
+        tallerId,
+        conversationId,
+        inboundQueueChannel(conversation.platform),
+        {
+          kind,
+          content,
+          messageId: saved.id,
+        },
+      );
+    } catch (err) {
+      console.error('enqueueDebouncedInbound:', err);
+    }
+  }
+
   /**
-   * Cada imagen **reinicia** un temporizador de 30 s; solo cuando pasan 30 s sin nuevas fotos
-   * se ejecuta el análisis con las URLs acumuladas en la ráfaga (no una cotización por foto).
+   * Worker BullMQ: procesa la ráfaga drenada de Redis (visión y/o autopilot texto).
    */
-  private scheduleConsolidatedInboundImageAnalysis(
-    conversationId: string,
-    triggeringMessageId: string,
-    imageUrl: string,
-  ): void {
-    const url = String(imageUrl).trim();
-    if (!url || !isIncomingImage(url)) {
+  async processQueuedInboundBurst(input: {
+    conversationId: string;
+    tallerId: string;
+    channel: string;
+    items: IncomingBufferItem[];
+  }): Promise<void> {
+    const conversationId = String(input.conversationId ?? '').trim();
+    if (!conversationId) return;
+
+    const images = input.items.filter(
+      (it) => it.kind === 'image' && isIncomingImage(it.content),
+    );
+    if (images.length > 0) {
+      const attachingMessageId =
+        images[images.length - 1]?.messageId || images[0]!.messageId;
+      const burst = images.map((it) => it.content);
+      console.log(
+        `[IncomingBurst] visión conversation=${conversationId} fotos=${burst.length}`,
+      );
+      await this.processConsolidatedInboundImages(
+        conversationId,
+        attachingMessageId,
+        burst,
+      );
       return;
     }
 
-    let bucket = this.pendingBurstImageUrls.get(conversationId);
-    if (!bucket) {
-      bucket = [];
-      this.pendingBurstImageUrls.set(conversationId, bucket);
-    }
-    if (!bucket.includes(url)) {
-      bucket.push(url);
-    }
-
-    const prev = this.consolidatedImageTimers.get(conversationId);
-    if (prev !== undefined) {
-      clearTimeout(prev);
-    }
-    const t = setTimeout(() => {
-      this.consolidatedImageTimers.delete(conversationId);
-      const burst = [...(this.pendingBurstImageUrls.get(conversationId) ?? [])];
-      this.pendingBurstImageUrls.delete(conversationId);
-      void this.processConsolidatedInboundImages(
-        conversationId,
-        triggeringMessageId,
-        burst,
-      ).catch((err) =>
-        console.error('processConsolidatedInboundImages:', err),
-      );
-    }, ChatService.INBOUND_IMAGE_ANALYSIS_DEBOUNCE_MS);
-    this.consolidatedImageTimers.set(conversationId, t);
+    console.log(
+      `[IncomingBurst] texto conversation=${conversationId} items=${input.items.length}`,
+    );
+    await this.processDebouncedAutopilotTextReply(conversationId);
   }
 
   /**
@@ -6520,20 +6522,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
   }
 
-  /** Sincrónicas: ráfaga, debounce de imagen o mensaje entrante con foto. */
+  /** Sincrónicas: visión en curso o el inbound actual trae foto. */
   private hasInboundVisionWorkInFlightSync(
     conversationId: string,
     inboundMsg: Message,
     inboundTextBatch?: Message[],
   ): boolean {
     if (this.consolidatedVisionInFlight.has(conversationId)) {
-      return true;
-    }
-    if (this.consolidatedImageTimers.has(conversationId)) {
-      return true;
-    }
-    const burst = this.pendingBurstImageUrls.get(conversationId);
-    if (burst && burst.length > 0) {
       return true;
     }
     if (isIncomingImage(inboundMsg.content)) {
@@ -6589,6 +6584,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return true;
     }
 
+    try {
+      if (await this.incomingMessageProducer.hasBufferedImages(conversationId)) {
+        return true;
+      }
+    } catch (err) {
+      console.warn('hasBufferedImages:', err);
+    }
+
     const unansweredImages =
       await this.findUnansweredInboundImageMessages(conversationId);
     return unansweredImages.length > 0;
@@ -6619,12 +6622,14 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
   }
 
-  /** Cancela el temporizador de debounce de autopilot de texto (p. ej. tras auto-reply de botón). */
-  private clearAutopilotTextDebounce(conversationId: string): void {
-    const prev = this.autopilotTextDebounceTimers.get(conversationId);
-    if (prev !== undefined) {
-      clearTimeout(prev);
-      this.autopilotTextDebounceTimers.delete(conversationId);
+  /** Cancela el job delayed de texto (p. ej. tras auto-reply de botón). */
+  private async clearAutopilotTextDebounce(conversationId: string): Promise<void> {
+    try {
+      await this.incomingMessageProducer.cancelDebounceIfNoImages(
+        conversationId,
+      );
+    } catch (err) {
+      console.warn('clearAutopilotTextDebounce:', err);
     }
   }
 
@@ -6675,22 +6680,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     this.chatGateway.emitNewMessage(savedOut);
     this.dispatchOutboundChannelMessage(conversation, text, false);
-  }
-
-  /** Reinicia el temporizador: un solo envío de autopilot al cabo del silencio. */
-  private scheduleDebouncedAutopilotTextReply(conversationId: string): void {
-    const prev = this.autopilotTextDebounceTimers.get(conversationId);
-    if (prev !== undefined) {
-      clearTimeout(prev);
-    }
-    const t = setTimeout(() => {
-      this.autopilotTextDebounceTimers.delete(conversationId);
-      void this.processDebouncedAutopilotTextReply(conversationId).catch(
-        (err) =>
-          console.error('processDebouncedAutopilotTextReply:', err),
-      );
-    }, ChatService.AUTOPILOT_INBOUND_TEXT_DEBOUNCE_MS);
-    this.autopilotTextDebounceTimers.set(conversationId, t);
   }
 
   private async processDebouncedAutopilotTextReply(
@@ -6744,8 +6733,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     const stillPending =
       await this.findUnansweredInboundTextMessages(conversationId);
-    if (stillPending.length > 0) {
-      this.scheduleDebouncedAutopilotTextReply(conversationId);
+    if (stillPending.length > 0 && conv) {
+      const last = stillPending[stillPending.length - 1]!;
+      void this.enqueueDebouncedInbound(last, conv, 'text');
     }
   }
 
@@ -7311,20 +7301,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     return { id: row.id, isAutoPilotActive: Boolean(row.isAutoPilotActive) };
   }
 
-  /** Cancela debounces / ráfagas de imagen asociados a la conversación (evita trabajo tras borrar). */
+  /** Cancela debounce Redis/BullMQ asociado a la conversación (evita trabajo tras borrar). */
   private clearPendingConversationJobs(conversationId: string): void {
-    const imgTimer = this.consolidatedImageTimers.get(conversationId);
-    if (imgTimer !== undefined) {
-      clearTimeout(imgTimer);
-      this.consolidatedImageTimers.delete(conversationId);
-    }
-    this.pendingBurstImageUrls.delete(conversationId);
-
-    const textTimer = this.autopilotTextDebounceTimers.get(conversationId);
-    if (textTimer !== undefined) {
-      clearTimeout(textTimer);
-      this.autopilotTextDebounceTimers.delete(conversationId);
-    }
+    void this.incomingMessageProducer
+      .discardConversation(conversationId)
+      .catch((err) => console.warn('discardConversation:', err));
   }
 
   /**
