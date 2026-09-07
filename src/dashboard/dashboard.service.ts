@@ -55,14 +55,14 @@ export class DashboardService {
 
     const rows = await this.leadEventRepository.manager
       .createQueryBuilder()
-      .select('latest.conversationId', 'conversationId')
-      .addSelect('latest.contactName', 'contactName')
-      .addSelect('latest.lastEventAt', 'lastEventAt')
-      .addSelect('latest.total', 'total')
+      .select('latest."conversationId"', 'conversationId')
+      .addSelect('latest."contactName"', 'contactName')
+      .addSelect('latest."lastEventAt"', 'lastEventAt')
+      .addSelect('latest."total"', 'total')
       .from(`(${latestCotizado.getQuery()})`, 'latest')
       .setParameters(latestCotizado.getParameters())
-      .orderBy('latest.total', 'DESC', 'NULLS LAST')
-      .addOrderBy('latest.lastEventAt', 'DESC')
+      .orderBy('latest."total"', 'DESC', 'NULLS LAST')
+      .addOrderBy('latest."lastEventAt"', 'DESC')
       .limit(take)
       .getRawMany<{
         conversationId: string;
@@ -113,7 +113,7 @@ export class DashboardService {
     const latest = this.latestCotizadoSubquery(tallerId, conversationStatus);
     const row = await this.leadEventRepository.manager
       .createQueryBuilder()
-      .select('COALESCE(SUM(latest.total), 0)', 'sum')
+      .select('COALESCE(SUM(latest."total"), 0)', 'sum')
       .from(`(${latest.getQuery()})`, 'latest')
       .setParameters(latest.getParameters())
       .getRawOne<{ sum: string | number | null }>();
