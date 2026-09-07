@@ -23,6 +23,8 @@ import { ArrivalAlarmController } from './arrival-alarm.controller';
 import { LlmMetricsController } from './llm-metrics.controller';
 import { LlmCallTrackerService } from './llm-call-tracker.service';
 import { LeadEventsService } from './lead-events.service';
+import { AppointmentReminderService } from './appointment-reminder.service';
+import { AppointmentReminderController } from './appointment-reminder.controller';
 import { CatalogModule } from '../catalog/catalog.module';
 import { TallerModule } from '../taller/taller.module';
 import { AuthModule } from '../auth/auth.module';
@@ -48,6 +50,7 @@ import { AuthModule } from '../auth/auth.module';
   controllers: [
     ChatController,
     ConversationTransitionController,
+    AppointmentReminderController,
     ArrivalAlarmController,
     LlmMetricsController,
   ],
@@ -59,6 +62,7 @@ import { AuthModule } from '../auth/auth.module';
     QuoteCartService,
     LlmCallTrackerService,
     LeadEventsService,
+    AppointmentReminderService,
   ],
   exports: [
     ChatService,
@@ -67,6 +71,7 @@ import { AuthModule } from '../auth/auth.module';
     QuoteCartService,
     LlmCallTrackerService,
     LeadEventsService,
+    AppointmentReminderService,
   ],
 })
 export class ChatModule {}
