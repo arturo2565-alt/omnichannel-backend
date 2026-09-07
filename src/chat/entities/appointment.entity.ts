@@ -35,6 +35,10 @@ export class AppointmentEntity {
   @Column({ type: 'varchar', length: 32, nullable: true })
   phone: string | null;
 
+  /** Resumen / total de la cotización activa al agendar. */
+  @Column({ type: 'text', nullable: true })
+  quoteSummary: string | null;
+
   @Column({ type: 'timestamptz' })
   scheduledAt: Date;
 

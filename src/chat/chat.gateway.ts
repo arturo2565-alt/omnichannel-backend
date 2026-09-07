@@ -63,6 +63,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     clientName: string;
     vehicle: string | null;
     phone: string | null;
+    quoteSummary?: string | null;
     scheduledAt: string;
     status: string;
   }) {

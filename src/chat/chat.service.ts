@@ -752,8 +752,15 @@ export class ChatService implements OnModuleDestroy {
     if (contact) {
       let dirty = false;
       if (contactName && contact.contactName !== contactName) {
-        contact.contactName = contactName;
-        dirty = true;
+        const incomingPlaceholder =
+          this.looksLikePlaceholderContactName(contactName);
+        const existingPlaceholder = this.looksLikePlaceholderContactName(
+          contact.contactName,
+        );
+        if (!incomingPlaceholder || existingPlaceholder) {
+          contact.contactName = contactName;
+          dirty = true;
+        }
       }
       if (avatarUrl && contact.avatarUrl !== avatarUrl) {
         contact.avatarUrl = avatarUrl;
@@ -763,6 +770,11 @@ export class ChatService implements OnModuleDestroy {
         contact.platform = platform;
         dirty = true;
       }
+      const inferredPhone = this.inferPhoneFromChannel(key, platform);
+      if (inferredPhone && !String(contact.phone ?? '').trim()) {
+        contact.phone = inferredPhone;
+        dirty = true;
+      }
       if (dirty) await this.contactRepository.save(contact);
       return contact;
     }
@@ -770,6 +782,7 @@ export class ChatService implements OnModuleDestroy {
       tallerId,
       externalId: key,
       contactName: contactName || 'Cliente Desconocido',
+      phone: this.inferPhoneFromChannel(key, platform),
       avatarUrl,
       platform,
     });
@@ -2274,7 +2287,14 @@ export class ChatService implements OnModuleDestroy {
           conversation.tallerId = tenantId;
         }
         if (contactName && conversation.contactName !== contactName) {
-          conversation.contactName = contactName;
+          const incomingPlaceholder =
+            this.looksLikePlaceholderContactName(contactName);
+          const existingPlaceholder = this.looksLikePlaceholderContactName(
+            conversation.contactName,
+          );
+          if (!incomingPlaceholder || existingPlaceholder) {
+            conversation.contactName = contactName;
+          }
         }
         if (platformFromData) {
           conversation.platform = platformFromData;
@@ -6186,6 +6206,8 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     error: string;
   } {
     const iso = pickFirstNonEmptyTrimmedString(
+      raw.dateTime,
+      raw.date_time,
       raw.scheduledAtIso,
       raw.scheduled_at_iso,
       raw.scheduledAt,
@@ -6195,7 +6217,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return {
         ok: false,
         error:
-          'Falta scheduledAtIso. Ejemplo cita 14:00 en CDMX: 2026-05-26T14:00:00 (hora del taller, sin Z).',
+          'Falta dateTime. Ejemplo cita 14:00 en CDMX: 2026-05-26T14:00:00 (hora del taller, sin Z).',
       };
     }
     const parsed = parseWorkshopScheduledAtIsoForBooking(iso);
@@ -6207,6 +6229,174 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return { ok: false, error: slot.error };
     }
     return { ok: true, date: parsed.date };
+  }
+
+  private inferPhoneFromChannel(
+    externalId: string | null | undefined,
+    platform: string | null | undefined,
+  ): string | null {
+    if (!String(platform ?? '').toLowerCase().includes('whatsapp')) {
+      return null;
+    }
+    const digits = String(externalId ?? '').replace(/\D/g, '');
+    return digits.length >= 8 ? digits.slice(0, 32) : null;
+  }
+
+  private async extractAppointmentClientFields(
+    raw: Record<string, unknown>,
+    conversation: Conversation,
+  ): Promise<{
+    clientName: string;
+    vehicle: string | null;
+    phone: string | null;
+    quoteSummary: string | null;
+  }> {
+    const argName = pickFirstNonEmptyTrimmedString(
+      raw.clientName,
+      raw.client_name,
+      raw.nombre,
+    );
+    const convName = String(conversation.contactName ?? '').trim();
+    let clientName = '';
+    if (argName && !this.looksLikePlaceholderContactName(argName)) {
+      clientName = argName;
+    } else if (convName && !this.looksLikePlaceholderContactName(convName)) {
+      clientName = convName;
+    } else {
+      clientName = argName || convName || 'Cliente';
+      if (this.looksLikePlaceholderContactName(clientName)) {
+        clientName = 'Cliente';
+      }
+    }
+
+    const vehicleRaw = pickFirstNonEmptyTrimmedString(
+      raw.vehicleInfo,
+      raw.vehicle_info,
+      raw.vehicleDescription,
+      raw.vehicle,
+    );
+    const vehicle = vehicleRaw.length > 0 ? vehicleRaw.slice(0, 500) : null;
+
+    const waFallback = this.inferPhoneFromChannel(
+      conversation.externalId,
+      conversation.platform,
+    );
+    let contactPhone: string | null = null;
+    const contactId = String(conversation.contactId ?? '').trim();
+    if (contactId) {
+      const contact = await this.contactRepository.findOne({
+        where: { id: contactId },
+      });
+      const fromContact = String(contact?.phone ?? '').trim();
+      if (fromContact) contactPhone = fromContact.slice(0, 32);
+    }
+    const rawPhone = pickFirstNonEmptyTrimmedString(
+      raw.phone,
+      raw.customerPhone,
+      raw.telefono,
+      contactPhone,
+      waFallback,
+    );
+    const phone =
+      rawPhone.length > 0 ? rawPhone.replace(/\s+/g, '').slice(0, 32) : null;
+
+    const quoteRaw = pickFirstNonEmptyTrimmedString(
+      raw.quoteSummary,
+      raw.quote_summary,
+      raw.resumenCotizacion,
+    );
+    const quoteSummary = quoteRaw.length > 0 ? quoteRaw.slice(0, 2000) : null;
+
+    return { clientName, vehicle, phone, quoteSummary };
+  }
+
+  private looksLikePlaceholderContactName(name: string | null | undefined): boolean {
+    const s = String(name ?? '').trim().toLowerCase();
+    if (!s) return true;
+    return (
+      s === 'cliente' ||
+      s === 'cliente desconocido' ||
+      s.startsWith('whatsapp +') ||
+      s.startsWith('whatsapp ')
+    );
+  }
+
+  private async mergeAppointmentClientFields(
+    row: AppointmentEntity,
+    fields: {
+      clientName: string;
+      vehicle: string | null;
+      phone: string | null;
+      quoteSummary: string | null;
+    },
+  ): Promise<void> {
+    let dirty = false;
+    if (
+      fields.clientName &&
+      this.looksLikePlaceholderContactName(row.clientName) &&
+      !this.looksLikePlaceholderContactName(fields.clientName)
+    ) {
+      row.clientName = fields.clientName;
+      dirty = true;
+    }
+    if (!row.vehicle && fields.vehicle) {
+      row.vehicle = fields.vehicle;
+      dirty = true;
+    }
+    if (!row.phone && fields.phone) {
+      row.phone = fields.phone;
+      dirty = true;
+    }
+    if (!row.quoteSummary && fields.quoteSummary) {
+      row.quoteSummary = fields.quoteSummary;
+      dirty = true;
+    }
+    if (dirty) await this.appointmentRepository.save(row);
+  }
+
+  private async syncContactFromAppointmentFields(
+    conversation: Conversation,
+    fields: {
+      clientName: string;
+      vehicle: string | null;
+      phone: string | null;
+      quoteSummary: string | null;
+    },
+  ): Promise<void> {
+    const betterName =
+      fields.clientName &&
+      !this.looksLikePlaceholderContactName(fields.clientName)
+        ? fields.clientName
+        : '';
+
+    if (
+      betterName &&
+      this.looksLikePlaceholderContactName(conversation.contactName)
+    ) {
+      conversation.contactName = betterName;
+      await this.conversationRepository.save(conversation);
+    }
+
+    const contactId = String(conversation.contactId ?? '').trim();
+    if (!contactId) return;
+    const contact = await this.contactRepository.findOne({
+      where: { id: contactId },
+    });
+    if (!contact) return;
+
+    let dirty = false;
+    if (
+      betterName &&
+      this.looksLikePlaceholderContactName(contact.contactName)
+    ) {
+      contact.contactName = betterName.slice(0, 255);
+      dirty = true;
+    }
+    if (fields.phone && !String(contact.phone ?? '').trim()) {
+      contact.phone = fields.phone;
+      dirty = true;
+    }
+    if (dirty) await this.contactRepository.save(contact);
   }
 
   private async executeCreateAppointmentTool(
@@ -6225,7 +6415,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return {
         success: false,
         error:
-          'Argumentos inválidos (JSON). scheduledAtIso debe ir en el objeto de la herramienta.',
+          'Argumentos inválidos (JSON). dateTime debe ir en el objeto de la herramienta.',
       };
     }
 
@@ -6234,11 +6424,34 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return { success: false, error: resolved.error };
     }
     const d = resolved.date;
+    const fields = await this.extractAppointmentClientFields(raw, conversation);
 
     const existingActive = await this.loadActiveAppointmentForConversation(
       conversation.id,
     );
     if (existingActive) {
+      await this.mergeAppointmentClientFields(existingActive, fields);
+      await this.syncContactFromAppointmentFields(conversation, fields);
+      this.chatGateway.emitAppointmentCreated({
+        id: existingActive.id,
+        conversationId: conversation.id,
+        clientName: existingActive.clientName,
+        vehicle: existingActive.vehicle,
+        phone: existingActive.phone,
+        quoteSummary: existingActive.quoteSummary,
+        scheduledAt: existingActive.scheduledAt.toISOString(),
+        status: existingActive.status,
+      });
+      this.chatGateway.emitConversationLeadUpdated({
+        conversationId: conversation.id,
+        status: conversation.status,
+        contactName: conversation.contactName,
+        lastMessageAt: conversation.lastMessageAt
+          ? conversation.lastMessageAt.toISOString()
+          : null,
+        lastMessage: conversation.lastMessage ?? null,
+        isAutoPilotActive: Boolean(conversation.isAutoPilotActive),
+      });
       return {
         success: true,
         appointmentId: existingActive.id,
@@ -6246,31 +6459,18 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       };
     }
 
-    const clientName =
-      pickFirstNonEmptyTrimmedString(
-        raw.clientName,
-        conversation.contactName,
-      ) || 'Cliente';
-
-    const vehicleRaw = pickFirstNonEmptyTrimmedString(
-      raw.vehicleDescription,
-      raw.vehicle,
-    );
-    const vehicle = vehicleRaw.length > 0 ? vehicleRaw : null;
-
-    const rawPhone = pickFirstNonEmptyTrimmedString(raw.phone, raw.customerPhone);
-    const phone =
-      rawPhone.length > 0 ? rawPhone.replace(/\s+/g, '').slice(0, 32) : null;
-
     const row = this.appointmentRepository.create({
       conversationId: conversation.id,
-      clientName,
-      vehicle,
-      phone,
+      clientName: fields.clientName,
+      vehicle: fields.vehicle,
+      phone: fields.phone,
+      quoteSummary: fields.quoteSummary,
       scheduledAt: d,
       status: 'confirmada',
     });
     const saved = await this.appointmentRepository.save(row);
+
+    await this.syncContactFromAppointmentFields(conversation, fields);
 
     await this.leadEventsService.logTransition(conversation.id, 'agendado', {
       fecha: saved.scheduledAt.toISOString(),
@@ -6283,6 +6483,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       clientName: saved.clientName,
       vehicle: saved.vehicle,
       phone: saved.phone,
+      quoteSummary: saved.quoteSummary,
       scheduledAt: saved.scheduledAt.toISOString(),
       status: saved.status,
     });
@@ -6357,7 +6558,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return {
         success: false,
         error:
-          'Argumentos inválidos (JSON). Incluye scheduledAtIso en el objeto de la herramienta.',
+          'Argumentos inválidos (JSON). Incluye dateTime en el objeto de la herramienta.',
       };
     }
 
@@ -6816,7 +7017,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
       const result = await this.executeCreateAppointmentTool(
         JSON.stringify({
-          scheduledAtIso: naiveIso,
+          dateTime: naiveIso,
           clientName: conversation.contactName,
         }),
         conversation,
@@ -7375,6 +7576,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       clientName: string;
       vehicle: string | null;
       phone: string | null;
+      quoteSummary: string | null;
       scheduledAt: string;
       status: AppointmentStatus;
       conversationId: string | null;
@@ -7391,6 +7593,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       clientName: a.clientName,
       vehicle: a.vehicle,
       phone: a.phone,
+      quoteSummary: a.quoteSummary ?? null,
       scheduledAt: a.scheduledAt.toISOString(),
       status: a.status,
       conversationId: a.conversationId,

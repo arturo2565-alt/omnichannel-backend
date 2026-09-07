@@ -36,6 +36,10 @@ export class Contact {
   @Column({ type: 'varchar', length: 255 })
   contactName: string;
 
+  /** Teléfono de contacto (Messenger no lo trae en el PSID). */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  phone: string | null;
+
   @Column({ type: 'varchar', length: 2048, nullable: true })
   avatarUrl: string | null;
 

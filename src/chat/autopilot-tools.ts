@@ -132,32 +132,42 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
     type: 'function',
     name: 'createAppointment',
     description:
-      'Registra una cita en la base de datos del taller. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. En el panel de simulación (playground), la misma llamada solo valida horario y devuelve vista previa sin persistir en BD.',
+      'Registra una cita en la base de datos del taller con los datos completos del cliente. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. En Messenger pide el teléfono si aún no lo tienes. En el panel de simulación (playground) solo valida horario y no persiste.',
     parameters: {
       type: 'object',
       properties: {
+        dateTime: {
+          type: 'string',
+          description:
+            'Fecha y hora del turno en America/Mexico_City. Preferido: YYYY-MM-DDTHH:mm:ss sin sufijo Z (ej. 2026-05-26T15:30:00 = 3:30 PM CDMX). Si el cliente dice "3:30" sin AM/PM, usa 15:30. Horario: lun–vie 09:00–18:00, sáb 09:00–14:00. Alias aceptado: scheduledAtIso.',
+        },
         scheduledAtIso: {
           type: 'string',
           description:
-            'Fecha y hora del turno en America/Mexico_City. Preferido: YYYY-MM-DDTHH:mm sin sufijo Z (ej. 2026-05-26T15:30:00 = 3:30 PM CDMX). Si el cliente dice "3:30" sin AM/PM, usa 15:30. Horario: lun–vie 09:00–18:00, sáb 09:00–14:00.',
+            'Alias de dateTime (compatibilidad). Usa dateTime si puedes.',
         },
         clientName: {
           type: 'string',
           description:
-            'Nombre del cliente si se menciona; si omites, se usará el nombre de la conversación.',
+            'Nombre real del cliente. No uses "Cliente Desconocido" si el cliente ya se presentó.',
         },
-        vehicleDescription: {
+        vehicleInfo: {
           type: 'string',
           description:
-            'Modelo o datos del vehículo si el cliente los dio en el chat.',
+            'Marca, modelo y año del vehículo (ej. Jetta 2018). Alias: vehicleDescription.',
         },
         phone: {
           type: 'string',
           description:
-            'Teléfono del cliente si consta en el mensaje (solo dígitos o formato típico).',
+            'Teléfono de contacto. Obligatorio en la práctica para Messenger (el PSID no es un número llamable).',
+        },
+        quoteSummary: {
+          type: 'string',
+          description:
+            'Opcional. Resumen breve o total de la cotización activa (ej. "Hojalatería fascia $4,800").',
         },
       },
-      required: ['scheduledAtIso'],
+      required: ['dateTime', 'clientName', 'vehicleInfo', 'phone'],
     },
     strict: false,
   },
