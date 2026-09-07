@@ -7,6 +7,7 @@ import { CatalogModule } from './catalog/catalog.module';
 import { AuthModule } from './auth/auth.module';
 import { TallerModule } from './taller/taller.module';
 import { MessagingQueueModule } from './messaging-queue/messaging-queue.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 import { DebugController } from './sentry/debug.controller';
 import {
   buildBullMqRedisConnection,
@@ -22,6 +23,7 @@ import { DraftQuoteItem } from './chat/entities/draft-quote-item.entity';
 import { AppointmentEntity } from './chat/entities/appointment.entity';
 import { AiConfigEntity } from './chat/entities/ai-config.entity';
 import { LlmCall } from './chat/entities/llm-call.entity';
+import { LeadEventEntity } from './chat/entities/lead-event.entity';
 import { PriceMatrix } from './catalog/entities/price-matrix.entity';
 
 const databaseUrl = process.env.DATABASE_URL?.trim();
@@ -61,6 +63,7 @@ const dbSynchronize =
         AppointmentEntity,
         AiConfigEntity,
         LlmCall,
+        LeadEventEntity,
         PriceMatrix,
       ],
       autoLoadEntities: true,
@@ -72,6 +75,7 @@ const dbSynchronize =
     ChatModule,
     CatalogModule,
     MessagingQueueModule,
+    DashboardModule,
   ],
   controllers: [DebugController],
 })

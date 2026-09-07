@@ -14,16 +14,27 @@ import { DraftQuoteEntity } from './draft-quote.entity';
 import { Taller } from '../../taller/entities/taller.entity';
 import { Contact } from './contact.entity';
 
-/** Estados de lead admitidos para `Conversation.status`. */
+/** Estados de lead admitidos para `Conversation.status` y `lead_events.status`. */
 export const CONVERSATION_LEAD_STATUSES = [
   'nuevo',
-  'por_cotizar',
   'cotizado',
   'agendado',
+  'recordatorio_enviado',
+  'atendido',
+  'en_taller',
+  'no_asistio',
+  'completado',
+  'transferido',
 ] as const;
 
 export type ConversationLeadStatus =
   (typeof CONVERSATION_LEAD_STATUSES)[number];
+
+export function isConversationLeadStatus(
+  value: string,
+): value is ConversationLeadStatus {
+  return (CONVERSATION_LEAD_STATUSES as readonly string[]).includes(value);
+}
 
 @Entity()
 @Unique(['tallerId', 'externalId'])
@@ -60,7 +71,11 @@ export class Conversation {
   @Column({ type: 'character varying', nullable: true })
   platform?: string | null; // 'whatsapp' | 'instagram' | etc.
 
-  /** Lead: nuevo → por_cotizar (IA + borrador) → cotizado (envío cotización) → agendado (manual / futuro). */
+  /**
+   * Proyección del último evento en `lead_events`.
+   * nuevo → cotizado → agendado → recordatorio_enviado → atendido → en_taller → completado
+   * (desvíos: no_asistio, transferido).
+   */
   @Column({ type: 'varchar', length: 32, default: 'nuevo' })
   status: string;
 

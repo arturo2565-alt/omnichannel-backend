@@ -12,12 +12,14 @@ import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { AppointmentEntity } from './entities/appointment.entity';
 import { AiConfigEntity } from './entities/ai-config.entity';
 import { LlmCall } from './entities/llm-call.entity';
+import { LeadEventEntity } from './entities/lead-event.entity';
 import { AiConfigService } from './ai-config.service';
 import { QuoteCartService } from './quote-cart.service';
 import { TwilioService } from './twilio.service';
 import { ArrivalAlarmController } from './arrival-alarm.controller';
 import { LlmMetricsController } from './llm-metrics.controller';
 import { LlmCallTrackerService } from './llm-call-tracker.service';
+import { LeadEventsService } from './lead-events.service';
 import { CatalogModule } from '../catalog/catalog.module';
 import { TallerModule } from '../taller/taller.module';
 import { AuthModule } from '../auth/auth.module';
@@ -37,6 +39,7 @@ import { AuthModule } from '../auth/auth.module';
       AppointmentEntity,
       AiConfigEntity,
       LlmCall,
+      LeadEventEntity,
     ]),
   ],
   controllers: [ChatController, ArrivalAlarmController, LlmMetricsController],
@@ -47,6 +50,7 @@ import { AuthModule } from '../auth/auth.module';
     TwilioService,
     QuoteCartService,
     LlmCallTrackerService,
+    LeadEventsService,
   ],
   exports: [
     ChatService,
@@ -54,6 +58,7 @@ import { AuthModule } from '../auth/auth.module';
     TwilioService,
     QuoteCartService,
     LlmCallTrackerService,
+    LeadEventsService,
   ],
 })
 export class ChatModule {}

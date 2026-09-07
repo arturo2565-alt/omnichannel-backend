@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { IncomingMessageProducer } from '../messaging-queue/incoming-message.producer';
 import { OutgoingMessageProducer } from '../messaging-queue/outgoing-message.producer';
+import { LeadEventsService } from './lead-events.service';
 import type { IncomingBufferItem } from '../messaging-queue/incoming-message.constants';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
@@ -697,6 +698,8 @@ export class ChatService implements OnModuleDestroy {
 
     @Inject(forwardRef(() => OutgoingMessageProducer))
     private readonly outgoingMessageProducer: OutgoingMessageProducer,
+
+    private readonly leadEventsService: LeadEventsService,
   ) {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY, 
@@ -825,7 +828,10 @@ export class ChatService implements OnModuleDestroy {
 
       const draft = await createDraft();
       try {
-        return await this.conversationRepository.save(draft);
+        const saved = await this.conversationRepository.save(draft);
+        await this.leadEventsService.logTransition(saved.id, 'nuevo');
+        saved.status = 'nuevo';
+        return saved;
       } catch (err) {
         if (this.isUniqueConstraintError(err)) {
           const winner = await loadExisting();
@@ -2320,14 +2326,6 @@ export class ChatService implements OnModuleDestroy {
       resolvedDirection === 'outbound' &&
       String(data.conversationLeadStatus ?? '').trim() === 'cotizado'
     ) {
-      const activeApt = await this.loadActiveAppointmentForConversation(
-        conversation.id,
-      );
-      if (activeApt) {
-        conversation.status = 'agendado';
-      } else {
-        conversation.status = 'cotizado';
-      }
       await this.quoteCartService.recordQuoteSendSnapshot(
         conversation.id,
         conversation.tallerId,
@@ -2335,6 +2333,14 @@ export class ChatService implements OnModuleDestroy {
           formalNarrative: contentToSave || undefined,
         },
       );
+      const total = await this.resolveQuoteSendTotal(
+        conversation.id,
+        conversation.tallerId,
+      );
+      await this.leadEventsService.logTransition(conversation.id, 'cotizado', {
+        total,
+      });
+      conversation.status = 'cotizado';
     }
 
     await this.conversationRepository.save(conversation);
@@ -2878,25 +2884,33 @@ export class ChatService implements OnModuleDestroy {
     return rows[0] ?? null;
   }
 
-  /** Tras nuevo borrador: `por_cotizar` salvo lead con cita activa (permanece `agendado`). */
+  /**
+   * Tras nuevo borrador listo: no muta el lead (el envío autónomo pasa a `cotizado`).
+   * Solo apaga autopilot de texto para no duplicar la cotización formal.
+   */
   private async markConversationDraftPendingReview(
     conversationId: string,
   ): Promise<void> {
-    const conv = await this.conversationRepository.findOne({
-      where: { id: conversationId },
-    });
-    const activeApt =
-      await this.loadActiveAppointmentForConversation(conversationId);
-    const keepAgendado =
-      String(conv?.status ?? '').toLowerCase().trim() === 'agendado' ||
-      activeApt != null;
-
     await this.conversationRepository.update(
       { id: conversationId },
-      keepAgendado
-        ? { isAutoPilotActive: false }
-        : { status: 'por_cotizar', isAutoPilotActive: false },
+      { isAutoPilotActive: false },
     );
+  }
+
+  private async resolveQuoteSendTotal(
+    conversationId: string,
+    tallerId: string | null | undefined,
+  ): Promise<number> {
+    const cart = await this.quoteCartService.resolveActiveCart(
+      conversationId,
+      tallerId,
+    );
+    if (!cart) return 0;
+    const snapTotal = cart.quotePayload?.lastSendSnapshot?.total;
+    if (Number.isFinite(Number(snapTotal))) {
+      return Math.max(0, Math.round(Number(snapTotal)));
+    }
+    return Math.max(0, Math.round(Number(cart.estimateAmount) || 0));
   }
 
   private async buildBanioTierContextForDraft(
@@ -3082,7 +3096,7 @@ export class ChatService implements OnModuleDestroy {
 
     await this.conversationRepository.update(
       { id: conversationId },
-      { status: 'por_cotizar', isAutoPilotActive: true },
+      { isAutoPilotActive: true },
     );
 
     this.chatGateway.emitDraftPeritajeAwaitingVehicle({
@@ -6254,8 +6268,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     });
     const saved = await this.appointmentRepository.save(row);
 
+    await this.leadEventsService.logTransition(conversation.id, 'agendado', {
+      fecha: saved.scheduledAt.toISOString(),
+    });
     conversation.status = 'agendado';
-    await this.conversationRepository.save(conversation);
 
     this.chatGateway.emitAppointmentCreated({
       id: saved.id,
@@ -7343,6 +7359,24 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     }
     row.status = raw as AppointmentStatus;
     await this.appointmentRepository.save(row);
+
+    if (raw === 'finalizada' && row.conversationId) {
+      await this.leadEventsService.logTransition(row.conversationId, 'atendido');
+      if (row.conversation) {
+        row.conversation.status = 'atendido';
+        this.chatGateway.emitConversationLeadUpdated({
+          conversationId: row.conversationId,
+          status: 'atendido',
+          contactName: row.conversation.contactName,
+          lastMessageAt: row.conversation.lastMessageAt
+            ? row.conversation.lastMessageAt.toISOString()
+            : null,
+          lastMessage: row.conversation.lastMessage ?? null,
+          isAutoPilotActive: Boolean(row.conversation.isAutoPilotActive),
+        });
+      }
+    }
+
     return { id: row.id, status: row.status };
   }
 
