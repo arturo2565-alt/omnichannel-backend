@@ -19,7 +19,11 @@ import {
   Message,
   VehicleDamageAnalysis,
 } from './entities/chat.entity';
-import { Conversation } from './entities/conversation.entity';
+import {
+  CONVERSATION_LEAD_STATUSES,
+  Conversation,
+  isConversationLeadStatus,
+} from './entities/conversation.entity';
 import { Contact } from './entities/contact.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
@@ -7268,6 +7272,65 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       await this.conversationRepository.save(row);
     }
     return { id: row.id, isAutoPilotActive: Boolean(row.isAutoPilotActive) };
+  }
+
+  async transitionConversationLead(
+    conversationId: string,
+    body: { newStatus?: string; metadata?: Record<string, unknown> },
+    tallerId: string,
+  ): Promise<{
+    id: string;
+    status: string;
+    isAutoPilotActive: boolean;
+  }> {
+    const cid = String(conversationId ?? '').trim();
+    if (!looksLikeConversationUuid(cid)) {
+      throw new BadRequestException(
+        'Id de conversación inválido (se espera UUID)',
+      );
+    }
+    const row = await this.assertConversationForTaller(cid, tallerId);
+    const newStatus = String(body?.newStatus ?? '').trim();
+    if (!isConversationLeadStatus(newStatus)) {
+      throw new BadRequestException(
+        `newStatus inválido. Permitidos: ${CONVERSATION_LEAD_STATUSES.join(', ')}`,
+      );
+    }
+
+    const metadata =
+      body?.metadata && typeof body.metadata === 'object'
+        ? body.metadata
+        : undefined;
+
+    await this.leadEventsService.logTransition(cid, newStatus, metadata);
+
+    if (newStatus === 'transferido') {
+      await this.conversationRepository.update(
+        { id: cid },
+        { isAutoPilotActive: false },
+      );
+    }
+
+    const fresh = await this.conversationRepository.findOne({
+      where: { id: cid },
+    });
+    const status = fresh?.status ?? newStatus;
+    const isAutoPilotActive = Boolean(fresh?.isAutoPilotActive);
+
+    this.chatGateway.emitConversationLeadUpdated({
+      conversationId: cid,
+      status,
+      contactName: fresh?.contactName ?? row.contactName,
+      lastMessageAt: fresh?.lastMessageAt
+        ? fresh.lastMessageAt.toISOString()
+        : row.lastMessageAt
+          ? row.lastMessageAt.toISOString()
+          : null,
+      lastMessage: fresh?.lastMessage ?? row.lastMessage ?? null,
+      isAutoPilotActive,
+    });
+
+    return { id: cid, status, isAutoPilotActive };
   }
 
   /** Cancela debounce Redis/BullMQ asociado a la conversación (evita trabajo tras borrar). */

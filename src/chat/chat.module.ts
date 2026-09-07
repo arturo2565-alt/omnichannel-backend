@@ -2,7 +2,10 @@ import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MessagingQueueModule } from '../messaging-queue/messaging-queue.module';
 import { ChatService } from './chat.service';
-import { ChatController } from './chat.controller';
+import {
+  ChatController,
+  ConversationTransitionController,
+} from './chat.controller';
 import { Message } from './entities/chat.entity';
 import { ChatGateway } from './chat.gateway';
 import { Conversation } from './entities/conversation.entity';
@@ -42,7 +45,12 @@ import { AuthModule } from '../auth/auth.module';
       LeadEventEntity,
     ]),
   ],
-  controllers: [ChatController, ArrivalAlarmController, LlmMetricsController],
+  controllers: [
+    ChatController,
+    ConversationTransitionController,
+    ArrivalAlarmController,
+    LlmMetricsController,
+  ],
   providers: [
     ChatService,
     ChatGateway,

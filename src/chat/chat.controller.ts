@@ -361,3 +361,23 @@ export class ChatController {
     );
   }
 }
+
+@Controller('api/conversations')
+@UseGuards(JwtAuthGuard)
+export class ConversationTransitionController {
+  constructor(private readonly chatService: ChatService) {}
+
+  @Post(':id/transition')
+  @HttpCode(HttpStatus.OK)
+  async transitionLead(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: { newStatus?: string; metadata?: Record<string, unknown> },
+  ) {
+    return await this.chatService.transitionConversationLead(
+      id,
+      body ?? {},
+      user.tallerId,
+    );
+  }
+}
