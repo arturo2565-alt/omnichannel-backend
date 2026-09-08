@@ -2908,16 +2908,61 @@ export class ChatService implements OnModuleDestroy {
     return rows[0] ?? null;
   }
 
+  private extractDraftClientMessage(draft: {
+    clientMessage?: string | null;
+    generatedMessage?: string | null;
+    formalNarrative?: string | null;
+  }): string {
+    return pickFirstNonEmptyTrimmedString(
+      draft.clientMessage,
+      draft.generatedMessage,
+      draft.formalNarrative,
+    );
+  }
+
   /**
-   * Tras nuevo borrador listo: no muta el lead (el envío autónomo pasa a `cotizado`).
-   * Solo apaga autopilot de texto para no duplicar la cotización formal.
+   * Cierre comercial autónomo: outbound oficial + `lead_events.cotizado` + Outbox.
+   * El autopilot permanece encendido para agendar.
    */
-  private async markConversationDraftPendingReview(
-    conversationId: string,
-  ): Promise<void> {
+  private async dispatchAutonomousQuotedOutbound(params: {
+    conversationId: string;
+    tallerId: string | null | undefined;
+    platform?: string | null;
+    clientMessage: string;
+  }): Promise<void> {
+    const conversationId = String(params.conversationId ?? '').trim();
+    const text = String(params.clientMessage ?? '').trim();
+    if (!conversationId) return;
+
+    if (!text) {
+      console.warn('[AutonomousQuote] sin texto al cliente; no se envía outbound', {
+        conversationId,
+      });
+      await this.conversationRepository.update(
+        { id: conversationId },
+        { isAutoPilotActive: true },
+      );
+      return;
+    }
+
+    const tallerId =
+      pickFirstNonEmptyTrimmedString(params.tallerId) ||
+      (await this.tallerService.findDefaultTallerId());
+
+    await this.saveMessage({
+      direction: 'outbound',
+      conversationId,
+      message: text,
+      conversationLeadStatus: 'cotizado',
+      tallerId,
+      platform: params.platform ?? undefined,
+      user: 'Asistente IA',
+      contactName: 'Asistente IA',
+    });
+
     await this.conversationRepository.update(
       { id: conversationId },
-      { isAutoPilotActive: false },
+      { isAutoPilotActive: true },
     );
   }
 
@@ -3233,8 +3278,6 @@ export class ChatService implements OnModuleDestroy {
       );
     }
 
-    await this.markConversationDraftPendingReview(conversationId);
-
     this.chatGateway.emitDraftQuoteReady({
       draftQuoteId: saved.id,
       conversationId,
@@ -3242,11 +3285,22 @@ export class ChatService implements OnModuleDestroy {
       damageAnalysis: analysis,
       draftQuote: draftQuoteForClient,
       estimateAmount,
-      isAutoPilotActive: false,
+      isAutoPilotActive: true,
+    });
+
+    const convForSend = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+      select: ['id', 'tallerId', 'platform'],
+    });
+    await this.dispatchAutonomousQuotedOutbound({
+      conversationId,
+      tallerId: tallerId ?? convForSend?.tallerId,
+      platform: convForSend?.platform,
+      clientMessage: this.extractDraftClientMessage(draftQuoteForClient),
     });
 
     console.log(
-      '[BanioVehicleGate] Cotización BPC completada tras modelo del cliente:',
+      '[BanioVehicleGate] Cotización BPC completada y enviada tras modelo del cliente:',
       vehicle,
     );
     return true;
@@ -5240,7 +5294,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     const convRow = await this.conversationRepository.findOne({
       where: { id: conversationId },
-      select: ['id', 'tallerId'],
+      select: ['id', 'tallerId', 'platform'],
     });
     const visionTallerId =
       convRow?.tallerId ?? (await this.tallerService.findDefaultTallerId());
@@ -5428,7 +5482,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       { damageAnalysis: analysisForQuote, draftQuote: draftQuoteForClient },
     );
 
-    await this.markConversationDraftPendingReview(conversationId);
+    await this.dispatchAutonomousQuotedOutbound({
+      conversationId,
+      tallerId: visionTallerId,
+      platform: convRow?.platform,
+      clientMessage: this.extractDraftClientMessage(draftQuoteForClient),
+    });
   }
 
   async findDraftQuotesByConversation(
@@ -7085,7 +7144,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     conversation: Conversation,
     inboundMsg: Message,
     options?: { inboundTextBatch?: Message[] },
-  ): Promise<string | null> {
+  ): Promise<{ text: string | null; markQuoted: boolean }> {
     return runWithLlmAuditContextAsync(
       {
         tallerId: conversation.tallerId ?? null,
@@ -7105,7 +7164,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     conversation: Conversation,
     inboundMsg: Message,
     options?: { inboundTextBatch?: Message[] },
-  ): Promise<string | null> {
+  ): Promise<{ text: string | null; markQuoted: boolean }> {
     try {
       const convFresh = await this.conversationRepository.findOne({
         where: { id: conversation.id },
@@ -7115,7 +7174,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         conversation.isAutoPilotActive = convFresh.isAutoPilotActive;
       }
       if (!conversation.isAutoPilotActive) {
-        return null;
+        return { text: null, markQuoted: false };
       }
 
       if (
@@ -7125,7 +7184,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           options?.inboundTextBatch,
         )
       ) {
-        return null;
+        return { text: null, markQuoted: false };
       }
 
       const history = await this.loadRecentMessagesForLlm(conversation.id);
@@ -7178,7 +7237,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         });
       } else if (dialogue.length === 0) {
         const t = String(inboundMsg.content ?? '').trim();
-        if (!t || t.includes('cloudinary')) return null;
+        if (!t || t.includes('cloudinary')) {
+          return { text: null, markQuoted: false };
+        }
         dialogue.push({ role: 'user', content: t });
       }
 
@@ -7190,6 +7251,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         }));
 
       let lastConfirmedIso: string | null = null;
+      let expressQuoted = false;
       const multiVehicleExpressTracker = new MultiVehicleExpressTracker();
 
       const freshChatPrompt = await this.aiConfigService.getValue(
@@ -7230,6 +7292,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           ) {
             lastConfirmedIso = String(payload.scheduledAt);
           }
+          if (name === 'obtenerCotizacionExpress' && payload.success) {
+            expressQuoted = true;
+          }
           return this.enrichAutopilotToolPayloadForMultiVehicleExpress(
             name,
             argsJson,
@@ -7240,25 +7305,27 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       });
 
       if (loop.assistantText?.trim()) {
-        return await this.finalizeAutopilotReplyWithAppointmentGuard(
+        const text = await this.finalizeAutopilotReplyWithAppointmentGuard(
           conversation,
           loop.assistantText.trim(),
           lastConfirmedIso,
           interceptorTurns,
           mergedForInstant,
         );
+        return { text, markQuoted: expressQuoted };
       }
 
-      return await this.finalizeAutopilotReplyWithAppointmentGuard(
+      const text = await this.finalizeAutopilotReplyWithAppointmentGuard(
         conversation,
         null,
         lastConfirmedIso,
         interceptorTurns,
         mergedForInstant,
       );
+      return { text, markQuoted: expressQuoted };
     } catch (err) {
       console.error('composeAutopilotReplyWithTools:', err);
-      return AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
+      return { text: AUTOPILOT_TECHNICAL_FALLBACK_REPLY, markQuoted: false };
     }
   }
 
@@ -7299,17 +7366,40 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     conversation: Conversation,
     options?: { inboundTextBatch?: Message[] },
   ): Promise<void> {
-    const text = await this.composeAutopilotReplyWithTools(
+    const composed = await this.composeAutopilotReplyWithTools(
       conversation,
       inboundMsg,
       options,
     );
+    const text = String(composed?.text ?? '').trim();
     if (!text) return;
 
     const autopilotTallerId =
       conversation.tallerId ??
       inboundMsg.tallerId ??
       (await this.tallerService.findDefaultTallerId());
+
+    if (composed.markQuoted) {
+      await this.saveMessage({
+        direction: 'outbound',
+        conversationId: conversation.id,
+        message: text,
+        conversationLeadStatus: 'cotizado',
+        tallerId: autopilotTallerId,
+        platform:
+          conversation.platform ?? inboundMsg.channelType ?? undefined,
+        user: 'Asistente IA',
+        contactName: 'Asistente IA',
+      });
+      await this.conversationRepository.update(
+        { id: conversation.id },
+        { isAutoPilotActive: true },
+      );
+      conversation.isAutoPilotActive = true;
+      conversation.status = 'cotizado';
+      return;
+    }
+
     const outbound = this.messageRepository.create({
       content: text,
       channelType: inboundMsg.channelType || conversation.platform || 'test',

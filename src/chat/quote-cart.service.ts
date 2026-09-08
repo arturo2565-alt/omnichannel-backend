@@ -406,7 +406,7 @@ export class QuoteCartService {
         damageAnalysis: input.analysis,
         draftQuote: draftQuoteForClient,
         estimateAmount: input.estimateAmount,
-        isAutoPilotActive: false,
+        isAutoPilotActive: true,
       });
 
       return { savedDraft, priorMessageId: priorMessageId ?? null };
@@ -431,7 +431,7 @@ export class QuoteCartService {
       damageAnalysis: input.analysis,
       draftQuote: draftQuoteForClient,
       estimateAmount: input.estimateAmount,
-      isAutoPilotActive: false,
+      isAutoPilotActive: true,
     });
 
     return { savedDraft, priorMessageId: null };

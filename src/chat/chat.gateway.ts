@@ -39,7 +39,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     damageAnalysis: unknown;
     draftQuote: unknown;
     estimateAmount: number;
-    /** Tras cotización IA el autopilot se apaga para revisión humana */
+    /** El bot cotiza en autónomo; el panel solo monitorea. */
     isAutoPilotActive?: boolean;
     awaitingVehicleForBanio?: boolean;
   }) {
