@@ -115,8 +115,9 @@ import {
 } from './vision-viability';
 import {
   isFacebookStickerUrl,
-  isMessengerStickerAttachment,
   looksLikeInboundStickerFlag,
+  normalizeMediaUrlForDedup,
+  resolveMessengerInboundMedia,
   STICKER_FALLBACK_TEXT,
 } from './inbound-sticker';
 import {
@@ -692,6 +693,12 @@ export class ChatService implements OnModuleDestroy {
     Promise<Conversation>
   >();
 
+  /** Evita dos filas del mismo sticker si Meta entrega el webhook en paralelo. */
+  private readonly inboundStickerPersistInflight = new Map<
+    string,
+    Promise<Message>
+  >();
+
   constructor(
     @InjectRepository(Message)
     private readonly messageRepository: Repository<Message>,
@@ -739,6 +746,7 @@ export class ChatService implements OnModuleDestroy {
   onModuleDestroy(): void {
     this.consolidatedVisionInFlight.clear();
     this.conversationFindOrCreateInflight.clear();
+    this.inboundStickerPersistInflight.clear();
   }
 
   private async tallerIdForConversation(conversationId: string): Promise<string> {
@@ -1747,13 +1755,23 @@ export class ChatService implements OnModuleDestroy {
     return { processed: 1, lastMessageId: saved.id };
   }
 
-  /** Evita duplicados cuando Meta reenvía el mismo `mid`. */
+  /** Evita duplicados cuando Meta reenvía el mismo `mid` (o `mid:sticker:0` / `mid:img:0`). */
   private async findMessageByMetaMid(
     metaMid: string,
   ): Promise<Message | null> {
     const mid = String(metaMid ?? '').trim();
     if (!mid) return null;
-    return this.messageRepository.findOne({ where: { externalId: mid } });
+    const exact = await this.messageRepository.findOne({
+      where: { externalId: mid },
+    });
+    if (exact) return exact;
+    const raw = mid.replace(/:(sticker|img):\d+$/i, '');
+    const variants = [...new Set([raw, `${raw}:sticker:0`, `${raw}:img:0`])];
+    return this.messageRepository
+      .createQueryBuilder('m')
+      .where('m.externalId IN (:...ids)', { ids: variants })
+      .orderBy('m.createdAt', 'ASC')
+      .getOne();
   }
 
   /**
@@ -1788,13 +1806,21 @@ export class ChatService implements OnModuleDestroy {
     const trimmed = String(content ?? '').trim();
     if (!convId || !trimmed) return null;
     const since = new Date(Date.now() - windowMs);
-    return this.messageRepository
+    const pathKey = normalizeMediaUrlForDedup(trimmed);
+    const recent = await this.messageRepository
       .createQueryBuilder('m')
       .where('m.conversationId = :conversationId', { conversationId: convId })
-      .andWhere('m.content = :content', { content: trimmed })
       .andWhere('m.createdAt >= :since', { since })
       .orderBy('m.createdAt', 'DESC')
-      .getOne();
+      .take(25)
+      .getMany();
+    return (
+      recent.find((m) => {
+        const row = String(m.content ?? '').trim();
+        if (row === trimmed) return true;
+        return Boolean(pathKey) && normalizeMediaUrlForDedup(row) === pathKey;
+      }) ?? null
+    );
   }
 
   /**
@@ -1929,22 +1955,13 @@ export class ChatService implements OnModuleDestroy {
         const attachments = Array.isArray(msg.attachments)
           ? msg.attachments
           : [];
-        const imageUrls: string[] = [];
-        const stickerUrls: string[] = [];
-        for (const a of attachments) {
-          if (!a || typeof a !== 'object') continue;
-          const url = String(
-            (a as { payload?: { url?: string } }).payload?.url ?? '',
-          ).trim();
-          if (!url) continue;
-          if (isMessengerStickerAttachment(a)) {
-            stickerUrls.push(url);
-            continue;
-          }
-          if (String((a as { type?: string }).type).toLowerCase() === 'image') {
-            imageUrls.push(url);
-          }
-        }
+        const { imageUrls, stickerUrls } = resolveMessengerInboundMedia({
+          attachments,
+          text,
+          stickerId:
+            (msg as { sticker_id?: unknown; stickerId?: unknown }).sticker_id ??
+            (msg as { stickerId?: unknown }).stickerId,
+        });
 
         const contactHint = isEcho
           ? ''
@@ -1967,10 +1984,6 @@ export class ChatService implements OnModuleDestroy {
               ? { contactName: contactHint }
               : {}),
         };
-
-        if (text && isFacebookStickerUrl(text) && !stickerUrls.includes(text)) {
-          stickerUrls.push(text);
-        }
 
         if (!text && imageUrls.length === 0 && stickerUrls.length === 0) continue;
 
@@ -2081,28 +2094,58 @@ export class ChatService implements OnModuleDestroy {
           lastMessageId = saved.id;
           n++;
         }
-        for (let stIdx = 0; stIdx < stickerUrls.length; stIdx += 1) {
-          const url = stickerUrls[stIdx]!;
-          const stickerMid = metaMid
-            ? stickerUrls.length === 1 && !hasCaption && imageUrls.length === 0
-              ? metaMid
-              : `${metaMid}:sticker:${stIdx}`
-            : '';
-          if (stickerMid) {
-            const dupSt = await this.findMessageByMetaMid(stickerMid);
-            if (dupSt) continue;
+        if (stickerUrls.length > 0) {
+          const url = stickerUrls[0]!;
+          const stickerMid = metaMid;
+          const persistKey = [
+            'sticker',
+            String(tallerId ?? ''),
+            threadPsid,
+            stickerMid || normalizeMediaUrlForDedup(url) || url,
+          ].join(':');
+          const urlKey = [
+            'sticker-url',
+            String(tallerId ?? ''),
+            threadPsid,
+            normalizeMediaUrlForDedup(url) || url,
+          ].join(':');
+          const persistSticker = async (): Promise<Message> => {
+            if (stickerMid) {
+              const dupSt = await this.findMessageByMetaMid(stickerMid);
+              if (dupSt) return dupSt;
+            }
+            return this.saveMessage({
+              ...basePayload,
+              message: url || STICKER_FALLBACK_TEXT,
+              inboundMediaKind: 'sticker',
+              isSticker: true,
+              skipVisionAnalysis: true,
+              type: 'sticker',
+              ...(stickerMid ? { metaMessageId: stickerMid } : {}),
+            });
+          };
+          const inflight =
+            this.inboundStickerPersistInflight.get(persistKey) ??
+            this.inboundStickerPersistInflight.get(urlKey);
+          const saved = inflight
+            ? await inflight
+            : await (() => {
+                const p = persistSticker().finally(() => {
+                  if (this.inboundStickerPersistInflight.get(persistKey) === p) {
+                    this.inboundStickerPersistInflight.delete(persistKey);
+                  }
+                  if (this.inboundStickerPersistInflight.get(urlKey) === p) {
+                    this.inboundStickerPersistInflight.delete(urlKey);
+                  }
+                });
+                this.inboundStickerPersistInflight.set(persistKey, p);
+                this.inboundStickerPersistInflight.set(urlKey, p);
+                return p;
+              })();
+          if (lastMessageId !== saved.id) {
+            lastMessageId = saved.id;
+            n++;
           }
-          const saved = await this.saveMessage({
-            ...basePayload,
-            message: url || STICKER_FALLBACK_TEXT,
-            inboundMediaKind: 'sticker',
-            isSticker: true,
-            skipVisionAnalysis: true,
-            type: 'sticker',
-            ...(stickerMid ? { metaMessageId: stickerMid } : {}),
-          });
-          lastMessageId = saved.id;
-          n++;
         }
       }
     }

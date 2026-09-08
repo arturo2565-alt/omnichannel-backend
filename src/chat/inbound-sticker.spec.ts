@@ -2,6 +2,7 @@ import {
   isFacebookStickerUrl,
   isMessengerStickerAttachment,
   looksLikeInboundStickerFlag,
+  resolveMessengerInboundMedia,
 } from './inbound-sticker';
 
 describe('inbound-sticker Messenger fbcdn', () => {
@@ -42,5 +43,20 @@ describe('inbound-sticker Messenger fbcdn', () => {
 
   it('looksLikeInboundStickerFlag lee la URL del message', () => {
     expect(looksLikeInboundStickerFlag({ message: fbSticker })).toBe(true);
+  });
+
+  it('un Like de Messenger no persiste sticker + preview', () => {
+    const preview =
+      'https://scontent.xx.fbcdn.net/v/t39.1997-6/123_n.png?oh=xyz&oe=1';
+    const resolved = resolveMessengerInboundMedia({
+      text: fbSticker,
+      stickerId: 369239263222822,
+      attachments: [
+        { type: 'image', payload: { url: fbSticker, sticker_id: 369239263222822 } },
+        { type: 'image', payload: { url: preview } },
+      ],
+    });
+    expect(resolved.stickerUrls).toHaveLength(1);
+    expect(resolved.imageUrls).toEqual([]);
   });
 });

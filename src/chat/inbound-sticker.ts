@@ -76,3 +76,82 @@ export function looksLikeInboundStickerFlag(data: {
 }
 
 export const STICKER_FALLBACK_TEXT = '[Sticker]';
+
+/** Misma calcomanía con distintos `oh`/`oe`/`stp` de fbcdn. */
+export function normalizeMediaUrlForDedup(raw: unknown): string {
+  const url = String(raw ?? '').trim();
+  if (!url) return '';
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`.toLowerCase();
+  } catch {
+    return url.split('?')[0].split('#')[0].toLowerCase();
+  }
+}
+
+export function uniqueUrlsByPath(urls: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const url of urls) {
+    const trimmed = String(url ?? '').trim();
+    if (!trimmed) continue;
+    const key = normalizeMediaUrlForDedup(trimmed) || trimmed;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Meta manda el Like (y otros stickers) como `sticker_id` + imagen preview.
+ * Un evento = una calcomanía; las fotos hermanas no se persisten.
+ */
+export function resolveMessengerInboundMedia(input: {
+  attachments?: unknown[];
+  text?: unknown;
+  stickerId?: unknown;
+}): { stickerUrls: string[]; imageUrls: string[] } {
+  const stickerUrls: string[] = [];
+  const imageUrls: string[] = [];
+  const attachments = Array.isArray(input.attachments) ? input.attachments : [];
+  for (const a of attachments) {
+    if (!a || typeof a !== 'object') continue;
+    const url = String(
+      (a as { payload?: { url?: unknown } }).payload?.url ?? '',
+    ).trim();
+    if (!url) continue;
+    if (isMessengerStickerAttachment(a)) {
+      stickerUrls.push(url);
+      continue;
+    }
+    if (String((a as { type?: unknown }).type).toLowerCase() === 'image') {
+      imageUrls.push(url);
+    }
+  }
+
+  const text = String(input.text ?? '').trim();
+  if (text && isFacebookStickerUrl(text)) {
+    const textKey = normalizeMediaUrlForDedup(text);
+    const already = stickerUrls.some(
+      (u) => normalizeMediaUrlForDedup(u) === textKey,
+    );
+    if (!already && stickerUrls.length === 0) {
+      stickerUrls.push(text);
+    }
+  }
+
+  const hasRootSticker =
+    input.stickerId != null && String(input.stickerId).trim() !== '';
+  if (stickerUrls.length > 0 || hasRootSticker) {
+    if (stickerUrls.length === 0 && imageUrls.length > 0) {
+      stickerUrls.push(imageUrls[0]!);
+    }
+    return {
+      stickerUrls: uniqueUrlsByPath(stickerUrls).slice(0, 1),
+      imageUrls: [],
+    };
+  }
+
+  return { stickerUrls: [], imageUrls: uniqueUrlsByPath(imageUrls) };
+}
