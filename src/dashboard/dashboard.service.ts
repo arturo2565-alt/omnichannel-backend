@@ -5,11 +5,17 @@ import { Conversation } from '../chat/entities/conversation.entity';
 import { LeadEventEntity } from '../chat/entities/lead-event.entity';
 
 export type DashboardKpis = {
-  pipelineActivo: number;
-  leadsNuevos: number;
-  tasaConversion: number;
-  valorEnPatio: number;
+  leadsAtendidos: number;
+  cotizaciones: number;
+  citas: number;
+  llegaron: number;
+  trabajosVendidos: number;
+  ventasGeneradas: number;
+  roiPegazuz: number;
 };
+
+/** Costo mensual estándar Pegazuz (MXN) si no hay `PEGAZUZ_BASE_COST`. */
+const DEFAULT_PEGAZUZ_BASE_COST = 4990;
 
 export type HotLeadRow = {
   conversationId: string;
@@ -29,21 +35,52 @@ export class DashboardService {
 
   async getKpis(tallerId: string): Promise<DashboardKpis> {
     const tid = String(tallerId ?? '').trim();
-    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    if (!tid) {
+      return {
+        leadsAtendidos: 0,
+        cotizaciones: 0,
+        citas: 0,
+        llegaron: 0,
+        trabajosVendidos: 0,
+        ventasGeneradas: 0,
+        roiPegazuz: 0,
+      };
+    }
 
-    const [pipelineActivo, leadsNuevos, valorEnPatio, conversion] =
-      await Promise.all([
-        this.sumLatestCotizadoTotal(tid, 'cotizado'),
-        this.countConversationsByStatus(tid, 'nuevo'),
-        this.sumLatestCotizadoTotal(tid, 'en_taller'),
-        this.conversionRateLast30Days(tid, since),
-      ]);
+    const [
+      leadsAtendidos,
+      cotizaciones,
+      citas,
+      llegaron,
+      trabajosVendidos,
+      ventasCompletado,
+      ventasEnTaller,
+    ] = await Promise.all([
+      this.conversationRepository.count({ where: { tallerId: tid } }),
+      this.countLeadEventsByStatus(tid, ['cotizado']),
+      this.countLeadEventsByStatus(tid, ['agendado']),
+      this.countLeadEventsByStatus(tid, ['atendido']),
+      this.countLeadEventsByStatus(tid, ['en_taller', 'completado']),
+      this.sumLeadEventTotals(tid, ['completado']),
+      this.sumLeadEventTotals(tid, ['en_taller']),
+    ]);
+
+    const ventasGeneradas =
+      ventasCompletado > 0 ? ventasCompletado : ventasEnTaller;
+    const costoBase = this.resolvePegazuzBaseCost();
+    const roiPegazuz =
+      costoBase > 0
+        ? Math.round((ventasGeneradas / costoBase) * 10) / 10
+        : 0;
 
     return {
-      pipelineActivo,
-      leadsNuevos,
-      tasaConversion: conversion,
-      valorEnPatio,
+      leadsAtendidos,
+      cotizaciones,
+      citas,
+      llegaron,
+      trabajosVendidos,
+      ventasGeneradas,
+      roiPegazuz,
     };
   }
 
@@ -105,73 +142,41 @@ export class DashboardService {
       .addOrderBy('event.createdAt', 'DESC');
   }
 
-  private async sumLatestCotizadoTotal(
+  private async countLeadEventsByStatus(
     tallerId: string,
-    conversationStatus: string,
+    statuses: string[],
   ): Promise<number> {
-    if (!tallerId) return 0;
-    const latest = this.latestCotizadoSubquery(tallerId, conversationStatus);
-    const row = await this.leadEventRepository.manager
-      .createQueryBuilder()
-      .select('COALESCE(SUM(latest."total"), 0)', 'sum')
-      .from(`(${latest.getQuery()})`, 'latest')
-      .setParameters(latest.getParameters())
+    if (!tallerId || statuses.length === 0) return 0;
+    return this.leadEventRepository
+      .createQueryBuilder('event')
+      .innerJoin('event.conversation', 'conv')
+      .where('conv.tallerId = :tallerId', { tallerId })
+      .andWhere('event.status IN (:...statuses)', { statuses })
+      .getCount();
+  }
+
+  private async sumLeadEventTotals(
+    tallerId: string,
+    statuses: string[],
+  ): Promise<number> {
+    if (!tallerId || statuses.length === 0) return 0;
+    const row = await this.leadEventRepository
+      .createQueryBuilder('event')
+      .innerJoin('event.conversation', 'conv')
+      .select(
+        `COALESCE(SUM(CAST(NULLIF(TRIM(event.metadata->>'total'), '') AS NUMERIC)), 0)`,
+        'sum',
+      )
+      .where('conv.tallerId = :tallerId', { tallerId })
+      .andWhere('event.status IN (:...statuses)', { statuses })
       .getRawOne<{ sum: string | number | null }>();
     return this.toMoney(row?.sum);
   }
 
-  private async countConversationsByStatus(
-    tallerId: string,
-    status: string,
-  ): Promise<number> {
-    if (!tallerId) return 0;
-    return this.conversationRepository.count({
-      where: { tallerId, status },
-    });
-  }
-
-  /**
-   * % de conversaciones con evento `nuevo` en los últimos 30 días
-   * que también tienen al menos un evento `agendado`.
-   * (Conversation no tiene createdAt; el alta se registra en lead_events.)
-   */
-  private async conversionRateLast30Days(
-    tallerId: string,
-    since: Date,
-  ): Promise<number> {
-    if (!tallerId) return 0;
-
-    const created = this.conversationRepository
-      .createQueryBuilder('conv')
-      .innerJoin(
-        LeadEventEntity,
-        'nuevo',
-        `nuevo.conversationId = conv.id AND nuevo.status = :nuevoStatus`,
-      )
-      .where('conv.tallerId = :tallerId', { tallerId })
-      .andWhere('nuevo.createdAt >= :since', { since })
-      .setParameter('nuevoStatus', 'nuevo');
-
-    const createdRow = await created
-      .clone()
-      .select('COUNT(DISTINCT conv.id)', 'cnt')
-      .getRawOne<{ cnt: string | number }>();
-
-    const convertedRow = await created
-      .clone()
-      .innerJoin(
-        LeadEventEntity,
-        'agendado',
-        `agendado.conversationId = conv.id AND agendado.status = :agendadoStatus`,
-      )
-      .setParameter('agendadoStatus', 'agendado')
-      .select('COUNT(DISTINCT conv.id)', 'cnt')
-      .getRawOne<{ cnt: string | number }>();
-
-    const createdCount = Number(createdRow?.cnt ?? 0) || 0;
-    const convertedCount = Number(convertedRow?.cnt ?? 0) || 0;
-    if (createdCount <= 0) return 0;
-    return Math.round((convertedCount / createdCount) * 1000) / 10;
+  private resolvePegazuzBaseCost(): number {
+    const raw = Number(String(process.env.PEGAZUZ_BASE_COST ?? '').trim());
+    if (Number.isFinite(raw) && raw > 0) return raw;
+    return DEFAULT_PEGAZUZ_BASE_COST;
   }
 
   private toMoney(value: string | number | null | undefined): number {
