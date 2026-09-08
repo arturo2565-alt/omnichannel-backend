@@ -234,6 +234,9 @@ export function quoteRowsFromDamageInventory(
           pricingRules,
         );
       }
+    } else if (isRefaccionPieza(panelCode)) {
+      storedSev = 'N/A';
+      precio = Math.max(0, Math.round(Number(it.precioMx) || 0));
     } else {
       storedSev = coerceDamageLevelCode(sevRaw);
     }
@@ -241,6 +244,9 @@ export function quoteRowsFromDamageInventory(
       pieza: panelCode,
       severidad: storedSev,
       precioMx: Math.max(0, Math.round(precio)),
+      ...(it.detallesRefaccion
+        ? { detallesRefaccion: it.detallesRefaccion }
+        : {}),
     });
   }
   return rows;

@@ -16,6 +16,9 @@ export type MetaWhatsAppInboundEvent = {
   buttonPayload: string;
   /** URL directa si el payload ya trae enlace (p. ej. reenvío legacy). */
   imageUrl: string;
+  /** Stickers WhatsApp (webp): persistir, no mandar a visión. */
+  isSticker?: boolean;
+  mimeType?: string;
   /** true = webhook de entrega/lectura (sin mensaje entrante). */
   isStatusOnly?: boolean;
 };
@@ -68,6 +71,8 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
   text: string;
   imageUrl: string;
   buttonPayload: string;
+  isSticker: boolean;
+  mimeType: string;
 } {
   const type = String(msg.type ?? 'text').toLowerCase().trim();
   if (type === 'text') {
@@ -77,7 +82,22 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
       (msg.text as Record<string, unknown>).body != null
         ? String((msg.text as Record<string, unknown>).body).trim()
         : '';
-    return { text: body, imageUrl: '', buttonPayload: '' };
+    return { text: body, imageUrl: '', buttonPayload: '', isSticker: false, mimeType: '' };
+  }
+  if (type === 'sticker') {
+    const sticker =
+      msg.sticker && typeof msg.sticker === 'object'
+        ? (msg.sticker as Record<string, unknown>)
+        : null;
+    const link = pickTrimmed(sticker?.link, sticker?.url);
+    const mime = pickTrimmed(sticker?.mime_type, sticker?.mimeType, 'image/webp');
+    return {
+      text: link ? '' : 'Sticker',
+      imageUrl: link,
+      buttonPayload: '',
+      isSticker: true,
+      mimeType: mime || 'image/webp',
+    };
   }
   if (type === 'image') {
     const image =
@@ -86,10 +106,13 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
         : null;
     const link = pickTrimmed(image?.link, image?.url);
     const caption = pickTrimmed(image?.caption);
+    const mime = pickTrimmed(image?.mime_type, image?.mimeType);
     return {
       text: caption,
       imageUrl: link,
       buttonPayload: '',
+      isSticker: false,
+      mimeType: mime,
     };
   }
   if (type === 'button') {
@@ -102,6 +125,8 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
       text: pickTrimmed(button?.text, button?.payload),
       imageUrl: '',
       buttonPayload,
+      isSticker: false,
+      mimeType: '',
     };
   }
   if (type === 'interactive') {
@@ -129,9 +154,11 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
       ),
       imageUrl: '',
       buttonPayload,
+      isSticker: false,
+      mimeType: '',
     };
   }
-  return { text: '', imageUrl: '', buttonPayload: '' };
+  return { text: '', imageUrl: '', buttonPayload: '', isSticker: false, mimeType: '' };
 }
 
 /** Metadatos del primer change (validación de cuenta / número). */
@@ -246,7 +273,7 @@ export function extractMetaWhatsAppInboundEvents(
         if (!threadWaId) continue;
 
         const messageId = pickTrimmed(msg.id);
-        const { text, imageUrl, buttonPayload } =
+        const { text, imageUrl, buttonPayload, isSticker, mimeType } =
           parseWhatsAppMessageContent(msg);
         if (!text && !imageUrl) continue;
 
@@ -261,6 +288,8 @@ export function extractMetaWhatsAppInboundEvents(
           text,
           buttonPayload,
           imageUrl,
+          isSticker,
+          mimeType,
         });
       }
     }

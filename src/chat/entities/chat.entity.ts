@@ -25,6 +25,12 @@ export interface DetectedDamageItem {
   vehiculoDetectado?: string;
   /** Copia del inventario antes de colapsar a BPC (solo en fila BPC). */
   inventarioVisualPrevio?: DetectedDamageItem[];
+  /** Precio manual (refacción de mercado). */
+  precioMx?: number;
+  /** Nombre de la refacción (panel / tool estimarRefaccionMercado). */
+  detallesRefaccion?: string;
+  /** Código de panel que originó la refacción (FD, PDI…). */
+  refaccionDePieza?: string;
 }
 
 /** @deprecated usar DetectedDamageItem (descripcion → descripcionTecnica, urls_asociadas → urls_origen). */

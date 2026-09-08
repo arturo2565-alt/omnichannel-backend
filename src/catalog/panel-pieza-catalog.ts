@@ -4,7 +4,13 @@ export const PANEL_PIEZA_INTERNAL_DAMAGES_CODE = 'PDI_INT';
 /** Refacción con detalle y precio manual. */
 export const PANEL_PIEZA_REFACCION_CODE = 'REFACCION';
 
-/** Baño de pintura completo (servicio integral). */
+/** Baño de pintura exterior (alias legacy BPC). */
+export const PANEL_PIEZA_BPE_CODE = 'BPE';
+/** Baño exterior + interiores de puertas/cofre. */
+export const PANEL_PIEZA_BPEI_CODE = 'BPEI';
+/** Baño con cambio total de color (incluye desarmado). */
+export const PANEL_PIEZA_BPCC_CODE = 'BPCC';
+/** @deprecated usar BPE — se conserva para carritos viejos. */
 export const PANEL_PIEZA_BPC_CODE = 'BPC';
 
 /** Cerámico automotriz (servicio integral). */
@@ -61,8 +67,12 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
   { code: 'Cofre', fullName: 'Cofre', catalogPieza: 'Cofre' },
   { code: 'BiCO', fullName: 'Bigote Cofre', catalogPieza: 'BiCO' },
   { code: 'Parilla', fullName: 'Parilla', catalogPieza: 'Parilla' },
+  { code: 'CTI', fullName: 'Costado izquierdo', catalogPieza: 'Salpicadera' },
+  { code: 'CTD', fullName: 'Costado derecho', catalogPieza: 'Salpicadera' },
   { code: 'Tapa Cajuela', fullName: 'Tapa de cajuela', catalogPieza: 'Tapa Cajuela' },
   { code: 'Toldo', fullName: 'Toldo', catalogPieza: 'Toldo' },
+  { code: 'ESI', fullName: 'Espejo izquierdo', catalogPieza: 'Espejo' },
+  { code: 'ESD', fullName: 'Espejo derecho', catalogPieza: 'Espejo' },
   { code: 'Espejo', fullName: 'Espejo', catalogPieza: 'Espejo' },
   { code: 'Moldura', fullName: 'Moldura', catalogPieza: 'Estetica Exterior' },
   {
@@ -71,7 +81,28 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
     catalogPieza: 'Estetica Exterior',
   },
   {
-    code: 'BPC',
+    code: PANEL_PIEZA_BPE_CODE,
+    fullName: 'Baño de Pintura Exterior',
+    catalogPieza: 'Baño de Pintura Exterior',
+    banioCompleto: true,
+    integralService: true,
+  },
+  {
+    code: PANEL_PIEZA_BPEI_CODE,
+    fullName: 'Baño de Pintura Exterior e Interiores',
+    catalogPieza: 'Baño de Pintura Exterior',
+    banioCompleto: true,
+    integralService: true,
+  },
+  {
+    code: PANEL_PIEZA_BPCC_CODE,
+    fullName: 'Baño de Pintura con Cambio de Color',
+    catalogPieza: 'Baño de Pintura Exterior',
+    banioCompleto: true,
+    integralService: true,
+  },
+  {
+    code: PANEL_PIEZA_BPC_CODE,
     fullName: 'Baño de Pintura Completo',
     catalogPieza: 'Baño de Pintura Exterior',
     banioCompleto: true,
@@ -125,6 +156,19 @@ const EXPLICIT_PIEZA_ALIASES: Readonly<Record<string, string>> = {
   'estribos derechos': 'ED',
   'poste izquierdo': 'POI',
   'poste derecho': 'POD',
+  'costado izquierdo': 'CTI',
+  'costado izq': 'CTI',
+  'costado derecho': 'CTD',
+  'costado der': 'CTD',
+  'espejo izquierdo': 'ESI',
+  'espejo izq': 'ESI',
+  'espejo derecho': 'ESD',
+  'espejo der': 'ESD',
+  porton: 'Tapa Cajuela',
+  'porton trasero': 'Tapa Cajuela',
+  'portón': 'Tapa Cajuela',
+  'portón trasero': 'Tapa Cajuela',
+  'tapa cajuela': 'Tapa Cajuela',
   'bigote cofre': 'BiCO',
   bico: 'BiCO',
   parilla: 'Parilla',
@@ -163,22 +207,45 @@ aliasNormToCode.set(
 );
 aliasNormToCode.set(normalizePiezaText('refaccion'), PANEL_PIEZA_REFACCION_CODE);
 aliasNormToCode.set(normalizePiezaText('refacción'), PANEL_PIEZA_REFACCION_CODE);
-aliasNormToCode.set(normalizePiezaText('bpc'), PANEL_PIEZA_BPC_CODE);
+aliasNormToCode.set(normalizePiezaText('bpe'), PANEL_PIEZA_BPE_CODE);
+aliasNormToCode.set(normalizePiezaText('bpei'), PANEL_PIEZA_BPEI_CODE);
+aliasNormToCode.set(normalizePiezaText('bpcc'), PANEL_PIEZA_BPCC_CODE);
+aliasNormToCode.set(normalizePiezaText('bpc'), PANEL_PIEZA_BPE_CODE);
 aliasNormToCode.set(
   normalizePiezaText('bano de pintura completo'),
-  PANEL_PIEZA_BPC_CODE,
+  PANEL_PIEZA_BPE_CODE,
 );
 aliasNormToCode.set(
   normalizePiezaText('baño de pintura completo'),
-  PANEL_PIEZA_BPC_CODE,
+  PANEL_PIEZA_BPE_CODE,
 );
 aliasNormToCode.set(
   normalizePiezaText('bano de pintura exterior'),
-  PANEL_PIEZA_BPC_CODE,
+  PANEL_PIEZA_BPE_CODE,
 );
 aliasNormToCode.set(
   normalizePiezaText('baño de pintura exterior'),
-  PANEL_PIEZA_BPC_CODE,
+  PANEL_PIEZA_BPE_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('bano de pintura exterior e interiores'),
+  PANEL_PIEZA_BPEI_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('baño de pintura exterior e interiores'),
+  PANEL_PIEZA_BPEI_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('cambio de color'),
+  PANEL_PIEZA_BPCC_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('bano de pintura con cambio de color'),
+  PANEL_PIEZA_BPCC_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('baño de pintura con cambio de color'),
+  PANEL_PIEZA_BPCC_CODE,
 );
 aliasNormToCode.set(
   normalizePiezaText('ceramico automotriz'),
@@ -270,8 +337,22 @@ export function findPanelPiezaOption(raw: string): PanelPiezaOption | null {
 
 /** Normaliza texto/sigla de visión o inventario al código del panel (FD, SI, …). */
 export function normalizePanelPiezaCode(raw: string): string {
-  const opt = findPanelPiezaOption(raw);
-  return opt?.code ?? String(raw ?? '').trim();
+  return canonicalizePanelCode(raw);
+}
+
+/**
+ * Código canónico de panel. Un código válido (FD, PDI, BPE…) o un nombre
+ * natural resuelve a la sigla que `resolveMatrixServicioRaw` usa para price_matrix.
+ */
+export function canonicalizePanelCode(rawPiece: string): string {
+  const t = String(rawPiece ?? '').trim();
+  if (!t) return '';
+  if (byCode.has(t)) return t;
+  const upper = t.toUpperCase();
+  if (byCode.has(upper)) return upper;
+  const opt = findPanelPiezaOption(t);
+  if (opt?.code) return opt.code;
+  return t;
 }
 
 export function isInternalDamageRangePieza(raw: string): boolean {
@@ -288,15 +369,25 @@ export function isRefaccionPieza(raw: string): boolean {
   return Boolean(findPanelPiezaOption(raw)?.refaccionManual);
 }
 
+const BANIO_PANEL_CODES = new Set([
+  PANEL_PIEZA_BPE_CODE,
+  PANEL_PIEZA_BPEI_CODE,
+  PANEL_PIEZA_BPCC_CODE,
+  PANEL_PIEZA_BPC_CODE,
+]);
+
 export function isBanioPinturaCompletoPieza(raw: string): boolean {
-  const t = String(raw ?? '').trim();
-  if (t === PANEL_PIEZA_BPC_CODE) return true;
+  const code = canonicalizePanelCode(raw);
+  if (BANIO_PANEL_CODES.has(code)) return true;
   if (Boolean(findPanelPiezaOption(raw)?.banioCompleto)) return true;
-  const n = normalizePiezaText(t);
+  const n = normalizePiezaText(String(raw ?? ''));
   return (
     n === 'bpc' ||
-    n.includes('bano de pintura completo') ||
-    n.includes('baño de pintura completo')
+    n === 'bpe' ||
+    n === 'bpei' ||
+    n === 'bpcc' ||
+    n.includes('bano de pintura') ||
+    n.includes('baño de pintura')
   );
 }
 
@@ -304,7 +395,7 @@ export function isBanioPinturaCompletoPieza(raw: string): boolean {
 export function isIntegralPanelPieza(raw: string): boolean {
   const t = String(raw ?? '').trim();
   if (
-    t === PANEL_PIEZA_BPC_CODE ||
+    BANIO_PANEL_CODES.has(t) ||
     t === PANEL_PIEZA_CERAMICO_CODE ||
     t === PANEL_PIEZA_ESTETICA_AUTO_CODE
   ) {

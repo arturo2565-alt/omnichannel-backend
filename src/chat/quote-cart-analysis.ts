@@ -38,6 +38,7 @@ function pickWorstDamageLevel(levels: string[]): DamageLevel {
 export function inventoryLineKey(pieza: string): string {
   const trimmed = String(pieza ?? '').trim();
   if (!trimmed) return '';
+  if (/^refacci[oó]n\s*:/i.test(trimmed)) return trimmed.toUpperCase();
   return normalizePanelPiezaCode(trimmed) || trimmed;
 }
 
@@ -93,7 +94,7 @@ export function inventoryItemsToVehicleAnalysis(
     severidadDelDano: worst,
     descripcionTecnica: desc,
     justificacion: just,
-    partesAfectadas: partes.length ? partes : ['Estetica Exterior'],
+    partesAfectadas: partes.length ? partes : [],
     inventory: inv,
     ...(vehiculoDetectado ? { vehiculoDetectado } : {}),
   };
@@ -116,6 +117,13 @@ export function mergeCartInventoryItem(
         severidad: coerceDamageLevelCode(incoming.severidad),
         descripcionTecnica: String(incoming.descripcionTecnica ?? '').trim(),
         urls_origen: [...(incoming.urls_origen ?? [])],
+        ...(incoming.precioMx != null ? { precioMx: incoming.precioMx } : {}),
+        ...(incoming.detallesRefaccion
+          ? { detallesRefaccion: incoming.detallesRefaccion }
+          : {}),
+        ...(incoming.refaccionDePieza
+          ? { refaccionDePieza: incoming.refaccionDePieza }
+          : {}),
       },
     ];
   }

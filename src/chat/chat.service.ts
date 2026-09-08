@@ -99,6 +99,7 @@ import {
 } from './draft-client-message-composer';
 import {
   banioCompletoNeedsHeavyBodyworkDisclaimer,
+  applyBanioCodePriceAdjustments,
   collapseVisionItemsToBpcIfNeeded,
   isBanioPinturaCompletoVisionInventory,
   isVisionBpcPiezaCode,
@@ -106,6 +107,24 @@ import {
   visionItemsIndicateBanioCompleto,
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
+import {
+  extractVisionViability,
+  mergeVisionViability,
+  resolveClienteAclaracion,
+  type VisionViability,
+} from './vision-viability';
+import {
+  isMessengerStickerAttachment,
+  looksLikeInboundStickerFlag,
+} from './inbound-sticker';
+import {
+  buildRefaccionDisclaimer,
+  buildRefaccionInventoryItem,
+  estimarRefaccionMercado,
+  looksLikeEvidentBreakage,
+  piezaLabelForRefaccion,
+} from './refaccion-mercado';
+import { canonicalizePanelCode } from '../catalog/panel-pieza-catalog';
 import { detectCartPricingMode } from './quote-cart-inventory-mode';
 import {
   matchAdButtonAutoReply,
@@ -511,7 +530,7 @@ function inventoryItemsToVehicleAnalysis(
     severidadDelDano: worst,
     descripcionTecnica: desc,
     justificacion: just,
-    partesAfectadas: partes.length ? partes : ['Estetica Exterior'],
+    partesAfectadas: partes.length ? partes : [],
     inventory: inv,
     ...(vehiculoDetectado ? { vehiculoDetectado } : {}),
   };
@@ -1489,7 +1508,11 @@ export class ChatService implements OnModuleDestroy {
         vehicleProfile,
         pricingRules,
       );
-      const unit = integral?.unitPrice ?? 0;
+      const unit = applyBanioCodePriceAdjustments(
+        integral?.unitPrice ?? 0,
+        bpc.pieza,
+        vehicleProfile?.sizeTier,
+      );
       this.logDebugBpcPrecio(
         analysis,
         canonical,
@@ -1510,14 +1533,50 @@ export class ChatService implements OnModuleDestroy {
         if (sum > 0) return sum;
       }
     }
-    const level = coerceDamageLevelCode(analysis.severidad);
-    const piezaMatriz =
-      snap.matchServicio(resolveMatrixServicioRaw(analysis.pieza)) ??
-      snap.matchServicio(
-        resolveMatrixServicioRaw(analysis.partesAfectadas?.[0] ?? ''),
-      ) ??
-      analysis.pieza;
-    return snap.getAmount(piezaMatriz, level);
+    return 0;
+  }
+
+  private collectPiecesForRefaccionEstimate(
+    analysis: VehicleDamageAnalysis,
+  ): DetectedDamageItem[] {
+    const inv = analysis.inventory ?? [];
+    const fromPrev = inv.flatMap((it) => it.inventarioVisualPrevio ?? []);
+    return [...inv, ...fromPrev].filter(
+      (it) =>
+        !isVisionBpcPiezaCode(it.pieza) &&
+        looksLikeEvidentBreakage(it.severidad, it.descripcionTecnica),
+    );
+  }
+
+  private async enrichInventoryWithMarketRefacciones(
+    analysis: VehicleDamageAnalysis,
+    notes: string[],
+  ): Promise<VehicleDamageAnalysis> {
+    const candidates = this.collectPiecesForRefaccionEstimate(analysis);
+    if (!candidates.length) return analysis;
+    const inventory = [...(analysis.inventory ?? [])];
+    const yearMatch = String(analysis.vehiculoDetectado ?? '').match(/\b(19|20)\d{2}\b/);
+    const seen = new Set<string>();
+    for (const it of candidates) {
+      const key = canonicalizePanelCode(it.pieza) || it.pieza;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const estimate = await estimarRefaccionMercado({
+        pieza: it.pieza,
+        vehiculo: analysis.vehiculoDetectado ?? '',
+        anio: yearMatch?.[0],
+      });
+      if (!estimate.success || estimate.precioAlCliente <= 0) continue;
+      inventory.push(buildRefaccionInventoryItem(estimate, it.pieza));
+      notes.push(
+        buildRefaccionDisclaimer(
+          piezaLabelForRefaccion(it.pieza),
+          estimate.precioAlCliente,
+        ),
+      );
+    }
+    if (inventory.length === (analysis.inventory ?? []).length) return analysis;
+    return { ...analysis, inventory };
   }
 
   /**
@@ -1846,17 +1905,19 @@ export class ChatService implements OnModuleDestroy {
           ? msg.attachments
           : [];
         const imageUrls: string[] = [];
+        const stickerUrls: string[] = [];
         for (const a of attachments) {
-          if (
-            a &&
-            typeof a === 'object' &&
-            String((a as { type?: string }).type).toLowerCase() ===
-              'image' &&
-            (a as { payload?: { url?: string } }).payload?.url
-          ) {
-            imageUrls.push(
-              String((a as { payload: { url: string } }).payload.url),
-            );
+          if (!a || typeof a !== 'object') continue;
+          const url = String(
+            (a as { payload?: { url?: string } }).payload?.url ?? '',
+          ).trim();
+          if (!url) continue;
+          if (isMessengerStickerAttachment(a)) {
+            stickerUrls.push(url);
+            continue;
+          }
+          if (String((a as { type?: string }).type).toLowerCase() === 'image') {
+            imageUrls.push(url);
           }
         }
 
@@ -1882,7 +1943,7 @@ export class ChatService implements OnModuleDestroy {
               : {}),
         };
 
-        if (!text && imageUrls.length === 0) continue;
+        if (!text && imageUrls.length === 0 && stickerUrls.length === 0) continue;
 
         if (text) {
           let skipText = false;
@@ -1985,6 +2046,27 @@ export class ChatService implements OnModuleDestroy {
             '| message.externalId:',
             saved.externalId,
           );
+          lastMessageId = saved.id;
+          n++;
+        }
+        for (let stIdx = 0; stIdx < stickerUrls.length; stIdx += 1) {
+          const url = stickerUrls[stIdx]!;
+          const stickerMid = metaMid
+            ? `${metaMid}:sticker:${stIdx}`
+            : '';
+          if (stickerMid) {
+            const dupSt = await this.findMessageByMetaMid(stickerMid);
+            if (dupSt) continue;
+          }
+          const saved = await this.saveMessage({
+            ...basePayload,
+            message: url,
+            inboundMediaKind: 'sticker',
+            isSticker: true,
+            skipVisionAnalysis: true,
+            mimeType: 'image/webp',
+            ...(stickerMid ? { metaMessageId: stickerMid } : {}),
+          });
           lastMessageId = saved.id;
           n++;
         }
@@ -2101,7 +2183,7 @@ export class ChatService implements OnModuleDestroy {
         }
       }
 
-      if (evt.text) {
+      if (evt.text && !(evt.isSticker && evt.imageUrl)) {
         const saved = await this.saveMessage({
           ...basePayload,
           message: evt.text,
@@ -2109,6 +2191,14 @@ export class ChatService implements OnModuleDestroy {
             ? { buttonPayload: evt.buttonPayload }
             : {}),
           ...(evt.messageId ? { metaMessageId: evt.messageId } : {}),
+          ...(evt.isSticker
+            ? {
+                inboundMediaKind: 'sticker',
+                isSticker: true,
+                skipVisionAnalysis: true,
+                mimeType: evt.mimeType || 'image/webp',
+              }
+            : {}),
         });
         console.log(
           '[Meta WhatsApp webhook] texto inbound | wa_id:',
@@ -2136,6 +2226,14 @@ export class ChatService implements OnModuleDestroy {
           ...basePayload,
           message: evt.imageUrl,
           ...(imageMid ? { metaMessageId: imageMid } : {}),
+          ...(evt.isSticker
+            ? {
+                inboundMediaKind: 'sticker',
+                isSticker: true,
+                skipVisionAnalysis: true,
+                mimeType: evt.mimeType || 'image/webp',
+              }
+            : {}),
         });
         lastMessageId = saved.id;
         n++;
@@ -2323,7 +2421,9 @@ export class ChatService implements OnModuleDestroy {
     }
 
     let contentToSave = data.message || 'Sin contenido';
-    const incomingIsImage = isIncomingImage(contentToSave);
+    const inboundIsSticker = looksLikeInboundStickerFlag(data);
+    const incomingIsImage =
+      isIncomingImage(contentToSave) && !inboundIsSticker;
     if (incomingIsImage) {
       try {
         contentToSave = await this.ensureImageOnCloudinary(contentToSave);
@@ -2346,9 +2446,11 @@ export class ChatService implements OnModuleDestroy {
     }
 
     conversation.lastMessageAt = new Date();
-    conversation.lastMessage = incomingIsImage
-      ? '📷 Imagen'
-      : contentToSave || 'Sin contenido';
+    conversation.lastMessage = inboundIsSticker
+      ? 'Sticker'
+      : incomingIsImage
+        ? '📷 Imagen'
+        : contentToSave || 'Sin contenido';
 
     if (
       resolvedDirection === 'outbound' &&
@@ -2486,7 +2588,8 @@ export class ChatService implements OnModuleDestroy {
       !suppressAutopilotAndSuggestions &&
       saved.direction === 'inbound' &&
       incomingIsImage &&
-      isIncomingImage(saved.content)
+      isIncomingImage(saved.content) &&
+      !inboundIsSticker
     ) {
       void this.enqueueDebouncedInbound(
         saved,
@@ -2540,6 +2643,45 @@ export class ChatService implements OnModuleDestroy {
       throw new Error('Se requiere al menos una URL de imagen');
     }
 
+    const result = await runWithLlmAuditContextAsync(
+      {
+        tallerId: options?.tallerId ?? null,
+        conversationId: options?.conversationId ?? null,
+        purpose: 'vision_peritaje',
+      },
+      () => this.analyzeDamageImageInner(urls, options),
+    );
+    return result.items;
+  }
+
+  private async analyzeDamageImageDetailed(
+    imageUrls: readonly string[],
+    options?: {
+      systemPrompt?: string;
+      userSchemaHint?: string;
+      allowEmptyInventory?: boolean;
+      clientContextText?: string;
+      conversationTextHistory?: ChatCompletionMessageParam[];
+      tallerId?: string | null;
+      conversationId?: string | null;
+    },
+  ): Promise<{ items: DetectedDamageItem[]; viability: VisionViability }> {
+    const urls = [
+      ...new Set(imageUrls.map((u) => String(u).trim()).filter(Boolean)),
+    ];
+    if (!urls.length) {
+      return {
+        items: [],
+        viability: {
+          peritajeViable: false,
+          motivoInviable: 'SIN_DANOS_EVIDENTES',
+          mensajeClienteAclaracion: resolveClienteAclaracion({
+            peritajeViable: false,
+            motivoInviable: 'SIN_DANOS_EVIDENTES',
+          }),
+        },
+      };
+    }
     return runWithLlmAuditContextAsync(
       {
         tallerId: options?.tallerId ?? null,
@@ -2561,7 +2703,7 @@ export class ChatService implements OnModuleDestroy {
       tallerId?: string | null;
       conversationId?: string | null;
     },
-  ): Promise<DetectedDamageItem[]> {
+  ): Promise<{ items: DetectedDamageItem[]; viability: VisionViability }> {
     const systemPrompt =
       options?.systemPrompt != null && String(options.systemPrompt).trim() !== ''
         ? String(options.systemPrompt).trim()
@@ -2655,8 +2797,16 @@ export class ChatService implements OnModuleDestroy {
     );
 
     if (!visionResponse) {
+      const viability: VisionViability = {
+        peritajeViable: false,
+        motivoInviable: 'FOTO_BORROSA',
+        mensajeClienteAclaracion: resolveClienteAclaracion({
+          peritajeViable: false,
+          motivoInviable: 'FOTO_BORROSA',
+        }),
+      };
       if (options?.allowEmptyInventory) {
-        return [];
+        return { items: [], viability };
       }
       throw new Error('OpenAI no devolvió contenido para el análisis de daños');
     }
@@ -2670,28 +2820,37 @@ export class ChatService implements OnModuleDestroy {
       .filter(Boolean)
       .join('\n');
 
-    if (options?.allowEmptyInventory) {
-      const items = parseDetectedDamageItemsAllowEmpty(parsed);
-      const collapsed = collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
+    const viability = extractVisionViability(parsed);
+    const rawItems = parseDetectedDamageItemsAllowEmpty(parsed);
+    const items = rawItems.map((it) => ({
+      ...it,
+      pieza: canonicalizePanelCode(it.pieza) || it.pieza,
+    }));
+
+    if (!viability.peritajeViable || items.length === 0) {
+      const inviable: VisionViability = {
+        peritajeViable: false,
+        motivoInviable:
+          viability.motivoInviable ??
+          (items.length === 0 ? 'SIN_DANOS_EVIDENTES' : undefined),
+        mensajeClienteAclaracion: resolveClienteAclaracion({
+          peritajeViable: false,
+          motivoInviable:
+            viability.motivoInviable ??
+            (items.length === 0 ? 'SIN_DANOS_EVIDENTES' : undefined),
+          mensajeClienteAclaracion: viability.mensajeClienteAclaracion,
+        }),
+      };
       console.log(
-        '[Vision] Inventario parseado (allowEmpty)',
+        '[Vision] Peritaje no viable',
         JSON.stringify({
-          rawItems: items.length,
-          collapsedItems: collapsed.length,
-          piezas: collapsed.map((i) => ({
-            pieza: i.pieza,
-            severidad: i.severidad,
-            urls: (i.urls_origen ?? []).length,
-          })),
-          vehiculo_detectado:
-            parsed && typeof parsed === 'object'
-              ? String((parsed as { vehiculo_detectado?: string }).vehiculo_detectado ?? '')
-              : '',
+          motivo: inviable.motivoInviable,
+          rawItems: rawItems.length,
         }),
       );
-      return collapsed;
+      return { items: [], viability: inviable };
     }
-    const items = normalizeDetectedDamagesJson(parsed);
+
     const collapsed = collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
     console.log(
       '[Vision] Inventario parseado',
@@ -2700,7 +2859,7 @@ export class ChatService implements OnModuleDestroy {
         piezas: collapsed.map((i) => i.pieza),
       }),
     );
-    return collapsed;
+    return { items: collapsed, viability: { peritajeViable: true } };
   }
 
   /** Parte URLs en lotes de hasta {@link ChatService.VISION_IMAGE_CHUNK_SIZE}. */
@@ -2733,21 +2892,30 @@ export class ChatService implements OnModuleDestroy {
       tallerId?: string | null;
       conversationId?: string | null;
     },
-  ): Promise<DetectedDamageItem[]> {
+  ): Promise<{ items: DetectedDamageItem[]; viability: VisionViability }> {
     const lotes = this.chunkImageUrlsForVision(imageUrls);
     if (!lotes.length) {
-      return [];
+      return {
+        items: [],
+        viability: {
+          peritajeViable: false,
+          motivoInviable: 'SIN_DANOS_EVIDENTES',
+          mensajeClienteAclaracion: resolveClienteAclaracion({
+            peritajeViable: false,
+            motivoInviable: 'SIN_DANOS_EVIDENTES',
+          }),
+        },
+      };
     }
 
     if (lotes.length === 1 && lotes[0]!.length === imageUrls.length) {
-      return this.analyzeDamageImage(lotes[0]!, options);
+      return this.analyzeDamageImageDetailed(lotes[0]!, options);
     }
 
-    const snap = await this.catalogService.getMatrixPricingSnapshot(
-      options?.tallerId,
-    );
     let allDetectedDamages: DetectedDamageItem[] = [];
     let accumulatedVisionVehicle: string | null = null;
+    const viabilityParts: { viability: VisionViability; itemCount: number }[] =
+      [];
 
     console.log(
       `[VisionChunk] Procesando ${imageUrls.length} imagen(es) en ${lotes.length} lote(s) de hasta ${ChatService.VISION_IMAGE_CHUNK_SIZE}`,
@@ -2758,33 +2926,35 @@ export class ChatService implements OnModuleDestroy {
       console.log(
         `[VisionChunk] Lote ${idx + 1}/${lotes.length} — ${lote.length} imagen(es)`,
       );
-      const batchItems = await this.analyzeDamageImage(lote, {
-        ...options,
-        allowEmptyInventory: true,
+      const batch = await this.analyzeDamageImageDetailed(lote, options);
+      viabilityParts.push({
+        viability: batch.viability,
+        itemCount: batch.items.length,
       });
 
       console.log(
         `[VisionChunk] Lote ${idx + 1} resultado`,
         JSON.stringify({
-          items: batchItems.length,
-          piezas: batchItems.map((i) => i.pieza),
+          items: batch.items.length,
+          viable: batch.viability.peritajeViable,
+          piezas: batch.items.map((i) => i.pieza),
         }),
       );
 
-      if (!batchItems.length) {
+      if (!batch.items.length) {
         console.warn(
           `[VisionChunk] Lote ${idx + 1}/${lotes.length} sin ítems válidos (pieza+severidad)`,
         );
         continue;
       }
 
-      const batchVehicle = pickVehicleLabelFromDamageInventory(batchItems);
+      const batchVehicle = pickVehicleLabelFromDamageInventory(batch.items);
       if (batchVehicle) {
         accumulatedVisionVehicle = batchVehicle;
       }
 
       if (!allDetectedDamages.length) {
-        allDetectedDamages = batchItems.map((it) => ({
+        allDetectedDamages = batch.items.map((it) => ({
           pieza: it.pieza,
           severidad: it.severidad,
           descripcionTecnica: it.descripcionTecnica,
@@ -2796,20 +2966,16 @@ export class ChatService implements OnModuleDestroy {
       } else {
         const merged = mergeDamageInventoryAccumulative(
           allDetectedDamages,
-          batchItems,
-          (raw) => snap.matchServicio(raw),
+          batch.items,
+          (raw) => canonicalizePanelCode(raw) || raw,
         );
         allDetectedDamages = merged.merged;
       }
     }
 
-    if (!allDetectedDamages.length && options?.allowEmptyInventory !== false) {
-      return [];
-    }
+    const viability = mergeVisionViability(viabilityParts);
     if (!allDetectedDamages.length) {
-      throw new Error(
-        'OpenAI no devolvió daños detectados en ningún lote de imágenes',
-      );
+      return { items: [], viability };
     }
 
     const tierContext = [
@@ -2824,11 +2990,14 @@ export class ChatService implements OnModuleDestroy {
       accumulatedVisionVehicle ?
         { vehiculo_detectado: accumulatedVisionVehicle }
       : undefined;
-    return collapseVisionItemsToBpcIfNeeded(
-      allDetectedDamages,
-      tierContext,
-      visionRootForCollapse,
-    );
+    return {
+      items: collapseVisionItemsToBpcIfNeeded(
+        allDetectedDamages,
+        tierContext,
+        visionRootForCollapse,
+      ),
+      viability: { peritajeViable: true },
+    };
   }
 
   private sanitizeVisionItemsForPlaygroundPrompt(
@@ -4995,14 +5164,19 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         vehicleProfile,
         pricingRules,
       );
-      const unit = integral?.unitPrice ?? 0;
+      const unit = applyBanioCodePriceAdjustments(
+        integral?.unitPrice ?? 0,
+        bpc.pieza,
+        vehicleProfile?.sizeTier,
+      );
       const tierLabel = vehicleProfile?.sizeTier ?? 'Compacto';
       this.logDebugBpcPrecio(analysis, canonical, tierLabel, unit);
       resolvedLevel = 'N/A';
       if (unit > 0) {
+        const banioCode = canonicalizePanelCode(bpc.pieza) || VISION_BPC_PIEZA_CODE;
         lines.push({
-          priceItemId: `matrix:${canonical}:${tierLabel}:bpc`,
-          description: `${canonical} (${VISION_BPC_PIEZA_CODE}) — ${tierLabel}${vehicleProfile?.isPremium ? ' premium' : ''}`,
+          priceItemId: `matrix:${canonical}:${tierLabel}:${banioCode}`,
+          description: `${canonical} (${banioCode}) — ${tierLabel}${vehicleProfile?.isPremium ? ' premium' : ''}`,
           quantity: 1,
           unitPrice: unit,
           subtotal: unit,
@@ -5025,48 +5199,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         ),
       );
     } else {
-      const partes =
-        analysis.partesAfectadas?.length > 0
-          ? analysis.partesAfectadas
-          : analysis.pieza
-            ? [analysis.pieza]
-            : ['Estetica Exterior'];
-
       resolvedLevel = coerceDamageLevelCode(
         analysis.severidad || analysis.severidadDelDano,
       );
-
-      const seen = new Set<string>();
-      for (const parteRaw of partes) {
-        const canonical = snap.matchServicio(parteRaw);
-        if (!canonical) continue;
-        const key = `${canonical}|${resolvedLevel}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const unit = snap.getAmount(canonical, resolvedLevel);
-        if (unit <= 0) continue;
-        lines.push({
-          priceItemId: `matrix:${canonical}:${resolvedLevel}`,
-          description: `${canonical} — nivel ${resolvedLevel} (según catálogo de precios)`,
-          quantity: 1,
-          unitPrice: unit,
-          subtotal: unit,
-        });
-      }
-    }
-
-    if (lines.length === 0) {
-      const fallbackPieza = 'Estetica Exterior';
-      const unit = snap.getAmount(fallbackPieza, resolvedLevel);
-      if (unit > 0) {
-        lines.push({
-          priceItemId: `matrix:${fallbackPieza}:${resolvedLevel}`,
-          description: `${fallbackPieza} — nivel ${resolvedLevel} (referencia general; no se identificó pieza en el texto)`,
-          quantity: 1,
-          unitPrice: unit,
-          subtotal: unit,
-        });
-      }
     }
 
     const subtotal = lines.reduce((acc, l) => acc + l.subtotal, 0);
@@ -5306,15 +5441,34 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const conversationTextHistory =
       await this.buildVisionTextHistoryForConversation(conversationId);
 
-    const newInventory = await this.analyzeDamageImageInSequentialChunks(
+    const visionResult = await this.analyzeDamageImageInSequentialChunks(
       imageUrls,
       {
-        allowEmptyInventory: true,
         tallerId: visionTallerId,
         conversationId,
         conversationTextHistory,
       },
     );
+    const newInventory = visionResult.items;
+
+    if (!visionResult.viability.peritajeViable || newInventory.length === 0) {
+      const aclaracion = resolveClienteAclaracion(visionResult.viability);
+      console.log(
+        '[VisionPipeline] Peritaje no viable — sin cotización',
+        JSON.stringify({
+          conversationId,
+          motivo: visionResult.viability.motivoInviable,
+        }),
+      );
+      await this.saveMessage({
+        direction: 'outbound',
+        conversationId,
+        message: aclaracion,
+        tallerId: visionTallerId,
+        skipOutboundFacebookSend: false,
+      });
+      return;
+    }
 
     console.log(
       `[VisionChunk] Inventario consolidado tras lotes: ${newInventory.length} pieza(s)`,
@@ -5385,6 +5539,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       }
     }
 
+    const refaccionNotes: string[] = [];
+    analysisForQuote = await this.enrichInventoryWithMarketRefacciones(
+      analysisForQuote,
+      refaccionNotes,
+    );
+
     const estimateAmount = await this.computePrimaryMatrixEstimate(
       analysisForQuote,
       visionTallerId,
@@ -5432,8 +5592,20 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       imageUrls.length,
       null,
     );
-    const draftQuoteForClient =
+    let draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
+    if (refaccionNotes.length) {
+      const noteBlock = refaccionNotes.join('\n');
+      draftQuoteForClient = {
+        ...draftQuoteForClient,
+        clientMessage: [draftQuoteForClient.clientMessage, noteBlock]
+          .filter(Boolean)
+          .join('\n\n'),
+        generatedMessage: [draftQuoteForClient.generatedMessage, noteBlock]
+          .filter(Boolean)
+          .join('\n\n'),
+      };
+    }
 
     console.log(
       '[VisionPipeline] Borrador listo para panel',
@@ -6248,6 +6420,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       if (name === 'obtenerResumenCarrito') {
         return await this.executeObtainCarritoResumenTool(conversation);
       }
+      if (name === 'estimarRefaccionMercado') {
+        return await this.executeEstimarRefaccionMercadoTool(args, conversation);
+      }
       if (name === 'notificarLlegadaCliente') {
         return await this.executeNotificarLlegadaClienteTool(conversation);
       }
@@ -6573,6 +6748,46 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     };
   }
 
+  private async executeEstimarRefaccionMercadoTool(
+    argsJson: string,
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+    const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.piece, raw.panel);
+    const vehiculo = pickFirstNonEmptyTrimmedString(
+      raw.vehiculo,
+      raw.vehicle,
+      raw.modeloVehiculo,
+    );
+    const anio = pickFirstNonEmptyTrimmedString(raw.anio, raw.year, raw.año);
+    if (!pieza || !vehiculo) {
+      return {
+        success: false,
+        error: 'Faltan pieza y vehiculo para estimar la refacción.',
+      };
+    }
+    const estimate = await estimarRefaccionMercado({ pieza, vehiculo, anio });
+    const item = buildRefaccionInventoryItem(estimate, pieza);
+    await this.quoteCartService.addRefaccionItem(
+      conversation.id,
+      conversation.tallerId,
+      item,
+    );
+    return {
+      ...estimate,
+      disclaimer: buildRefaccionDisclaimer(
+        piezaLabelForRefaccion(pieza),
+        estimate.precioAlCliente,
+      ),
+      inserted: true,
+    };
+  }
+
   /** Alarma de recepción física: marca espera afuera y dispara llamadas Twilio. */
   private async executeNotificarLlegadaClienteTool(
     conversation: Conversation,
@@ -6592,6 +6807,30 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       clienteEsperandoAfuera: true,
       message:
         'Recepción notificada por teléfono. Confirma al cliente que el equipo ya fue alertado y que lo atenderán en breve.',
+    };
+  }
+
+  private async executeEstimarRefaccionMercadoToolPlayground(
+    argsJson: string,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown> = {};
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      raw = {};
+    }
+    const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.piece) || 'FD';
+    const vehiculo =
+      pickFirstNonEmptyTrimmedString(raw.vehiculo, raw.vehicle) || 'Jetta';
+    const anio = pickFirstNonEmptyTrimmedString(raw.anio, raw.year);
+    const estimate = await estimarRefaccionMercado({ pieza, vehiculo, anio });
+    return {
+      ...estimate,
+      preview: true,
+      disclaimer: buildRefaccionDisclaimer(
+        piezaLabelForRefaccion(pieza),
+        estimate.precioAlCliente,
+      ),
     };
   }
 
@@ -6728,6 +6967,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         } else if (name === 'obtenerResumenCarrito') {
           payload = await this.executeObtainCarritoResumenTool(
             { status: 'nuevo' } as Conversation,
+          );
+        } else if (name === 'estimarRefaccionMercado') {
+          payload = await this.executeEstimarRefaccionMercadoToolPlayground(
+            argsJson,
           );
         } else if (name === 'notificarLlegadaCliente') {
           payload = await this.executeNotificarLlegadaClienteToolPlayground();

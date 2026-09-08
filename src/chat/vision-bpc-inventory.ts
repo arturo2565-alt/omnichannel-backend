@@ -1,23 +1,37 @@
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { coerceDamageLevelCode, damageLevelRank, type DamageLevel } from './autofix-config';
 import {
+  cambioDeColorAddonMxForSizeTier,
   flattenBañoTierSource,
   inferBañoTierSeveridad,
   isPlaceholderBañoVehicleLabel,
 } from './instant-quote-from-text';
+import type { VehicleSizeTier } from '../catalog/vehicle-pricing-profile';
 
-export const VISION_BPC_PIEZA_CODE = 'BPC';
+/** Default de colapso (baño exterior). Legacy BPC se trata como BPE. */
+export const VISION_BPC_PIEZA_CODE = 'BPE';
+export const VISION_BANIO_CODES = ['BPE', 'BPEI', 'BPCC', 'BPC'] as const;
+export type VisionBanioCode = (typeof VISION_BANIO_CODES)[number];
 
 const BPC_PIEZA_ALIASES = new Set([
   'bpc',
+  'bpe',
+  'bpei',
+  'bpcc',
   'bano de pintura completo',
   'bano pintura completo',
   'bano completo',
   'bano integral',
   'pintura exterior completa',
+  'bano de pintura exterior',
   'baño de pintura completo',
   'baño pintura completo',
   'baño completo',
+  'baño de pintura exterior',
+  'bano de pintura exterior e interiores',
+  'baño de pintura exterior e interiores',
+  'bano de pintura con cambio de color',
+  'baño de pintura con cambio de color',
 ]);
 
 function normalizePiezaKey(pieza: string): string {
@@ -33,7 +47,71 @@ export function isVisionBpcPiezaCode(pieza: string): boolean {
   const key = normalizePiezaKey(pieza);
   if (!key) return false;
   if (BPC_PIEZA_ALIASES.has(key)) return true;
-  return key === 'bpc' || /\bbpc\b/.test(key);
+  return (
+    key === 'bpc' ||
+    key === 'bpe' ||
+    key === 'bpei' ||
+    key === 'bpcc' ||
+    /\b(bpc|bpe|bpei|bpcc)\b/.test(key)
+  );
+}
+
+/** Mapea intención de chat/visión a BPE | BPEI | BPCC. */
+export function resolveVisionBanioCode(
+  contextText: string,
+  items: readonly DetectedDamageItem[],
+  visionRoot?: unknown,
+): 'BPE' | 'BPEI' | 'BPCC' {
+  const fromItem = items.find((it) => isVisionBpcPiezaCode(it.pieza));
+  const rawCode = normalizePiezaKey(fromItem?.pieza ?? '');
+  if (rawCode === 'bpcc') return 'BPCC';
+  if (rawCode === 'bpei') return 'BPEI';
+  if (rawCode === 'bpe') return 'BPE';
+
+  let tipo = '';
+  if (visionRoot && typeof visionRoot === 'object') {
+    const o = visionRoot as Record<string, unknown>;
+    tipo = normalizePiezaKey(
+      String(o.tipo_banio ?? o.tipoBanio ?? o.tipo_bano ?? ''),
+    );
+  }
+  const blob = normalizePiezaKey(
+    [contextText, tipo, items.map((i) => `${i.pieza} ${i.descripcionTecnica}`).join(' ')].join(' '),
+  );
+  if (
+    /\bcambio( de)? color\b/.test(blob) ||
+    /\bcolor completo\b/.test(blob) ||
+    tipo === 'bpcc'
+  ) {
+    return 'BPCC';
+  }
+  if (
+    tipo === 'bpei' ||
+    /\binteriores?\b/.test(blob) ||
+    /\binterior(es)? de puertas?\b/.test(blob) ||
+    /\bmarco(s)? de puertas?\b/.test(blob)
+  ) {
+    return 'BPEI';
+  }
+  return 'BPE';
+}
+
+/** BPEI: +15% interiores. BPCC: suplemento de cambio de color / desarmado. */
+export function applyBanioCodePriceAdjustments(
+  unitPrice: number,
+  banioCode: string,
+  sizeTier?: VehicleSizeTier | null,
+): number {
+  let price = Math.max(0, Math.round(Number(unitPrice) || 0));
+  if (price <= 0) return 0;
+  const code = String(banioCode ?? '').toUpperCase().trim();
+  if (code === 'BPEI') {
+    price = Math.round((price * 1.15) / 50) * 50;
+  }
+  if (code === 'BPCC') {
+    price += cambioDeColorAddonMxForSizeTier(sizeTier ?? 'Mediano');
+  }
+  return price;
 }
 
 /** Lee vehículo del JSON crudo de visión (snake_case o camelCase). */
@@ -201,8 +279,10 @@ export function collapseVisionItemsToBpcIfNeeded(
     ...items.map((it) => it.vehiculoDetectado),
   );
 
+  const banioCode = resolveVisionBanioCode(contextText, items, visionRoot);
+
   console.log(
-    `[VisionBPC] Colapsando ${items.length} ítem(s) → BPC (${tierSeveridad}); piezas sueltas omitidas del presupuesto.`,
+    `[VisionBPC] Colapsando ${items.length} ítem(s) → ${banioCode} (${tierSeveridad}); piezas sueltas omitidas del presupuesto.`,
     vehiculoDetectado ? `vehículo visión: ${vehiculoDetectado}` : '',
   );
 
@@ -216,7 +296,7 @@ export function collapseVisionItemsToBpcIfNeeded(
 
   return [
     {
-      pieza: VISION_BPC_PIEZA_CODE,
+      pieza: banioCode,
       severidad: tierSeveridad,
       descripcionTecnica,
       urls_origen: urls.length ? urls : [...(bpcRow.urls_origen ?? [])],

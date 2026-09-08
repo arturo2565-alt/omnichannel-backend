@@ -1,4 +1,5 @@
 import {
+  canonicalizePanelCode,
   findPanelPiezaOption,
   normalizePanelPiezaCode,
   resolveCatalogPiezaForMatrixLookup,
@@ -44,6 +45,21 @@ describe('panel-pieza-catalog', () => {
     expect(resolveCatalogPiezaForMatrixLookup('Refacción: Faro')).toBeNull();
     expect(resolveCatalogPiezaForMatrixLookup('CERAMICO')).toBeNull();
     expect(resolveCatalogPiezaForMatrixLookup('ESTETICA_AUTO')).toBeNull();
+  });
+
+  it('canonicalizePanelCode cubre códigos y nombres naturales', () => {
+    expect(canonicalizePanelCode('FD')).toBe('FD');
+    expect(canonicalizePanelCode('fascia delantera')).toBe('FD');
+    expect(canonicalizePanelCode('CTI')).toBe('CTI');
+    expect(canonicalizePanelCode('costado derecho')).toBe('CTD');
+    expect(canonicalizePanelCode('espejo izquierdo')).toBe('ESI');
+    expect(canonicalizePanelCode('portón trasero')).toBe('Tapa Cajuela');
+    expect(canonicalizePanelCode('BPE')).toBe('BPE');
+    expect(canonicalizePanelCode('baño de pintura exterior')).toBe('BPE');
+    expect(canonicalizePanelCode('BPCC')).toBe('BPCC');
+    expect(resolveCatalogPiezaForMatrixLookup('CTI')).toBe('Salpicadera');
+    expect(resolveCatalogPiezaForMatrixLookup('ESI')).toBe('Espejo');
+    expect(resolveCatalogPiezaForMatrixLookup('BPE')).toBeNull();
   });
 
   it('resolveMatrixServicioRaw conserva texto libre si no hay mapeo', () => {

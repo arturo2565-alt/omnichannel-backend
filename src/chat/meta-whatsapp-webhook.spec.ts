@@ -194,4 +194,44 @@ describe('meta-whatsapp-webhook', () => {
       buttonPayload: 'BTN_BANIO_PINTURA',
     });
   });
+
+  it('extrae stickers sin tratarlos como foto de peritaje', () => {
+    const payload = {
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          id: 'WABA-12345',
+          changes: [
+            {
+              field: 'messages',
+              value: {
+                messaging_product: 'whatsapp',
+                metadata: {
+                  display_phone_number: '15550001111',
+                  phone_number_id: 'PHONE-NUM-ID-99',
+                },
+                contacts: [{ profile: { name: 'Test' }, wa_id: '5215511111111' }],
+                messages: [
+                  {
+                    from: '5215511111111',
+                    id: 'wamid.STICKER',
+                    timestamp: '1504902988',
+                    type: 'sticker',
+                    sticker: { mime_type: 'image/webp', animated: false },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const events = extractMetaWhatsAppInboundEvents(payload);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      isSticker: true,
+      text: 'Sticker',
+      mimeType: 'image/webp',
+    });
+  });
 });

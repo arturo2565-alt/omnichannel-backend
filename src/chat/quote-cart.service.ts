@@ -475,6 +475,20 @@ export class QuoteCartService {
     return this.getCartSummaryEnvelope(conversationId, tallerId);
   }
 
+  async addRefaccionItem(
+    conversationId: string,
+    tallerId: string | null | undefined,
+    item: DetectedDamageItem,
+  ): Promise<Record<string, unknown>> {
+    const cart = await this.resolveMutableCart(conversationId, tallerId);
+    const inventory = [...(cart.damageAnalysis?.inventory ?? [])];
+    const merged = mergeCartInventoryWithPricingMode(inventory, item);
+    await this.rebuildAndPersist(cart, merged, tallerId, undefined, null, {
+      matrixPricePiezaCodes: [item.pieza],
+    });
+    return this.getCartSummaryEnvelope(conversationId, tallerId);
+  }
+
   async updateItem(
     conversationId: string,
     tallerId: string | null | undefined,

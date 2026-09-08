@@ -9,6 +9,9 @@ import {
 describe('vision-bpc-inventory', () => {
   it('detecta BPC en pieza', () => {
     expect(isVisionBpcPiezaCode('BPC')).toBe(true);
+    expect(isVisionBpcPiezaCode('BPE')).toBe(true);
+    expect(isVisionBpcPiezaCode('BPEI')).toBe(true);
+    expect(isVisionBpcPiezaCode('BPCC')).toBe(true);
     expect(isVisionBpcPiezaCode('bpc')).toBe(true);
     expect(isVisionBpcPiezaCode('Cofre')).toBe(false);
   });
@@ -39,7 +42,7 @@ describe('vision-bpc-inventory', () => {
       'Es un Volkswagen Passat 2020, quiero baño de pintura completo',
     );
     expect(out).toHaveLength(1);
-    expect(out[0]!.pieza).toBe('BPC');
+    expect(out[0]!.pieza).toBe('BPE');
     expect(out[0]!.severidad).toBe('Grande');
     expect(out[0]!.urls_origen).toEqual(
       expect.arrayContaining(['https://a/1.jpg', 'https://a/2.jpg']),
@@ -87,6 +90,35 @@ describe('vision-bpc-inventory', () => {
       intencion_banio_completo_detectada: true,
     });
     expect(out).toHaveLength(1);
-    expect(out[0]!.pieza).toBe('BPC');
+    expect(out[0]!.pieza).toBe('BPE');
+  });
+
+  it('mapea cambio de color a BPCC e interiores a BPEI', () => {
+    const color = collapseVisionItemsToBpcIfNeeded(
+      [
+        {
+          pieza: 'Cofre',
+          severidad: 'DL',
+          descripcionTecnica: 'x',
+          urls_origen: [],
+        },
+      ],
+      'quiero baño de pintura con cambio de color',
+      { intencion_banio_completo_detectada: true },
+    );
+    expect(color[0]!.pieza).toBe('BPCC');
+
+    const interiors = collapseVisionItemsToBpcIfNeeded(
+      [
+        {
+          pieza: 'BPEI',
+          severidad: 'Mediano',
+          descripcionTecnica: 'interiores de puertas',
+          urls_origen: [],
+        },
+      ],
+      '',
+    );
+    expect(interiors[0]!.pieza).toBe('BPEI');
   });
 });

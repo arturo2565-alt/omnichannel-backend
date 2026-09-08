@@ -173,6 +173,31 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
   },
   {
     type: 'function',
+    name: 'estimarRefaccionMercado',
+    description:
+      'Estima el costo de una refacción (pieza de reemplazo) con rangos de mercado México (MercadoLibre / refaccionarias) y aplica +30% de margen logístico. Úsala cuando el daño sea DF o DMFuerte con rotura evidente, o el cliente pregunte por cambiar la pieza. Inserta la línea REFACCION en el carrito.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pieza: {
+          type: 'string',
+          description: 'Pieza a reemplazar (FD, fascia delantera, puerta, etc.).',
+        },
+        vehiculo: {
+          type: 'string',
+          description: 'Marca y modelo (ej. Jetta, Nissan March).',
+        },
+        anio: {
+          type: 'string',
+          description: 'Año del vehículo si se conoce (ej. 2018).',
+        },
+      },
+      required: ['pieza', 'vehiculo'],
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
     name: 'notificarLlegadaCliente',
     description:
       'Ejecuta esta herramienta inmediatamente cuando el cliente indique que ya llegó al taller o está esperando afuera.',

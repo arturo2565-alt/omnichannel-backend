@@ -17,6 +17,13 @@ Si una sola foto muestra dos zonas/pestañas/pestanas diferentes con daño en pi
 
 Severidad: EXACTAMENTE uno de DL, DML, DM, DMF, DF, DMFuerte.
 
+Usa códigos canónicos de panel cuando puedas identificar laterality:
+FD/FT (fascia delantera/trasera), SI/SD/STI/STD (salpicaderas), CTI/CTD (costados),
+PDI/PDD/PTI/PTD (puertas), EI/ED (estribos), ESI/ESD (espejos), Cofre, Toldo, Tapa Cajuela / Portón.
+
+Si la foto no sirve para peritar (borrosa, macro extremo, no es un auto, sin daño visible):
+pon peritaje_viable=false, un motivo_inviable y un mensaje_cliente_aclaracion amable. NO inventes piezas ni Estética Exterior.
+
 Ten en cuenta reflejos, sombras de carrocería y líneas de cierre entre piezas. Descuadre o daño muy profundo pueden justificar DF o DMFuerte.
 
 NO inventes URLs: solo pueden aparecer valores que figuraron en el texto del usuario.`;
@@ -48,27 +55,37 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   '',
   'createAppointment: úsala SIEMPRE que el cliente confirme día y hora válidos. Pasa dateTime (hora del taller sin Z, ej. 2026-05-26T15:30:00), clientName (nombre real, no "cliente"/"desconocido"), vehicleInfo (marca o modelo) y phone (mín. 8 dígitos; en WhatsApp puede inferirse del wa_id). En Messenger pide el teléfono si no lo tienes. quoteSummary opcional con el total/resumen de la cotización. Si dice "3:30" sin AM/PM, usa 15:30. Si la herramienta responde error MISSING_REQUIRED_DATA, NO confirmes la cita: pide amablemente el dato que falte y reintenta. NUNCA digas que la cita quedó agendada si createAppointment no devolvió success:true.',
   'notificarLlegadaCliente: ejecútala INMEDIATAMENTE cuando el cliente diga que ya llegó al taller, está afuera, en la puerta, esperando en el estacionamiento o similar. Después confirma cordialmente que recepción fue alertada.',
+  'estimarRefaccionMercado: si el daño es DF/DMFuerte con rotura evidente o el cliente pide cambiar la pieza, estima mercado MX (+30% margen) e incluye el disclaimer de refacción. No inventes el precio: usa el monto que devuelve la herramienta.',
   'Si falta algún dato imprescindible, pregunta de forma breve y cordial.',
   'Respuestas profesionales y naturales; concisas salvo que el cliente pida más detalle.',
 ].join('\n');
 
 /** Texto del mensaje de usuario en visión: esquema JSON esperado y reglas del payload. */
 export const DEFAULT_VISION_JSON_USER_INSTRUCTION = `Responde ÚNICAMENTE con un objeto JSON válido (sin markdown):
-{ "items": [ ... ], "vehiculo_detectado": "..." }
+{ "items": [ ... ], "vehiculo_detectado": "...", "peritaje_viable": true }
 
-En la raíz del JSON, incluye SIEMPRE que sea posible:
-- "vehiculo_detectado": string con marca, modelo y año si los infieres de las fotos (ej. "Volkswagen Passat 2005", "Nissan March 2018"). Si no puedes identificar el auto con confianza razonable, usa cadena vacía "".
+En la raíz del JSON, incluye SIEMPRE:
+- "peritaje_viable": boolean. false si no se puede valuár (foto borrosa, toma demasiado cerrada, no es un auto, o sin daños evidentes).
+- "motivo_inviable": solo si peritaje_viable es false. Uno de: FOTO_BORROSA | TOMA_DEMASIADO_CERRADA | NO_ES_AUTO | SIN_DANOS_EVIDENTES.
+- "mensaje_cliente_aclaracion": si no es viable, 1–2 frases amables pidiendo mejores fotos. NO cotices.
+- "vehiculo_detectado": string con marca, modelo y año si los infieres de las fotos (ej. "Volkswagen Passat 2005"). Si no hay confianza, "".
 
 Cada elemento de items es una **pieza o zona agrupada lógica** tras consolidar vistas:
 - Varias fotos del mismo punto de impacto mismo componente ⇒ un solo objeto y severidad máxima vista.
 - Varios golpes/pestañas en piezas diferentes ⇒ varios objetos.
+- Si peritaje_viable es false, items DEBE ser [].
 
 Por objeto:
-- "pieza": string (nombre entendible: Fascia, Salpicadera, Puerta, Cofre, Tapa Cajuela, Toldo, Espejo, Estribo, etc.). Si el cliente pide **baño de pintura completo** del vehículo (exterior integral), usa **exactamente** el código **"BPC"** como única pieza y NO listes Cofre/Fascia/Puertas por separado.
-- "severidad": para piezas sueltas, EXACTAMENTE DL | DML | DM | DMF | DF | DMFuerte. Para **"BPC"** usa el tamaño de carrocería inferido del chat (Chico, Mediano, Grande, XL o variantes Premium), no códigos de golpe.
-- Opcional en la raíz del JSON: "intencion_banio_completo_detectada": true cuando el envío sea baño completo aunque falte la sigla BPC.
-- "descripcionTecnica": texto en español (sintetiza lo visto considerando todas las fotos pertinentes).
-- "urls_origen": array copiando **literalmente** de la lista siguiente las URLs donde se ve ese daño (las que mejor apoyan la severidad declarada).
+- "pieza": código canónico (FD, FT, SI, SD, STI, STD, CTI, CTD, PDI, PDD, PTI, PTD, EI, ED, ESI, ESD, Cofre, Toldo, Tapa Cajuela) o nombre natural equivalente.
+- Baños de pintura (única pieza, no listes paneles sueltos):
+  * "BPE" = Baño de Pintura Exterior.
+  * "BPEI" = Exterior + interiores de puertas/cofre.
+  * "BPCC" = Baño con cambio total de color (incluye desarmado).
+  El alias "BPC" se interpreta como BPE.
+- "severidad": para piezas sueltas, EXACTAMENTE DL | DML | DM | DMF | DF | DMFuerte. Para BPE/BPEI/BPCC usa tamaño (Chico, Mediano, Grande, XL), no código de golpe.
+- Opcional: "intencion_banio_completo_detectada": true y "tipo_banio": BPE | BPEI | BPCC.
+- "descripcionTecnica": texto en español. Si hay rotura/quiebre, dilo explícitamente.
+- "urls_origen": array copiando **literalmente** de la lista siguiente las URLs donde se ve ese daño.
 
 Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min) en el mismo chat.`;
 

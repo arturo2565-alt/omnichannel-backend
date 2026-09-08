@@ -1,5 +1,6 @@
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { isVisionBpcPiezaCode } from './vision-bpc-inventory';
+import { isRefaccionPieza } from '../catalog/panel-pieza-catalog';
 import { mergeCartInventoryItem } from './quote-cart-analysis';
 
 export type CartPricingMode = 'bpc' | 'piezas' | 'vacio';
@@ -7,7 +8,8 @@ export type CartPricingMode = 'bpc' | 'piezas' | 'vacio';
 export function isIndividualPanelPieza(pieza: string): boolean {
   const p = String(pieza ?? '').trim();
   if (!p) return false;
-  return !isVisionBpcPiezaCode(p);
+  if (isVisionBpcPiezaCode(p) || isRefaccionPieza(p)) return false;
+  return true;
 }
 
 /** Modo activo según inventario actual. */
@@ -41,23 +43,34 @@ export function sanitizeCartInventoryForPricing(
         ...(it.vehiculoDetectado?.trim()
           ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
           : {}),
+        ...(it.precioMx != null ? { precioMx: it.precioMx } : {}),
+        ...(it.detallesRefaccion
+          ? { detallesRefaccion: it.detallesRefaccion }
+          : {}),
+        ...(it.refaccionDePieza
+          ? { refaccionDePieza: it.refaccionDePieza }
+          : {}),
       }));
   }
   if (mode === 'bpc') {
-    const bpc = inventory.find((it) => isVisionBpcPiezaCode(it.pieza));
-    return bpc
-      ? [
-          {
-            pieza: bpc.pieza,
-            severidad: bpc.severidad,
-            descripcionTecnica: bpc.descripcionTecnica,
-            urls_origen: [...(bpc.urls_origen ?? [])],
-            ...(bpc.vehiculoDetectado?.trim()
-              ? { vehiculoDetectado: bpc.vehiculoDetectado.trim() }
-              : {}),
-          },
-        ]
-      : [];
+    return inventory
+      .filter((it) => isVisionBpcPiezaCode(it.pieza) || isRefaccionPieza(it.pieza))
+      .map((it) => ({
+        pieza: it.pieza,
+        severidad: it.severidad,
+        descripcionTecnica: it.descripcionTecnica,
+        urls_origen: [...(it.urls_origen ?? [])],
+        ...(it.vehiculoDetectado?.trim()
+          ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
+          : {}),
+        ...(it.precioMx != null ? { precioMx: it.precioMx } : {}),
+        ...(it.detallesRefaccion
+          ? { detallesRefaccion: it.detallesRefaccion }
+          : {}),
+        ...(it.refaccionDePieza
+          ? { refaccionDePieza: it.refaccionDePieza }
+          : {}),
+      }));
   }
   return [];
 }
@@ -69,6 +82,9 @@ export function mergeCartInventoryWithPricingMode(
   inventory: readonly DetectedDamageItem[],
   incoming: DetectedDamageItem,
 ): DetectedDamageItem[] {
+  if (isRefaccionPieza(incoming.pieza)) {
+    return mergeCartInventoryItem(inventory, incoming);
+  }
   if (isVisionBpcPiezaCode(incoming.pieza)) {
     return [
       {
