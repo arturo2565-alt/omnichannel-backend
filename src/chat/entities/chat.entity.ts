@@ -118,4 +118,8 @@ export class Message {
   /** Cotización borrador generada a partir del análisis + lista base de precios */
   @Column({ type: 'jsonb', nullable: true })
   draftQuote: DraftQuote | null;
+
+  /** Metadatos de canal (p. ej. `{ type: 'sticker', isSticker: true }`). */
+  @Column({ type: 'jsonb', nullable: true })
+  metadata: Record<string, unknown> | null;
 }

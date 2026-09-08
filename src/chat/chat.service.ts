@@ -114,8 +114,10 @@ import {
   type VisionViability,
 } from './vision-viability';
 import {
+  isFacebookStickerUrl,
   isMessengerStickerAttachment,
   looksLikeInboundStickerFlag,
+  STICKER_FALLBACK_TEXT,
 } from './inbound-sticker';
 import {
   buildRefaccionDisclaimer,
@@ -279,6 +281,7 @@ function looksLikeConversationUuid(raw: unknown): boolean {
 /** Imagen entrante: URL, data URL base64 o ya alojada en Cloudinary */
 function isIncomingImage(content: unknown): content is string {
   if (typeof content !== 'string' || !content.trim()) return false;
+  if (isFacebookStickerUrl(content)) return false;
   if (/^data:image\//i.test(content)) return true;
   return (
     content.match(/\.(jpeg|jpg|gif|png|webp)(\?|$)/i) != null ||
@@ -1159,7 +1162,7 @@ export class ChatService implements OnModuleDestroy {
       .where('m.conversationId = :cid', { cid: conversationId })
       .andWhere('m.createdAt >= :since', { since })
       .orderBy('m.createdAt', 'ASC')
-      .select(['m.content', 'm.direction'])
+      .select(['m.content', 'm.direction', 'm.metadata'])
       .getMany();
 
     const ordered: string[] = [];
@@ -1171,7 +1174,11 @@ export class ChatService implements OnModuleDestroy {
       }
       const content =
         typeof msg.content === 'string' ? msg.content.trim() : '';
-      if (!content || !isIncomingImage(content)) {
+      const meta = msg.metadata as { isSticker?: unknown; type?: unknown } | null;
+      if (meta?.isSticker === true || String(meta?.type ?? '') === 'sticker') {
+        continue;
+      }
+      if (!content || !isIncomingImage(content) || isFacebookStickerUrl(content)) {
         continue;
       }
       if (seen.has(content)) {
@@ -1772,6 +1779,24 @@ export class ChatService implements OnModuleDestroy {
       .getOne();
   }
 
+  private async findRecentDuplicateMessageAnyDirection(
+    conversationId: string,
+    content: string,
+    windowMs = 8000,
+  ): Promise<Message | null> {
+    const convId = String(conversationId ?? '').trim();
+    const trimmed = String(content ?? '').trim();
+    if (!convId || !trimmed) return null;
+    const since = new Date(Date.now() - windowMs);
+    return this.messageRepository
+      .createQueryBuilder('m')
+      .where('m.conversationId = :conversationId', { conversationId: convId })
+      .andWhere('m.content = :content', { content: trimmed })
+      .andWhere('m.createdAt >= :since', { since })
+      .orderBy('m.createdAt', 'DESC')
+      .getOne();
+  }
+
   /**
    * Normaliza eventos `entry[].messaging[]` de Meta Messenger y delega en {@link saveMessage}.
    */
@@ -1943,9 +1968,16 @@ export class ChatService implements OnModuleDestroy {
               : {}),
         };
 
+        if (text && isFacebookStickerUrl(text) && !stickerUrls.includes(text)) {
+          stickerUrls.push(text);
+        }
+
         if (!text && imageUrls.length === 0 && stickerUrls.length === 0) continue;
 
-        if (text) {
+        const textIsMediaUrl =
+          isFacebookStickerUrl(text) || isIncomingImage(text);
+        const hasCaption = Boolean(text && !textIsMediaUrl);
+        if (hasCaption) {
           let skipText = false;
           if (metaMid) {
             const dup = await this.findMessageByMetaMid(metaMid);
@@ -2000,7 +2032,7 @@ export class ChatService implements OnModuleDestroy {
         for (let imgIdx = 0; imgIdx < imageUrls.length; imgIdx += 1) {
           const url = imageUrls[imgIdx]!;
           const imageMid = metaMid
-            ? imageUrls.length > 1 || text
+            ? imageUrls.length > 1 || hasCaption
               ? `${metaMid}:img:${imgIdx}`
               : metaMid
             : '';
@@ -2052,7 +2084,9 @@ export class ChatService implements OnModuleDestroy {
         for (let stIdx = 0; stIdx < stickerUrls.length; stIdx += 1) {
           const url = stickerUrls[stIdx]!;
           const stickerMid = metaMid
-            ? `${metaMid}:sticker:${stIdx}`
+            ? stickerUrls.length === 1 && !hasCaption && imageUrls.length === 0
+              ? metaMid
+              : `${metaMid}:sticker:${stIdx}`
             : '';
           if (stickerMid) {
             const dupSt = await this.findMessageByMetaMid(stickerMid);
@@ -2060,11 +2094,11 @@ export class ChatService implements OnModuleDestroy {
           }
           const saved = await this.saveMessage({
             ...basePayload,
-            message: url,
+            message: url || STICKER_FALLBACK_TEXT,
             inboundMediaKind: 'sticker',
             isSticker: true,
             skipVisionAnalysis: true,
-            mimeType: 'image/webp',
+            type: 'sticker',
             ...(stickerMid ? { metaMessageId: stickerMid } : {}),
           });
           lastMessageId = saved.id;
@@ -2196,6 +2230,7 @@ export class ChatService implements OnModuleDestroy {
                 inboundMediaKind: 'sticker',
                 isSticker: true,
                 skipVisionAnalysis: true,
+                type: 'sticker',
                 mimeType: evt.mimeType || 'image/webp',
               }
             : {}),
@@ -2231,6 +2266,7 @@ export class ChatService implements OnModuleDestroy {
                 inboundMediaKind: 'sticker',
                 isSticker: true,
                 skipVisionAnalysis: true,
+                type: 'sticker',
                 mimeType: evt.mimeType || 'image/webp',
               }
             : {}),
@@ -2421,7 +2457,8 @@ export class ChatService implements OnModuleDestroy {
     }
 
     let contentToSave = data.message || 'Sin contenido';
-    const inboundIsSticker = looksLikeInboundStickerFlag(data);
+    const inboundIsSticker =
+      looksLikeInboundStickerFlag(data) || isFacebookStickerUrl(contentToSave);
     const incomingIsImage =
       isIncomingImage(contentToSave) && !inboundIsSticker;
     if (incomingIsImage) {
@@ -2445,9 +2482,22 @@ export class ChatService implements OnModuleDestroy {
       }
     }
 
+    if (inboundIsSticker) {
+      const dupSticker = await this.findRecentDuplicateMessageAnyDirection(
+        conversation.id,
+        contentToSave,
+      );
+      if (dupSticker) {
+        console.log(
+          `[saveMessage] sticker duplicado omitido | conv=${conversation.id}`,
+        );
+        return dupSticker;
+      }
+    }
+
     conversation.lastMessageAt = new Date();
     conversation.lastMessage = inboundIsSticker
-      ? 'Sticker'
+      ? STICKER_FALLBACK_TEXT
       : incomingIsImage
         ? '📷 Imagen'
         : contentToSave || 'Sin contenido';
@@ -2521,6 +2571,9 @@ export class ChatService implements OnModuleDestroy {
       senderName: senderName || 'Cliente Desconocido',
       direction: resolvedDirection,
       externalId: messageRowExternalId || conversation.externalId,
+      metadata: inboundIsSticker
+        ? { type: 'sticker', isSticker: true }
+        : null,
       conversationId: conversation.id,
       conversation,
       tallerId: msgTallerId,
@@ -2534,6 +2587,7 @@ export class ChatService implements OnModuleDestroy {
     if (
       !suppressAutopilotAndSuggestions &&
       saved.direction === 'inbound' &&
+      !inboundIsSticker &&
       !isIncomingImage(saved.content)
     ) {
       const convRow = await this.conversationRepository.findOne({
@@ -2604,7 +2658,8 @@ export class ChatService implements OnModuleDestroy {
 
     if (
       resolvedDirection === 'outbound' &&
-      !data.skipOutboundFacebookSend
+      !data.skipOutboundFacebookSend &&
+      !inboundIsSticker
     ) {
       this.dispatchOutboundChannelMessage(
         conversation,
@@ -7025,11 +7080,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       }
     }
     const tail = lastOutboundIdx < 0 ? all : all.slice(lastOutboundIdx + 1);
-    return tail.filter(
-      (m) =>
+    return tail.filter((m) => {
+      const meta = m.metadata as { isSticker?: unknown; type?: unknown } | null;
+      if (meta?.isSticker === true || String(meta?.type ?? '') === 'sticker') {
+        return false;
+      }
+      return (
         String(m.direction ?? '').toLowerCase() === 'inbound' &&
-        isIncomingImage(m.content),
-    );
+        isIncomingImage(m.content) &&
+        !isFacebookStickerUrl(m.content)
+      );
+    });
   }
 
   /** Sincrónicas: visión en curso o el inbound actual trae foto. */
