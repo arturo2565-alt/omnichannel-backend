@@ -132,7 +132,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
     type: 'function',
     name: 'createAppointment',
     description:
-      'Registra una cita en la base de datos del taller con los datos completos del cliente. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. En Messenger pide el teléfono si aún no lo tienes. En el panel de simulación (playground) solo valida horario y no persiste.',
+      'Registra una cita en la base de datos del taller con los datos completos del cliente. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. Requiere nombre real (no "cliente"/"desconocido"), teléfono de al menos 8 dígitos (en WhatsApp puede omitirse si ya hay wa_id) y vehicleInfo con marca o modelo. Si falta alguno, la herramienta devuelve success:false y error MISSING_REQUIRED_DATA: pide esos datos amablemente y reintenta. En Messenger pide el teléfono si aún no lo tienes. En el panel de simulación (playground) valida horario y datos, pero no persiste.',
     parameters: {
       type: 'object',
       properties: {

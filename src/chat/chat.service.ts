@@ -74,6 +74,10 @@ import {
   textClaimsAppointmentBooked,
   workshopNaiveIsoFromUtc,
 } from './appointment-scheduling-helpers';
+import {
+  evaluateAppointmentRequiredClientData,
+  isUsableAppointmentClientName,
+} from './appointment-client-guard';
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { DEFAULT_CHAT_APPOINTMENT_PROMPT } from './ai-config-defaults';
 import { AiConfigService } from './ai-config.service';
@@ -6322,10 +6326,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     } else if (convName && !this.looksLikePlaceholderContactName(convName)) {
       clientName = convName;
     } else {
-      clientName = argName || convName || 'Cliente';
-      if (this.looksLikePlaceholderContactName(clientName)) {
-        clientName = 'Cliente';
-      }
+      clientName = '';
     }
 
     const vehicleRaw = pickFirstNonEmptyTrimmedString(
@@ -6372,12 +6373,8 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   private looksLikePlaceholderContactName(name: string | null | undefined): boolean {
     const s = String(name ?? '').trim().toLowerCase();
     if (!s) return true;
-    return (
-      s === 'cliente' ||
-      s === 'cliente desconocido' ||
-      s.startsWith('whatsapp +') ||
-      s.startsWith('whatsapp ')
-    );
+    if (s.startsWith('whatsapp +') || s.startsWith('whatsapp ')) return true;
+    return !isUsableAppointmentClientName(name);
   }
 
   private async mergeAppointmentClientFields(
@@ -6466,6 +6463,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     appointmentId?: string;
     scheduledAt?: string;
     error?: string;
+    message?: string;
   }> {
     let raw: Record<string, unknown>;
     try {
@@ -6488,6 +6486,16 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const existingActive = await this.loadActiveAppointmentForConversation(
       conversation.id,
     );
+    const clientGuard = evaluateAppointmentRequiredClientData({
+      clientName: fields.clientName || existingActive?.clientName,
+      phone: fields.phone || existingActive?.phone,
+      vehicleInfo: fields.vehicle || existingActive?.vehicle,
+      platform: conversation.platform,
+      waId: conversation.externalId,
+    });
+    if (!clientGuard.ok) {
+      return { ...clientGuard.payload };
+    }
     if (existingActive) {
       await this.mergeAppointmentClientFields(existingActive, fields);
       await this.syncContactFromAppointmentFields(conversation, fields);
@@ -6608,6 +6616,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     appointmentId?: string | null;
     scheduledAt?: string;
     error?: string;
+    message?: string;
     preview?: boolean;
   }> {
     let raw: Record<string, unknown>;
@@ -6626,6 +6635,31 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       return { success: false, error: resolved.error };
     }
     const d = resolved.date;
+
+    const clientName = pickFirstNonEmptyTrimmedString(
+      raw.clientName,
+      raw.client_name,
+      raw.nombre,
+    );
+    const vehicleInfo = pickFirstNonEmptyTrimmedString(
+      raw.vehicleInfo,
+      raw.vehicle_info,
+      raw.vehicleDescription,
+      raw.vehicle,
+    );
+    const phone = pickFirstNonEmptyTrimmedString(
+      raw.phone,
+      raw.customerPhone,
+      raw.telefono,
+    );
+    const clientGuard = evaluateAppointmentRequiredClientData({
+      clientName,
+      phone,
+      vehicleInfo,
+    });
+    if (!clientGuard.ok) {
+      return { ...clientGuard.payload };
+    }
 
     return {
       success: true,
