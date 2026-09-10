@@ -428,3 +428,59 @@ export function resolveMatrixServicioRaw(parteLibre: string): string {
   const catalog = resolveCatalogPiezaForMatrixLookup(parteLibre);
   return catalog ?? String(parteLibre ?? '').trim();
 }
+
+const REFACCION_CATALOG_CODES = new Set([
+  'FARO_IZQ',
+  'FARO_DER',
+  'CAL_IZQ',
+  'CAL_DER',
+  'FARO_NIEBLA_IZQ',
+  'FARO_NIEBLA_DER',
+  'MOLD_FD',
+  'GUIA_FD',
+]);
+
+/**
+ * Pieza de visión/panel → código de `refaccion_catalog` (FARO_IZQ, CAL_IZQ…).
+ * `null` si no hay equivalente en el catálogo semilla.
+ */
+export function refaccionCatalogCodigoForPieza(raw: unknown): string | null {
+  const t = String(raw ?? '')
+    .replace(/^REFACCION\s*:\s*/i, '')
+    .trim();
+  if (!t) return null;
+  const upper = t.toUpperCase().replace(/[\s-]+/g, '_');
+  if (REFACCION_CATALOG_CODES.has(upper)) return upper;
+
+  const n = normalizePiezaText(t.replace(/[_-]+/g, ' '));
+  const izq =
+    /izquierd|\bizq\b|\bti\b|\bdi\b/.test(n) || /_(ti|di|i)$/i.test(t);
+  const der =
+    /derech|\bder\b|\btd\b|\bdd\b/.test(n) || /_(td|dd|d)$/i.test(t);
+  const niebla = /\bniebla\b/.test(n);
+  const calavera = /\bcalavera\b/.test(n);
+  const faro = /\bfaro\b/.test(n) && !calavera;
+  const moldura = /\bmoldura\b/.test(n);
+  const guia = /\bguia\b/.test(n);
+  const fasciaDel = /\bfascia\b/.test(n) && /\bdelanter/.test(n);
+
+  if (calavera) {
+    if (der) return 'CAL_DER';
+    return 'CAL_IZQ';
+  }
+  if (faro && niebla) {
+    if (der) return 'FARO_NIEBLA_DER';
+    return 'FARO_NIEBLA_IZQ';
+  }
+  if (faro) {
+    if (der) return 'FARO_DER';
+    return 'FARO_IZQ';
+  }
+  if (moldura && (fasciaDel || /\bfd\b/.test(n) || /mold_fd/i.test(t))) {
+    return 'MOLD_FD';
+  }
+  if (guia && (fasciaDel || /\bfd\b/.test(n) || /guia_fd/i.test(t))) {
+    return 'GUIA_FD';
+  }
+  return null;
+}

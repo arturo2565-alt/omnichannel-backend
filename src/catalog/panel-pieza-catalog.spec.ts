@@ -2,6 +2,7 @@ import {
   canonicalizePanelCode,
   findPanelPiezaOption,
   normalizePanelPiezaCode,
+  refaccionCatalogCodigoForPieza,
   resolveCatalogPiezaForMatrixLookup,
   resolveMatrixServicioRaw,
 } from './panel-pieza-catalog';
@@ -60,6 +61,18 @@ describe('panel-pieza-catalog', () => {
     expect(resolveCatalogPiezaForMatrixLookup('CTI')).toBe('Salpicadera');
     expect(resolveCatalogPiezaForMatrixLookup('ESI')).toBe('Espejo');
     expect(resolveCatalogPiezaForMatrixLookup('BPE')).toBeNull();
+  });
+
+  it('refaccionCatalogCodigoForPieza mapea visión a código de catálogo', () => {
+    expect(refaccionCatalogCodigoForPieza('Calavera_TI')).toBe('CAL_IZQ');
+    expect(refaccionCatalogCodigoForPieza('calavera trasera derecha')).toBe(
+      'CAL_DER',
+    );
+    expect(refaccionCatalogCodigoForPieza('FARO_IZQ')).toBe('FARO_IZQ');
+    expect(refaccionCatalogCodigoForPieza('faro de niebla derecho')).toBe(
+      'FARO_NIEBLA_DER',
+    );
+    expect(refaccionCatalogCodigoForPieza('Puerta')).toBeNull();
   });
 
   it('resolveMatrixServicioRaw conserva texto libre si no hay mapeo', () => {
