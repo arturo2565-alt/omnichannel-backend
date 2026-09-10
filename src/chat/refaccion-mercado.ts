@@ -2,23 +2,9 @@ import {
   PANEL_PIEZA_REFACCION_CODE,
   canonicalizePanelCode,
   findPanelPiezaOption,
-  isOpticaPanelPieza,
 } from '../catalog/panel-pieza-catalog';
-import {
-  precioSugeridoAlCliente,
-  redondearRefaccionA50,
-} from '../catalog/refaccion-catalog-pricing';
-import {
-  inferSizeTierFromVehicleText,
-  type VehicleSizeTier,
-} from '../catalog/vehicle-pricing-profile';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { coerceDamageLevelCode, damageLevelRank } from './autofix-config';
-import {
-  buildRefaccionWebQuery,
-  isViableRefaccionPrice,
-  searchRefaccionWebPrices,
-} from './refaccion-web-search';
 
 const BREAKAGE_RE =
   /\b(rota|roto|rotura|quebrada|quebrado|partida|partido|destruida|destruido|desprendida|desprendido|faltante|hueco|perforad|estrellad|hecha\s+pedazos)\b/i;
@@ -36,83 +22,14 @@ export function looksLikeEvidentBreakage(
 
 /** MXN al cliente: costo base + 30%, redondeo comercial a $50. */
 export function precioAlClienteConMargen(costoBase: number): number {
-  const suggested = precioSugeridoAlCliente(costoBase, 30);
-  return redondearRefaccionA50(suggested);
+  const base = Math.max(0, Number(costoBase) || 0);
+  return Math.round((base * 1.3) / 50) * 50;
 }
 
-export function looksLikeOpticaOrUnusablePart(
-  pieza: string,
-  severidad: string,
-  descripcionTecnica?: string,
-): boolean {
-  const blob = String(descripcionTecnica ?? '');
-  const unusable =
-    BREAKAGE_RE.test(blob) ||
-    /\b(inservible|irreparable|estrellad|fisurad|reemplaz|cambiar la pieza)\b/i.test(
-      blob,
-    );
-  if (isOpticaPanelPieza(pieza)) {
-    if (unusable) return true;
-    const level = coerceDamageLevelCode(severidad);
-    return damageLevelRank(level) >= damageLevelRank('DF');
-  }
-  return looksLikeEvidentBreakage(severidad, descripcionTecnica);
-}
-
-export type RefaccionQuoteNoteLine = {
-  label: string;
-  monto: number;
-  fuente?: RefaccionMercadoEstimate['fuente'];
-};
-
-function origenRefaccion(fuente?: RefaccionMercadoEstimate['fuente']): string {
-  if (fuente === 'catalogo') return 'precio manual del taller';
-  if (fuente === 'estimacion_categoria') {
-    return 'estimado comercial por gama, sujeto a revisión física';
-  }
-  if (fuente === 'web') return 'búsqueda web MX/CDMX (+30% margen, redondeo a $50)';
-  return 'mercado MX (+30% margen, redondeo a $50)';
-}
-
-export function buildRefaccionDisclaimer(
-  pieza: string,
-  monto: number,
-  fuente: RefaccionMercadoEstimate['fuente'] = 'web',
-): string {
-  return buildConsolidatedRefaccionQuoteNote([
-    { label: pieza, monto, fuente },
-  ]);
-}
-
-/** Un solo bloque comercial; varias piezas van en viñetas (no N notas repetidas). */
-export function buildConsolidatedRefaccionQuoteNote(
-  lines: readonly RefaccionQuoteNoteLine[],
-): string {
-  const valid = lines
-    .map((l) => ({
-      label: String(l.label ?? '').trim() || 'la pieza',
-      monto: Number.isFinite(Number(l.monto))
-        ? Math.max(0, Math.round(Number(l.monto)))
-        : 0,
-      fuente: l.fuente,
-    }))
-    .filter((l) => l.monto > 0);
-  if (!valid.length) return '';
-  const hasCategoria = valid.some((l) => l.fuente === 'estimacion_categoria');
-  const footer = hasCategoria
-    ? 'El montaje y la pintura de matriz van en renglones aparte. *Estimado comercial por gama — se confirma número de parte en la revisión física.*'
-    : 'El montaje y la pintura de matriz van en renglones aparte. Sujeto a confirmación de número de parte en físico.';
-  if (valid.length === 1) {
-    const row = valid[0]!;
-    return `📦 *Nota de Refacción:* Pieza nueva/reemplazo de *${row.label}* — $${row.monto.toLocaleString('es-MX')} MXN (${origenRefaccion(row.fuente)}). ${footer}`;
-  }
-  const bullets = valid
-    .map(
-      (r) =>
-        `• ${r.label} — $${r.monto.toLocaleString('es-MX')} MXN`,
-    )
-    .join('\n');
-  return `📦 *Nota de Refacción:* Incluimos el costo estimado de las piezas nuevas/reemplazo (mercado MX +30%, redondeo a $50):\n${bullets}\n${footer}`;
+export function buildRefaccionDisclaimer(pieza: string, monto: number): string {
+  const label = String(pieza ?? '').trim() || 'la pieza';
+  const amt = Math.max(0, Math.round(Number(monto) || 0));
+  return `📦 *Nota sobre Refacción:* Por la magnitud del daño en ${label}, es muy probable que requiera reemplazo. Te incluimos un costo estimado de mercado de $${amt.toLocaleString('es-MX')} MXN (+30% margen logístico), sujeto a confirmación de número de parte en físico.`;
 }
 
 export function piezaLabelForRefaccion(raw: string): string {
@@ -127,18 +44,10 @@ export type RefaccionMercadoEstimate = {
   anio: string | null;
   costoBase: number;
   precioAlCliente: number;
-  fuente: 'catalogo' | 'mercadolibre' | 'web' | 'estimacion_categoria';
+  fuente: 'mercadolibre' | 'estimacion';
   muestra: number;
   query: string;
   error?: string;
-  requiereAnioModelo?: boolean;
-  requiereConfirmacionManual?: boolean;
-};
-
-export type MercadoLibreSearchHit = {
-  price?: number;
-  currency_id?: string;
-  title?: string;
 };
 
 function median(nums: number[]): number {
@@ -148,206 +57,90 @@ function median(nums: number[]): number {
   return s.length % 2 ? s[mid]! : Math.round((s[mid - 1]! + s[mid]!) / 2);
 }
 
-/** Query web: `precio "${pieza}" "${marca} ${modelo}" ${anio} comprar mexico cdmx`. */
-export function buildRefaccionMarketQuery(input: {
-  pieza: string;
-  marca?: string | null;
-  modelo?: string | null;
-  vehiculo?: string | null;
-  anio?: string | null;
-}): string {
-  const pieza = piezaLabelForRefaccion(input.pieza);
-  const marca = String(input.marca ?? '').trim();
-  const modelo = String(input.modelo ?? '').trim();
-  const vehiculo = String(input.vehiculo ?? '').trim();
-  const identity =
-    [marca, modelo].filter(Boolean).join(' ').trim() || vehiculo;
-  return buildRefaccionWebQuery({
-    pieza,
-    marca,
-    modelo: identity && !modelo ? identity : modelo,
-    anio: input.anio,
-  });
+function buildSearchQuery(pieza: string, vehiculo: string, anio?: string): string {
+  const parts = [
+    piezaLabelForRefaccion(pieza),
+    String(vehiculo ?? '').trim(),
+    String(anio ?? '').replace(/\D/g, '').slice(0, 4),
+    'refacción',
+  ].filter(Boolean);
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
-/** Primeros precios MXN viables ($600–$12,000). */
-export function selectViableMlPrices(
-  results: readonly MercadoLibreSearchHit[],
-): number[] {
-  const prices: number[] = [];
-  for (const r of results) {
-    const currency = String(r.currency_id ?? 'MXN').toUpperCase();
-    if (currency && currency !== 'MXN') continue;
-    const n = Number(r.price);
-    if (!isViableRefaccionPrice(n)) continue;
-    prices.push(Math.round(n));
-    if (prices.length >= 5) break;
-  }
-  return prices;
-}
-
-type RefaccionCategoriaEstimada = 'optica' | 'iluminacion' | 'plastico' | 'colision';
-
-function categoriaEstimadaDePieza(pieza: string): RefaccionCategoriaEstimada {
-  const n = String(pieza ?? '').toLowerCase();
-  if (/niebla|antiniebla|faro_niebla/.test(n)) return 'iluminacion';
-  if (isOpticaPanelPieza(pieza) || /faro|calavera|optica/.test(n)) return 'optica';
-  if (/mold|guia|plast/.test(n)) return 'plastico';
-  return 'colision';
-}
-
-/** Base comercial CDMX por categoría de pieza × gama (costo, antes del +30%). */
-const CATEGORIA_COSTO_POR_GAMA: Record<
-  RefaccionCategoriaEstimada,
-  Record<VehicleSizeTier, number>
-> = {
-  optica: { Compacto: 2200, Mediano: 2800, Grande: 3800, XL: 4500 },
-  iluminacion: { Compacto: 900, Mediano: 1200, Grande: 1600, XL: 2000 },
-  plastico: { Compacto: 800, Mediano: 1100, Grande: 1500, XL: 1800 },
-  colision: { Compacto: 2500, Mediano: 3200, Grande: 4200, XL: 5000 },
-};
-
-export function estimarCostoBasePorCategoria(
-  pieza: string,
-  sizeTier: VehicleSizeTier = 'Mediano',
-): number {
-  const cat = categoriaEstimadaDePieza(pieza);
-  return CATEGORIA_COSTO_POR_GAMA[cat][sizeTier] ?? CATEGORIA_COSTO_POR_GAMA[cat].Mediano;
-}
-
-async function searchMercadoLibreHits(
-  query: string,
-): Promise<MercadoLibreSearchHit[]> {
-  const url = `https://api.mercadolibre.com/sites/MLM/search?q=${encodeURIComponent(query)}`;
+async function searchMercadoLibrePrices(query: string): Promise<number[]> {
+  const url = `https://api.mercadolibre.com/sites/MLM/search?q=${encodeURIComponent(query)}&limit=12`;
   const res = await fetch(url, {
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) return [];
-  const json = (await res.json()) as { results?: MercadoLibreSearchHit[] };
-  return Array.isArray(json.results) ? json.results : [];
+  const json = (await res.json()) as { results?: Array<{ price?: number }> };
+  const prices = (json.results ?? [])
+    .map((r) => Number(r.price))
+    .filter((n) => Number.isFinite(n) && n >= 200 && n <= 80_000);
+  return prices;
 }
 
-function emptyEstimate(
-  input: {
-    pieza: string;
-    vehiculo: string;
-    anio: string | null;
-    query: string;
-  },
-  extra: Partial<RefaccionMercadoEstimate>,
-): RefaccionMercadoEstimate {
-  return {
-    success: false,
-    pieza: piezaLabelForRefaccion(input.pieza),
-    vehiculo: input.vehiculo,
-    anio: input.anio,
-    costoBase: 0,
-    precioAlCliente: 0,
-    fuente: 'mercadolibre',
-    muestra: 0,
-    query: input.query,
-    ...extra,
+/** Fallback conservador CDMX si no hay muestra de mercado. */
+function fallbackCostoBase(pieza: string): number {
+  const code = canonicalizePanelCode(pieza);
+  const map: Record<string, number> = {
+    FD: 2800,
+    FT: 2600,
+    SI: 2200,
+    SD: 2200,
+    STI: 2400,
+    STD: 2400,
+    CTI: 3200,
+    CTD: 3200,
+    PDI: 3500,
+    PDD: 3500,
+    PTI: 3300,
+    PTD: 3300,
+    EI: 1800,
+    ED: 1800,
+    Cofre: 4500,
+    Toldo: 5000,
+    'Tapa Cajuela': 3800,
+    ESI: 1200,
+    ESD: 1200,
+    Espejo: 1200,
   };
+  return map[code] ?? 2500;
 }
 
-export async function buscarCostoRefaccionOnline(input: {
+export async function estimarRefaccionMercado(input: {
   pieza: string;
-  marca?: string | null;
-  modelo?: string | null;
-  vehiculo?: string | null;
+  vehiculo: string;
   anio?: string | null;
-  sizeTier?: VehicleSizeTier | null;
 }): Promise<RefaccionMercadoEstimate> {
   const pieza = String(input.pieza ?? '').trim();
+  const vehiculo = String(input.vehiculo ?? '').trim();
   const anio = String(input.anio ?? '').replace(/\D/g, '').slice(0, 4) || null;
-  const marca = String(input.marca ?? '').trim();
-  const modelo = String(input.modelo ?? '').trim();
-  const vehiculo =
-    String(input.vehiculo ?? '').trim() ||
-    [marca, modelo, anio].filter(Boolean).join(' ').trim();
-  const query = buildRefaccionMarketQuery({
-    pieza,
-    marca,
-    modelo,
-    vehiculo,
-    anio,
-  });
+  const query = buildSearchQuery(pieza, vehiculo, anio ?? undefined);
 
-  if (!anio || !modelo) {
-    return emptyEstimate(
-      { pieza, vehiculo, anio, query },
-      {
-        requiereAnioModelo: true,
-        error: 'Se requiere marca, modelo y año (ej. Mazda 2 2018).',
-      },
-    );
-  }
-
-  const webPrices: number[] = [];
+  let prices: number[] = [];
   try {
-    const webHits = await searchRefaccionWebPrices(query);
-    webPrices.push(...webHits.map((h) => h.price).filter(isViableRefaccionPrice));
+    prices = await searchMercadoLibrePrices(query);
   } catch {
-    /* ML / fallback */
+    prices = [];
   }
 
-  let mlHits: MercadoLibreSearchHit[] = [];
-  try {
-    mlHits = await searchMercadoLibreHits(
-      `${piezaLabelForRefaccion(pieza)} ${marca} ${modelo} ${anio}`.trim(),
-    );
-  } catch {
-    mlHits = [];
-  }
-  const mlPrices = selectViableMlPrices(mlHits);
-  const prices = [...webPrices, ...mlPrices];
-  const unique = [...new Set(prices)].sort((a, b) => a - b);
+  const costoBase = prices.length >= 3 ? median(prices) : fallbackCostoBase(pieza);
+  const fuente: RefaccionMercadoEstimate['fuente'] =
+    prices.length >= 3 ? 'mercadolibre' : 'estimacion';
 
-  if (unique.length >= 1) {
-    const costoBase = unique.length === 1 ? unique[0]! : median(unique);
-    const precioAlCliente = precioAlClienteConMargen(costoBase);
-    if (Number.isFinite(precioAlCliente) && precioAlCliente > 0) {
-      return {
-        success: true,
-        pieza: piezaLabelForRefaccion(pieza),
-        vehiculo,
-        anio,
-        costoBase: Math.max(0, Math.round(Number(costoBase) || 0)),
-        precioAlCliente,
-        fuente: webPrices.length ? 'web' : 'mercadolibre',
-        muestra: unique.length,
-        query,
-      };
-    }
-  }
-
-  const tier =
-    input.sizeTier ??
-    inferSizeTierFromVehicleText([marca, modelo, vehiculo].filter(Boolean).join(' '));
-  const costoBase = estimarCostoBasePorCategoria(pieza, tier);
-  const precioAlCliente = precioAlClienteConMargen(costoBase);
   return {
     success: true,
     pieza: piezaLabelForRefaccion(pieza),
     vehiculo,
     anio,
-    costoBase,
-    precioAlCliente,
-    fuente: 'estimacion_categoria',
-    muestra: 0,
+    costoBase: Math.round(costoBase),
+    precioAlCliente: precioAlClienteConMargen(costoBase),
+    fuente,
+    muestra: prices.length,
     query,
   };
-}
-
-export async function estimarRefaccionMercado(input: {
-  pieza: string;
-  vehiculo?: string | null;
-  marca?: string | null;
-  modelo?: string | null;
-  anio?: string | null;
-}): Promise<RefaccionMercadoEstimate> {
-  return buscarCostoRefaccionOnline(input);
 }
 
 export function buildRefaccionInventoryItem(
@@ -355,27 +148,13 @@ export function buildRefaccionInventoryItem(
   sourcePieza: string,
 ): DetectedDamageItem {
   const source = canonicalizePanelCode(sourcePieza) || sourcePieza;
-  const precio = Number.isFinite(Number(estimate.precioAlCliente))
-    ? Math.max(0, Math.round(Number(estimate.precioAlCliente)))
-    : 0;
-  const base = Number.isFinite(Number(estimate.costoBase))
-    ? Math.max(0, Math.round(Number(estimate.costoBase)))
-    : 0;
-  const origen =
-    estimate.fuente === 'catalogo'
-      ? 'precio manual taller'
-      : estimate.fuente === 'estimacion_categoria'
-        ? 'estimado por gama'
-        : estimate.fuente === 'web'
-          ? 'web MX/CDMX'
-          : 'mercado MX';
   return {
     pieza: `${PANEL_PIEZA_REFACCION_CODE}:${source}`,
     severidad: 'N/A',
-    descripcionTecnica: `Refacción ${estimate.pieza} — pieza nueva/reemplazo $${precio.toLocaleString('es-MX')} (${origen}, base $${base.toLocaleString('es-MX')}). Montaje/pintura de matriz aparte si aplica.`,
+    descripcionTecnica: `Refacción ${estimate.pieza} — mercado MX $${estimate.precioAlCliente.toLocaleString('es-MX')} (base $${estimate.costoBase.toLocaleString('es-MX')}, +30%).`,
     urls_origen: [],
     detallesRefaccion: estimate.pieza,
-    precioMx: precio,
+    precioMx: estimate.precioAlCliente,
     refaccionDePieza: canonicalizePanelCode(sourcePieza) || sourcePieza,
   };
 }

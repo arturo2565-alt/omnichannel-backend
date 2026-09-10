@@ -26,7 +26,6 @@ import { AiConfigEntity } from './chat/entities/ai-config.entity';
 import { LlmCall } from './chat/entities/llm-call.entity';
 import { LeadEventEntity } from './chat/entities/lead-event.entity';
 import { PriceMatrix } from './catalog/entities/price-matrix.entity';
-import { RefaccionCatalog } from './catalog/entities/refaccion-catalog.entity';
 
 const databaseUrl = process.env.DATABASE_URL?.trim();
 const isCloudDatabase = Boolean(databaseUrl);
@@ -68,7 +67,6 @@ const dbSynchronize =
         LlmCall,
         LeadEventEntity,
         PriceMatrix,
-        RefaccionCatalog,
       ],
       autoLoadEntities: true,
       synchronize: dbSynchronize,

@@ -105,9 +105,7 @@ describe('autopilot-cotizacion-express', () => {
     expect(result.success).toBe(true);
     expect(result.extras).toBeUndefined();
     expect(result.lines).toHaveLength(1);
-    expect(result.lines?.[0]?.servicio).toMatch(
-      /Baño de Pintura y Cambio de Color/,
-    );
+    expect(result.lines?.[0]?.servicio).toMatch(/Transformación Total/);
     expect(result.totalMx).toBe(result.subtotalMx);
     expect(result.totalMx).toBe(31_000);
   });

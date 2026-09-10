@@ -1,9 +1,7 @@
 import {
   canonicalizePanelCode,
   findPanelPiezaOption,
-  isOpticaPanelPieza,
   normalizePanelPiezaCode,
-  refaccionCatalogCodigoForPieza,
   resolveCatalogPiezaForMatrixLookup,
   resolveMatrixServicioRaw,
 } from './panel-pieza-catalog';
@@ -62,24 +60,6 @@ describe('panel-pieza-catalog', () => {
     expect(resolveCatalogPiezaForMatrixLookup('CTI')).toBe('Salpicadera');
     expect(resolveCatalogPiezaForMatrixLookup('ESI')).toBe('Espejo');
     expect(resolveCatalogPiezaForMatrixLookup('BPE')).toBeNull();
-  });
-
-  it('resuelve faros y calaveras al código oficial de óptica', () => {
-    expect(canonicalizePanelCode('Faro_Izquierdo')).toBe('Faro_Izquierdo');
-    expect(canonicalizePanelCode('faro izquierdo')).toBe('Faro_Izquierdo');
-    expect(canonicalizePanelCode('Calavera trasera derecha')).toBe(
-      'Calavera_Derecha',
-    );
-    expect(canonicalizePanelCode('FARO_IZQ')).toBe('Faro_Izquierdo');
-    expect(canonicalizePanelCode('faro de niebla izquierdo')).toBe(
-      'Faro_Niebla_Izquierdo',
-    );
-    expect(isOpticaPanelPieza('Calavera_Izquierda')).toBe(true);
-    expect(isOpticaPanelPieza('FD')).toBe(false);
-    expect(refaccionCatalogCodigoForPieza('Faro_Derecho')).toBe('FARO_DER');
-    expect(refaccionCatalogCodigoForPieza('CAL_IZQ')).toBe('CAL_IZQ');
-    expect(resolveCatalogPiezaForMatrixLookup('Faro_Izquierdo')).toBeNull();
-    expect(resolveCatalogPiezaForMatrixLookup('Calavera')).toBeNull();
   });
 
   it('resolveMatrixServicioRaw conserva texto libre si no hay mapeo', () => {

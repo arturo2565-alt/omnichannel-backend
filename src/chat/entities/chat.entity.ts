@@ -31,8 +31,6 @@ export interface DetectedDamageItem {
   detallesRefaccion?: string;
   /** Código de panel que originó la refacción (FD, PDI…). */
   refaccionDePieza?: string;
-  /** Visión: la pieza está rota / inservible y requiere reemplazo. */
-  requiere_refaccion?: boolean;
 }
 
 /** @deprecated usar DetectedDamageItem (descripcion → descripcionTecnica, urls_asociadas → urls_origen). */
@@ -54,12 +52,6 @@ export interface VehicleDamageAnalysis {
   inventory?: DetectedDamageItem[];
   /** Vehículo visto en fotos (campo `vehiculo_detectado` del JSON de visión). */
   vehiculoDetectado?: string;
-  /** Refacción: esperando año y modelo antes de buscar precio de mercado. */
-  refaccionGate?: {
-    solicitarAnioModelo: boolean;
-    piezasPendientes: Array<{ pieza: string; label: string }>;
-    guardadoEn: string;
-  };
   /** Baño de pintura: peritaje guardado, esperando marca/modelo antes de cotizar. */
   banioPinturaGate?: {
     solicitarModeloBanio: boolean;

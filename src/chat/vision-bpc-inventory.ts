@@ -1,10 +1,10 @@
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { coerceDamageLevelCode, damageLevelRank, type DamageLevel } from './autofix-config';
 import {
+  cambioDeColorAddonMxForSizeTier,
   flattenBañoTierSource,
   inferBañoTierSeveridad,
   isPlaceholderBañoVehicleLabel,
-  resolveBpccTurnkeyUnitPrice,
 } from './instant-quote-from-text';
 import type { VehicleSizeTier } from '../catalog/vehicle-pricing-profile';
 
@@ -96,7 +96,7 @@ export function resolveVisionBanioCode(
   return 'BPE';
 }
 
-/** BPEI: +15% interiores. BPCC: BPEI + suplemento de tono, un solo monto. */
+/** BPEI: +15% interiores. BPCC: suplemento de cambio de color / desarmado. */
 export function applyBanioCodePriceAdjustments(
   unitPrice: number,
   banioCode: string,
@@ -105,11 +105,11 @@ export function applyBanioCodePriceAdjustments(
   let price = Math.max(0, Math.round(Number(unitPrice) || 0));
   if (price <= 0) return 0;
   const code = String(banioCode ?? '').toUpperCase().trim();
-  if (code === 'BPCC') {
-    return resolveBpccTurnkeyUnitPrice(price, sizeTier ?? 'Mediano');
-  }
   if (code === 'BPEI') {
     price = Math.round((price * 1.15) / 50) * 50;
+  }
+  if (code === 'BPCC') {
+    price += cambioDeColorAddonMxForSizeTier(sizeTier ?? 'Mediano');
   }
   return price;
 }

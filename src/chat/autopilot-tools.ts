@@ -173,58 +173,26 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
   },
   {
     type: 'function',
-    name: 'buscarCostoRefaccionOnline',
+    name: 'estimarRefaccionMercado',
     description:
-      'Busca el costo de una refacción en web México/CDMX (y MercadoLibre). REQUIERE marca, modelo y año (ej. Mazda 2 2018). PROHIBIDO pedir versión o equipamiento. Aplica +30% y redondea a $50. Si no hay muestra web, usa el estimado comercial por gama. Inserta cada pieza como renglón REFACCION; en el mensaje al cliente agrupa las notas en un solo bloque.',
+      'Estima el costo de una refacción (pieza de reemplazo) con rangos de mercado México (MercadoLibre / refaccionarias) y aplica +30% de margen logístico. Úsala cuando el daño sea DF o DMFuerte con rotura evidente, o el cliente pregunte por cambiar la pieza. Inserta la línea REFACCION en el carrito.',
     parameters: {
       type: 'object',
       properties: {
         pieza: {
           type: 'string',
-          description: 'Pieza a reemplazar (Calavera_Izquierda, Faro_Derecho, FD, etc.).',
+          description: 'Pieza a reemplazar (FD, fascia delantera, puerta, etc.).',
         },
         vehiculo: {
           type: 'string',
-          description: 'Marca y modelo (ej. Volkswagen Jetta).',
-        },
-        modelo: {
-          type: 'string',
-          description: 'Modelo (ej. Jetta, 2, March). No pidas versión.',
+          description: 'Marca y modelo (ej. Jetta, Nissan March).',
         },
         anio: {
           type: 'string',
-          description: 'Año del vehículo (obligatorio, ej. 2019).',
-        },
-        marca: {
-          type: 'string',
-          description: 'Marca si se conoce (ej. Volkswagen).',
+          description: 'Año del vehículo si se conoce (ej. 2018).',
         },
       },
-      required: ['pieza', 'anio'],
-    },
-    strict: false,
-  },
-  {
-    type: 'function',
-    name: 'estimarRefaccionMercado',
-    description:
-      'Alias de buscarCostoRefaccionOnline. Marca + modelo + año bastan (Mazda 2 2018). No pidas versión.',
-    parameters: {
-      type: 'object',
-      properties: {
-        pieza: {
-          type: 'string',
-          description: 'Pieza a reemplazar.',
-        },
-        vehiculo: {
-          type: 'string',
-          description: 'Marca y modelo.',
-        },
-        modelo: { type: 'string', description: 'Modelo (sin versión).' },
-        anio: { type: 'string', description: 'Año (obligatorio).' },
-        marca: { type: 'string', description: 'Marca.' },
-      },
-      required: ['pieza', 'anio'],
+      required: ['pieza', 'vehiculo'],
     },
     strict: false,
   },

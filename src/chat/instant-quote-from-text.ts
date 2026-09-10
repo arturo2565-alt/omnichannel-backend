@@ -1098,29 +1098,8 @@ export function inferBañoTierSeveridad(contextText: string): string {
 const COLOR_NAME_TOKENS =
   /\b(negro|blanco|rojo|azul|gris|plateado|dorado|beige|amarillo|verde|naranja|morado|violeta|perla|metalizado|mate|bicolor|vinotinto|guinda|champagne|plata|negro|azul\s*marino)\b/;
 
-/** Copy comercial único de BPCC (sin desglose exterior + suplemento). */
-export const BPCC_TURNKEY_LABEL =
-  'Baño de Pintura y Cambio de Color (Carrocería Completa e Interiores de Marcos, Cofre y Cajuela)';
-
-/** BPEI (exterior × 1.15) + suplemento de tono, un solo monto. */
-export function resolveBpccTurnkeyUnitPrice(
-  exteriorBase: number,
-  sizeTier: VehicleSizeTier,
-): number {
-  const base = Math.max(0, Math.round(Number(exteriorBase) || 0));
-  if (base <= 0) return 0;
-  const withInteriors = Math.round((base * 1.15) / 50) * 50;
-  return withInteriors + cambioDeColorAddonMxForSizeTier(sizeTier);
-}
-
-function looksLikeBpccIntent(text: string): boolean {
-  const n = normalizeTextForMatch(text);
-  return /\bbpcc\b/.test(n) || mentionsCambioDeColor(text);
-}
-
 export function mentionsCambioDeColor(userText: string): boolean {
   const n = normalizeTextForMatch(userText);
-  if (/\bbpcc\b/.test(n)) return true;
   if (
     /\bcambio\s+de\s+color\b/.test(n) ||
     /\bcambio\s+color\b/.test(n) ||
@@ -1312,24 +1291,27 @@ export function materializeIntegralQuoteResolution(
     isInstantService: true,
   });
 
-  const isBpcc =
-    isBañoDePinturaServicio(canonical) &&
-    looksLikeBpccIntent(tierSourceForCambioColor);
-  const unit = isBpcc
-    ? resolveBpccTurnkeyUnitPrice(resolved.unitPrice, profile.sizeTier)
-    : resolved.unitPrice;
   const lines: InstantQuoteLine[] = [
-    {
-      label: isBpcc ? BPCC_TURNKEY_LABEL : canonical,
-      amount: unit,
-    },
+    { label: canonical, amount: resolved.unitPrice },
   ];
+  const extras: InstantQuoteLine[] = [];
+  let add = 0;
+  if (
+    isBañoDePinturaServicio(canonical) &&
+    mentionsCambioDeColor(tierSourceForCambioColor)
+  ) {
+    add = cambioDeColorAddonMxForSizeTier(profile.sizeTier);
+    extras.push({ label: 'Cambio de color', amount: add });
+  }
+
+  const subtotal = resolved.unitPrice;
+  const total = resolved.unitPrice + add;
   return {
     lines,
-    extras: [],
-    subtotal: unit,
-    total: unit,
-    precioMx: unit,
+    extras,
+    subtotal,
+    total,
+    precioMx: resolved.unitPrice,
     diasEntrega: resolved.diasEntrega > 0 ? resolved.diasEntrega : 3,
     currency: AUTO_FIX_CURRENCY,
   };
@@ -1408,32 +1390,28 @@ export function materializeInstantQuoteResolution(
     isInstantService: true,
   });
 
-  const isBpcc =
-    isBañoDePinturaServicio(canonical) &&
-    looksLikeBpccIntent(tierSourceForCambioColor);
-  const sizeForAddon = resolveIntegralVehicleProfileForQuote(
-    tierSourceForCambioColor,
-    canonical,
-    severidadLiteral,
-  ).sizeTier;
-  const unit = isBpcc
-    ? resolveBpccTurnkeyUnitPrice(base, sizeForAddon)
-    : base;
   const lines: InstantQuoteLine[] = [
-    {
-      label: isBpcc
-        ? BPCC_TURNKEY_LABEL
-        : `${canonical} (${severidadLiteral})`,
-      amount: unit,
-    },
+    { label: `${canonical} (${severidadLiteral})`, amount: base },
   ];
+  const extras: InstantQuoteLine[] = [];
+  let add = 0;
+  if (isBañoDePinturaServicio(canonical) && mentionsCambioDeColor(tierSourceForCambioColor)) {
+    add = cambioDeColorAddonMx(severidadLiteral);
+    extras.push({
+      label: 'Cambio de color',
+      amount: add,
+    });
+  }
+
+  const subtotal = base;
+  const total = base + add;
   const diasEntrega = snap.getDiasEntregaForCanonical(canonical, severidadLiteral);
   return {
     lines,
-    extras: [],
-    subtotal: unit,
-    total: unit,
-    precioMx: unit,
+    extras,
+    subtotal,
+    total,
+    precioMx: base,
     diasEntrega: diasEntrega > 0 ? diasEntrega : 3,
     currency: AUTO_FIX_CURRENCY,
   };

@@ -342,11 +342,8 @@ export function buildObtenerCotizacionExpressPayload(
     totalMx,
     diasEntrega,
     leadAgendado,
-    formatoRedaccion: lines.some((l) =>
-      /cambio de color|carrocer[ií]a completa e interiores/i.test(l.servicio),
-    )
-      ? 'Presenta UN solo concepto llave en mano de baño de pintura y cambio de color (carrocería completa e interiores de marcos, cofre y cajuela). PROHIBIDO desglosar baño exterior + suplemento de color. El total ya incluye exteriores e interiores. Emojis 🛠️, total en negritas, Sikkens y garantía.'
-      : 'Redacta al cliente con emojis 🛠️ por línea, total en negritas, Materiales premium Sikkens, Acabado Espejo y garantía por escrito cuando encaje. Menciona el vehículo y si aplica segmento premium.',
+    formatoRedaccion:
+      'Redacta al cliente con emojis 🛠️ por línea, total en negritas, Materiales premium Sikkens, Acabado Espejo y garantía por escrito cuando encaje. Menciona el vehículo y si aplica segmento premium.',
   };
 
   if (leadAgendado) {

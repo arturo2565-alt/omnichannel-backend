@@ -19,9 +19,8 @@ export function detectCartPricingMode(
   if (!inventory.length) return 'vacio';
   const hasBpc = inventory.some((it) => isVisionBpcPiezaCode(it.pieza));
   const hasPiezas = inventory.some((it) => isIndividualPanelPieza(it.pieza));
-  const hasRefaccion = inventory.some((it) => isRefaccionPieza(it.pieza));
   if (hasBpc && !hasPiezas) return 'bpc';
-  if (hasPiezas || hasRefaccion) return 'piezas';
+  if (hasPiezas) return 'piezas';
   return 'vacio';
 }
 
@@ -35,7 +34,7 @@ export function sanitizeCartInventoryForPricing(
   const mode = detectCartPricingMode(inventory);
   if (mode === 'piezas') {
     return inventory
-      .filter((it) => isIndividualPanelPieza(it.pieza) || isRefaccionPieza(it.pieza))
+      .filter((it) => isIndividualPanelPieza(it.pieza))
       .map((it) => ({
         pieza: it.pieza,
         severidad: it.severidad,
@@ -51,7 +50,6 @@ export function sanitizeCartInventoryForPricing(
         ...(it.refaccionDePieza
           ? { refaccionDePieza: it.refaccionDePieza }
           : {}),
-        ...(it.requiere_refaccion ? { requiere_refaccion: true } : {}),
       }));
   }
   if (mode === 'bpc') {

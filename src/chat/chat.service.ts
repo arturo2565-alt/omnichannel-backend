@@ -122,23 +122,12 @@ import {
 } from './inbound-sticker';
 import {
   buildRefaccionDisclaimer,
-  buildConsolidatedRefaccionQuoteNote,
   buildRefaccionInventoryItem,
-  buscarCostoRefaccionOnline,
-  looksLikeOpticaOrUnusablePart,
+  estimarRefaccionMercado,
+  looksLikeEvidentBreakage,
   piezaLabelForRefaccion,
-  type RefaccionMercadoEstimate,
 } from './refaccion-mercado';
-import {
-  buildConsolidatedRefaccionAskNote,
-  extractVehicleYear,
-  hasConfirmedMarcaModeloAnio,
-  parseVehicleYearAndModel,
-  pendientesFromPieces,
-  type RefaccionGateState,
-} from './refaccion-vehicle-gate';
 import { canonicalizePanelCode } from '../catalog/panel-pieza-catalog';
-import { RefaccionesService } from '../catalog/refacciones.service';
 import { detectCartPricingMode } from './quote-cart-inventory-mode';
 import {
   matchAdButtonAutoReply,
@@ -199,7 +188,6 @@ import {
   resolveBañoSeveridadFromVehicleProfile,
   resolveVehiclePricingProfile,
   vehiclePricingProfileFromAnalysis,
-  type VehicleSizeTier,
 } from '../catalog/vehicle-pricing-profile';
 import { resolveIntegralPriceForVehicleProfile } from '../catalog/vehicle-integral-pricing';
 import { QuoteCartService } from './quote-cart.service';
@@ -485,17 +473,12 @@ function normalizeDetectedDamagesJson(raw: unknown): DetectedDamageItem[] {
           : [];
     let urls_origen = u.map((x) => String(x).trim()).filter(Boolean);
     if (!pieza || !severidad) continue;
-    const requiereRefaccion =
-      r['requiere_refaccion'] === true ||
-      r['requiere_refaccion'] === 'true' ||
-      r['requiereRefaccion'] === true;
     out.push({
       pieza,
       severidad,
       descripcionTecnica:
         descripcionTecnica || 'Sin descripción técnica disponible.',
       urls_origen,
-      ...(requiereRefaccion ? { requiere_refaccion: true } : {}),
     });
   }
   if (!out.length) {
@@ -527,12 +510,6 @@ function inventoryItemsToVehicleAnalysis(
     ...(it.vehiculoDetectado?.trim()
       ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
       : {}),
-    ...(it.requiere_refaccion ? { requiere_refaccion: true } : {}),
-    ...(it.precioMx != null && Number.isFinite(Number(it.precioMx))
-      ? { precioMx: Math.max(0, Math.round(Number(it.precioMx))) }
-      : {}),
-    ...(it.detallesRefaccion ? { detallesRefaccion: it.detallesRefaccion } : {}),
-    ...(it.refaccionDePieza ? { refaccionDePieza: it.refaccionDePieza } : {}),
   }));
   const vehiculoDetectado = pickVehicleLabelFromDamageInventory(inv);
   const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
@@ -746,8 +723,6 @@ export class ChatService implements OnModuleDestroy {
     private readonly aiConfigService: AiConfigService,
 
     private readonly catalogService: CatalogService,
-
-    private readonly refaccionesService: RefaccionesService,
 
     private readonly tallerService: TallerService,
 
@@ -1185,18 +1160,11 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * URLs únicas de imágenes inbound. `lookbackSeconds` acota la ventana
-   * (default: {@link ChatService.RECENT_IMAGE_LOOKBACK_MS}).
+   * URLs únicas de imágenes entrantes (**inbound**) en esta conversación cuya `createdAt`
+   * cae dentro de los últimos 5 minutos, en orden cronológico (más antigua primero).
    */
-  async getRecentImages(
-    conversationId: string,
-    lookbackSeconds?: number,
-  ): Promise<string[]> {
-    const windowMs =
-      lookbackSeconds != null && Number.isFinite(lookbackSeconds) && lookbackSeconds > 0
-        ? lookbackSeconds * 1000
-        : ChatService.RECENT_IMAGE_LOOKBACK_MS;
-    const since = new Date(Date.now() - windowMs);
+  async getRecentImages(conversationId: string): Promise<string[]> {
+    const since = new Date(Date.now() - ChatService.RECENT_IMAGE_LOOKBACK_MS);
     const messages = await this.messageRepository
       .createQueryBuilder('m')
       .where('m.conversationId = :cid', { cid: conversationId })
@@ -1591,123 +1559,39 @@ export class ChatService implements OnModuleDestroy {
     return [...inv, ...fromPrev].filter(
       (it) =>
         !isVisionBpcPiezaCode(it.pieza) &&
-        (Boolean(it.requiere_refaccion) ||
-          looksLikeOpticaOrUnusablePart(
-            it.pieza,
-            it.severidad,
-            it.descripcionTecnica,
-          )),
+        looksLikeEvidentBreakage(it.severidad, it.descripcionTecnica),
     );
-  }
-
-  private async resolveRefaccionEstimateForPieza(
-    tallerId: string | null | undefined,
-    pieza: string,
-    vehiculo: string,
-    anio?: string | null,
-    marca?: string | null,
-    modelo?: string | null,
-    sizeTier?: VehicleSizeTier | null,
-  ): Promise<RefaccionMercadoEstimate> {
-    const catalog = await this.refaccionesService.resolveClienteQuote(
-      tallerId,
-      pieza,
-    );
-    if (catalog && Number.isFinite(catalog.precioAlCliente) && catalog.precioAlCliente > 0) {
-      return {
-        success: true,
-        pieza: catalog.nombre,
-        vehiculo,
-        anio: anio ?? null,
-        costoBase: catalog.costoReferenciaBase,
-        precioAlCliente: catalog.precioAlCliente,
-        fuente: 'catalogo',
-        muestra: 1,
-        query: catalog.codigo,
-      };
-    }
-    return buscarCostoRefaccionOnline({
-      pieza,
-      vehiculo,
-      anio,
-      marca,
-      modelo,
-      sizeTier,
-    });
   }
 
   private async enrichInventoryWithMarketRefacciones(
     analysis: VehicleDamageAnalysis,
     notes: string[],
-    tallerId?: string | null,
   ): Promise<VehicleDamageAnalysis> {
     const candidates = this.collectPiecesForRefaccionEstimate(analysis);
-    if (!candidates.length) {
-      const next = { ...analysis };
-      delete next.refaccionGate;
-      return next;
-    }
-    const identity = parseVehicleYearAndModel(analysis.vehiculoDetectado);
-    if (!identity.confirmed) {
-      const pendientes = pendientesFromPieces(candidates);
-      const gate: RefaccionGateState = {
-        solicitarAnioModelo: true,
-        piezasPendientes: pendientes,
-        guardadoEn: new Date().toISOString(),
-      };
-      notes.push(
-        buildConsolidatedRefaccionAskNote(pendientes.map((p) => p.label)),
-      );
-      return { ...analysis, refaccionGate: gate };
-    }
-
-    const sizeTier = resolveVehiclePricingProfile({
-      modeloVehiculo: identity.label || analysis.vehiculoDetectado || '',
-      tierSource: 'vision',
-    }).sizeTier;
+    if (!candidates.length) return analysis;
     const inventory = [...(analysis.inventory ?? [])];
+    const yearMatch = String(analysis.vehiculoDetectado ?? '').match(/\b(19|20)\d{2}\b/);
     const seen = new Set<string>();
-    const quoteLines: Array<{
-      label: string;
-      monto: number;
-      fuente: RefaccionMercadoEstimate['fuente'];
-    }> = [];
     for (const it of candidates) {
       const key = canonicalizePanelCode(it.pieza) || it.pieza;
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      const estimate = await this.resolveRefaccionEstimateForPieza(
-        tallerId,
-        it.pieza,
-        identity.label || analysis.vehiculoDetectado || '',
-        identity.anio,
-        identity.marca,
-        identity.modelo,
-        sizeTier,
-      );
-      if (
-        !estimate.success ||
-        !Number.isFinite(estimate.precioAlCliente) ||
-        estimate.precioAlCliente <= 0
-      ) {
-        continue;
-      }
-      inventory.push(buildRefaccionInventoryItem(estimate, it.pieza));
-      quoteLines.push({
-        label: piezaLabelForRefaccion(it.pieza),
-        monto: estimate.precioAlCliente,
-        fuente: estimate.fuente,
+      const estimate = await estimarRefaccionMercado({
+        pieza: it.pieza,
+        vehiculo: analysis.vehiculoDetectado ?? '',
+        anio: yearMatch?.[0],
       });
+      if (!estimate.success || estimate.precioAlCliente <= 0) continue;
+      inventory.push(buildRefaccionInventoryItem(estimate, it.pieza));
+      notes.push(
+        buildRefaccionDisclaimer(
+          piezaLabelForRefaccion(it.pieza),
+          estimate.precioAlCliente,
+        ),
+      );
     }
-    const quoteNote = buildConsolidatedRefaccionQuoteNote(quoteLines);
-    if (quoteNote) notes.push(quoteNote);
-    const next: VehicleDamageAnalysis = {
-      ...analysis,
-      inventory,
-      vehiculoDetectado: identity.label || analysis.vehiculoDetectado,
-    };
-    delete next.refaccionGate;
-    return next;
+    if (inventory.length === (analysis.inventory ?? []).length) return analysis;
+    return { ...analysis, inventory };
   }
 
   /**
@@ -1871,13 +1755,23 @@ export class ChatService implements OnModuleDestroy {
     return { processed: 1, lastMessageId: saved.id };
   }
 
-  /** Evita duplicados cuando Meta reenvía el mismo id persistido (coincidencia estricta). */
+  /** Evita duplicados cuando Meta reenvía el mismo `mid` (o `mid:sticker:0` / `mid:img:0`). */
   private async findMessageByMetaMid(
     metaMid: string,
   ): Promise<Message | null> {
     const mid = String(metaMid ?? '').trim();
     if (!mid) return null;
-    return this.messageRepository.findOne({ where: { externalId: mid } });
+    const exact = await this.messageRepository.findOne({
+      where: { externalId: mid },
+    });
+    if (exact) return exact;
+    const raw = mid.replace(/:(sticker|img):\d+$/i, '');
+    const variants = [...new Set([raw, `${raw}:sticker:0`, `${raw}:img:0`])];
+    return this.messageRepository
+      .createQueryBuilder('m')
+      .where('m.externalId IN (:...ids)', { ids: variants })
+      .orderBy('m.createdAt', 'ASC')
+      .getOne();
   }
 
   /**
@@ -2150,7 +2044,11 @@ export class ChatService implements OnModuleDestroy {
         }
         for (let imgIdx = 0; imgIdx < imageUrls.length; imgIdx += 1) {
           const url = imageUrls[imgIdx]!;
-          const imageMid = metaMid ? `${metaMid}:img:${imgIdx}` : '';
+          const imageMid = metaMid
+            ? imageUrls.length > 1 || hasCaption
+              ? `${metaMid}:img:${imgIdx}`
+              : metaMid
+            : '';
           if (imageMid) {
             const dupImg = await this.findMessageByMetaMid(imageMid);
             if (dupImg) {
@@ -3676,133 +3574,6 @@ export class ChatService implements OnModuleDestroy {
       '[BanioVehicleGate] Cotización BPC completada y enviada tras modelo del cliente:',
       vehicle,
     );
-    return true;
-  }
-
-  /**
-   * Tras "es 2019" (u año+versión): busca mercado real y anexa REFACCION al carrito.
-   */
-  private async tryFinalizeRefaccionAfterYearReply(
-    conversationId: string,
-    inboundText: string,
-  ): Promise<boolean> {
-    const conv = await this.conversationRepository.findOne({
-      where: { id: conversationId },
-      select: ['id', 'tallerId', 'platform'],
-    });
-    const cart = await this.quoteCartService.resolveActiveCart(
-      conversationId,
-      conv?.tallerId,
-    );
-    const gate = cart?.damageAnalysis?.refaccionGate;
-    if (!cart || !gate?.solicitarAnioModelo || !gate.piezasPendientes?.length) {
-      return false;
-    }
-
-    const yearInReply = extractVehicleYear(inboundText);
-    if (!yearInReply) return false;
-
-    const identity = parseVehicleYearAndModel(
-      cart.damageAnalysis?.vehiculoDetectado,
-      inboundText,
-    );
-    if (!hasConfirmedMarcaModeloAnio(identity.marca, identity.modelo, identity.anio)) {
-      await this.dispatchAutonomousQuotedOutbound({
-        conversationId,
-        tallerId: cart.tallerId ?? conv?.tallerId,
-        platform: conv?.platform,
-        clientMessage:
-          'Gracias. Para cotizar la pieza nueva necesito *marca, modelo y año* de tu unidad (ej. Mazda 2 2018).',
-      });
-      return true;
-    }
-
-    const sizeTier = resolveVehiclePricingProfile({
-      modeloVehiculo: identity.label,
-      tierSource: 'cliente',
-    }).sizeTier;
-    const quoteLines: Array<{
-      label: string;
-      monto: number;
-      fuente: RefaccionMercadoEstimate['fuente'];
-    }> = [];
-    let inserted = 0;
-    for (const pending of gate.piezasPendientes) {
-      const estimate = await this.resolveRefaccionEstimateForPieza(
-        cart.tallerId,
-        pending.pieza,
-        identity.label,
-        identity.anio,
-        identity.marca,
-        identity.modelo,
-        sizeTier,
-      );
-      if (
-        !estimate.success ||
-        !Number.isFinite(estimate.precioAlCliente) ||
-        estimate.precioAlCliente <= 0
-      ) {
-        continue;
-      }
-      await this.quoteCartService.addRefaccionItem(
-        conversationId,
-        cart.tallerId,
-        buildRefaccionInventoryItem(estimate, pending.pieza),
-      );
-      quoteLines.push({
-        label: pending.label,
-        monto: estimate.precioAlCliente,
-        fuente: estimate.fuente,
-      });
-      inserted += 1;
-    }
-    const notes = [buildConsolidatedRefaccionQuoteNote(quoteLines)].filter(Boolean);
-
-    const refreshed = await this.quoteCartService.resolveActiveCart(
-      conversationId,
-      cart.tallerId,
-    );
-    if (refreshed?.damageAnalysis) {
-      const nextAnalysis: VehicleDamageAnalysis = {
-        ...refreshed.damageAnalysis,
-        vehiculoDetectado: identity.label,
-      };
-      delete nextAnalysis.refaccionGate;
-      refreshed.damageAnalysis = nextAnalysis;
-      await this.draftQuoteRepository.save(refreshed);
-    }
-
-    const envelope = await this.quoteCartService.getCartSummaryEnvelope(
-      conversationId,
-      cart.tallerId,
-    );
-    const totalRaw = Number(
-      envelope.totalGlobal ?? envelope.total ?? refreshed?.estimateAmount ?? 0,
-    );
-    const total = Number.isFinite(totalRaw) ? Math.max(0, Math.round(totalRaw)) : 0;
-    const header =
-      inserted > 0
-        ? `Listo, con tu *${identity.label}* ya pude cotizar la pieza nueva.`
-        : 'Gracias. Cotizamos con un estimado comercial por gama y lo confirmamos en la revisión física.';
-    const totalLine =
-      inserted > 0
-        ? `\n\n*Total actualizado:* $${total.toLocaleString('es-MX')} MXN`
-        : '';
-
-    await this.dispatchAutonomousQuotedOutbound({
-      conversationId,
-      tallerId: cart.tallerId ?? conv?.tallerId,
-      platform: conv?.platform,
-      clientMessage: [header, ...notes, totalLine.trim()]
-        .filter(Boolean)
-        .join('\n\n'),
-    });
-
-    console.log('[RefaccionVehicleGate] búsqueda de mercado tras año', {
-      conversationId,
-      vehicle: identity.label,
-      inserted,
-    });
     return true;
   }
 
@@ -5728,28 +5499,15 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   ): Promise<void> {
     const fromBurst = [
       ...new Set(
-        burstUrls
-          .map((u) => String(u).trim())
-          .filter((u) => u && isIncomingImage(u) && !isFacebookStickerUrl(u)),
+        burstUrls.map((u) => String(u).trim()).filter((u) => u && isIncomingImage(u)),
       ),
     ];
-    const fromRecent = await this.getRecentImages(conversationId, 60);
-    let imageUrls = [
-      ...new Set(
-        [...fromBurst, ...fromRecent].filter(
-          (u) => u && isIncomingImage(u) && !isFacebookStickerUrl(u),
-        ),
-      ),
-    ];
-    console.log(
-      '[VisionPipeline] lote consolidado',
-      JSON.stringify({
-        conversationId,
-        fromBurst: fromBurst.length,
-        fromRecent: fromRecent.length,
-        imageCount: imageUrls.length,
-      }),
-    );
+
+    let imageUrls = fromBurst;
+
+    if (!imageUrls.length) {
+      imageUrls = await this.getRecentImages(conversationId);
+    }
 
     if (!imageUrls.length) {
       const fallbackMsg = await this.messageRepository.findOne({
@@ -5883,7 +5641,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     analysisForQuote = await this.enrichInventoryWithMarketRefacciones(
       analysisForQuote,
       refaccionNotes,
-      visionTallerId,
     );
 
     const estimateAmount = await this.computePrimaryMatrixEstimate(
@@ -5936,7 +5693,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     let draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
     if (refaccionNotes.length) {
-      const noteBlock = refaccionNotes.join('\n\n');
+      const noteBlock = refaccionNotes.join('\n');
       draftQuoteForClient = {
         ...draftQuoteForClient,
         clientMessage: [draftQuoteForClient.clientMessage, noteBlock]
@@ -6761,10 +6518,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       if (name === 'obtenerResumenCarrito') {
         return await this.executeObtainCarritoResumenTool(conversation);
       }
-      if (
-        name === 'estimarRefaccionMercado' ||
-        name === 'buscarCostoRefaccionOnline'
-      ) {
+      if (name === 'estimarRefaccionMercado') {
         return await this.executeEstimarRefaccionMercadoTool(args, conversation);
       }
       if (name === 'notificarLlegadaCliente') {
@@ -7109,52 +6863,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       raw.modeloVehiculo,
     );
     const anio = pickFirstNonEmptyTrimmedString(raw.anio, raw.year, raw.año);
-    const marca = pickFirstNonEmptyTrimmedString(raw.marca, raw.brand);
-    const modelo = pickFirstNonEmptyTrimmedString(
-      raw.modelo,
-      raw.model,
-      raw.version,
-    );
-    const identity = parseVehicleYearAndModel(vehiculo, marca, modelo, anio);
-    if (!pieza) {
+    if (!pieza || !vehiculo) {
       return {
         success: false,
-        error: 'Falta la pieza para estimar la refacción.',
+        error: 'Faltan pieza y vehiculo para estimar la refacción.',
       };
     }
-    if (!hasConfirmedMarcaModeloAnio(identity.marca, identity.modelo, identity.anio)) {
-      return {
-        success: false,
-        requiereAnioModelo: true,
-        error:
-          'Se requiere marca, modelo y año (ej. Mazda 2 2018). No pidas versión ni equipamiento.',
-      };
-    }
-    const estimate = await this.resolveRefaccionEstimateForPieza(
-      conversation.tallerId,
-      pieza,
-      identity.label || vehiculo || '',
-      identity.anio,
-      identity.marca,
-      identity.modelo,
-    );
-    if (estimate.requiereAnioModelo) {
-      return { ...estimate, inserted: false };
-    }
-    if (
-      !estimate.success ||
-      !Number.isFinite(estimate.precioAlCliente) ||
-      estimate.precioAlCliente <= 0
-    ) {
-      return {
-        ...estimate,
-        inserted: false,
-        requiereConfirmacionManual: true,
-        error:
-          estimate.error ||
-          'Sin muestra de mercado suficiente. No se inventó un precio.',
-      };
-    }
+    const estimate = await estimarRefaccionMercado({ pieza, vehiculo, anio });
     const item = buildRefaccionInventoryItem(estimate, pieza);
     await this.quoteCartService.addRefaccionItem(
       conversation.id,
@@ -7166,7 +6881,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       disclaimer: buildRefaccionDisclaimer(
         piezaLabelForRefaccion(pieza),
         estimate.precioAlCliente,
-        estimate.fuente,
       ),
       inserted: true,
     };
@@ -7204,26 +6918,17 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       raw = {};
     }
     const pieza = pickFirstNonEmptyTrimmedString(raw.pieza, raw.piece) || 'FD';
-    const vehiculo = pickFirstNonEmptyTrimmedString(raw.vehiculo, raw.vehicle);
-    const anio = pickFirstNonEmptyTrimmedString(raw.anio, raw.year, raw.año);
-    const identity = parseVehicleYearAndModel(vehiculo, anio);
-    const estimate = await buscarCostoRefaccionOnline({
-      pieza,
-      vehiculo: identity.label || vehiculo,
-      anio: identity.anio,
-      marca: identity.marca,
-      modelo: identity.modelo,
-    });
+    const vehiculo =
+      pickFirstNonEmptyTrimmedString(raw.vehiculo, raw.vehicle) || 'Jetta';
+    const anio = pickFirstNonEmptyTrimmedString(raw.anio, raw.year);
+    const estimate = await estimarRefaccionMercado({ pieza, vehiculo, anio });
     return {
       ...estimate,
       preview: true,
-      disclaimer: estimate.success
-        ? buildRefaccionDisclaimer(
-            piezaLabelForRefaccion(pieza),
-            estimate.precioAlCliente,
-            estimate.fuente,
-          )
-        : undefined,
+      disclaimer: buildRefaccionDisclaimer(
+        piezaLabelForRefaccion(pieza),
+        estimate.precioAlCliente,
+      ),
     };
   }
 
@@ -7361,10 +7066,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           payload = await this.executeObtainCarritoResumenTool(
             { status: 'nuevo' } as Conversation,
           );
-        } else if (
-          name === 'estimarRefaccionMercado' ||
-          name === 'buscarCostoRefaccionOnline'
-        ) {
+        } else if (name === 'estimarRefaccionMercado') {
           payload = await this.executeEstimarRefaccionMercadoToolPlayground(
             argsJson,
           );
@@ -7625,14 +7327,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       mergedText,
     );
     if (finalizedBanio) {
-      return;
-    }
-
-    const finalizedRefaccion = await this.tryFinalizeRefaccionAfterYearReply(
-      conversationId,
-      mergedText,
-    );
-    if (finalizedRefaccion) {
       return;
     }
 

@@ -10,8 +10,7 @@ CREATE TABLE IF NOT EXISTS refaccion_catalog (
   nombre character varying(160) NOT NULL,
   categoria character varying(24) NOT NULL,
   costo_referencia_base integer NOT NULL,
-  margen_porcentaje integer NOT NULL DEFAULT 30,
-  forzar_precio_manual boolean NOT NULL DEFAULT false
+  margen_porcentaje integer NOT NULL DEFAULT 30
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_refaccion_catalog_taller_codigo
@@ -22,6 +21,3 @@ CREATE INDEX IF NOT EXISTS idx_refaccion_catalog_taller_id
 
 CREATE INDEX IF NOT EXISTS idx_refaccion_catalog_codigo
   ON refaccion_catalog (codigo);
-
-ALTER TABLE refaccion_catalog
-  ADD COLUMN IF NOT EXISTS forzar_precio_manual boolean NOT NULL DEFAULT false;

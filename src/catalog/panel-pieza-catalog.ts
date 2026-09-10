@@ -27,8 +27,6 @@ export type PanelPiezaOption = {
   refaccionManual?: boolean;
   banioCompleto?: boolean;
   integralService?: boolean;
-  /** Óptica / faro / calavera: no se valúa en matriz de pintura. */
-  optica?: boolean;
 };
 
 export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
@@ -76,42 +74,6 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
   { code: 'ESI', fullName: 'Espejo izquierdo', catalogPieza: 'Espejo' },
   { code: 'ESD', fullName: 'Espejo derecho', catalogPieza: 'Espejo' },
   { code: 'Espejo', fullName: 'Espejo', catalogPieza: 'Espejo' },
-  {
-    code: 'Faro_Izquierdo',
-    fullName: 'Faro izquierdo',
-    catalogPieza: '',
-    optica: true,
-  },
-  {
-    code: 'Faro_Derecho',
-    fullName: 'Faro derecho',
-    catalogPieza: '',
-    optica: true,
-  },
-  {
-    code: 'Calavera_Izquierda',
-    fullName: 'Calavera izquierda',
-    catalogPieza: '',
-    optica: true,
-  },
-  {
-    code: 'Calavera_Derecha',
-    fullName: 'Calavera derecha',
-    catalogPieza: '',
-    optica: true,
-  },
-  {
-    code: 'Faro_Niebla_Izquierdo',
-    fullName: 'Faro de niebla izquierdo',
-    catalogPieza: '',
-    optica: true,
-  },
-  {
-    code: 'Faro_Niebla_Derecho',
-    fullName: 'Faro de niebla derecho',
-    catalogPieza: '',
-    optica: true,
-  },
   { code: 'Moldura', fullName: 'Moldura', catalogPieza: 'Estetica Exterior' },
   {
     code: 'Estetica Exterior',
@@ -210,57 +172,7 @@ const EXPLICIT_PIEZA_ALIASES: Readonly<Record<string, string>> = {
   'bigote cofre': 'BiCO',
   bico: 'BiCO',
   parilla: 'Parilla',
-  'faro izquierdo': 'Faro_Izquierdo',
-  'faro izq': 'Faro_Izquierdo',
-  'faro principal izquierdo': 'Faro_Izquierdo',
-  'faro delantero izquierdo': 'Faro_Izquierdo',
-  'optica delantera izquierda': 'Faro_Izquierdo',
-  faro_izq: 'Faro_Izquierdo',
-  'faro derecho': 'Faro_Derecho',
-  'faro der': 'Faro_Derecho',
-  'faro principal derecho': 'Faro_Derecho',
-  'faro delantero derecho': 'Faro_Derecho',
-  'optica delantera derecha': 'Faro_Derecho',
-  faro_der: 'Faro_Derecho',
-  'calavera izquierda': 'Calavera_Izquierda',
-  'calavera izq': 'Calavera_Izquierda',
-  'calavera trasera izquierda': 'Calavera_Izquierda',
-  'stop izquierdo': 'Calavera_Izquierda',
-  'luz trasera izquierda': 'Calavera_Izquierda',
-  cal_izq: 'Calavera_Izquierda',
-  'calavera derecha': 'Calavera_Derecha',
-  'calavera der': 'Calavera_Derecha',
-  'calavera trasera derecha': 'Calavera_Derecha',
-  'stop derecho': 'Calavera_Derecha',
-  'luz trasera derecha': 'Calavera_Derecha',
-  cal_der: 'Calavera_Derecha',
-  'faro niebla izquierdo': 'Faro_Niebla_Izquierdo',
-  'faro de niebla izquierdo': 'Faro_Niebla_Izquierdo',
-  'antiniebla izquierdo': 'Faro_Niebla_Izquierdo',
-  faro_niebla_izq: 'Faro_Niebla_Izquierdo',
-  'faro niebla derecho': 'Faro_Niebla_Derecho',
-  'faro de niebla derecho': 'Faro_Niebla_Derecho',
-  'antiniebla derecho': 'Faro_Niebla_Derecho',
-  faro_niebla_der: 'Faro_Niebla_Derecho',
 };
-
-/** Código de panel → código del catálogo de refacciones. */
-export const OPTICA_PANEL_TO_CATALOG_CODIGO: Readonly<Record<string, string>> = {
-  Faro_Izquierdo: 'FARO_IZQ',
-  Faro_Derecho: 'FARO_DER',
-  Calavera_Izquierda: 'CAL_IZQ',
-  Calavera_Derecha: 'CAL_DER',
-  Faro_Niebla_Izquierdo: 'FARO_NIEBLA_IZQ',
-  Faro_Niebla_Derecho: 'FARO_NIEBLA_DER',
-};
-
-const CATALOG_CODIGO_TO_OPTICA_PANEL: Readonly<Record<string, string>> =
-  Object.fromEntries(
-    Object.entries(OPTICA_PANEL_TO_CATALOG_CODIGO).map(([panel, codigo]) => [
-      codigo,
-      panel,
-    ]),
-  );
 
 const catalogPiezaCodeCounts = new Map<string, number>();
 for (const opt of PANEL_PIEZA_OPTIONS) {
@@ -351,9 +263,6 @@ aliasNormToCode.set(
   normalizePiezaText('estética automotriz'),
   PANEL_PIEZA_ESTETICA_AUTO_CODE,
 );
-for (const [codigo, panel] of Object.entries(CATALOG_CODIGO_TO_OPTICA_PANEL)) {
-  aliasNormToCode.set(normalizePiezaText(codigo), panel);
-}
 
 const catalogNamesByLengthDesc = [
   ...new Set(
@@ -460,37 +369,6 @@ export function isRefaccionPieza(raw: string): boolean {
   return Boolean(findPanelPiezaOption(raw)?.refaccionManual);
 }
 
-const OPTICA_PANEL_CODES = new Set(Object.keys(OPTICA_PANEL_TO_CATALOG_CODIGO));
-
-export function isOpticaPanelPieza(raw: string): boolean {
-  const t = String(raw ?? '').trim();
-  if (!t) return false;
-  if (/^refacci[oó]n(\s*:|$)/i.test(t)) {
-    const inner = t.replace(/^refacci[oó]n\s*:\s*/i, '').trim();
-    return inner ? isOpticaPanelPieza(inner) : false;
-  }
-  const code = canonicalizePanelCode(t);
-  if (OPTICA_PANEL_CODES.has(code)) return true;
-  if (Boolean(findPanelPiezaOption(t)?.optica)) return true;
-  const n = normalizePiezaText(t);
-  return /\b(faro|calavera|optica|antiniebla|luz trasera|\bstop\b)\b/.test(n);
-}
-
-/** Código de `RefaccionCatalog` para una pieza de visión o sigla de panel. */
-export function refaccionCatalogCodigoForPieza(raw: string): string | null {
-  const t = String(raw ?? '').trim();
-  if (!t) return null;
-  const inner = t.replace(/^refacci[oó]n\s*:\s*/i, '').trim() || t;
-  const code = canonicalizePanelCode(inner);
-  if (OPTICA_PANEL_TO_CATALOG_CODIGO[code]) {
-    return OPTICA_PANEL_TO_CATALOG_CODIGO[code]!;
-  }
-  const compact = inner.toUpperCase().replace(/[\s-]+/g, '_');
-  if (CATALOG_CODIGO_TO_OPTICA_PANEL[compact]) return compact;
-  if (/^[A-Z][A-Z0-9_]{1,31}$/.test(compact)) return compact;
-  return null;
-}
-
 const BANIO_PANEL_CODES = new Set([
   PANEL_PIEZA_BPE_CODE,
   PANEL_PIEZA_BPEI_CODE,
@@ -540,7 +418,6 @@ export function isSpecialPanelPieza(raw: string): boolean {
  */
 export function resolveCatalogPiezaForMatrixLookup(raw: string): string | null {
   if (isSpecialPanelPieza(raw) || isIntegralPanelPieza(raw)) return null;
-  if (isOpticaPanelPieza(raw)) return null;
   const opt = findPanelPiezaOption(raw);
   if (opt?.catalogPieza) return opt.catalogPieza;
   return matchCatalogPiezaFromFreeText(raw);

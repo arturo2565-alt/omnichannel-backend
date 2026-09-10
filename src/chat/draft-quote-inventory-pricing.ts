@@ -14,7 +14,6 @@ import {
   findPanelPiezaOption,
   isInternalDamageRangePieza,
   isIntegralPanelPieza,
-  isOpticaPanelPieza,
   isRefaccionPieza,
   isSpecialPanelPieza,
   normalizePanelPiezaCode,
@@ -188,15 +187,8 @@ export function quoteRowsFromDamageInventory(
 ): QuoteRowInput[] {
   const rows: QuoteRowInput[] = [];
   for (const it of inventory) {
-    const rawPieza = String(it.pieza ?? '').trim();
-    if (!rawPieza) continue;
-    const isRefaccionLine = isRefaccionPieza(rawPieza);
-    const panelCode = isRefaccionLine
-      ? rawPieza
-      : normalizePanelPiezaCode(rawPieza) || rawPieza;
-    if (!isRefaccionLine && isOpticaPanelPieza(panelCode)) {
-      continue;
-    }
+    const panelCode = normalizePanelPiezaCode(it.pieza) || String(it.pieza ?? '').trim();
+    if (!panelCode) continue;
     const sevRaw = String(it.severidad ?? '').trim();
     let storedSev = sevRaw || 'DM';
     let precio = 0;
@@ -244,8 +236,7 @@ export function quoteRowsFromDamageInventory(
       }
     } else if (isRefaccionPieza(panelCode)) {
       storedSev = 'N/A';
-      const rawPrecio = Number(it.precioMx);
-      precio = Number.isFinite(rawPrecio) ? Math.max(0, Math.round(rawPrecio)) : 0;
+      precio = Math.max(0, Math.round(Number(it.precioMx) || 0));
     } else {
       storedSev = coerceDamageLevelCode(sevRaw);
     }

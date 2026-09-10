@@ -70,13 +70,6 @@ export function inventoryItemsToVehicleAnalysis(
     ...(it.vehiculoDetectado?.trim()
       ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
       : {}),
-    ...(it.precioMx != null && Number.isFinite(Number(it.precioMx))
-      ? { precioMx: Math.max(0, Math.round(Number(it.precioMx))) }
-      : {}),
-    ...(it.detallesRefaccion
-      ? { detallesRefaccion: it.detallesRefaccion }
-      : {}),
-    ...(it.refaccionDePieza ? { refaccionDePieza: it.refaccionDePieza } : {}),
   }));
   const vehiculoDetectado = pickVehicleLabelFromDamageInventory(inv);
   const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
@@ -145,9 +138,6 @@ export function mergeCartInventoryItem(
     .filter(Boolean);
 
   const next = [...inventory];
-  const precioRaw =
-    incoming.precioMx != null ? incoming.precioMx : existing.precioMx;
-  const precioMx = Number(precioRaw);
   next[idx] = {
     pieza: existing.pieza,
     severidad: worst,
@@ -158,21 +148,6 @@ export function mergeCartInventoryItem(
         ...(incoming.urls_origen ?? []),
       ]),
     ],
-    ...(Number.isFinite(precioMx)
-      ? { precioMx: Math.max(0, Math.round(precioMx)) }
-      : {}),
-    ...(incoming.detallesRefaccion || existing.detallesRefaccion
-      ? {
-          detallesRefaccion:
-            incoming.detallesRefaccion || existing.detallesRefaccion,
-        }
-      : {}),
-    ...(incoming.refaccionDePieza || existing.refaccionDePieza
-      ? {
-          refaccionDePieza:
-            incoming.refaccionDePieza || existing.refaccionDePieza,
-        }
-      : {}),
   };
   return next;
 }

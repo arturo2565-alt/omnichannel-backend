@@ -34,8 +34,3 @@ export type IncomingMessageJobData = {
 export function incomingBufferKey(conversationId: string): string {
   return `chat:buffer:${String(conversationId).trim()}`;
 }
-
-/** Sucesor cuando el job primario de la conversación ya está `active`. */
-export function inboundDebouncePendingJobId(conversationId: string): string {
-  return `${String(conversationId).trim()}:pending`;
-}
