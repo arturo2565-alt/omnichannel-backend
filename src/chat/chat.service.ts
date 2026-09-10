@@ -665,7 +665,7 @@ export class ChatService implements OnModuleDestroy {
   private static readonly INBOUND_IMAGE_ANALYSIS_DEBOUNCE_MS = 30 * 1000;
 
   /** Máximo de imágenes por llamada a visión (evita timeouts / TPM en ráfagas grandes). */
-  private static readonly VISION_IMAGE_CHUNK_SIZE = 3;
+  private static readonly VISION_MAX_CHUNK_SIZE = 4;
 
   /**
    * Tras el último mensaje de texto entrante (Messenger / WhatsApp): esperar antes de lanzar el autopilot.
@@ -1160,11 +1160,21 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * URLs únicas de imágenes entrantes (**inbound**) en esta conversación cuya `createdAt`
-   * cae dentro de los últimos 5 minutos, en orden cronológico (más antigua primero).
+   * URLs únicas de imágenes entrantes (**inbound**) en esta conversación,
+   * en orden cronológico (más antigua primero).
+   * @param lookbackSeconds ventana en segundos; si se omite, usa {@link RECENT_IMAGE_LOOKBACK_MS}.
    */
-  async getRecentImages(conversationId: string): Promise<string[]> {
-    const since = new Date(Date.now() - ChatService.RECENT_IMAGE_LOOKBACK_MS);
+  async getRecentImages(
+    conversationId: string,
+    lookbackSeconds?: number,
+  ): Promise<string[]> {
+    const windowMs =
+      lookbackSeconds != null &&
+      Number.isFinite(lookbackSeconds) &&
+      lookbackSeconds > 0
+        ? lookbackSeconds * 1000
+        : ChatService.RECENT_IMAGE_LOOKBACK_MS;
+    const since = new Date(Date.now() - windowMs);
     const messages = await this.messageRepository
       .createQueryBuilder('m')
       .where('m.conversationId = :cid', { cid: conversationId })
@@ -1755,23 +1765,13 @@ export class ChatService implements OnModuleDestroy {
     return { processed: 1, lastMessageId: saved.id };
   }
 
-  /** Evita duplicados cuando Meta reenvía el mismo `mid` (o `mid:sticker:0` / `mid:img:0`). */
+  /** Evita duplicados cuando Meta reenvía el mismo ID persistido (coincidencia exacta). */
   private async findMessageByMetaMid(
     metaMid: string,
   ): Promise<Message | null> {
     const mid = String(metaMid ?? '').trim();
     if (!mid) return null;
-    const exact = await this.messageRepository.findOne({
-      where: { externalId: mid },
-    });
-    if (exact) return exact;
-    const raw = mid.replace(/:(sticker|img):\d+$/i, '');
-    const variants = [...new Set([raw, `${raw}:sticker:0`, `${raw}:img:0`])];
-    return this.messageRepository
-      .createQueryBuilder('m')
-      .where('m.externalId IN (:...ids)', { ids: variants })
-      .orderBy('m.createdAt', 'ASC')
-      .getOne();
+    return this.messageRepository.findOne({ where: { externalId: mid } });
   }
 
   /**
@@ -2044,11 +2044,7 @@ export class ChatService implements OnModuleDestroy {
         }
         for (let imgIdx = 0; imgIdx < imageUrls.length; imgIdx += 1) {
           const url = imageUrls[imgIdx]!;
-          const imageMid = metaMid
-            ? imageUrls.length > 1 || hasCaption
-              ? `${metaMid}:img:${imgIdx}`
-              : metaMid
-            : '';
+          const imageMid = metaMid ? `${metaMid}:img:${imgIdx}` : '';
           if (imageMid) {
             const dupImg = await this.findMessageByMetaMid(imageMid);
             if (dupImg) {
@@ -2294,7 +2290,7 @@ export class ChatService implements OnModuleDestroy {
 
       if (evt.imageUrl) {
         const imageMid = evt.messageId
-          ? `${evt.messageId}:img`
+          ? `${evt.messageId}:img:0`
           : '';
         if (imageMid) {
           const dupImg = await this.findMessageByMetaMid(imageMid);
@@ -2960,10 +2956,10 @@ export class ChatService implements OnModuleDestroy {
     return { items: collapsed, viability: { peritajeViable: true } };
   }
 
-  /** Parte URLs en lotes de hasta {@link ChatService.VISION_IMAGE_CHUNK_SIZE}. */
+  /** Parte URLs en lotes de hasta {@link ChatService.VISION_MAX_CHUNK_SIZE}. */
   private chunkImageUrlsForVision(
     urls: readonly string[],
-    chunkSize = ChatService.VISION_IMAGE_CHUNK_SIZE,
+    chunkSize = ChatService.VISION_MAX_CHUNK_SIZE,
   ): string[][] {
     const clean = [
       ...new Set(urls.map((u) => String(u).trim()).filter(Boolean)),
@@ -2991,7 +2987,11 @@ export class ChatService implements OnModuleDestroy {
       conversationId?: string | null;
     },
   ): Promise<{ items: DetectedDamageItem[]; viability: VisionViability }> {
-    const lotes = this.chunkImageUrlsForVision(imageUrls);
+    const VISION_MAX_CHUNK_SIZE = ChatService.VISION_MAX_CHUNK_SIZE;
+    const lotes = this.chunkImageUrlsForVision(
+      imageUrls,
+      VISION_MAX_CHUNK_SIZE,
+    );
     if (!lotes.length) {
       return {
         items: [],
@@ -3016,7 +3016,7 @@ export class ChatService implements OnModuleDestroy {
       [];
 
     console.log(
-      `[VisionChunk] Procesando ${imageUrls.length} imagen(es) en ${lotes.length} lote(s) de hasta ${ChatService.VISION_IMAGE_CHUNK_SIZE}`,
+      `[VisionChunk] Procesando ${imageUrls.length} imagen(es) en ${lotes.length} lote(s) de hasta ${VISION_MAX_CHUNK_SIZE}`,
     );
 
     for (let idx = 0; idx < lotes.length; idx++) {
@@ -5473,7 +5473,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   }
 
   /**
-   * Usa el lote de la ráfaga si existe; si no, cae a {@link getRecentImages} + fallback al mensaje disparador.
+   * Une URLs de la ráfaga en memoria con {@link getRecentImages} (45s) para no perder fotos de Messenger.
    */
   private async processConsolidatedInboundImages(
     conversationId: string,
@@ -5503,11 +5503,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       ),
     ];
 
-    let imageUrls = fromBurst;
-
-    if (!imageUrls.length) {
-      imageUrls = await this.getRecentImages(conversationId);
-    }
+    const recentUrls = await this.getRecentImages(conversationId, 45);
+    let imageUrls = Array.from(new Set([...fromBurst, ...recentUrls]));
+    console.log(
+      `[VisionPipeline] Total imágenes recolectadas para peritaje: ${imageUrls.length}`,
+    );
 
     if (!imageUrls.length) {
       const fallbackMsg = await this.messageRepository.findOne({
