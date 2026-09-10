@@ -1,8 +1,8 @@
 import {
   PANEL_PIEZA_REFACCION_CODE,
   canonicalizePanelCode,
-  findPanelPiezaOption,
 } from '../catalog/panel-pieza-catalog';
+import { resolvePiezaDisplayLabel } from './draft-quote-resume';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { coerceDamageLevelCode, damageLevelRank } from './autofix-config';
 
@@ -33,8 +33,8 @@ export function buildRefaccionDisclaimer(pieza: string, monto: number): string {
 }
 
 export function piezaLabelForRefaccion(raw: string): string {
-  const opt = findPanelPiezaOption(raw);
-  return opt?.fullName || String(raw ?? '').trim() || 'pieza';
+  const label = resolvePiezaDisplayLabel(String(raw ?? '').trim());
+  return label && label !== 'Servicio' ? label : String(raw ?? '').trim() || 'pieza';
 }
 
 export type RefaccionMercadoEstimate = {

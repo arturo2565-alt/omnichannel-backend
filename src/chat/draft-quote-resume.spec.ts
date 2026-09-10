@@ -2,6 +2,7 @@ import {
   buildDamagePhotoIntroForCliente,
   filterLineRowsForPiezaCodes,
   lineRowMatchesPiezaCode,
+  replaceRawPiezaCodesInClientText,
   resolvePiezaDisplayLabel,
 } from './draft-quote-resume';
 
@@ -9,6 +10,12 @@ describe('draft-quote-resume pieza matching', () => {
   it('resolvePiezaDisplayLabel traduce códigos de panel', () => {
     expect(resolvePiezaDisplayLabel('FD')).toMatch(/fascia/i);
     expect(resolvePiezaDisplayLabel('Cofre')).toBe('Cofre');
+    expect(resolvePiezaDisplayLabel('Calavera_TI')).toMatch(
+      /calavera trasera izquierda/i,
+    );
+    expect(replaceRawPiezaCodesInClientText('tu Calavera_TI rota')).toMatch(
+      /calavera trasera izquierda/i,
+    );
   });
 
   it('lineRowMatchesPiezaCode enlaza código FD con Fascia delantera', () => {

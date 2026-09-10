@@ -176,9 +176,15 @@ import {
   mergeDamageInventoryAccumulative,
   normalizeAuthorizedQuoteSummaryLines,
   piezaLabelFromDraftLineDescription,
+  replaceRawPiezaCodesInClientText,
   sanitizeClienteDisplayName,
   type DamageInventoryMergeResult,
 } from './draft-quote-resume';
+import {
+  parseVehicleYearAndModel,
+  shouldAppendRefaccionNote,
+  stripRedundantRefaccionAskFooter,
+} from './refaccion-vehicle-gate';
 import {
   buildObtenerCotizacionExpressPayload,
   normalizeCategoriaTamanoExpress,
@@ -1579,8 +1585,15 @@ export class ChatService implements OnModuleDestroy {
   ): Promise<VehicleDamageAnalysis> {
     const candidates = this.collectPiecesForRefaccionEstimate(analysis);
     if (!candidates.length) return analysis;
+    const vehicleId = parseVehicleYearAndModel(
+      analysis.vehiculoDetectado ?? '',
+      '',
+    );
+    if (!vehicleId.confirmed) {
+      return analysis;
+    }
     const inventory = [...(analysis.inventory ?? [])];
-    const yearMatch = String(analysis.vehiculoDetectado ?? '').match(/\b(19|20)\d{2}\b/);
+    const yearMatch = vehicleId.anio;
     const seen = new Set<string>();
     for (const it of candidates) {
       const key = canonicalizePanelCode(it.pieza) || it.pieza;
@@ -1588,8 +1601,8 @@ export class ChatService implements OnModuleDestroy {
       seen.add(key);
       const estimate = await estimarRefaccionMercado({
         pieza: it.pieza,
-        vehiculo: analysis.vehiculoDetectado ?? '',
-        anio: yearMatch?.[0],
+        vehiculo: vehicleId.modelo || analysis.vehiculoDetectado || '',
+        anio: yearMatch,
       });
       if (!estimate.success || estimate.precioAlCliente <= 0) continue;
       inventory.push(buildRefaccionInventoryItem(estimate, it.pieza));
@@ -3905,7 +3918,9 @@ export class ChatService implements OnModuleDestroy {
         newPiezas: newDistinct,
         narrativeOptions,
       });
-    draft.formalNarrative = llmNarrative || fallbackNarrative;
+    draft.formalNarrative = replaceRawPiezaCodesInClientText(
+      stripRedundantRefaccionAskFooter(llmNarrative || fallbackNarrative),
+    );
     console.log(
       '[DraftClientNarrative] applyClientFacingFormalNarrativeToDraft',
       JSON.stringify({
@@ -5692,8 +5707,25 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
     let draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
-    if (refaccionNotes.length) {
-      const noteBlock = refaccionNotes.join('\n');
+    const vehicleForNotes = parseVehicleYearAndModel(
+      analysisForQuote.vehiculoDetectado ?? '',
+      '',
+    );
+    const primaryClientText = String(
+      draftQuoteForClient.clientMessage ??
+        draftQuoteForClient.generatedMessage ??
+        draftQuoteForClient.formalNarrative ??
+        '',
+    );
+    if (
+      refaccionNotes.length &&
+      shouldAppendRefaccionNote(primaryClientText, {
+        vehicleConfirmed: vehicleForNotes.confirmed,
+      })
+    ) {
+      const noteBlock = refaccionNotes
+        .map((n) => replaceRawPiezaCodesInClientText(n))
+        .join('\n');
       draftQuoteForClient = {
         ...draftQuoteForClient,
         clientMessage: [draftQuoteForClient.clientMessage, noteBlock]
@@ -5703,6 +5735,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           .filter(Boolean)
           .join('\n\n'),
       };
+    } else if (refaccionNotes.length) {
+      console.log(
+        '[VisionPipeline] Nota de refacción omitida (ya cubierta o sin vehículo)',
+      );
     }
 
     console.log(
@@ -6863,10 +6899,19 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       raw.modeloVehiculo,
     );
     const anio = pickFirstNonEmptyTrimmedString(raw.anio, raw.year, raw.año);
-    if (!pieza || !vehiculo) {
+    if (!pieza) {
+      return { success: false, error: 'Falta la pieza para estimar la refacción.' };
+    }
+    const vehicleId = parseVehicleYearAndModel(
+      `${vehiculo} ${anio ?? ''}`.trim(),
+      '',
+    );
+    if (!vehiculo || !vehicleId.confirmed) {
       return {
         success: false,
-        error: 'Faltan pieza y vehiculo para estimar la refacción.',
+        deferToPhysicalReview: true,
+        error:
+          'Sin vehículo confirmado: no cotices la refacción ni pidas marca/modelo/año. Menciona revisión física en taller e invita solo a agendar.',
       };
     }
     const estimate = await estimarRefaccionMercado({ pieza, vehiculo, anio });

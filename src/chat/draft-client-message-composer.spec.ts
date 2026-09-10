@@ -52,6 +52,14 @@ describe('draft-client-message-composer', () => {
     expect(p.vehiculoDetectado).toBe('VW Jetta');
   });
 
+  it('humaniza códigos crudos de visión antes de redactar', () => {
+    const p = peritajeFromDamageAnalysisLike({
+      inventory: [{ pieza: 'Calavera_TI', severidad: 'DF' }],
+    });
+    expect(p.inventario[0]?.pieza).toMatch(/calavera trasera izquierda/i);
+    expect(p.inventario[0]?.pieza).not.toBe('Calavera_TI');
+  });
+
   it('validateDraftClientMessageOutput rechaza IDs de plataforma', () => {
     expect(
       validateDraftClientMessageOutput(

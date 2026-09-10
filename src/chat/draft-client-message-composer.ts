@@ -2,6 +2,7 @@ import type OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { openAiChatCompletionParams } from './openai-model-config';
 import { createTrackedChatCompletion } from './tracked-chat-completion';
+import { resolvePiezaDisplayLabel } from './draft-quote-resume';
 
 export type DraftClientMessageLineRow = {
   pieza: string;
@@ -50,6 +51,9 @@ Reglas obligatorias:
 - Si es false, invita cordialmente a elegir día para ingresar la unidad e incluye mapsUrl si está presente.
 - Si "contextoOperativo.isComplement" es true, menciona que son piezas/conceptos adicionales al presupuesto previo.
 - PROHIBIDO incluir IDs numéricos de plataforma (UID/PSID/Messenger ID).
+- PROHIBIDO mostrar códigos internos de pieza (Calavera_TI, FD, PDI, REFACCION:…). Usa el nombre legible (ej. "calavera trasera izquierda").
+- Si una pieza rota no tiene vehículo confirmado y se confirma en taller, explícalo UNA sola vez en el cuerpo. El CTA debe ser SOLO invitar a agendar. PROHIBIDO un pie "Nota de Refacción" pidiendo marca, modelo o año.
+- No dupliques el tema de refacción si ya lo mencionaste en el cuerpo.
 - Mismo formato y tono para baño de pintura completo (BPC) y piezas sueltas: una sola voz comercial premium.
 - Sigue el estilo, emojis y estructura definidos en el system prompt principal (ChatAppointmentPrompt).`.trim();
 
@@ -70,7 +74,10 @@ export function buildDraftClientMessageStructuredPayload(
 ): Record<string, unknown> {
   return {
     reportePericial: {
-      inventario: input.peritaje.inventario,
+      inventario: input.peritaje.inventario.map((it) => ({
+        ...it,
+        pieza: resolvePiezaDisplayLabel(String(it.pieza ?? '')),
+      })),
       descripcionTecnica: input.peritaje.descripcionTecnica ?? '',
       justificacion: input.peritaje.justificacion ?? '',
       vehiculoDetectado: input.peritaje.vehiculoDetectado ?? input.vehicleModel,
@@ -78,7 +85,10 @@ export function buildDraftClientMessageStructuredPayload(
       pricingMode: input.pricingMode,
     },
     cotizacion: {
-      lineRows: input.lineRows,
+      lineRows: input.lineRows.map((r) => ({
+        ...r,
+        pieza: resolvePiezaDisplayLabel(r.pieza),
+      })),
       total: input.total,
       currency: input.currency,
       reference: input.reference ?? '',
@@ -91,8 +101,10 @@ export function buildDraftClientMessageStructuredPayload(
       mapsUrl: input.mapsUrl,
       vehicleModel: input.vehicleModel,
       isComplement: input.isComplement,
-      previousPiezas: input.previousPiezas,
-      newPiezas: input.newPiezas,
+      previousPiezas: input.previousPiezas.map((p) =>
+        resolvePiezaDisplayLabel(p),
+      ),
+      newPiezas: input.newPiezas.map((p) => resolvePiezaDisplayLabel(p)),
     },
   };
 }
@@ -125,20 +137,20 @@ export function peritajeFromDamageAnalysisLike(analysis: {
   const inventario =
     analysis.inventory?.length ?
       analysis.inventory.map((it) => ({
-        pieza: String(it.pieza ?? '').trim(),
+        pieza: resolvePiezaDisplayLabel(String(it.pieza ?? '').trim()),
         severidad: String(it.severidad ?? '').trim() || undefined,
         descripcionTecnica: String(it.descripcionTecnica ?? '').trim() || undefined,
       }))
     : analysis.pieza ?
       [
         {
-          pieza: String(analysis.pieza).trim(),
+          pieza: resolvePiezaDisplayLabel(String(analysis.pieza).trim()),
           severidad: String(analysis.severidad ?? '').trim() || undefined,
           descripcionTecnica: String(analysis.descripcionTecnica ?? '').trim() || undefined,
         },
       ]
     : (analysis.partesAfectadas ?? []).map((p) => ({
-        pieza: String(p).trim(),
+        pieza: resolvePiezaDisplayLabel(String(p).trim()),
       }));
 
   return {

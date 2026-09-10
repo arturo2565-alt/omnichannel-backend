@@ -117,11 +117,62 @@ export function formatPiezasListForCliente(piezas: readonly string[]): string {
   return `${list.slice(0, -1).join(', ')} y ${list[list.length - 1]}`;
 }
 
-/** Código de panel → nombre legible para el cliente (ej. FD → Fascia delantera). */
+const VISION_POSITION_SUFFIX: Record<string, string> = {
+  TI: 'trasera izquierda',
+  TD: 'trasera derecha',
+  DI: 'delantera izquierda',
+  DD: 'delantera derecha',
+  I: 'izquierda',
+  D: 'derecha',
+};
+
+function titleCasePiezaWord(word: string): string {
+  const w = String(word ?? '').trim();
+  if (!w) return '';
+  return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+}
+
+/** `Calavera_TI` → "Calavera trasera izquierda". */
+export function humanizeVisionPiezaToken(raw: string): string {
+  const token = String(raw ?? '').trim();
+  if (!token || !/[_-]/.test(token)) return token;
+  const parts = token.split(/[_-]+/).filter(Boolean);
+  if (parts.length < 2) return token.replace(/[_-]+/g, ' ');
+  const suffix = parts[parts.length - 1]!.toUpperCase();
+  const pos = VISION_POSITION_SUFFIX[suffix];
+  const head = parts
+    .slice(0, pos ? -1 : parts.length)
+    .map(titleCasePiezaWord)
+    .join(' ')
+    .replace(/^Refaccion\s*:?\s*/i, '')
+    .trim();
+  if (!head) return token.replace(/[_-]+/g, ' ');
+  return pos ? `${head} ${pos}` : head;
+}
+
+/** Código de panel o token de visión → nombre legible (nunca `Calavera_TI`). */
 export function resolvePiezaDisplayLabel(codeOrLabel: string): string {
   const raw = String(codeOrLabel ?? '').trim();
   if (!raw) return 'Servicio';
-  return findPanelPiezaOption(raw)?.fullName ?? raw;
+  const withoutRefPrefix = raw.replace(/^REFACCION\s*:\s*/i, '').trim();
+  const fromCatalog = findPanelPiezaOption(withoutRefPrefix)?.fullName;
+  if (fromCatalog && fromCatalog.toLowerCase() !== 'refacción') {
+    return fromCatalog;
+  }
+  if (/[_-]/.test(withoutRefPrefix)) {
+    return humanizeVisionPiezaToken(withoutRefPrefix);
+  }
+  return fromCatalog ?? withoutRefPrefix;
+}
+
+/** Sustituye tokens crudos tipo `Calavera_TI` en texto al cliente. */
+export function replaceRawPiezaCodesInClientText(text: unknown): string {
+  const raw = String(text ?? '');
+  if (!raw) return '';
+  return raw.replace(
+    /\b(?:REFACCION\s*:\s*)?([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+[_-][A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]{1,6})\b/gi,
+    (full, token: string) => resolvePiezaDisplayLabel(String(token)),
+  );
 }
 
 export function lineRowMatchesPiezaCode(

@@ -1,8 +1,11 @@
 import {
   buildRefaccionYearAskNote,
+  clientNarrativeAlreadyCoversRefaccion,
   extractVehicleYear,
   hasConfirmedYearAndModel,
   parseVehicleYearAndModel,
+  shouldAppendRefaccionNote,
+  stripRedundantRefaccionAskFooter,
 } from './refaccion-vehicle-gate';
 
 describe('refaccion-vehicle-gate', () => {
@@ -30,5 +33,29 @@ describe('refaccion-vehicle-gate', () => {
     expect(note).toMatch(/Calavera izquierda/);
     expect(note).toMatch(/año y versión/);
     expect(note).not.toMatch(/\$/);
+  });
+
+  it('no concatena nota si el cuerpo ya cubre rotura + taller', () => {
+    const body =
+      'También se observa calavera trasera izquierda rota, la cual se confirma al ingresar al taller. ¿Qué día te queda para agendar?';
+    expect(clientNarrativeAlreadyCoversRefaccion(body)).toBe(true);
+    expect(
+      shouldAppendRefaccionNote(body, { vehicleConfirmed: false }),
+    ).toBe(false);
+    expect(
+      shouldAppendRefaccionNote(body, { vehicleConfirmed: true }),
+    ).toBe(false);
+  });
+
+  it('quita el pie Nota de Refacción que pide marca/modelo/año', () => {
+    const text = [
+      'Ya analizamos las fotos de tu fascia. ¿Qué día te queda para ingresar?',
+      '',
+      '🔍 *Nota de Refacción:* Notamos que tu *Calavera_TI* presenta rotura. ¿me confirmas *marca, modelo y año*?',
+    ].join('\n');
+    const cleaned = stripRedundantRefaccionAskFooter(text);
+    expect(cleaned).toMatch(/fascia/i);
+    expect(cleaned).not.toMatch(/Nota de Refacción/i);
+    expect(cleaned).not.toMatch(/Calavera_TI/);
   });
 });
