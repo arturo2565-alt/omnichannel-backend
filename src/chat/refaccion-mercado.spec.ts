@@ -3,10 +3,13 @@ import {
   looksLikeOpticaOrUnusablePart,
   precioAlClienteConMargen,
   buildRefaccionDisclaimer,
+  buildConsolidatedRefaccionQuoteNote,
   buildRefaccionMarketQuery,
   selectViableMlPrices,
   buscarCostoRefaccionOnline,
+  estimarCostoBasePorCategoria,
 } from './refaccion-mercado';
+import { extractMxnPricesFromText } from './refaccion-web-search';
 
 describe('refaccion-mercado', () => {
   it('aplica +30% y redondea a 50', () => {
@@ -26,7 +29,7 @@ describe('refaccion-mercado', () => {
     );
     expect(buildRefaccionDisclaimer('Fascia delantera', 1450)).toMatch(/1,450/);
     expect(buildRefaccionDisclaimer('Calavera izquierda', 2860, 'catalogo')).toMatch(
-      /pieza nueva/,
+      /pieza nueva/i,
     );
     expect(buildRefaccionDisclaimer('Calavera izquierda', 2860, 'catalogo')).toMatch(
       /montaje/,
@@ -45,15 +48,39 @@ describe('refaccion-mercado', () => {
     expect(looksLikeOpticaOrUnusablePart('FD', 'DL', 'pieza rota')).toBe(false);
   });
 
-  it('arma query de mercado con pieza marca modelo año mexico', () => {
+  it('arma query web México/CDMX', () => {
     expect(
       buildRefaccionMarketQuery({
         pieza: 'Calavera_Izquierda',
-        marca: 'Volkswagen',
-        modelo: 'Jetta',
-        anio: '2019',
+        marca: 'Mazda',
+        modelo: '2',
+        anio: '2018',
       }),
-    ).toBe('Calavera izquierda Volkswagen Jetta 2019 mexico');
+    ).toBe('precio "Calavera izquierda" "Mazda 2" 2018 comprar mexico cdmx');
+  });
+
+  it('agrupa varias refacciones en un solo bloque', () => {
+    const block = buildConsolidatedRefaccionQuoteNote([
+      { label: 'Calavera izquierda', monto: 2850, fuente: 'web' },
+      { label: 'Faro de niebla izquierdo', monto: 1450, fuente: 'web' },
+    ]);
+    expect((block.match(/Nota de Refacción/g) ?? []).length).toBe(1);
+    expect(block).toMatch(/• Calavera izquierda — \$2,850/);
+    expect(block).toMatch(/• Faro de niebla izquierdo — \$1,450/);
+  });
+
+  it('extrae MXN y excluye años', () => {
+    const prices = extractMxnPricesFromText(
+      'Calavera 2018 Mazda 2 en $1,850 MXN y otra en $2,200 pesos CDMX',
+    );
+    expect(prices).toEqual([1850, 2200]);
+  });
+
+  it('estima por gama Compacto para óptica', () => {
+    expect(estimarCostoBasePorCategoria('Calavera_Izquierda', 'Compacto')).toBe(
+      2200,
+    );
+    expect(precioAlClienteConMargen(2200)).toBe(2850);
   });
 
   it('toma 3 a 5 precios MXN y descarta otras monedas', () => {
@@ -69,7 +96,7 @@ describe('refaccion-mercado', () => {
     expect(prices).toEqual([1800, 2100, 2500, 2700, 3000]);
   });
 
-  it('no inventa precio si faltan año/modelo o no hay muestra', async () => {
+  it('exige marca/modelo/año y si no hay web usa estimado por gama', async () => {
     const missing = await buscarCostoRefaccionOnline({
       pieza: 'Calavera_Izquierda',
       vehiculo: 'Jetta',
@@ -82,17 +109,19 @@ describe('refaccion-mercado', () => {
     global.fetch = (async () =>
       ({
         ok: true,
-        json: async () => ({ results: [{ price: 900, currency_id: 'MXN' }] }),
+        json: async () => ({ results: [] }),
       })) as typeof fetch;
     try {
-      const thin = await buscarCostoRefaccionOnline({
+      const fallback = await buscarCostoRefaccionOnline({
         pieza: 'Calavera_Izquierda',
-        modelo: 'Jetta',
-        anio: '2019',
+        marca: 'Mazda',
+        modelo: '2',
+        anio: '2018',
+        sizeTier: 'Compacto',
       });
-      expect(thin.success).toBe(false);
-      expect(thin.requiereConfirmacionManual).toBe(true);
-      expect(thin.precioAlCliente).toBe(0);
+      expect(fallback.success).toBe(true);
+      expect(fallback.fuente).toBe('estimacion_categoria');
+      expect(fallback.precioAlCliente).toBe(2850);
     } finally {
       global.fetch = origFetch;
     }

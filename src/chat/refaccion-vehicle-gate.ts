@@ -37,7 +37,7 @@ function stripYearAndNoise(raw: string): string {
   return String(raw ?? '')
     .replace(YEAR_RE, ' ')
     .replace(
-      /\b(es|un|una|el|la|de|del|mi|tu|auto|carro|camioneta|unidad|version|versión|modelo|año|anio)\b/gi,
+      /\b(es|un|una|el|la|de|del|mi|tu|auto|carro|camioneta|unidad|modelo|año|anio)\b/gi,
       ' ',
     )
     .replace(/\s+/g, ' ')
@@ -52,6 +52,18 @@ export function extractVehicleMarca(text: string): string {
   return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
 }
 
+/** Modelo comercial (Jetta, 2, March). No exige versión/equipamiento. */
+export function isValidRefaccionModelo(
+  modelo: string | null | undefined,
+  marca?: string | null,
+): boolean {
+  const m = String(modelo ?? '').trim();
+  if (!m) return false;
+  if (/^\d{1,2}[a-z]?$/i.test(m)) return Boolean(String(marca ?? '').trim());
+  if (isPlaceholderBañoVehicleLabel(m)) return false;
+  return m.length >= 2;
+}
+
 export function extractVehicleModelo(text: string): string {
   const cleaned = stripYearAndNoise(text);
   if (!cleaned || isPlaceholderBañoVehicleLabel(cleaned)) return '';
@@ -60,13 +72,13 @@ export function extractVehicleModelo(text: string): string {
   if (marca) {
     rest = rest
       .replace(new RegExp(`\\b${marca}\\b`, 'ig'), ' ')
-      .replace(/\bvw\b/ig, ' ')
+      .replace(/\bvw\b/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
   }
-  const modelo = rest.split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
-  if (!modelo || isPlaceholderBañoVehicleLabel(modelo)) return '';
-  if (modelo.length < 2) return '';
+  const tokens = rest.split(/\s+/).filter(Boolean).slice(0, 3);
+  const modelo = tokens.join(' ');
+  if (!isValidRefaccionModelo(modelo, marca)) return '';
   return modelo;
 }
 
@@ -86,29 +98,54 @@ export function parseVehicleYearAndModel(
     modelo,
     anio,
     label,
-    confirmed: hasConfirmedYearAndModel(anio, modelo),
+    confirmed: hasConfirmedMarcaModeloAnio(marca, modelo, anio),
   };
 }
 
-export function hasConfirmedYearAndModel(
-  anio: string | null | undefined,
+/** Marca + modelo + año. "Mazda 2 2018" basta; no se pide versión. */
+export function hasConfirmedMarcaModeloAnio(
+  marca: string | null | undefined,
   modelo: string | null | undefined,
+  anio: string | null | undefined,
 ): boolean {
   const y = String(anio ?? '').replace(/\D/g, '').slice(0, 4);
-  const m = String(modelo ?? '').trim();
   if (!y || y.length !== 4) return false;
-  if (!m || isPlaceholderBañoVehicleLabel(m)) return false;
+  if (!isValidRefaccionModelo(modelo, marca)) return false;
+  const m = String(modelo ?? '').trim();
+  if (/^\d{1,2}[a-z]?$/i.test(m) && !String(marca ?? '').trim()) return false;
   return true;
 }
 
+/** @deprecated usar {@link hasConfirmedMarcaModeloAnio}. */
+export function hasConfirmedYearAndModel(
+  anio: string | null | undefined,
+  modelo: string | null | undefined,
+  marca?: string | null,
+): boolean {
+  return hasConfirmedMarcaModeloAnio(marca, modelo, anio);
+}
+
 export function buildRefaccionYearAskNote(piezaLabel: string): string {
-  const label = String(piezaLabel ?? '').trim() || 'la pieza';
-  return `🔍 *Nota de Refacción:* Notamos que tu *${label}* presenta rotura y requiere cambio. Para darte el costo exacto de la pieza nueva o reemplazo, ¿podrías confirmarme el *año y versión* de tu unidad?`;
+  return buildConsolidatedRefaccionAskNote([piezaLabel]);
+}
+
+export function buildConsolidatedRefaccionAskNote(labels: string[]): string {
+  const pieces = labels
+    .map((l) => String(l ?? '').trim())
+    .filter(Boolean);
+  if (!pieces.length) {
+    return '🔍 *Nota de Refacción:* Hay una pieza con rotura que requiere cambio. Para cotizarla, ¿me confirmas *marca, modelo y año* de tu unidad? (ej. Mazda 2 2018)';
+  }
+  if (pieces.length === 1) {
+    return `🔍 *Nota de Refacción:* Notamos que tu *${pieces[0]}* presenta rotura y requiere cambio. Para darte el costo de la pieza nueva o reemplazo, ¿me confirmas *marca, modelo y año* de tu unidad? (ej. Mazda 2 2018)`;
+  }
+  const bullets = pieces.map((p) => `• ${p}`).join('\n');
+  return `🔍 *Nota de Refacción:* Notamos rotura y se requiere cambio en:\n${bullets}\nPara cotizar las piezas nuevas, ¿me confirmas *marca, modelo y año* de tu unidad? (ej. Mazda 2 2018)`;
 }
 
 export function buildRefaccionManualConfirmNote(piezaLabel: string): string {
   const label = String(piezaLabel ?? '').trim() || 'la pieza';
-  return `🔍 *Nota de Refacción:* ${label} requiere reemplazo, pero no encontramos un precio de mercado confiable en este momento. Lo confirmamos en físico con el número de parte — no incluimos un costo estimado inventado.`;
+  return `🔍 *Nota de Refacción:* ${label} requiere reemplazo. Usaremos un estimado comercial por gama y lo confirmamos en la revisión física.`;
 }
 
 export function pendientesFromPieces(
@@ -120,8 +157,7 @@ export function pendientesFromPieces(
     const pieza = String(it.pieza ?? '').trim();
     if (!pieza || seen.has(pieza)) continue;
     seen.add(pieza);
-    const label =
-      findPanelPiezaOption(pieza)?.fullName || pieza;
+    const label = findPanelPiezaOption(pieza)?.fullName || pieza;
     out.push({ pieza, label });
   }
   return out;

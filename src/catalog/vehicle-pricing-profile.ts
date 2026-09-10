@@ -46,7 +46,7 @@ const GRANDE_BODY_RE =
   /\b(f-150|f150|silverado|ram\s*1500|lobo|tundra|tacoma|hilux|ranger|frontier|colorado|canyon|cr-v|crv|rav4|rav\s*4|x-trail|xtrail|rogue|escape|equinox|tucson|sportage|sorento|edge|explorer|highlander|4runner|pick\s*up|pickup|camioneta|suv)\b/i;
 
 const COMPACTO_BODY_RE =
-  /\b(aveo|spark|march|mirage|vers[aá]|rio|fit|yaris|i10|i20|matiz|beat|figo|punto|500|mini\s*cooper|smart|up!|gol|polo|clio|sandero)\b/i;
+  /\b(aveo|spark|march|mirage|vers[aá]|rio|fit|yaris|i10|i20|matiz|beat|figo|punto|500|mini\s*cooper|smart|up!|gol|polo|clio|sandero|mazda\s*2|mazda2|mazda\s*3|mazda3)\b/i;
 
 const SIZE_TIER_VALUES: readonly VehicleSizeTier[] = [
   'Compacto',

@@ -122,6 +122,7 @@ import {
 } from './inbound-sticker';
 import {
   buildRefaccionDisclaimer,
+  buildConsolidatedRefaccionQuoteNote,
   buildRefaccionInventoryItem,
   buscarCostoRefaccionOnline,
   looksLikeOpticaOrUnusablePart,
@@ -129,10 +130,9 @@ import {
   type RefaccionMercadoEstimate,
 } from './refaccion-mercado';
 import {
-  buildRefaccionManualConfirmNote,
-  buildRefaccionYearAskNote,
+  buildConsolidatedRefaccionAskNote,
   extractVehicleYear,
-  hasConfirmedYearAndModel,
+  hasConfirmedMarcaModeloAnio,
   parseVehicleYearAndModel,
   pendientesFromPieces,
   type RefaccionGateState,
@@ -199,6 +199,7 @@ import {
   resolveBañoSeveridadFromVehicleProfile,
   resolveVehiclePricingProfile,
   vehiclePricingProfileFromAnalysis,
+  type VehicleSizeTier,
 } from '../catalog/vehicle-pricing-profile';
 import { resolveIntegralPriceForVehicleProfile } from '../catalog/vehicle-integral-pricing';
 import { QuoteCartService } from './quote-cart.service';
@@ -1606,6 +1607,7 @@ export class ChatService implements OnModuleDestroy {
     anio?: string | null,
     marca?: string | null,
     modelo?: string | null,
+    sizeTier?: VehicleSizeTier | null,
   ): Promise<RefaccionMercadoEstimate> {
     const catalog = await this.refaccionesService.resolveClienteQuote(
       tallerId,
@@ -1630,6 +1632,7 @@ export class ChatService implements OnModuleDestroy {
       anio,
       marca,
       modelo,
+      sizeTier,
     });
   }
 
@@ -1652,14 +1655,23 @@ export class ChatService implements OnModuleDestroy {
         piezasPendientes: pendientes,
         guardadoEn: new Date().toISOString(),
       };
-      for (const p of pendientes.slice(0, 3)) {
-        notes.push(buildRefaccionYearAskNote(p.label));
-      }
+      notes.push(
+        buildConsolidatedRefaccionAskNote(pendientes.map((p) => p.label)),
+      );
       return { ...analysis, refaccionGate: gate };
     }
 
+    const sizeTier = resolveVehiclePricingProfile({
+      modeloVehiculo: identity.label || analysis.vehiculoDetectado || '',
+      tierSource: 'vision',
+    }).sizeTier;
     const inventory = [...(analysis.inventory ?? [])];
     const seen = new Set<string>();
+    const quoteLines: Array<{
+      label: string;
+      monto: number;
+      fuente: RefaccionMercadoEstimate['fuente'];
+    }> = [];
     for (const it of candidates) {
       const key = canonicalizePanelCode(it.pieza) || it.pieza;
       if (!key || seen.has(key)) continue;
@@ -1671,27 +1683,24 @@ export class ChatService implements OnModuleDestroy {
         identity.anio,
         identity.marca,
         identity.modelo,
+        sizeTier,
       );
       if (
-        estimate.requiereAnioModelo ||
         !estimate.success ||
         !Number.isFinite(estimate.precioAlCliente) ||
         estimate.precioAlCliente <= 0
       ) {
-        if (estimate.requiereConfirmacionManual) {
-          notes.push(buildRefaccionManualConfirmNote(piezaLabelForRefaccion(it.pieza)));
-        }
         continue;
       }
       inventory.push(buildRefaccionInventoryItem(estimate, it.pieza));
-      notes.push(
-        buildRefaccionDisclaimer(
-          piezaLabelForRefaccion(it.pieza),
-          estimate.precioAlCliente,
-          estimate.fuente,
-        ),
-      );
+      quoteLines.push({
+        label: piezaLabelForRefaccion(it.pieza),
+        monto: estimate.precioAlCliente,
+        fuente: estimate.fuente,
+      });
     }
+    const quoteNote = buildConsolidatedRefaccionQuoteNote(quoteLines);
+    if (quoteNote) notes.push(quoteNote);
     const next: VehicleDamageAnalysis = {
       ...analysis,
       inventory,
@@ -3697,18 +3706,26 @@ export class ChatService implements OnModuleDestroy {
       cart.damageAnalysis?.vehiculoDetectado,
       inboundText,
     );
-    if (!hasConfirmedYearAndModel(identity.anio, identity.modelo)) {
+    if (!hasConfirmedMarcaModeloAnio(identity.marca, identity.modelo, identity.anio)) {
       await this.dispatchAutonomousQuotedOutbound({
         conversationId,
         tallerId: cart.tallerId ?? conv?.tallerId,
         platform: conv?.platform,
         clientMessage:
-          'Gracias. Para cotizar la pieza nueva necesito también el *modelo o versión* de tu unidad (ej. Jetta Comfortline).',
+          'Gracias. Para cotizar la pieza nueva necesito *marca, modelo y año* de tu unidad (ej. Mazda 2 2018).',
       });
       return true;
     }
 
-    const notes: string[] = [];
+    const sizeTier = resolveVehiclePricingProfile({
+      modeloVehiculo: identity.label,
+      tierSource: 'cliente',
+    }).sizeTier;
+    const quoteLines: Array<{
+      label: string;
+      monto: number;
+      fuente: RefaccionMercadoEstimate['fuente'];
+    }> = [];
     let inserted = 0;
     for (const pending of gate.piezasPendientes) {
       const estimate = await this.resolveRefaccionEstimateForPieza(
@@ -3718,13 +3735,13 @@ export class ChatService implements OnModuleDestroy {
         identity.anio,
         identity.marca,
         identity.modelo,
+        sizeTier,
       );
       if (
         !estimate.success ||
         !Number.isFinite(estimate.precioAlCliente) ||
         estimate.precioAlCliente <= 0
       ) {
-        notes.push(buildRefaccionManualConfirmNote(pending.label));
         continue;
       }
       await this.quoteCartService.addRefaccionItem(
@@ -3732,15 +3749,14 @@ export class ChatService implements OnModuleDestroy {
         cart.tallerId,
         buildRefaccionInventoryItem(estimate, pending.pieza),
       );
-      notes.push(
-        buildRefaccionDisclaimer(
-          pending.label,
-          estimate.precioAlCliente,
-          estimate.fuente,
-        ),
-      );
+      quoteLines.push({
+        label: pending.label,
+        monto: estimate.precioAlCliente,
+        fuente: estimate.fuente,
+      });
       inserted += 1;
     }
+    const notes = [buildConsolidatedRefaccionQuoteNote(quoteLines)].filter(Boolean);
 
     const refreshed = await this.quoteCartService.resolveActiveCart(
       conversationId,
@@ -3767,7 +3783,7 @@ export class ChatService implements OnModuleDestroy {
     const header =
       inserted > 0
         ? `Listo, con tu *${identity.label}* ya pude cotizar la pieza nueva.`
-        : 'Gracias por el año. Aún no hay un precio de mercado confiable para la refacción.';
+        : 'Gracias. Cotizamos con un estimado comercial por gama y lo confirmamos en la revisión física.';
     const totalLine =
       inserted > 0
         ? `\n\n*Total actualizado:* $${total.toLocaleString('es-MX')} MXN`
@@ -5920,7 +5936,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     let draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
     if (refaccionNotes.length) {
-      const noteBlock = refaccionNotes.join('\n');
+      const noteBlock = refaccionNotes.join('\n\n');
       draftQuoteForClient = {
         ...draftQuoteForClient,
         clientMessage: [draftQuoteForClient.clientMessage, noteBlock]
@@ -7106,12 +7122,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         error: 'Falta la pieza para estimar la refacción.',
       };
     }
-    if (!hasConfirmedYearAndModel(identity.anio, identity.modelo)) {
+    if (!hasConfirmedMarcaModeloAnio(identity.marca, identity.modelo, identity.anio)) {
       return {
         success: false,
         requiereAnioModelo: true,
         error:
-          'Se requiere año y modelo confirmados antes de buscar el costo de la refacción. Pregunta al cliente; no inventes un precio.',
+          'Se requiere marca, modelo y año (ej. Mazda 2 2018). No pidas versión ni equipamiento.',
       };
     }
     const estimate = await this.resolveRefaccionEstimateForPieza(

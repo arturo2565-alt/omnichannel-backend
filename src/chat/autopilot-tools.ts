@@ -175,7 +175,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
     type: 'function',
     name: 'buscarCostoRefaccionOnline',
     description:
-      'Busca el costo real de una refacción en MercadoLibre México. REQUIERE año y modelo confirmados. Aplica +30% y redondea a $50. Si no hay muestra de mercado, devuelve requiereConfirmacionManual y NO inventes un precio. Inserta REFACCION en el carrito solo si success=true. El catálogo del taller solo aplica si el taller forzó un precio manual.',
+      'Busca el costo de una refacción en web México/CDMX (y MercadoLibre). REQUIERE marca, modelo y año (ej. Mazda 2 2018). PROHIBIDO pedir versión o equipamiento. Aplica +30% y redondea a $50. Si no hay muestra web, usa el estimado comercial por gama. Inserta cada pieza como renglón REFACCION; en el mensaje al cliente agrupa las notas en un solo bloque.',
     parameters: {
       type: 'object',
       properties: {
@@ -189,7 +189,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
         },
         modelo: {
           type: 'string',
-          description: 'Modelo o versión (ej. Jetta, March).',
+          description: 'Modelo (ej. Jetta, 2, March). No pidas versión.',
         },
         anio: {
           type: 'string',
@@ -208,7 +208,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
     type: 'function',
     name: 'estimarRefaccionMercado',
     description:
-      'Alias de buscarCostoRefaccionOnline. Misma regla: año + modelo obligatorios, mercado MX en tiempo real, +30%, sin precios inventados.',
+      'Alias de buscarCostoRefaccionOnline. Marca + modelo + año bastan (Mazda 2 2018). No pidas versión.',
     parameters: {
       type: 'object',
       properties: {
@@ -220,7 +220,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
           type: 'string',
           description: 'Marca y modelo.',
         },
-        modelo: { type: 'string', description: 'Modelo o versión.' },
+        modelo: { type: 'string', description: 'Modelo (sin versión).' },
         anio: { type: 'string', description: 'Año (obligatorio).' },
         marca: { type: 'string', description: 'Marca.' },
       },

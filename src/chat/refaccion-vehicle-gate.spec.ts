@@ -1,5 +1,5 @@
 import {
-  buildRefaccionYearAskNote,
+  buildConsolidatedRefaccionAskNote,
   extractVehicleYear,
   hasConfirmedYearAndModel,
   parseVehicleYearAndModel,
@@ -10,6 +10,21 @@ describe('refaccion-vehicle-gate', () => {
     expect(extractVehicleYear('Es 2019')).toBe('2019');
     expect(extractVehicleYear('es un jetta 2018')).toBe('2018');
     expect(extractVehicleYear('no sé el año')).toBeNull();
+  });
+
+  it('acepta Mazda 2 2018 sin pedir versión', () => {
+    const id = parseVehicleYearAndModel('Mazda 2 2018');
+    expect(id.marca).toBe('Mazda');
+    expect(id.modelo).toBe('2');
+    expect(id.anio).toBe('2018');
+    expect(id.confirmed).toBe(true);
+    expect(id.label).toBe('Mazda 2 2018');
+  });
+
+  it('acepta Mazda 2 2020', () => {
+    const id = parseVehicleYearAndModel('Mazda 2 2020');
+    expect(id.confirmed).toBe(true);
+    expect(id.anio).toBe('2020');
   });
 
   it('exige año y modelo reales', () => {
@@ -25,10 +40,20 @@ describe('refaccion-vehicle-gate', () => {
     expect(id.confirmed).toBe(true);
   });
 
-  it('pregunta año y versión sin inventar precio', () => {
-    const note = buildRefaccionYearAskNote('Calavera izquierda');
-    expect(note).toMatch(/Calavera izquierda/);
-    expect(note).toMatch(/año y versión/);
-    expect(note).not.toMatch(/\$/);
+  it('pregunta marca, modelo y año — nunca versión', () => {
+    const one = buildConsolidatedRefaccionAskNote(['Calavera izquierda']);
+    expect(one).toMatch(/Calavera izquierda/);
+    expect(one).toMatch(/marca, modelo y año/);
+    expect(one).toMatch(/Mazda 2 2018/);
+    expect(one).not.toMatch(/versi[oó]n/i);
+    expect(one).not.toMatch(/\$/);
+
+    const many = buildConsolidatedRefaccionAskNote([
+      'Calavera izquierda',
+      'Faro de niebla izquierdo',
+    ]);
+    expect(many).toMatch(/• Calavera izquierda/);
+    expect(many).toMatch(/• Faro de niebla izquierdo/);
+    expect((many.match(/Nota de Refacción/g) ?? []).length).toBe(1);
   });
 });
