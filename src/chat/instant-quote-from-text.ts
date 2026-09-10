@@ -13,11 +13,6 @@ import {
   type VehicleSizeTier,
 } from '../catalog/vehicle-pricing-profile';
 import {
-  BPCC_TURNKEY_LABEL,
-  resolveBanioCodeUnitPrice,
-  cambioDeColorAddonMxForSizeTier as addonMxForSizeTier,
-} from '../catalog/vehicle-piece-pricing';
-import {
   AUTO_FIX_CURRENCY,
   formatAutoFixMoney,
   matchServicioFromCatalog,
@@ -37,8 +32,6 @@ export type InstantQuoteResolution = {
   /** Días hábiles de entrega según catálogo. */
   diasEntrega: number;
   currency: typeof AUTO_FIX_CURRENCY;
-  /** BPCC llave en mano: no hay extra de línea, pero sí días extra de color. */
-  includesColorChange?: boolean;
 };
 
 export type InstantQuoteFromTextOptions = {
@@ -1105,11 +1098,29 @@ export function inferBañoTierSeveridad(contextText: string): string {
 const COLOR_NAME_TOKENS =
   /\b(negro|blanco|rojo|azul|gris|plateado|dorado|beige|amarillo|verde|naranja|morado|violeta|perla|metalizado|mate|bicolor|vinotinto|guinda|champagne|plata|negro|azul\s*marino)\b/;
 
+/** Copy comercial único de BPCC (sin desglose exterior + suplemento). */
+export const BPCC_TURNKEY_LABEL =
+  'Baño de Pintura y Cambio de Color (Carrocería Completa e Interiores de Marcos, Cofre y Cajuela)';
+
+/** BPEI (exterior × 1.15) + suplemento de tono, un solo monto. */
+export function resolveBpccTurnkeyUnitPrice(
+  exteriorBase: number,
+  sizeTier: VehicleSizeTier,
+): number {
+  const base = Math.max(0, Math.round(Number(exteriorBase) || 0));
+  if (base <= 0) return 0;
+  const withInteriors = Math.round((base * 1.15) / 50) * 50;
+  return withInteriors + cambioDeColorAddonMxForSizeTier(sizeTier);
+}
+
+function looksLikeBpccIntent(text: string): boolean {
+  const n = normalizeTextForMatch(text);
+  return /\bbpcc\b/.test(n) || mentionsCambioDeColor(text);
+}
+
 export function mentionsCambioDeColor(userText: string): boolean {
   const n = normalizeTextForMatch(userText);
-  if (/\bbpcc\b/.test(n) || /\btransformacion total\b/.test(n)) {
-    return true;
-  }
+  if (/\bbpcc\b/.test(n)) return true;
   if (
     /\bcambio\s+de\s+color\b/.test(n) ||
     /\bcambio\s+color\b/.test(n) ||
@@ -1210,7 +1221,8 @@ export function cambioDeColorAddonMx(severidadBaño: string): number {
 }
 
 export function cambioDeColorAddonMxForSizeTier(sizeTier: VehicleSizeTier): number {
-  return addonMxForSizeTier(sizeTier);
+  if (sizeTier === 'Grande' || sizeTier === 'XL') return 10_000;
+  return 8_000;
 }
 
 function logInstantResolution(payload: Record<string, unknown>): void {
@@ -1302,9 +1314,9 @@ export function materializeIntegralQuoteResolution(
 
   const isBpcc =
     isBañoDePinturaServicio(canonical) &&
-    mentionsCambioDeColor(tierSourceForCambioColor);
+    looksLikeBpccIntent(tierSourceForCambioColor);
   const unit = isBpcc
-    ? resolveBanioCodeUnitPrice(resolved.unitPrice, 'BPCC', profile.sizeTier)
+    ? resolveBpccTurnkeyUnitPrice(resolved.unitPrice, profile.sizeTier)
     : resolved.unitPrice;
   const lines: InstantQuoteLine[] = [
     {
@@ -1312,7 +1324,6 @@ export function materializeIntegralQuoteResolution(
       amount: unit,
     },
   ];
-
   return {
     lines,
     extras: [],
@@ -1321,7 +1332,6 @@ export function materializeIntegralQuoteResolution(
     precioMx: unit,
     diasEntrega: resolved.diasEntrega > 0 ? resolved.diasEntrega : 3,
     currency: AUTO_FIX_CURRENCY,
-    includesColorChange: isBpcc,
   };
 }
 
@@ -1400,17 +1410,14 @@ export function materializeInstantQuoteResolution(
 
   const isBpcc =
     isBañoDePinturaServicio(canonical) &&
-    mentionsCambioDeColor(tierSourceForCambioColor);
+    looksLikeBpccIntent(tierSourceForCambioColor);
+  const sizeForAddon = resolveIntegralVehicleProfileForQuote(
+    tierSourceForCambioColor,
+    canonical,
+    severidadLiteral,
+  ).sizeTier;
   const unit = isBpcc
-    ? resolveBanioCodeUnitPrice(
-        base,
-        'BPCC',
-        resolveIntegralVehicleProfileForQuote(
-          tierSourceForCambioColor,
-          canonical,
-          severidadLiteral,
-        ).sizeTier,
-      )
+    ? resolveBpccTurnkeyUnitPrice(base, sizeForAddon)
     : base;
   const lines: InstantQuoteLine[] = [
     {
@@ -1420,7 +1427,6 @@ export function materializeInstantQuoteResolution(
       amount: unit,
     },
   ];
-
   const diasEntrega = snap.getDiasEntregaForCanonical(canonical, severidadLiteral);
   return {
     lines,
@@ -1430,7 +1436,6 @@ export function materializeInstantQuoteResolution(
     precioMx: unit,
     diasEntrega: diasEntrega > 0 ? diasEntrega : 3,
     currency: AUTO_FIX_CURRENCY,
-    includesColorChange: isBpcc,
   };
 }
 

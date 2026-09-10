@@ -39,6 +39,28 @@ describe('quote-cart-inventory-mode', () => {
     expect(sanitized.map((i) => i.pieza)).toEqual(['Toldo', 'PDI']);
   });
 
+  it('conserva renglones REFACCION junto a piezas de matriz', () => {
+    const refaccion = {
+      pieza: 'REFACCION:Calavera_Izquierda',
+      severidad: 'N/A',
+      descripcionTecnica: 'Pieza nueva',
+      urls_origen: [] as string[],
+      precioMx: 2860,
+    };
+    const mixed = [puertaItem, refaccion];
+    expect(detectCartPricingMode(mixed)).toBe('piezas');
+    const sanitized = sanitizeCartInventoryForPricing(mixed);
+    expect(sanitized.map((i) => i.pieza)).toEqual([
+      'PDI',
+      'REFACCION:Calavera_Izquierda',
+    ]);
+    expect(sanitized[1]?.precioMx).toBe(2860);
+    expect(detectCartPricingMode([refaccion])).toBe('piezas');
+    expect(
+      sanitizeCartInventoryForPricing([refaccion]).map((i) => i.pieza),
+    ).toEqual(['REFACCION:Calavera_Izquierda']);
+  });
+
   it('mergeCartInventoryWithPricingMode: pieza nueva quita BPC previo', () => {
     const merged = mergeCartInventoryWithPricingMode([bpcItem], toldoItem);
     expect(merged.map((i) => i.pieza)).toEqual(['Toldo']);

@@ -5,7 +5,6 @@ import { ChatService } from '../chat/chat.service';
 import { IncomingMessageProducer } from './incoming-message.producer';
 import {
   INCOMING_MESSAGES_QUEUE,
-  shouldExtendInboundDebounce,
   type IncomingMessageJobData,
 } from './incoming-message.constants';
 
@@ -29,19 +28,6 @@ export class IncomingMessageWorker extends WorkerHost {
     this.logger.log(
       `process start job=${job.id} channel=${channel} conversation=${conversationId}`,
     );
-
-    const peeked = await this.producer.peekBuffer(conversationId);
-    if (shouldExtendInboundDebounce(peeked)) {
-      this.logger.log(
-        `settle wait conversation=${conversationId} images=${peeked.filter((i) => i.kind === 'image').length} — última foto aún dentro de la ventana de 25s`,
-      );
-      await this.producer.rescheduleIfBufferPending(
-        tallerId,
-        conversationId,
-        channel,
-      );
-      return;
-    }
 
     const items = await this.producer.drainBuffer(conversationId);
     console.log('[IncomingMessageWorker] buffer drenado', {

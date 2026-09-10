@@ -4,9 +4,9 @@ import {
   flattenBañoTierSource,
   inferBañoTierSeveridad,
   isPlaceholderBañoVehicleLabel,
+  resolveBpccTurnkeyUnitPrice,
 } from './instant-quote-from-text';
 import type { VehicleSizeTier } from '../catalog/vehicle-pricing-profile';
-import { resolveBanioCodeUnitPrice } from '../catalog/vehicle-piece-pricing';
 
 /** Default de colapso (baño exterior). Legacy BPC se trata como BPE. */
 export const VISION_BPC_PIEZA_CODE = 'BPE';
@@ -96,13 +96,22 @@ export function resolveVisionBanioCode(
   return 'BPE';
 }
 
-/** BPEI: +15% interiores. BPCC: interiores + color en un solo monto llave en mano. */
+/** BPEI: +15% interiores. BPCC: BPEI + suplemento de tono, un solo monto. */
 export function applyBanioCodePriceAdjustments(
   unitPrice: number,
   banioCode: string,
   sizeTier?: VehicleSizeTier | null,
 ): number {
-  return resolveBanioCodeUnitPrice(unitPrice, banioCode, sizeTier);
+  let price = Math.max(0, Math.round(Number(unitPrice) || 0));
+  if (price <= 0) return 0;
+  const code = String(banioCode ?? '').toUpperCase().trim();
+  if (code === 'BPCC') {
+    return resolveBpccTurnkeyUnitPrice(price, sizeTier ?? 'Mediano');
+  }
+  if (code === 'BPEI') {
+    price = Math.round((price * 1.15) / 50) * 50;
+  }
+  return price;
 }
 
 /** Lee vehículo del JSON crudo de visión (snake_case o camelCase). */

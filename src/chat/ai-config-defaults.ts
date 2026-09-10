@@ -76,11 +76,11 @@ Cada elemento de items es una **pieza o zona agrupada lógica** tras consolidar 
 - Si peritaje_viable es false, items DEBE ser [].
 
 Por objeto:
-- "pieza": código canónico (FD, FT, SI, SD, STI, STD, CTI, CTD, PDI, PDD, PTI, PTD, EI, ED, ESI, ESD, Cofre, Toldo, Tapa Cajuela) o nombre natural equivalente.
+- "pieza": código canónico (FD, FT, SI, SD, STI, STD, CTI, CTD, PDI, PDD, PTI, PTD, EI, ED, ESI, ESD, Cofre, Toldo, Tapa Cajuela, Faro_Izquierdo, Faro_Derecho, Calavera_Izquierda, Calavera_Derecha, Faro_Niebla_Izquierdo, Faro_Niebla_Derecho) o nombre natural equivalente. Si un faro o calavera está roto/estrellado/inservible, usa esos códigos de óptica (no los mapees a FD/FT).
 - Baños de pintura (única pieza, no listes paneles sueltos):
   * "BPE" = Baño de Pintura Exterior.
   * "BPEI" = Exterior + interiores de puertas/cofre.
-  * "BPCC" = Transformación Total / Cambio de Color (Exterior e Interiores completos; no desglosar).
+  * "BPCC" = Baño con cambio total de color (incluye desarmado).
   El alias "BPC" se interpreta como BPE.
 - "severidad": para piezas sueltas, EXACTAMENTE DL | DML | DM | DMF | DF | DMFuerte. Para BPE/BPEI/BPCC usa tamaño (Chico, Mediano, Grande, XL), no código de golpe.
 - Opcional: "intencion_banio_completo_detectada": true y "tipo_banio": BPE | BPEI | BPCC.

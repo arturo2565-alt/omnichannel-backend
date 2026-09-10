@@ -107,4 +107,64 @@ describe('draft-quote-inventory-pricing', () => {
     expect(rows[0]?.precioMx).toBe(7000);
     expect(classifyQuoteRow(rows[0]!)).toBe('integral');
   });
+
+  it('cotiza óptica rota como REFACCION y no como pieza de matriz', () => {
+    const snap = mockPricingSnap({
+      'Fascia|DF': 4200,
+    });
+    const rows = quoteRowsFromDamageInventory(
+      [
+        {
+          pieza: 'Calavera_Izquierda',
+          severidad: 'DF',
+          descripcionTecnica: 'Calavera estrellada',
+          urls_origen: [],
+        },
+        {
+          pieza: 'REFACCION:Calavera_Izquierda',
+          severidad: 'N/A',
+          descripcionTecnica: 'Pieza nueva',
+          urls_origen: [],
+          precioMx: 2860,
+          detallesRefaccion: 'Calavera Trasera Izquierda',
+        },
+        {
+          pieza: 'FT',
+          severidad: 'DF',
+          descripcionTecnica: 'Fascia',
+          urls_origen: [],
+        },
+      ],
+      snap,
+    );
+    expect(rows.map((r) => r.pieza)).toEqual([
+      'REFACCION:Calavera_Izquierda',
+      'FT',
+    ]);
+    expect(rows[0]?.precioMx).toBe(2860);
+    expect(classifyQuoteRow(rows[0]!)).toBe('refaccion');
+    expect(rows[1]?.pieza).toBe('FT');
+    expect(Number.isFinite(rows[1]?.precioMx)).toBe(true);
+    expect(rows[1]!.precioMx).toBeGreaterThan(0);
+    expect(sumQuoteRowsSubtotal(rows)).toBe(2860 + rows[1]!.precioMx);
+  });
+
+  it('REFACCION con precio inválido no produce NaN', () => {
+    const snap = mockPricingSnap({});
+    const rows = quoteRowsFromDamageInventory(
+      [
+        {
+          pieza: 'REFACCION:Faro_Izquierdo',
+          severidad: 'N/A',
+          descripcionTecnica: '',
+          urls_origen: [],
+          precioMx: Number.NaN,
+        },
+      ],
+      snap,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.precioMx).toBe(0);
+    expect(Number.isFinite(sumQuoteRowsSubtotal(rows))).toBe(true);
+  });
 });

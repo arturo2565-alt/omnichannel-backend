@@ -2,7 +2,12 @@ import {
   PANEL_PIEZA_REFACCION_CODE,
   canonicalizePanelCode,
   findPanelPiezaOption,
+  isOpticaPanelPieza,
 } from '../catalog/panel-pieza-catalog';
+import {
+  precioSugeridoAlCliente,
+  redondearRefaccionA50,
+} from '../catalog/refaccion-catalog-pricing';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { coerceDamageLevelCode, damageLevelRank } from './autofix-config';
 
@@ -22,14 +27,45 @@ export function looksLikeEvidentBreakage(
 
 /** MXN al cliente: costo base + 30%, redondeo comercial a $50. */
 export function precioAlClienteConMargen(costoBase: number): number {
-  const base = Math.max(0, Number(costoBase) || 0);
-  return Math.round((base * 1.3) / 50) * 50;
+  const suggested = precioSugeridoAlCliente(costoBase, 30);
+  return redondearRefaccionA50(suggested);
 }
 
-export function buildRefaccionDisclaimer(pieza: string, monto: number): string {
+export function looksLikeOpticaOrUnusablePart(
+  pieza: string,
+  severidad: string,
+  descripcionTecnica?: string,
+): boolean {
+  const blob = String(descripcionTecnica ?? '');
+  const unusable =
+    BREAKAGE_RE.test(blob) ||
+    /\b(inservible|irreparable|estrellad|fisurad|reemplaz|cambiar la pieza)\b/i.test(
+      blob,
+    );
+  if (isOpticaPanelPieza(pieza)) {
+    if (unusable) return true;
+    const level = coerceDamageLevelCode(severidad);
+    return damageLevelRank(level) >= damageLevelRank('DF');
+  }
+  return looksLikeEvidentBreakage(severidad, descripcionTecnica);
+}
+
+export function buildRefaccionDisclaimer(
+  pieza: string,
+  monto: number,
+  fuente: RefaccionMercadoEstimate['fuente'] = 'estimacion',
+): string {
   const label = String(pieza ?? '').trim() || 'la pieza';
-  const amt = Math.max(0, Math.round(Number(monto) || 0));
-  return `📦 *Nota sobre Refacción:* Por la magnitud del daño en ${label}, es muy probable que requiera reemplazo. Te incluimos un costo estimado de mercado de $${amt.toLocaleString('es-MX')} MXN (+30% margen logístico), sujeto a confirmación de número de parte en físico.`;
+  const amt = Number.isFinite(Number(monto))
+    ? Math.max(0, Math.round(Number(monto)))
+    : 0;
+  const origen =
+    fuente === 'catalogo'
+      ? 'catálogo del taller'
+      : fuente === 'mercadolibre'
+        ? 'mercado MX (+30% margen, redondeo a $50)'
+        : 'estimación de mercado MX (+30% margen, redondeo a $50)';
+  return `📦 *Nota sobre Refacción:* El renglón cubre la *pieza nueva/reemplazo* de ${label} ($${amt.toLocaleString('es-MX')} MXN, ${origen}). El montaje y la pintura de matriz se cotizan en renglones aparte si aplican. Sujeto a confirmación de número de parte en físico.`;
 }
 
 export function piezaLabelForRefaccion(raw: string): string {
@@ -44,7 +80,7 @@ export type RefaccionMercadoEstimate = {
   anio: string | null;
   costoBase: number;
   precioAlCliente: number;
-  fuente: 'mercadolibre' | 'estimacion';
+  fuente: 'catalogo' | 'mercadolibre' | 'estimacion';
   muestra: number;
   query: string;
   error?: string;
@@ -105,6 +141,12 @@ function fallbackCostoBase(pieza: string): number {
     ESI: 1200,
     ESD: 1200,
     Espejo: 1200,
+    Faro_Izquierdo: 3800,
+    Faro_Derecho: 3800,
+    Calavera_Izquierda: 2200,
+    Calavera_Derecha: 2200,
+    Faro_Niebla_Izquierdo: 1400,
+    Faro_Niebla_Derecho: 1400,
   };
   return map[code] ?? 2500;
 }
@@ -135,7 +177,7 @@ export async function estimarRefaccionMercado(input: {
     pieza: piezaLabelForRefaccion(pieza),
     vehiculo,
     anio,
-    costoBase: Math.round(costoBase),
+    costoBase: Math.max(0, Math.round(Number(costoBase) || 0)),
     precioAlCliente: precioAlClienteConMargen(costoBase),
     fuente,
     muestra: prices.length,
@@ -148,13 +190,25 @@ export function buildRefaccionInventoryItem(
   sourcePieza: string,
 ): DetectedDamageItem {
   const source = canonicalizePanelCode(sourcePieza) || sourcePieza;
+  const precio = Number.isFinite(Number(estimate.precioAlCliente))
+    ? Math.max(0, Math.round(Number(estimate.precioAlCliente)))
+    : 0;
+  const base = Number.isFinite(Number(estimate.costoBase))
+    ? Math.max(0, Math.round(Number(estimate.costoBase)))
+    : 0;
+  const origen =
+    estimate.fuente === 'catalogo'
+      ? 'catálogo taller'
+      : estimate.fuente === 'mercadolibre'
+        ? 'mercado MX'
+        : 'estimación';
   return {
     pieza: `${PANEL_PIEZA_REFACCION_CODE}:${source}`,
     severidad: 'N/A',
-    descripcionTecnica: `Refacción ${estimate.pieza} — mercado MX $${estimate.precioAlCliente.toLocaleString('es-MX')} (base $${estimate.costoBase.toLocaleString('es-MX')}, +30%).`,
+    descripcionTecnica: `Refacción ${estimate.pieza} — pieza nueva/reemplazo $${precio.toLocaleString('es-MX')} (${origen}, base $${base.toLocaleString('es-MX')}). Montaje/pintura de matriz aparte si aplica.`,
     urls_origen: [],
     detallesRefaccion: estimate.pieza,
-    precioMx: estimate.precioAlCliente,
+    precioMx: precio,
     refaccionDePieza: canonicalizePanelCode(sourcePieza) || sourcePieza,
   };
 }

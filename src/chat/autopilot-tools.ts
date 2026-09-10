@@ -175,7 +175,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
     type: 'function',
     name: 'estimarRefaccionMercado',
     description:
-      'Estima el costo de una refacción (pieza de reemplazo) con rangos de mercado México (MercadoLibre / refaccionarias) y aplica +30% de margen logístico. Úsala cuando el daño sea DF o DMFuerte con rotura evidente, o el cliente pregunte por cambiar la pieza. Inserta la línea REFACCION en el carrito.',
+      'Estima el costo de una refacción (pieza nueva/reemplazo). Si el taller tiene la pieza en Catálogo de Refacciones y Ópticas, usa ese costo + margen; si no, MercadoLibre +30% redondeado a $50. Úsala en DF/DMFuerte con rotura, ópticas estrelladas o si el cliente pide cambiar la pieza. Inserta la línea REFACCION; el montaje/pintura de matriz va en renglones aparte.',
     parameters: {
       type: 'object',
       properties: {

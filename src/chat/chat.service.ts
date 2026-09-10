@@ -124,11 +124,12 @@ import {
   buildRefaccionDisclaimer,
   buildRefaccionInventoryItem,
   estimarRefaccionMercado,
-  looksLikeEvidentBreakage,
+  looksLikeOpticaOrUnusablePart,
   piezaLabelForRefaccion,
+  type RefaccionMercadoEstimate,
 } from './refaccion-mercado';
 import { canonicalizePanelCode } from '../catalog/panel-pieza-catalog';
-import { banioTurnkeyDisplayLabel } from '../catalog/vehicle-piece-pricing';
+import { RefaccionesService } from '../catalog/refacciones.service';
 import { detectCartPricingMode } from './quote-cart-inventory-mode';
 import {
   matchAdButtonAutoReply,
@@ -666,7 +667,7 @@ export class ChatService implements OnModuleDestroy {
   private static readonly INBOUND_IMAGE_ANALYSIS_DEBOUNCE_MS = 30 * 1000;
 
   /** Máximo de imágenes por llamada a visión (evita timeouts / TPM en ráfagas grandes). */
-  private static readonly VISION_IMAGE_CHUNK_SIZE = 4;
+  private static readonly VISION_IMAGE_CHUNK_SIZE = 3;
 
   /**
    * Tras el último mensaje de texto entrante (Messenger / WhatsApp): esperar antes de lanzar el autopilot.
@@ -724,6 +725,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly aiConfigService: AiConfigService,
 
     private readonly catalogService: CatalogService,
+
+    private readonly refaccionesService: RefaccionesService,
 
     private readonly tallerService: TallerService,
 
@@ -1161,11 +1164,18 @@ export class ChatService implements OnModuleDestroy {
   }
 
   /**
-   * URLs únicas de imágenes entrantes (**inbound**) en esta conversación cuya `createdAt`
-   * cae dentro de los últimos 5 minutos, en orden cronológico (más antigua primero).
+   * URLs únicas de imágenes inbound. `lookbackSeconds` acota la ventana
+   * (default: {@link ChatService.RECENT_IMAGE_LOOKBACK_MS}).
    */
-  async getRecentImages(conversationId: string): Promise<string[]> {
-    const since = new Date(Date.now() - ChatService.RECENT_IMAGE_LOOKBACK_MS);
+  async getRecentImages(
+    conversationId: string,
+    lookbackSeconds?: number,
+  ): Promise<string[]> {
+    const windowMs =
+      lookbackSeconds != null && Number.isFinite(lookbackSeconds) && lookbackSeconds > 0
+        ? lookbackSeconds * 1000
+        : ChatService.RECENT_IMAGE_LOOKBACK_MS;
+    const since = new Date(Date.now() - windowMs);
     const messages = await this.messageRepository
       .createQueryBuilder('m')
       .where('m.conversationId = :cid', { cid: conversationId })
@@ -1560,13 +1570,48 @@ export class ChatService implements OnModuleDestroy {
     return [...inv, ...fromPrev].filter(
       (it) =>
         !isVisionBpcPiezaCode(it.pieza) &&
-        looksLikeEvidentBreakage(it.severidad, it.descripcionTecnica),
+        looksLikeOpticaOrUnusablePart(
+          it.pieza,
+          it.severidad,
+          it.descripcionTecnica,
+        ),
     );
+  }
+
+  private async resolveRefaccionEstimateForPieza(
+    tallerId: string | null | undefined,
+    pieza: string,
+    vehiculo: string,
+    anio?: string | null,
+  ): Promise<RefaccionMercadoEstimate | null> {
+    const catalog = await this.refaccionesService.resolveClienteQuote(
+      tallerId,
+      pieza,
+    );
+    if (catalog && Number.isFinite(catalog.precioAlCliente) && catalog.precioAlCliente > 0) {
+      return {
+        success: true,
+        pieza: catalog.nombre,
+        vehiculo,
+        anio: anio ?? null,
+        costoBase: catalog.costoReferenciaBase,
+        precioAlCliente: catalog.precioAlCliente,
+        fuente: 'catalogo',
+        muestra: 1,
+        query: catalog.codigo,
+      };
+    }
+    const estimate = await estimarRefaccionMercado({ pieza, vehiculo, anio });
+    if (!estimate.success || !Number.isFinite(estimate.precioAlCliente) || estimate.precioAlCliente <= 0) {
+      return null;
+    }
+    return estimate;
   }
 
   private async enrichInventoryWithMarketRefacciones(
     analysis: VehicleDamageAnalysis,
     notes: string[],
+    tallerId?: string | null,
   ): Promise<VehicleDamageAnalysis> {
     const candidates = this.collectPiecesForRefaccionEstimate(analysis);
     if (!candidates.length) return analysis;
@@ -1577,17 +1622,19 @@ export class ChatService implements OnModuleDestroy {
       const key = canonicalizePanelCode(it.pieza) || it.pieza;
       if (!key || seen.has(key)) continue;
       seen.add(key);
-      const estimate = await estimarRefaccionMercado({
-        pieza: it.pieza,
-        vehiculo: analysis.vehiculoDetectado ?? '',
-        anio: yearMatch?.[0],
-      });
-      if (!estimate.success || estimate.precioAlCliente <= 0) continue;
+      const estimate = await this.resolveRefaccionEstimateForPieza(
+        tallerId,
+        it.pieza,
+        analysis.vehiculoDetectado ?? '',
+        yearMatch?.[0],
+      );
+      if (!estimate) continue;
       inventory.push(buildRefaccionInventoryItem(estimate, it.pieza));
       notes.push(
         buildRefaccionDisclaimer(
           piezaLabelForRefaccion(it.pieza),
           estimate.precioAlCliente,
+          estimate.fuente,
         ),
       );
     }
@@ -1756,23 +1803,13 @@ export class ChatService implements OnModuleDestroy {
     return { processed: 1, lastMessageId: saved.id };
   }
 
-  /** Evita duplicados cuando Meta reenvía el mismo `mid` (o `mid:sticker:0` / `mid:img:0`). */
+  /** Evita duplicados cuando Meta reenvía el mismo id persistido (coincidencia estricta). */
   private async findMessageByMetaMid(
     metaMid: string,
   ): Promise<Message | null> {
     const mid = String(metaMid ?? '').trim();
     if (!mid) return null;
-    const exact = await this.messageRepository.findOne({
-      where: { externalId: mid },
-    });
-    if (exact) return exact;
-    const raw = mid.replace(/:(sticker|img):\d+$/i, '');
-    const variants = [...new Set([raw, `${raw}:sticker:0`, `${raw}:img:0`])];
-    return this.messageRepository
-      .createQueryBuilder('m')
-      .where('m.externalId IN (:...ids)', { ids: variants })
-      .orderBy('m.createdAt', 'ASC')
-      .getOne();
+    return this.messageRepository.findOne({ where: { externalId: mid } });
   }
 
   /**
@@ -2045,11 +2082,7 @@ export class ChatService implements OnModuleDestroy {
         }
         for (let imgIdx = 0; imgIdx < imageUrls.length; imgIdx += 1) {
           const url = imageUrls[imgIdx]!;
-          const imageMid = metaMid
-            ? imageUrls.length > 1 || hasCaption
-              ? `${metaMid}:img:${imgIdx}`
-              : metaMid
-            : '';
+          const imageMid = metaMid ? `${metaMid}:img:${imgIdx}` : '';
           if (imageMid) {
             const dupImg = await this.findMessageByMetaMid(imageMid);
             if (dupImg) {
@@ -5195,7 +5228,7 @@ Si el usuario dice "baño de pintura" o similar sin decir "Exterior", correspond
 **Baño de pintura (obligatorio):** si en el mensaje actual y el historial reciente del cliente NO aparece el modelo de su auto ni camioneta (ni año, ni marca, ni frases tipo "es un…", "tengo un…", "mi …") y tampoco dice explícitamente el tamaño de carrocería (Chico, Mediano, Grande, XL, con o sin Premium), PROHIBIDO dar cifras o totales. Responde exactamente: "¡Claro! Con gusto. Para darte el precio estimado, ¿qué auto o camioneta tienes?" Si el modelo ya se dijo antes en el chat, úsalo y cotiza sin volver a preguntar.
 **Servicios de precio fijo en catálogo (p. ej. Estética Automotriz, Cerámico cuando aplique en la lista):** puedes dar el precio de inmediato; no dependen del tamaño del vehículo en nuestro flujo actual.
 Para baño de pintura con vehículo ya conocido, tamaños de referencia: Audi A4/A5, BMW Serie 3 / 318–335, Mercedes Clase C, Mazda 6 = severidad "Mediano Premium" salvo que el usuario indique explícitamente otro tamaño (Chico, Grande, XL, Premium, etc.).
-Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide BPCC / cambio de color, preséntalo como un solo servicio llave en mano ("Transformación Total / Cambio de Color (Exterior e Interiores completos)") — no desgloses baño exterior + interiores + suplemento. Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.
+Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide baño de pintura y además "cambio de color", suma el suplemento: $8,000 MXN si el tamaño es Chico o Mediano (incluye variantes Premium de esos tamaños), y $10,000 MXN si es Grande o XL (incluye Premium). Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.
 **Después de cotizar:** si el cliente ya recibió el precio y muestra interés, pide día/hora o menciona un día de la semana, tu prioridad es **agendar** (en canales con herramientas: función createAppointment). No repitas montos que ya enviaste salvo que pida otra cotización explícita.`;
     } catch (err) {
       console.warn('[loadCatalogPromptAppendForLlm]', err);
@@ -5273,10 +5306,9 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       resolvedLevel = 'N/A';
       if (unit > 0) {
         const banioCode = canonicalizePanelCode(bpc.pieza) || VISION_BPC_PIEZA_CODE;
-        const turnkeyLabel = banioTurnkeyDisplayLabel(banioCode, canonical);
         lines.push({
           priceItemId: `matrix:${canonical}:${tierLabel}:${banioCode}`,
-          description: `${turnkeyLabel} — ${tierLabel}${vehicleProfile?.isPremium ? ' premium' : ''}`,
+          description: `${canonical} (${banioCode}) — ${tierLabel}${vehicleProfile?.isPremium ? ' premium' : ''}`,
           quantity: 1,
           unitPrice: unit,
           subtotal: unit,
@@ -5457,21 +5489,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const attachingMessageId =
         images[images.length - 1]?.messageId || images[0]!.messageId;
       const burst = images.map((it) => it.content);
-      const recent = await this.getRecentImages(conversationId);
-      const consolidated = [
-        ...new Set(
-          [...recent, ...burst]
-            .map((u) => String(u).trim())
-            .filter((u) => u && isIncomingImage(u) && !isFacebookStickerUrl(u)),
-        ),
-      ];
       console.log(
-        `[IncomingBurst] visión conversation=${conversationId} buffer=${burst.length} consolidado=${consolidated.length}`,
+        `[IncomingBurst] visión conversation=${conversationId} fotos=${burst.length}`,
       );
       await this.processConsolidatedInboundImages(
         conversationId,
         attachingMessageId,
-        consolidated,
+        burst,
       );
       return;
     }
@@ -5514,15 +5538,23 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
           .filter((u) => u && isIncomingImage(u) && !isFacebookStickerUrl(u)),
       ),
     ];
-
-    const fromRecent = await this.getRecentImages(conversationId);
+    const fromRecent = await this.getRecentImages(conversationId, 60);
     let imageUrls = [
       ...new Set(
-        [...fromRecent, ...fromBurst].filter(
+        [...fromBurst, ...fromRecent].filter(
           (u) => u && isIncomingImage(u) && !isFacebookStickerUrl(u),
         ),
       ),
     ];
+    console.log(
+      '[VisionPipeline] lote consolidado',
+      JSON.stringify({
+        conversationId,
+        fromBurst: fromBurst.length,
+        fromRecent: fromRecent.length,
+        imageCount: imageUrls.length,
+      }),
+    );
 
     if (!imageUrls.length) {
       const fallbackMsg = await this.messageRepository.findOne({
@@ -5550,16 +5582,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     });
     const visionTallerId =
       convRow?.tallerId ?? (await this.tallerService.findDefaultTallerId());
-
-    console.log(
-      '[VisionPipeline] lote consolidado',
-      JSON.stringify({
-        conversationId,
-        imageCount: imageUrls.length,
-        fromBurst: fromBurst.length,
-        fromRecent: fromRecent.length,
-      }),
-    );
 
     const conversationTextHistory =
       await this.buildVisionTextHistoryForConversation(conversationId);
@@ -5666,6 +5688,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     analysisForQuote = await this.enrichInventoryWithMarketRefacciones(
       analysisForQuote,
       refaccionNotes,
+      visionTallerId,
     );
 
     const estimateAmount = await this.computePrimaryMatrixEstimate(
@@ -6894,7 +6917,15 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
         error: 'Faltan pieza y vehiculo para estimar la refacción.',
       };
     }
-    const estimate = await estimarRefaccionMercado({ pieza, vehiculo, anio });
+    const estimate = await this.resolveRefaccionEstimateForPieza(
+      conversation.tallerId,
+      pieza,
+      vehiculo,
+      anio,
+    );
+    if (!estimate) {
+      return { success: false, error: 'No se pudo estimar la refacción.' };
+    }
     const item = buildRefaccionInventoryItem(estimate, pieza);
     await this.quoteCartService.addRefaccionItem(
       conversation.id,
@@ -6906,6 +6937,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       disclaimer: buildRefaccionDisclaimer(
         piezaLabelForRefaccion(pieza),
         estimate.precioAlCliente,
+        estimate.fuente,
       ),
       inserted: true,
     };
@@ -6953,6 +6985,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       disclaimer: buildRefaccionDisclaimer(
         piezaLabelForRefaccion(pieza),
         estimate.precioAlCliente,
+        estimate.fuente,
       ),
     };
   }
