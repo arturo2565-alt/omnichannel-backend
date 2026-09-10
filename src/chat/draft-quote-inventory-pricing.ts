@@ -2,7 +2,10 @@ import type { DraftQuoteLine } from './autofix-config';
 import { coerceDamageLevelCode } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
-import { resolvePiecePriceForVehicleProfile } from '../catalog/vehicle-piece-pricing';
+import {
+  resolveBanioCodeUnitPrice,
+  resolvePiecePriceForVehicleProfile,
+} from '../catalog/vehicle-piece-pricing';
 import {
   inferVehicleProfileFromLegacyBañoSeveridad,
   resolveIntegralPriceForVehicleProfile,
@@ -11,6 +14,7 @@ import type { CatalogPricingRules } from '../catalog/catalog-pricing-rules';
 import type { VehiclePricingProfile } from '../catalog/vehicle-pricing-profile';
 import { normalizeVehicleSizeTier } from '../catalog/vehicle-pricing-profile';
 import {
+  canonicalizePanelCode,
   findPanelPiezaOption,
   isInternalDamageRangePieza,
   isIntegralPanelPieza,
@@ -211,6 +215,19 @@ export function quoteRowsFromDamageInventory(
         pricingRules,
       );
       precio = resolution?.unitPrice ?? 0;
+      const banioCode = canonicalizePanelCode(panelCode);
+      if (
+        banioCode === 'BPE' ||
+        banioCode === 'BPEI' ||
+        banioCode === 'BPCC' ||
+        banioCode === 'BPC'
+      ) {
+        precio = resolveBanioCodeUnitPrice(
+          precio,
+          banioCode,
+          profile.sizeTier,
+        );
+      }
     } else if (!isSpecialPanelPieza(panelCode)) {
       const sev = coerceDamageLevelCode(sevRaw);
       storedSev = sev;

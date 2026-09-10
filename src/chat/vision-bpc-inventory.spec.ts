@@ -1,4 +1,5 @@
 import {
+  applyBanioCodePriceAdjustments,
   collapseVisionItemsToBpcIfNeeded,
   extractVisionDetectedVehicle,
   isVisionBpcPiezaCode,
@@ -120,5 +121,11 @@ describe('vision-bpc-inventory', () => {
       '',
     );
     expect(interiors[0]!.pieza).toBe('BPEI');
+  });
+
+  it('BPCC no es solo suplemento: incluye interiores en el mismo precio', () => {
+    expect(applyBanioCodePriceAdjustments(20_000, 'BPCC', 'Mediano')).toBe(
+      31_000,
+    );
   });
 });

@@ -96,7 +96,8 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
   },
   {
     code: PANEL_PIEZA_BPCC_CODE,
-    fullName: 'Baño de Pintura con Cambio de Color',
+    fullName:
+      'Transformación Total / Cambio de Color (Exterior e Interiores completos)',
     catalogPieza: 'Baño de Pintura Exterior',
     banioCompleto: true,
     integralService: true,
@@ -237,6 +238,16 @@ aliasNormToCode.set(
 );
 aliasNormToCode.set(
   normalizePiezaText('cambio de color'),
+  PANEL_PIEZA_BPCC_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText('transformacion total'),
+  PANEL_PIEZA_BPCC_CODE,
+);
+aliasNormToCode.set(
+  normalizePiezaText(
+    'Transformación Total / Cambio de Color (Exterior e Interiores completos)',
+  ),
   PANEL_PIEZA_BPCC_CODE,
 );
 aliasNormToCode.set(

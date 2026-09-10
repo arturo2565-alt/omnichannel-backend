@@ -13,6 +13,11 @@ import {
   type VehicleSizeTier,
 } from '../catalog/vehicle-pricing-profile';
 import {
+  BPCC_TURNKEY_LABEL,
+  resolveBanioCodeUnitPrice,
+  cambioDeColorAddonMxForSizeTier as addonMxForSizeTier,
+} from '../catalog/vehicle-piece-pricing';
+import {
   AUTO_FIX_CURRENCY,
   formatAutoFixMoney,
   matchServicioFromCatalog,
@@ -32,6 +37,8 @@ export type InstantQuoteResolution = {
   /** Días hábiles de entrega según catálogo. */
   diasEntrega: number;
   currency: typeof AUTO_FIX_CURRENCY;
+  /** BPCC llave en mano: no hay extra de línea, pero sí días extra de color. */
+  includesColorChange?: boolean;
 };
 
 export type InstantQuoteFromTextOptions = {
@@ -1100,6 +1107,9 @@ const COLOR_NAME_TOKENS =
 
 export function mentionsCambioDeColor(userText: string): boolean {
   const n = normalizeTextForMatch(userText);
+  if (/\bbpcc\b/.test(n) || /\btransformacion total\b/.test(n)) {
+    return true;
+  }
   if (
     /\bcambio\s+de\s+color\b/.test(n) ||
     /\bcambio\s+color\b/.test(n) ||
@@ -1200,8 +1210,7 @@ export function cambioDeColorAddonMx(severidadBaño: string): number {
 }
 
 export function cambioDeColorAddonMxForSizeTier(sizeTier: VehicleSizeTier): number {
-  if (sizeTier === 'Grande' || sizeTier === 'XL') return 10_000;
-  return 8_000;
+  return addonMxForSizeTier(sizeTier);
 }
 
 function logInstantResolution(payload: Record<string, unknown>): void {
@@ -1291,29 +1300,28 @@ export function materializeIntegralQuoteResolution(
     isInstantService: true,
   });
 
-  const lines: InstantQuoteLine[] = [
-    { label: canonical, amount: resolved.unitPrice },
-  ];
-  const extras: InstantQuoteLine[] = [];
-  let add = 0;
-  if (
+  const isBpcc =
     isBañoDePinturaServicio(canonical) &&
-    mentionsCambioDeColor(tierSourceForCambioColor)
-  ) {
-    add = cambioDeColorAddonMxForSizeTier(profile.sizeTier);
-    extras.push({ label: 'Cambio de color', amount: add });
-  }
+    mentionsCambioDeColor(tierSourceForCambioColor);
+  const unit = isBpcc
+    ? resolveBanioCodeUnitPrice(resolved.unitPrice, 'BPCC', profile.sizeTier)
+    : resolved.unitPrice;
+  const lines: InstantQuoteLine[] = [
+    {
+      label: isBpcc ? BPCC_TURNKEY_LABEL : canonical,
+      amount: unit,
+    },
+  ];
 
-  const subtotal = resolved.unitPrice;
-  const total = resolved.unitPrice + add;
   return {
     lines,
-    extras,
-    subtotal,
-    total,
-    precioMx: resolved.unitPrice,
+    extras: [],
+    subtotal: unit,
+    total: unit,
+    precioMx: unit,
     diasEntrega: resolved.diasEntrega > 0 ? resolved.diasEntrega : 3,
     currency: AUTO_FIX_CURRENCY,
+    includesColorChange: isBpcc,
   };
 }
 
@@ -1390,30 +1398,39 @@ export function materializeInstantQuoteResolution(
     isInstantService: true,
   });
 
+  const isBpcc =
+    isBañoDePinturaServicio(canonical) &&
+    mentionsCambioDeColor(tierSourceForCambioColor);
+  const unit = isBpcc
+    ? resolveBanioCodeUnitPrice(
+        base,
+        'BPCC',
+        resolveIntegralVehicleProfileForQuote(
+          tierSourceForCambioColor,
+          canonical,
+          severidadLiteral,
+        ).sizeTier,
+      )
+    : base;
   const lines: InstantQuoteLine[] = [
-    { label: `${canonical} (${severidadLiteral})`, amount: base },
+    {
+      label: isBpcc
+        ? BPCC_TURNKEY_LABEL
+        : `${canonical} (${severidadLiteral})`,
+      amount: unit,
+    },
   ];
-  const extras: InstantQuoteLine[] = [];
-  let add = 0;
-  if (isBañoDePinturaServicio(canonical) && mentionsCambioDeColor(tierSourceForCambioColor)) {
-    add = cambioDeColorAddonMx(severidadLiteral);
-    extras.push({
-      label: 'Cambio de color',
-      amount: add,
-    });
-  }
 
-  const subtotal = base;
-  const total = base + add;
   const diasEntrega = snap.getDiasEntregaForCanonical(canonical, severidadLiteral);
   return {
     lines,
-    extras,
-    subtotal,
-    total,
-    precioMx: base,
+    extras: [],
+    subtotal: unit,
+    total: unit,
+    precioMx: unit,
     diasEntrega: diasEntrega > 0 ? diasEntrega : 3,
     currency: AUTO_FIX_CURRENCY,
+    includesColorChange: isBpcc,
   };
 }
 

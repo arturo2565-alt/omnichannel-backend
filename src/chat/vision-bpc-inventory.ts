@@ -1,12 +1,12 @@
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { coerceDamageLevelCode, damageLevelRank, type DamageLevel } from './autofix-config';
 import {
-  cambioDeColorAddonMxForSizeTier,
   flattenBañoTierSource,
   inferBañoTierSeveridad,
   isPlaceholderBañoVehicleLabel,
 } from './instant-quote-from-text';
 import type { VehicleSizeTier } from '../catalog/vehicle-pricing-profile';
+import { resolveBanioCodeUnitPrice } from '../catalog/vehicle-piece-pricing';
 
 /** Default de colapso (baño exterior). Legacy BPC se trata como BPE. */
 export const VISION_BPC_PIEZA_CODE = 'BPE';
@@ -96,22 +96,13 @@ export function resolveVisionBanioCode(
   return 'BPE';
 }
 
-/** BPEI: +15% interiores. BPCC: suplemento de cambio de color / desarmado. */
+/** BPEI: +15% interiores. BPCC: interiores + color en un solo monto llave en mano. */
 export function applyBanioCodePriceAdjustments(
   unitPrice: number,
   banioCode: string,
   sizeTier?: VehicleSizeTier | null,
 ): number {
-  let price = Math.max(0, Math.round(Number(unitPrice) || 0));
-  if (price <= 0) return 0;
-  const code = String(banioCode ?? '').toUpperCase().trim();
-  if (code === 'BPEI') {
-    price = Math.round((price * 1.15) / 50) * 50;
-  }
-  if (code === 'BPCC') {
-    price += cambioDeColorAddonMxForSizeTier(sizeTier ?? 'Mediano');
-  }
-  return price;
+  return resolveBanioCodeUnitPrice(unitPrice, banioCode, sizeTier);
 }
 
 /** Lee vehículo del JSON crudo de visión (snake_case o camelCase). */

@@ -85,4 +85,28 @@ describe('autopilot-cotizacion-express', () => {
     expect(result.success).toBe(true);
     expect(result.totalMx).toBe(31850);
   });
+
+  it('BPCC se cotiza como un solo servicio llave en mano, sin extras', () => {
+    const snap = createMatrixPricingSnapshot(
+      matrixRows([
+        {
+          servicio: 'Baño de Pintura Exterior',
+          severidad: 'BASE',
+          precio: 20000,
+        },
+      ]),
+    );
+    const profile = resolveVehiclePricingProfile({
+      modeloVehiculo: 'Nissan March',
+      sizeTier: 'Compacto',
+      isPremium: false,
+    });
+    const result = buildObtenerCotizacionExpressPayload(snap, ['BPCC'], profile);
+    expect(result.success).toBe(true);
+    expect(result.extras).toBeUndefined();
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines?.[0]?.servicio).toMatch(/Transformación Total/);
+    expect(result.totalMx).toBe(result.subtotalMx);
+    expect(result.totalMx).toBe(31_000);
+  });
 });

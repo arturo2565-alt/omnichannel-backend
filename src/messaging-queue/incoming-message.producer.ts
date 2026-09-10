@@ -7,6 +7,7 @@ import {
   INCOMING_MESSAGES_QUEUE,
   MESSAGING_REDIS,
   incomingBufferKey,
+  inboundDebounceJobIds,
   type IncomingBufferItem,
   type IncomingMessageChannel,
   type IncomingMessageJobData,
@@ -51,10 +52,7 @@ export class IncomingMessageProducer {
     return job;
   }
 
-  async drainBuffer(conversationId: string): Promise<IncomingBufferItem[]> {
-    const key = incomingBufferKey(conversationId);
-    const exec = await this.redis.multi().lrange(key, 0, -1).del(key).exec();
-    const rawList = (exec?.[0]?.[1] as string[] | undefined) ?? [];
+  private parseBufferRows(rawList: string[], key: string): IncomingBufferItem[] {
     const items: IncomingBufferItem[] = [];
     for (const raw of rawList) {
       try {
@@ -65,6 +63,19 @@ export class IncomingMessageProducer {
       }
     }
     return items;
+  }
+
+  async peekBuffer(conversationId: string): Promise<IncomingBufferItem[]> {
+    const key = incomingBufferKey(conversationId);
+    const rawList = await this.redis.lrange(key, 0, -1);
+    return this.parseBufferRows(rawList, key);
+  }
+
+  async drainBuffer(conversationId: string): Promise<IncomingBufferItem[]> {
+    const key = incomingBufferKey(conversationId);
+    const exec = await this.redis.multi().lrange(key, 0, -1).del(key).exec();
+    const rawList = (exec?.[0]?.[1] as string[] | undefined) ?? [];
+    return this.parseBufferRows(rawList, key);
   }
 
   async bufferLength(conversationId: string): Promise<number> {
@@ -90,18 +101,20 @@ export class IncomingMessageProducer {
     const cid = String(conversationId ?? '').trim();
     if (!cid) return;
     if (await this.hasBufferedImages(cid)) return;
-    const job = await this.incomingQueue.getJob(cid);
-    if (!job) return;
-    try {
-      const state = await job.getState();
-      if (state === 'delayed' || state === 'waiting') {
-        await job.remove();
-        this.logger.log(`debounce cancelado (sin fotos) conversation=${cid}`);
+    for (const jobId of inboundDebounceJobIds(cid)) {
+      const job = await this.incomingQueue.getJob(jobId);
+      if (!job) continue;
+      try {
+        const state = await job.getState();
+        if (state === 'delayed' || state === 'waiting') {
+          await job.remove();
+          this.logger.log(`debounce cancelado (sin fotos) job=${jobId}`);
+        }
+      } catch (err) {
+        this.logger.warn(
+          `cancelDebounceIfNoImages job=${jobId}: ${String(err)}`,
+        );
       }
-    } catch (err) {
-      this.logger.warn(
-        `cancelDebounceIfNoImages conversation=${cid}: ${String(err)}`,
-      );
     }
   }
 
@@ -110,17 +123,19 @@ export class IncomingMessageProducer {
     const cid = String(conversationId ?? '').trim();
     if (!cid) return;
     await this.redis.del(incomingBufferKey(cid));
-    const job = await this.incomingQueue.getJob(cid);
-    if (!job) return;
-    try {
-      const state = await job.getState();
-      if (state === 'delayed' || state === 'waiting') {
-        await job.remove();
+    for (const jobId of inboundDebounceJobIds(cid)) {
+      const job = await this.incomingQueue.getJob(jobId);
+      if (!job) continue;
+      try {
+        const state = await job.getState();
+        if (state === 'delayed' || state === 'waiting') {
+          await job.remove();
+        }
+      } catch (err) {
+        this.logger.warn(
+          `no se pudo quitar job debounce job=${jobId}: ${String(err)}`,
+        );
       }
-    } catch (err) {
-      this.logger.warn(
-        `no se pudo quitar job debounce conversation=${cid}: ${String(err)}`,
-      );
     }
   }
 
@@ -183,48 +198,61 @@ export class IncomingMessageProducer {
       removeOnFail: true,
     } as const;
 
-    const existing = await this.incomingQueue.getJob(conversationId);
-    if (existing) {
+    const jobIds = inboundDebounceJobIds(conversationId);
+    for (const jobId of jobIds) {
+      const existing = await this.incomingQueue.getJob(jobId);
+      if (!existing) continue;
       try {
         const state = await existing.getState();
         if (state === 'delayed' || state === 'waiting') {
           await existing.changeDelay(INCOMING_MESSAGE_DEBOUNCE_MS);
           await existing.updateData(data);
           this.logger.log(
-            `debounce reset job=${conversationId} delay=${INCOMING_MESSAGE_DEBOUNCE_MS}ms`,
+            `debounce reset job=${jobId} delay=${INCOMING_MESSAGE_DEBOUNCE_MS}ms`,
           );
           return existing;
         }
-        if (state === 'active') {
-          return existing;
-        }
-        await existing.remove();
       } catch (err) {
         this.logger.warn(
-          `scheduleDebouncedJob existing job=${conversationId}: ${String(err)}`,
+          `scheduleDebouncedJob existing job=${jobId}: ${String(err)}`,
         );
       }
     }
 
-    try {
-      return await this.incomingQueue.add('inbound', data, opts);
-    } catch (err) {
-      const msg = String((err as Error)?.message ?? err);
-      if (!/exist/i.test(msg)) throw err;
-      const raced = await this.incomingQueue.getJob(conversationId);
-      if (raced) {
+    for (const jobId of jobIds) {
+      const existing = await this.incomingQueue.getJob(jobId);
+      if (!existing) {
         try {
-          const state = await raced.getState();
-          if (state === 'delayed' || state === 'waiting') {
-            await raced.changeDelay(INCOMING_MESSAGE_DEBOUNCE_MS);
-          }
-        } catch (inner) {
-          this.logger.warn(
-            `changeDelay race job=${conversationId}: ${String(inner)}`,
-          );
+          return await this.incomingQueue.add('inbound', data, {
+            ...opts,
+            jobId,
+          });
+        } catch (err) {
+          const msg = String((err as Error)?.message ?? err);
+          if (!/exist/i.test(msg)) throw err;
+          continue;
         }
       }
-      return raced ?? undefined;
+      try {
+        const state = await existing.getState();
+        if (state === 'active') {
+          continue;
+        }
+        await existing.remove();
+        return await this.incomingQueue.add('inbound', data, {
+          ...opts,
+          jobId,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `scheduleDebouncedJob recycle job=${jobId}: ${String(err)}`,
+        );
+      }
     }
+
+    this.logger.log(
+      `debounce: ambos slots ocupados (visión en curso), buffer sigue acumulando conversation=${conversationId}`,
+    );
+    return undefined;
   }
 }

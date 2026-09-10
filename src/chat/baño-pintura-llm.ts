@@ -259,6 +259,14 @@ function cambioColorAddonFromResolution(resolution: InstantQuoteResolution): num
 }
 
 function hasCambioColorInResolution(resolution: InstantQuoteResolution): boolean {
+  if (resolution.includesColorChange === true) return true;
+  if (
+    resolution.lines.some((l) =>
+      /cambio de color|transformaci[oó]n total/i.test(String(l.label ?? '')),
+    )
+  ) {
+    return true;
+  }
   return cambioColorAddonFromResolution(resolution) > 0;
 }
 

@@ -115,8 +115,9 @@ export type ObtenerCotizacionExpressResult = {
 export function servicioSolicitudLooksLikeBano(raw: string): boolean {
   const n = normalizeTextForMatch(String(raw ?? ''));
   if (!n) return false;
+  if (/\b(bpcc|bpei|bpe|bpc)\b/.test(n)) return true;
   if (mentionsBañoDePinturaIntent(raw)) return true;
-  return /\b(bano de pintura|bano pintura|bano completo|bano integral|pintura exterior completa|baño de pintura|baño completo)\b/.test(
+  return /\b(bano de pintura|bano pintura|bano completo|bano integral|pintura exterior completa|baño de pintura|baño completo|transformacion total|cambio de color)\b/.test(
     n,
   );
 }

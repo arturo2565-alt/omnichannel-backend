@@ -80,7 +80,7 @@ Por objeto:
 - Baños de pintura (única pieza, no listes paneles sueltos):
   * "BPE" = Baño de Pintura Exterior.
   * "BPEI" = Exterior + interiores de puertas/cofre.
-  * "BPCC" = Baño con cambio total de color (incluye desarmado).
+  * "BPCC" = Transformación Total / Cambio de Color (Exterior e Interiores completos; no desglosar).
   El alias "BPC" se interpreta como BPE.
 - "severidad": para piezas sueltas, EXACTAMENTE DL | DML | DM | DMF | DF | DMFuerte. Para BPE/BPEI/BPCC usa tamaño (Chico, Mediano, Grande, XL), no código de golpe.
 - Opcional: "intencion_banio_completo_detectada": true y "tipo_banio": BPE | BPEI | BPCC.

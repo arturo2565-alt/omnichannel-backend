@@ -9,7 +9,60 @@ import {
   applyPremiumMultiplier,
   tierMatrixSeveridadKeys,
   type VehiclePricingProfile,
+  type VehicleSizeTier,
 } from './vehicle-pricing-profile';
+
+/** Una sola línea comercial para BPCC: exterior + interiores + cambio de color. */
+export const BPCC_TURNKEY_LABEL =
+  'Transformación Total / Cambio de Color (Exterior e Interiores completos)';
+
+export function cambioDeColorAddonMxForSizeTier(
+  sizeTier?: VehicleSizeTier | null,
+): number {
+  if (sizeTier === 'Grande' || sizeTier === 'XL') return 10_000;
+  return 8_000;
+}
+
+export function normalizeBanioPricingCode(
+  banioCode: string,
+): 'BPE' | 'BPEI' | 'BPCC' {
+  const c = String(banioCode ?? '').toUpperCase().trim();
+  if (c === 'BPCC') return 'BPCC';
+  if (c === 'BPEI') return 'BPEI';
+  return 'BPE';
+}
+
+/**
+ * Precio llave en mano del baño.
+ * BPE = base exterior. BPEI = base + interiores (+15%).
+ * BPCC = BPEI + suplemento de color, **sin desglosar** líneas extra.
+ */
+export function resolveBanioCodeUnitPrice(
+  exteriorBase: number,
+  banioCode: string,
+  sizeTier?: VehicleSizeTier | null,
+): number {
+  let price = Math.max(0, Math.round(Number(exteriorBase) || 0));
+  if (price <= 0) return 0;
+  const code = normalizeBanioPricingCode(banioCode);
+  if (code === 'BPEI' || code === 'BPCC') {
+    price = Math.round((price * 1.15) / 50) * 50;
+  }
+  if (code === 'BPCC') {
+    price += cambioDeColorAddonMxForSizeTier(sizeTier ?? 'Mediano');
+  }
+  return price;
+}
+
+export function banioTurnkeyDisplayLabel(
+  banioCode: string,
+  fallback = 'Baño de Pintura Exterior',
+): string {
+  const code = normalizeBanioPricingCode(banioCode);
+  if (code === 'BPCC') return BPCC_TURNKEY_LABEL;
+  if (code === 'BPEI') return 'Baño de Pintura Exterior e Interiores';
+  return fallback;
+}
 
 /**
  * Precio de pieza: base (LEVE/DL) × tamaño × premium × magnitud de daño.

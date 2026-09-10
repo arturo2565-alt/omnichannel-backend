@@ -128,6 +128,7 @@ import {
   piezaLabelForRefaccion,
 } from './refaccion-mercado';
 import { canonicalizePanelCode } from '../catalog/panel-pieza-catalog';
+import { banioTurnkeyDisplayLabel } from '../catalog/vehicle-piece-pricing';
 import { detectCartPricingMode } from './quote-cart-inventory-mode';
 import {
   matchAdButtonAutoReply,
@@ -665,7 +666,7 @@ export class ChatService implements OnModuleDestroy {
   private static readonly INBOUND_IMAGE_ANALYSIS_DEBOUNCE_MS = 30 * 1000;
 
   /** Máximo de imágenes por llamada a visión (evita timeouts / TPM en ráfagas grandes). */
-  private static readonly VISION_IMAGE_CHUNK_SIZE = 3;
+  private static readonly VISION_IMAGE_CHUNK_SIZE = 4;
 
   /**
    * Tras el último mensaje de texto entrante (Messenger / WhatsApp): esperar antes de lanzar el autopilot.
@@ -5194,7 +5195,7 @@ Si el usuario dice "baño de pintura" o similar sin decir "Exterior", correspond
 **Baño de pintura (obligatorio):** si en el mensaje actual y el historial reciente del cliente NO aparece el modelo de su auto ni camioneta (ni año, ni marca, ni frases tipo "es un…", "tengo un…", "mi …") y tampoco dice explícitamente el tamaño de carrocería (Chico, Mediano, Grande, XL, con o sin Premium), PROHIBIDO dar cifras o totales. Responde exactamente: "¡Claro! Con gusto. Para darte el precio estimado, ¿qué auto o camioneta tienes?" Si el modelo ya se dijo antes en el chat, úsalo y cotiza sin volver a preguntar.
 **Servicios de precio fijo en catálogo (p. ej. Estética Automotriz, Cerámico cuando aplique en la lista):** puedes dar el precio de inmediato; no dependen del tamaño del vehículo en nuestro flujo actual.
 Para baño de pintura con vehículo ya conocido, tamaños de referencia: Audi A4/A5, BMW Serie 3 / 318–335, Mercedes Clase C, Mazda 6 = severidad "Mediano Premium" salvo que el usuario indique explícitamente otro tamaño (Chico, Grande, XL, Premium, etc.).
-Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide baño de pintura y además "cambio de color", suma el suplemento: $8,000 MXN si el tamaño es Chico o Mediano (incluye variantes Premium de esos tamaños), y $10,000 MXN si es Grande o XL (incluye Premium). Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.
+Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerámico, estética automotriz) cotízalos en el mismo mensaje con precios del catálogo: *no pidas borrador ni autorización humana ni fotos* para esos casos; entrega total y desglose amable al instante. Si pide BPCC / cambio de color, preséntalo como un solo servicio llave en mano ("Transformación Total / Cambio de Color (Exterior e Interiores completos)") — no desgloses baño exterior + interiores + suplemento. Para el resto de hojalatería con daño, sigue el flujo de borrador / fotos cuando aplique.
 **Después de cotizar:** si el cliente ya recibió el precio y muestra interés, pide día/hora o menciona un día de la semana, tu prioridad es **agendar** (en canales con herramientas: función createAppointment). No repitas montos que ya enviaste salvo que pida otra cotización explícita.`;
     } catch (err) {
       console.warn('[loadCatalogPromptAppendForLlm]', err);
@@ -5272,9 +5273,10 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       resolvedLevel = 'N/A';
       if (unit > 0) {
         const banioCode = canonicalizePanelCode(bpc.pieza) || VISION_BPC_PIEZA_CODE;
+        const turnkeyLabel = banioTurnkeyDisplayLabel(banioCode, canonical);
         lines.push({
           priceItemId: `matrix:${canonical}:${tierLabel}:${banioCode}`,
-          description: `${canonical} (${banioCode}) — ${tierLabel}${vehicleProfile?.isPremium ? ' premium' : ''}`,
+          description: `${turnkeyLabel} — ${tierLabel}${vehicleProfile?.isPremium ? ' premium' : ''}`,
           quantity: 1,
           unitPrice: unit,
           subtotal: unit,
@@ -5455,13 +5457,21 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       const attachingMessageId =
         images[images.length - 1]?.messageId || images[0]!.messageId;
       const burst = images.map((it) => it.content);
+      const recent = await this.getRecentImages(conversationId);
+      const consolidated = [
+        ...new Set(
+          [...recent, ...burst]
+            .map((u) => String(u).trim())
+            .filter((u) => u && isIncomingImage(u) && !isFacebookStickerUrl(u)),
+        ),
+      ];
       console.log(
-        `[IncomingBurst] visión conversation=${conversationId} fotos=${burst.length}`,
+        `[IncomingBurst] visión conversation=${conversationId} buffer=${burst.length} consolidado=${consolidated.length}`,
       );
       await this.processConsolidatedInboundImages(
         conversationId,
         attachingMessageId,
-        burst,
+        consolidated,
       );
       return;
     }
@@ -5499,15 +5509,20 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
   ): Promise<void> {
     const fromBurst = [
       ...new Set(
-        burstUrls.map((u) => String(u).trim()).filter((u) => u && isIncomingImage(u)),
+        burstUrls
+          .map((u) => String(u).trim())
+          .filter((u) => u && isIncomingImage(u) && !isFacebookStickerUrl(u)),
       ),
     ];
 
-    let imageUrls = fromBurst;
-
-    if (!imageUrls.length) {
-      imageUrls = await this.getRecentImages(conversationId);
-    }
+    const fromRecent = await this.getRecentImages(conversationId);
+    let imageUrls = [
+      ...new Set(
+        [...fromRecent, ...fromBurst].filter(
+          (u) => u && isIncomingImage(u) && !isFacebookStickerUrl(u),
+        ),
+      ),
+    ];
 
     if (!imageUrls.length) {
       const fallbackMsg = await this.messageRepository.findOne({
@@ -5535,6 +5550,16 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     });
     const visionTallerId =
       convRow?.tallerId ?? (await this.tallerService.findDefaultTallerId());
+
+    console.log(
+      '[VisionPipeline] lote consolidado',
+      JSON.stringify({
+        conversationId,
+        imageCount: imageUrls.length,
+        fromBurst: fromBurst.length,
+        fromRecent: fromRecent.length,
+      }),
+    );
 
     const conversationTextHistory =
       await this.buildVisionTextHistoryForConversation(conversationId);
