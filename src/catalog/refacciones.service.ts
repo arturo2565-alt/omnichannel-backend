@@ -22,6 +22,7 @@ export type RefaccionCatalogDto = {
   costoReferenciaBase: number;
   margenPorcentaje: number;
   precioSugerido: number;
+  forzarPrecioManual: boolean;
 };
 
 export type RefaccionCatalogQuote = {
@@ -55,6 +56,7 @@ export class RefaccionesService {
       costoReferenciaBase: costo,
       margenPorcentaje: margen,
       precioSugerido: precioSugeridoAlCliente(costo, margen),
+      forzarPrecioManual: Boolean(row.forzarPrecioManual),
     };
   }
 
@@ -75,6 +77,7 @@ export class RefaccionesService {
       categoria?: unknown;
       costoReferenciaBase?: unknown;
       margenPorcentaje?: unknown;
+      forzarPrecioManual?: unknown;
     },
   ): Promise<RefaccionCatalogDto> {
     const parsed = this.parseWriteInput(input, { requireCodigo: true });
@@ -93,6 +96,7 @@ export class RefaccionesService {
       categoria: parsed.categoria,
       costoReferenciaBase: parsed.costoReferenciaBase,
       margenPorcentaje: parsed.margenPorcentaje,
+      forzarPrecioManual: parsed.forzarPrecioManual,
     });
     return this.toDto(await this.repo.save(row));
   }
@@ -106,6 +110,7 @@ export class RefaccionesService {
       categoria?: unknown;
       costoReferenciaBase?: unknown;
       margenPorcentaje?: unknown;
+      forzarPrecioManual?: unknown;
     },
   ): Promise<RefaccionCatalogDto> {
     const row = await this.repo.findOne({ where: { id, tallerId } });
@@ -132,6 +137,9 @@ export class RefaccionesService {
     if (parsed.margenProvided) {
       row.margenPorcentaje = parsed.margenPorcentaje;
     }
+    if (parsed.forzarProvided) {
+      row.forzarPrecioManual = parsed.forzarPrecioManual;
+    }
     return this.toDto(await this.repo.save(row));
   }
 
@@ -142,8 +150,7 @@ export class RefaccionesService {
   }
 
   /**
-   * Precio de catálogo para una pieza de visión/panel.
-   * `null` si el taller no tiene esa refacción (el caller usa mercado).
+   * Solo si el taller forzó un precio manual. La semilla no cotiza.
    */
   async resolveClienteQuote(
     tallerId: string | null | undefined,
@@ -154,7 +161,7 @@ export class RefaccionesService {
     const codigo = refaccionCatalogCodigoForPieza(pieza);
     if (!codigo) return null;
     const row = await this.repo.findOne({ where: { tallerId: tid, codigo } });
-    if (!row) return null;
+    if (!row?.forzarPrecioManual) return null;
     const costo = Math.max(0, Math.round(Number(row.costoReferenciaBase) || 0));
     const margen = Number.isFinite(Number(row.margenPorcentaje))
       ? Number(row.margenPorcentaje)
@@ -187,6 +194,7 @@ export class RefaccionesService {
       categoria?: unknown;
       costoReferenciaBase?: unknown;
       margenPorcentaje?: unknown;
+      forzarPrecioManual?: unknown;
     },
     opts: { requireCodigo: boolean },
   ): {
@@ -198,6 +206,8 @@ export class RefaccionesService {
     costoProvided: boolean;
     margenPorcentaje: number;
     margenProvided: boolean;
+    forzarPrecioManual: boolean;
+    forzarProvided: boolean;
   } {
     const codigo = String(input.codigo ?? '')
       .trim()
@@ -253,6 +263,14 @@ export class RefaccionesService {
       margenPorcentaje = n;
     }
 
+    const forzarRaw = input.forzarPrecioManual;
+    const forzarProvided = forzarRaw !== undefined && forzarRaw !== null;
+    const forzarPrecioManual =
+      forzarRaw === true ||
+      forzarRaw === 'true' ||
+      forzarRaw === 1 ||
+      forzarRaw === '1';
+
     return {
       codigo,
       nombre,
@@ -262,6 +280,8 @@ export class RefaccionesService {
       costoProvided,
       margenPorcentaje,
       margenProvided,
+      forzarPrecioManual,
+      forzarProvided,
     };
   }
 }

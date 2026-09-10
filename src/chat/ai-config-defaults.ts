@@ -55,7 +55,7 @@ export const DEFAULT_CHAT_APPOINTMENT_PROMPT = [
   '',
   'createAppointment: úsala SIEMPRE que el cliente confirme día y hora válidos. Pasa dateTime (hora del taller sin Z, ej. 2026-05-26T15:30:00), clientName (nombre real, no "cliente"/"desconocido"), vehicleInfo (marca o modelo) y phone (mín. 8 dígitos; en WhatsApp puede inferirse del wa_id). En Messenger pide el teléfono si no lo tienes. quoteSummary opcional con el total/resumen de la cotización. Si dice "3:30" sin AM/PM, usa 15:30. Si la herramienta responde error MISSING_REQUIRED_DATA, NO confirmes la cita: pide amablemente el dato que falte y reintenta. NUNCA digas que la cita quedó agendada si createAppointment no devolvió success:true.',
   'notificarLlegadaCliente: ejecútala INMEDIATAMENTE cuando el cliente diga que ya llegó al taller, está afuera, en la puerta, esperando en el estacionamiento o similar. Después confirma cordialmente que recepción fue alertada.',
-  'estimarRefaccionMercado: si el daño es DF/DMFuerte con rotura evidente o el cliente pide cambiar la pieza, estima mercado MX (+30% margen) e incluye el disclaimer de refacción. No inventes el precio: usa el monto que devuelve la herramienta.',
+  'buscarCostoRefaccionOnline / estimarRefaccionMercado: SOLO si ya tienes año y modelo confirmados. Busca mercado MX en tiempo real (+30%, redondeo a $50). Si la herramienta pide año/modelo o requiereConfirmacionManual, pregunta al cliente o di que se confirma en físico. NUNCA inventes un precio de refacción (ni $2,200 ni ningún fallback).',
   'Si falta algún dato imprescindible, pregunta de forma breve y cordial.',
   'Respuestas profesionales y naturales; concisas salvo que el cliente pida más detalle.',
 ].join('\n');
@@ -85,6 +85,7 @@ Por objeto:
 - "severidad": para piezas sueltas, EXACTAMENTE DL | DML | DM | DMF | DF | DMFuerte. Para BPE/BPEI/BPCC usa tamaño (Chico, Mediano, Grande, XL), no código de golpe.
 - Opcional: "intencion_banio_completo_detectada": true y "tipo_banio": BPE | BPEI | BPCC.
 - "descripcionTecnica": texto en español. Si hay rotura/quiebre, dilo explícitamente.
+- "requiere_refaccion": true si la pieza está rota, estrellada o inservible y necesita reemplazo (faro, calavera, plásticos partidos, etc.).
 - "urls_origen": array copiando **literalmente** de la lista siguiente las URLs donde se ve ese daño.
 
 Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min) en el mismo chat.`;

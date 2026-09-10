@@ -52,4 +52,11 @@ export class RefaccionCatalog {
   /** Margen del taller sobre el costo base (porcentaje entero). */
   @Column({ type: 'int', name: 'margen_porcentaje', default: 30 })
   margenPorcentaje: number;
+
+  /**
+   * Si es true, el peritaje usa este costo en lugar del mercado.
+   * La semilla y los placeholders NO se usan como precio.
+   */
+  @Column({ type: 'boolean', name: 'forzar_precio_manual', default: false })
+  forzarPrecioManual: boolean;
 }

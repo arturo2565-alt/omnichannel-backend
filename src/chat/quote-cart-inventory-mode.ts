@@ -51,6 +51,7 @@ export function sanitizeCartInventoryForPricing(
         ...(it.refaccionDePieza
           ? { refaccionDePieza: it.refaccionDePieza }
           : {}),
+        ...(it.requiere_refaccion ? { requiere_refaccion: true } : {}),
       }));
   }
   if (mode === 'bpc') {

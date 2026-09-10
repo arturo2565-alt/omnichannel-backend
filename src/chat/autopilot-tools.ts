@@ -173,26 +173,58 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
   },
   {
     type: 'function',
-    name: 'estimarRefaccionMercado',
+    name: 'buscarCostoRefaccionOnline',
     description:
-      'Estima el costo de una refacción (pieza nueva/reemplazo). Si el taller tiene la pieza en Catálogo de Refacciones y Ópticas, usa ese costo + margen; si no, MercadoLibre +30% redondeado a $50. Úsala en DF/DMFuerte con rotura, ópticas estrelladas o si el cliente pide cambiar la pieza. Inserta la línea REFACCION; el montaje/pintura de matriz va en renglones aparte.',
+      'Busca el costo real de una refacción en MercadoLibre México. REQUIERE año y modelo confirmados. Aplica +30% y redondea a $50. Si no hay muestra de mercado, devuelve requiereConfirmacionManual y NO inventes un precio. Inserta REFACCION en el carrito solo si success=true. El catálogo del taller solo aplica si el taller forzó un precio manual.',
     parameters: {
       type: 'object',
       properties: {
         pieza: {
           type: 'string',
-          description: 'Pieza a reemplazar (FD, fascia delantera, puerta, etc.).',
+          description: 'Pieza a reemplazar (Calavera_Izquierda, Faro_Derecho, FD, etc.).',
         },
         vehiculo: {
           type: 'string',
-          description: 'Marca y modelo (ej. Jetta, Nissan March).',
+          description: 'Marca y modelo (ej. Volkswagen Jetta).',
+        },
+        modelo: {
+          type: 'string',
+          description: 'Modelo o versión (ej. Jetta, March).',
         },
         anio: {
           type: 'string',
-          description: 'Año del vehículo si se conoce (ej. 2018).',
+          description: 'Año del vehículo (obligatorio, ej. 2019).',
+        },
+        marca: {
+          type: 'string',
+          description: 'Marca si se conoce (ej. Volkswagen).',
         },
       },
-      required: ['pieza', 'vehiculo'],
+      required: ['pieza', 'anio'],
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
+    name: 'estimarRefaccionMercado',
+    description:
+      'Alias de buscarCostoRefaccionOnline. Misma regla: año + modelo obligatorios, mercado MX en tiempo real, +30%, sin precios inventados.',
+    parameters: {
+      type: 'object',
+      properties: {
+        pieza: {
+          type: 'string',
+          description: 'Pieza a reemplazar.',
+        },
+        vehiculo: {
+          type: 'string',
+          description: 'Marca y modelo.',
+        },
+        modelo: { type: 'string', description: 'Modelo o versión.' },
+        anio: { type: 'string', description: 'Año (obligatorio).' },
+        marca: { type: 'string', description: 'Marca.' },
+      },
+      required: ['pieza', 'anio'],
     },
     strict: false,
   },
