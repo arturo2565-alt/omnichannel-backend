@@ -182,7 +182,6 @@ import {
 } from './draft-quote-resume';
 import {
   parseVehicleYearAndModel,
-  shouldAppendRefaccionNote,
   stripRedundantRefaccionAskFooter,
 } from './refaccion-vehicle-gate';
 import {
@@ -1581,7 +1580,6 @@ export class ChatService implements OnModuleDestroy {
 
   private async enrichInventoryWithMarketRefacciones(
     analysis: VehicleDamageAnalysis,
-    notes: string[],
   ): Promise<VehicleDamageAnalysis> {
     const candidates = this.collectPiecesForRefaccionEstimate(analysis);
     if (!candidates.length) return analysis;
@@ -1606,12 +1604,6 @@ export class ChatService implements OnModuleDestroy {
       });
       if (!estimate.success || estimate.precioAlCliente <= 0) continue;
       inventory.push(buildRefaccionInventoryItem(estimate, it.pieza));
-      notes.push(
-        buildRefaccionDisclaimer(
-          piezaLabelForRefaccion(it.pieza),
-          estimate.precioAlCliente,
-        ),
-      );
     }
     if (inventory.length === (analysis.inventory ?? []).length) return analysis;
     return { ...analysis, inventory };
@@ -5652,10 +5644,8 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       }
     }
 
-    const refaccionNotes: string[] = [];
     analysisForQuote = await this.enrichInventoryWithMarketRefacciones(
       analysisForQuote,
-      refaccionNotes,
     );
 
     const estimateAmount = await this.computePrimaryMatrixEstimate(
@@ -5707,39 +5697,6 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     );
     let draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteDoc) ?? draftQuoteDoc;
-    const vehicleForNotes = parseVehicleYearAndModel(
-      analysisForQuote.vehiculoDetectado ?? '',
-      '',
-    );
-    const primaryClientText = String(
-      draftQuoteForClient.clientMessage ??
-        draftQuoteForClient.generatedMessage ??
-        draftQuoteForClient.formalNarrative ??
-        '',
-    );
-    if (
-      refaccionNotes.length &&
-      shouldAppendRefaccionNote(primaryClientText, {
-        vehicleConfirmed: vehicleForNotes.confirmed,
-      })
-    ) {
-      const noteBlock = refaccionNotes
-        .map((n) => replaceRawPiezaCodesInClientText(n))
-        .join('\n');
-      draftQuoteForClient = {
-        ...draftQuoteForClient,
-        clientMessage: [draftQuoteForClient.clientMessage, noteBlock]
-          .filter(Boolean)
-          .join('\n\n'),
-        generatedMessage: [draftQuoteForClient.generatedMessage, noteBlock]
-          .filter(Boolean)
-          .join('\n\n'),
-      };
-    } else if (refaccionNotes.length) {
-      console.log(
-        '[VisionPipeline] Nota de refacción omitida (ya cubierta o sin vehículo)',
-      );
-    }
 
     console.log(
       '[VisionPipeline] Borrador listo para panel',
