@@ -11,6 +11,8 @@ import type { CatalogPricingRules } from '../catalog/catalog-pricing-rules';
 import type { VehiclePricingProfile } from '../catalog/vehicle-pricing-profile';
 import { normalizeVehicleSizeTier } from '../catalog/vehicle-pricing-profile';
 import {
+  PANEL_PIEZA_REFACCION_CODE,
+  canonicalizePanelCode,
   findPanelPiezaOption,
   isInternalDamageRangePieza,
   isIntegralPanelPieza,
@@ -20,6 +22,8 @@ import {
   resolveCatalogPiezaForMatrixLookup,
   resolveMatrixServicioRaw,
 } from '../catalog/panel-pieza-catalog';
+import { resolvePiezaDisplayLabel } from './draft-quote-resume';
+import { refaccionFallbackPrecioAlCliente } from './refaccion-mercado';
 
 /** Fila de cotización del panel / PATCH (QuoteRow). */
 export interface QuoteRowInput {
@@ -34,6 +38,41 @@ export interface QuoteRowInput {
   detallesRefaccion?: string;
   descripcionTecnica?: string;
   descripcion?: string;
+  /** Texto de línea al cliente (p. ej. montaje en cabina). */
+  descripcionServicio?: string;
+}
+
+const LARGE_REPLACEABLE_PANEL_CODES = new Set([
+  'Cofre',
+  'FD',
+  'FT',
+  'Tapa Cajuela',
+]);
+
+export const PRELIMINARY_REPLACEMENT_DISCLAIMER =
+  'Total Preliminar. Sujeto a desmontaje y revisión de marco frontal y bases de faros.';
+
+export function isLargeReplaceablePanel(pieza: string): boolean {
+  const code = canonicalizePanelCode(pieza);
+  if (LARGE_REPLACEABLE_PANEL_CODES.has(code)) return true;
+  const n = String(pieza ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return /\b(cofre|fascia|porton|tapa\s+de\s+cajuela|tapa\s+cajuela)\b/.test(n);
+}
+
+export function needsLargePanelReplacementSplit(
+  item: Pick<DetectedDamageItem, 'pieza' | 'severidad' | 'posibleReemplazoRefaccion'>,
+): boolean {
+  if (!isLargeReplaceablePanel(item.pieza)) return false;
+  if (item.posibleReemplazoRefaccion === true) return true;
+  return coerceDamageLevelCode(String(item.severidad ?? '')) === 'DMFuerte';
+}
+
+export function cabinInstallServiceLabel(pieza: string): string {
+  const label = resolvePiezaDisplayLabel(pieza);
+  return `Montar, preparar y pintar ${label}`;
 }
 
 export function resolveQuoteRowPrecioMaximo(
@@ -103,9 +142,10 @@ export function buildDraftQuoteLineFromQuoteRow(
 
   if (kind === 'refaccion') {
     const label = refaccionLabelFromRow(line);
+    const custom = String(line.descripcionServicio ?? '').trim();
     return {
       priceItemId: `panel:${idx}:refaccion`,
-      description: `Refacción (${label}) — panel`,
+      description: custom || `Refacción estimada (${label}) — mercado +30%`,
       quantity: 1,
       unitPrice: u,
       subtotal: u,
@@ -142,9 +182,10 @@ export function buildDraftQuoteLineFromQuoteRow(
   const lev = coerceDamageLevelCode(String(line.severidad));
   const displayName =
     findPanelPiezaOption(String(line.pieza).trim())?.fullName ?? canonical;
+  const custom = String(line.descripcionServicio ?? '').trim();
   return {
     priceItemId: `panel:${idx}:${canonical}:${lev}`,
-    description: `${displayName} — nivel ${lev} (panel)`,
+    description: custom || `${displayName} — nivel ${lev} (panel)`,
     quantity: 1,
     unitPrice: u,
     subtotal: u,
@@ -186,12 +227,53 @@ export function quoteRowsFromDamageInventory(
   pricingRules?: CatalogPricingRules | null,
 ): QuoteRowInput[] {
   const rows: QuoteRowInput[] = [];
+  const refaccionBySource = new Set(
+    inventory
+      .filter((it) => isRefaccionPieza(it.pieza))
+      .map((it) =>
+        String(it.refaccionDePieza ?? it.pieza.replace(/^REFACCION\s*:\s*/i, ''))
+          .trim(),
+      )
+      .filter(Boolean)
+      .map((c) => canonicalizePanelCode(c) || c),
+  );
+
+  const pricePiece = (
+    pieza: string,
+    sev: string,
+  ): number => {
+    const catalogPieza =
+      resolveCatalogPiezaForMatrixLookup(pieza) ??
+      snap.matchServicio(pieza) ??
+      pieza;
+    let precio = resolvePiecePriceForVehicleProfile(
+      snap,
+      catalogPieza,
+      sev,
+      vehicleProfile,
+      pricingRules,
+    );
+    if (precio <= 0) {
+      precio = resolvePiecePriceForVehicleProfile(
+        snap,
+        snap.matchServicio(pieza) ?? pieza,
+        sev,
+        vehicleProfile,
+        pricingRules,
+      );
+    }
+    return Math.max(0, Math.round(precio));
+  };
+
   for (const it of inventory) {
     const panelCode = normalizePanelPiezaCode(it.pieza) || String(it.pieza ?? '').trim();
     if (!panelCode) continue;
     const sevRaw = String(it.severidad ?? '').trim();
     let storedSev = sevRaw || 'DM';
     let precio = 0;
+    const canon = canonicalizePanelCode(panelCode) || panelCode;
+    const hasRefaccionSibling = refaccionBySource.has(canon);
+    const splitReplacement = needsLargePanelReplacementSplit(it);
 
     if (isIntegralPanelPieza(panelCode)) {
       storedSev = sevRaw || vehicleProfile?.sizeTier || 'Mediano';
@@ -211,35 +293,65 @@ export function quoteRowsFromDamageInventory(
         pricingRules,
       );
       precio = resolution?.unitPrice ?? 0;
-    } else if (!isSpecialPanelPieza(panelCode)) {
-      const sev = coerceDamageLevelCode(sevRaw);
-      storedSev = sev;
-      const catalogPieza =
-        resolveCatalogPiezaForMatrixLookup(panelCode) ??
-        snap.matchServicio(it.pieza) ??
-        it.pieza;
-      precio = resolvePiecePriceForVehicleProfile(
-        snap,
-        catalogPieza,
-        sev,
-        vehicleProfile,
-        pricingRules,
-      );
-      if (precio <= 0) {
-        precio = resolvePiecePriceForVehicleProfile(
-          snap,
-          snap.matchServicio(it.pieza) ?? it.pieza,
-          sev,
-          vehicleProfile,
-          pricingRules,
-        );
-      }
-    } else if (isRefaccionPieza(panelCode)) {
-      storedSev = 'N/A';
-      precio = Math.max(0, Math.round(Number(it.precioMx) || 0));
-    } else {
-      storedSev = coerceDamageLevelCode(sevRaw);
+      rows.push({
+        pieza: panelCode,
+        severidad: storedSev,
+        precioMx: Math.max(0, Math.round(precio)),
+      });
+      continue;
     }
+
+    if (isRefaccionPieza(it.pieza) || isRefaccionPieza(panelCode)) {
+      rows.push({
+        pieza: String(it.pieza ?? '').trim() || panelCode,
+        severidad: 'N/A',
+        precioMx: Math.max(0, Math.round(Number(it.precioMx) || 0)),
+        ...(it.detallesRefaccion
+          ? { detallesRefaccion: it.detallesRefaccion }
+          : {}),
+      });
+      continue;
+    }
+
+    if (isSpecialPanelPieza(panelCode)) {
+      rows.push({
+        pieza: panelCode,
+        severidad: coerceDamageLevelCode(sevRaw),
+        precioMx: 0,
+      });
+      continue;
+    }
+
+    if (splitReplacement) {
+      const cabinPrice = pricePiece(panelCode, 'DL');
+      rows.push({
+        pieza: panelCode,
+        severidad: 'DL',
+        precioMx: cabinPrice,
+        descripcionServicio: cabinInstallServiceLabel(panelCode),
+      });
+      if (!hasRefaccionSibling) {
+        const refPrecio =
+          Math.max(0, Math.round(Number(it.precioMx) || 0)) ||
+          refaccionFallbackPrecioAlCliente(panelCode);
+        rows.push({
+          pieza: `${PANEL_PIEZA_REFACCION_CODE}:${canon}`,
+          severidad: 'N/A',
+          precioMx: refPrecio,
+          detallesRefaccion: resolvePiezaDisplayLabel(panelCode),
+          descripcionServicio: `Refacción estimada (${resolvePiezaDisplayLabel(panelCode)}) — mercado +30%`,
+        });
+      }
+      continue;
+    }
+
+    if (hasRefaccionSibling) {
+      continue;
+    }
+
+    const sev = coerceDamageLevelCode(sevRaw);
+    storedSev = sev;
+    precio = pricePiece(panelCode, sev);
     rows.push({
       pieza: panelCode,
       severidad: storedSev,

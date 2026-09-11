@@ -82,7 +82,7 @@ async function searchMercadoLibrePrices(query: string): Promise<number[]> {
 }
 
 /** Fallback conservador CDMX si no hay muestra de mercado. */
-function fallbackCostoBase(pieza: string): number {
+export function fallbackCostoBase(pieza: string): number {
   const code = canonicalizePanelCode(pieza);
   const map: Record<string, number> = {
     FD: 2800,
@@ -107,6 +107,10 @@ function fallbackCostoBase(pieza: string): number {
     Espejo: 1200,
   };
   return map[code] ?? 2500;
+}
+
+export function refaccionFallbackPrecioAlCliente(pieza: string): number {
+  return precioAlClienteConMargen(fallbackCostoBase(pieza));
 }
 
 export async function estimarRefaccionMercado(input: {

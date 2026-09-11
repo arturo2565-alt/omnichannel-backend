@@ -13,6 +13,9 @@ describe('catalog-pricing-rules', () => {
     expect(coerceDamageMagnitude('DM')).toBe('MEDIO');
     expect(coerceDamageMagnitude('DF')).toBe('FUERTE');
     expect(coerceDamageMagnitude('DMFuerte')).toBe('MUY_FUERTE');
+    expect(coerceDamageMagnitude('DM Fuerte')).toBe('MUY_FUERTE');
+    expect(coerceDamageMagnitude('muy fuerte')).toBe('MUY_FUERTE');
+    expect(coerceDamageMagnitude('Daño muy fuerte')).toBe('MUY_FUERTE');
   });
 
   it('aggregatePieceBaseRows toma LEVE o DL como base', () => {

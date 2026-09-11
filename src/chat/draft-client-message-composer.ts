@@ -38,6 +38,7 @@ export type DraftClientMessageComposeInput = {
     vehiculoDetectado?: string;
     imageCount?: number;
   };
+  hasLargePanelReplacement?: boolean;
 };
 
 const DRAFT_CLIENT_MESSAGE_TECH_APPENDIX = `
@@ -54,6 +55,7 @@ Reglas obligatorias:
 - PROHIBIDO mostrar códigos internos de pieza (Calavera_TI, FD, PDI, REFACCION:…). Usa el nombre legible (ej. "calavera trasera izquierda").
 - Si una pieza rota no tiene vehículo confirmado y se confirma en taller, explícalo UNA sola vez en el cuerpo. El CTA debe ser SOLO invitar a agendar. PROHIBIDO un pie "Nota de Refacción" pidiendo marca, modelo o año.
 - No dupliques el tema de refacción si ya lo mencionaste en el cuerpo.
+- Si "contextoOperativo.hasLargePanelReplacement" es true, presenta el monto como Total Preliminar y aclara que está sujeto a desmontaje y revisión de marco frontal y bases de faros. No cobres esa pieza solo como hojalatería simple.
 - Mismo formato y tono para baño de pintura completo (BPC) y piezas sueltas: una sola voz comercial premium.
 - Sigue el estilo, emojis y estructura definidos en el system prompt principal (ChatAppointmentPrompt).`.trim();
 
@@ -101,6 +103,7 @@ export function buildDraftClientMessageStructuredPayload(
       mapsUrl: input.mapsUrl,
       vehicleModel: input.vehicleModel,
       isComplement: input.isComplement,
+      hasLargePanelReplacement: input.hasLargePanelReplacement === true,
       previousPiezas: input.previousPiezas.map((p) =>
         resolvePiezaDisplayLabel(p),
       ),

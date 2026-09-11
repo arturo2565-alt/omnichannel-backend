@@ -48,6 +48,8 @@ import { resolveMatrixServicioRaw, normalizePanelPiezaCode } from '../catalog/pa
 import {
   buildDraftQuoteLineFromQuoteRow,
   buildDraftQuoteLinesFromDamageInventory,
+  needsLargePanelReplacementSplit,
+  PRELIMINARY_REPLACEMENT_DISCLAIMER,
   quoteRowsFromDamageInventory,
   sumQuoteRowsSubtotal,
   type QuoteRowInput,
@@ -101,6 +103,8 @@ import {
   banioCompletoNeedsHeavyBodyworkDisclaimer,
   applyBanioCodePriceAdjustments,
   collapseVisionItemsToBpcIfNeeded,
+  extractVisionDetectedVehicle,
+  extractVisionIdentifiedVehicle,
   isBanioPinturaCompletoVisionInventory,
   isVisionBpcPiezaCode,
   pickVehicleLabelFromDamageInventory,
@@ -478,12 +482,21 @@ function normalizeDetectedDamagesJson(raw: unknown): DetectedDamageItem[] {
           : [];
     let urls_origen = u.map((x) => String(x).trim()).filter(Boolean);
     if (!pieza || !severidad) continue;
+    const reemplazoRaw =
+      r['posible_reemplazo_refaccion'] ?? r['posibleReemplazoRefaccion'];
+    const posibleReemplazoRefaccion =
+      reemplazoRaw === true ||
+      reemplazoRaw === 1 ||
+      reemplazoRaw === '1' ||
+      (typeof reemplazoRaw === 'string' &&
+        /^(si|sí|yes|true)$/i.test(reemplazoRaw.trim()));
     out.push({
       pieza,
       severidad,
       descripcionTecnica:
         descripcionTecnica || 'Sin descripción técnica disponible.',
       urls_origen,
+      ...(posibleReemplazoRefaccion ? { posibleReemplazoRefaccion: true } : {}),
     });
   }
   if (!out.length) {
@@ -515,6 +528,14 @@ function inventoryItemsToVehicleAnalysis(
     ...(it.vehiculoDetectado?.trim()
       ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
       : {}),
+    ...(it.posibleReemplazoRefaccion
+      ? { posibleReemplazoRefaccion: true }
+      : {}),
+    ...(it.precioMx != null ? { precioMx: it.precioMx } : {}),
+    ...(it.detallesRefaccion
+      ? { detallesRefaccion: it.detallesRefaccion }
+      : {}),
+    ...(it.refaccionDePieza ? { refaccionDePieza: it.refaccionDePieza } : {}),
   }));
   const vehiculoDetectado = pickVehicleLabelFromDamageInventory(inv);
   const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
@@ -1574,7 +1595,8 @@ export class ChatService implements OnModuleDestroy {
     return [...inv, ...fromPrev].filter(
       (it) =>
         !isVisionBpcPiezaCode(it.pieza) &&
-        looksLikeEvidentBreakage(it.severidad, it.descripcionTecnica),
+        (looksLikeEvidentBreakage(it.severidad, it.descripcionTecnica) ||
+          needsLargePanelReplacementSplit(it)),
     );
   }
 
@@ -2950,12 +2972,28 @@ export class ChatService implements OnModuleDestroy {
       return { items: [], viability: inviable };
     }
 
+    const identified = extractVisionIdentifiedVehicle(parsed);
+    const vehicleLabel =
+      identified?.label ?? extractVisionDetectedVehicle(parsed);
+    if (vehicleLabel) {
+      for (const it of items) {
+        if (!it.vehiculoDetectado) it.vehiculoDetectado = vehicleLabel;
+      }
+    }
+
     const collapsed = collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
+    if (vehicleLabel) {
+      for (const it of collapsed) {
+        if (!it.vehiculoDetectado) it.vehiculoDetectado = vehicleLabel;
+      }
+    }
     console.log(
       '[Vision] Inventario parseado',
       JSON.stringify({
         items: collapsed.length,
         piezas: collapsed.map((i) => i.pieza),
+        vehiculo: vehicleLabel ?? null,
+        vehiculoConfianza: identified?.confianza ?? null,
       }),
     );
     return { items: collapsed, viability: { peritajeViable: true } };
@@ -3767,6 +3805,9 @@ export class ChatService implements OnModuleDestroy {
           previousPiezas: input.previousPiezas,
           newPiezas: input.newPiezas,
           pricingMode: this.resolvePricingModeForClientNarrative(input.analysis),
+          hasLargePanelReplacement: (input.analysis.inventory ?? []).some(
+            (it) => needsLargePanelReplacementSplit(it),
+          ),
           peritaje: {
             ...peritajeFromDamageAnalysisLike(input.analysis),
             imageCount: input.imageCount,
@@ -3910,9 +3951,19 @@ export class ChatService implements OnModuleDestroy {
         newPiezas: newDistinct,
         narrativeOptions,
       });
-    draft.formalNarrative = replaceRawPiezaCodesInClientText(
+    let narrative = replaceRawPiezaCodesInClientText(
       stripRedundantRefaccionAskFooter(llmNarrative || fallbackNarrative),
     );
+    const hasReplacement = (analysis.inventory ?? []).some((it) =>
+      needsLargePanelReplacementSplit(it),
+    );
+    if (
+      hasReplacement &&
+      !/total preliminar|marco frontal|bases de faros/i.test(narrative)
+    ) {
+      narrative = `${narrative.trim()}\n\n${PRELIMINARY_REPLACEMENT_DISCLAIMER}`;
+    }
+    draft.formalNarrative = narrative;
     console.log(
       '[DraftClientNarrative] applyClientFacingFormalNarrativeToDraft',
       JSON.stringify({

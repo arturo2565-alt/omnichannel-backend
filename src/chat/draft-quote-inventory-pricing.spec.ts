@@ -149,6 +149,40 @@ describe('draft-quote-inventory-pricing', () => {
     expect(sumQuoteRowsSubtotal(rows)).toBe(2860 + rows[1]!.precioMx);
   });
 
+  it('DMFuerte en Cofre/Fascia desglosa refacción + cabina, no hojalatería sola', () => {
+    const snap = mockPricingSnap({
+      'Cofre|DL': 4000,
+      'Cofre|DMFuerte': 7650,
+      'Fascia|DL': 2900,
+      'Fascia|DMFuerte': 4900,
+    });
+    const rows = quoteRowsFromDamageInventory(
+      [
+        {
+          pieza: 'Cofre',
+          severidad: 'DMFuerte',
+          descripcionTecnica: 'Cofre colapsado',
+          urls_origen: [],
+        },
+        {
+          pieza: 'FD',
+          severidad: 'DMFuerte',
+          descripcionTecnica: 'Fascia destruida',
+          urls_origen: [],
+          posibleReemplazoRefaccion: true,
+        },
+      ],
+      snap,
+    );
+    expect(rows).toHaveLength(4);
+    expect(rows[0]?.descripcionServicio).toMatch(/Montar, preparar y pintar/i);
+    expect(rows[0]?.severidad).toBe('DL');
+    expect(rows[1]?.pieza).toMatch(/^REFACCION:/);
+    expect(rows[1]?.precioMx).toBeGreaterThan(0);
+    expect(rows[2]?.pieza).toBe('FD');
+    expect(rows[3]?.pieza).toMatch(/^REFACCION:/);
+  });
+
   it('REFACCION con precio inválido no produce NaN', () => {
     const snap = mockPricingSnap({});
     const rows = quoteRowsFromDamageInventory(

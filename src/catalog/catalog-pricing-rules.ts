@@ -71,10 +71,13 @@ const LEGACY_DAMAGE_TO_MAGNITUDE: Record<string, DamageMagnitude> = {
   DMF: 'FUERTE',
   DF: 'FUERTE',
   DMFUERTE: 'MUY_FUERTE',
+  DM_FUERTE: 'MUY_FUERTE',
+  DMF_FUERTE: 'MUY_FUERTE',
   LEVE: 'LEVE',
   MEDIO: 'MEDIO',
   FUERTE: 'FUERTE',
   MUY_FUERTE: 'MUY_FUERTE',
+  MUYFUERTE: 'MUY_FUERTE',
 };
 
 export function normalizeDamageMagnitudeKey(raw: string): string {
@@ -88,7 +91,15 @@ export function normalizeDamageMagnitudeKey(raw: string): string {
 
 export function coerceDamageMagnitude(raw: string): DamageMagnitude {
   const key = normalizeDamageMagnitudeKey(raw);
-  return LEGACY_DAMAGE_TO_MAGNITUDE[key] ?? 'MEDIO';
+  const mapped = LEGACY_DAMAGE_TO_MAGNITUDE[key];
+  if (mapped) return mapped;
+  if (
+    /MUY_?FUERTE|DMF_?FUERTE|DM_FUERTE/.test(key) ||
+    /muy\s*fuerte/i.test(String(raw ?? ''))
+  ) {
+    return 'MUY_FUERTE';
+  }
+  return 'MEDIO';
 }
 
 export function mergeCatalogPricingRules(

@@ -114,8 +114,58 @@ export function applyBanioCodePriceAdjustments(
   return price;
 }
 
+export type VisionIdentifiedVehicle = {
+  marca: string;
+  modelo: string;
+  anios: string;
+  confianza: 'alta' | 'media' | 'baja';
+  label: string;
+};
+
+function normalizeAniosField(raw: unknown): string {
+  if (Array.isArray(raw)) {
+    return raw
+      .map((x) => String(x ?? '').trim())
+      .filter(Boolean)
+      .join('-');
+  }
+  return String(raw ?? '').trim();
+}
+
+/**
+ * `vehiculo_identificado` del JSON de visión.
+ * Solo se usa si `confianza` es alta o media.
+ */
+export function extractVisionIdentifiedVehicle(
+  visionRoot?: unknown,
+): VisionIdentifiedVehicle | null {
+  if (!visionRoot || typeof visionRoot !== 'object') return null;
+  const o = visionRoot as Record<string, unknown>;
+  const block = o.vehiculo_identificado ?? o.vehiculoIdentificado;
+  if (!block || typeof block !== 'object') return null;
+  const b = block as Record<string, unknown>;
+  const confianzaRaw = String(b.confianza ?? b.confidence ?? '')
+    .toLowerCase()
+    .trim();
+  const confianza: VisionIdentifiedVehicle['confianza'] =
+    confianzaRaw === 'alta' || confianzaRaw === 'high'
+      ? 'alta'
+      : confianzaRaw === 'media' || confianzaRaw === 'medium'
+        ? 'media'
+        : 'baja';
+  if (confianza !== 'alta' && confianza !== 'media') return null;
+  const marca = String(b.marca ?? b.make ?? '').trim();
+  const modelo = String(b.modelo ?? b.model ?? '').trim();
+  const anios = normalizeAniosField(b.anios ?? b.anio ?? b.year ?? b.years);
+  const label = [marca, modelo, anios].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  if (!label) return null;
+  return { marca, modelo, anios, confianza, label };
+}
+
 /** Lee vehículo del JSON crudo de visión (snake_case o camelCase). */
 export function extractVisionDetectedVehicle(visionRoot?: unknown): string | null {
+  const identified = extractVisionIdentifiedVehicle(visionRoot);
+  if (identified?.label) return identified.label;
   if (!visionRoot || typeof visionRoot !== 'object') return null;
   const o = visionRoot as Record<string, unknown>;
   const keys = [

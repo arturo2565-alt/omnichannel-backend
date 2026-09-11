@@ -31,6 +31,8 @@ export interface DetectedDamageItem {
   detallesRefaccion?: string;
   /** Código de panel que originó la refacción (FD, PDI…). */
   refaccionDePieza?: string;
+  /** Visión: la pieza conviene reemplazarse (no solo hojalatería). */
+  posibleReemplazoRefaccion?: boolean;
 }
 
 /** @deprecated usar DetectedDamageItem (descripcion → descripcionTecnica, urls_asociadas → urls_origen). */

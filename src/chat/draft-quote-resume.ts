@@ -63,6 +63,12 @@ export function mergeDamageInventoryAccumulative(
       severidad: coerceDamageLevelCode(it.severidad),
       descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
       urls_origen: [...(it.urls_origen ?? [])],
+      ...(it.vehiculoDetectado?.trim()
+        ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
+        : {}),
+      ...(it.posibleReemplazoRefaccion
+        ? { posibleReemplazoRefaccion: true }
+        : {}),
     });
   }
 
@@ -79,6 +85,12 @@ export function mergeDamageInventoryAccumulative(
         severidad: coerceDamageLevelCode(it.severidad),
         descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
         urls_origen: [...(it.urls_origen ?? [])],
+        ...(it.vehiculoDetectado?.trim()
+          ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
+          : {}),
+        ...(it.posibleReemplazoRefaccion
+          ? { posibleReemplazoRefaccion: true }
+          : {}),
       });
       if (!previousCanonicals.has(canon)) {
         newPiezas.push(canon);
@@ -99,6 +111,15 @@ export function mergeDamageInventoryAccumulative(
       urls_origen: [
         ...new Set([...(existing.urls_origen ?? []), ...(it.urls_origen ?? [])]),
       ],
+      ...(existing.vehiculoDetectado || it.vehiculoDetectado
+        ? {
+            vehiculoDetectado:
+              existing.vehiculoDetectado || it.vehiculoDetectado,
+          }
+        : {}),
+      ...(existing.posibleReemplazoRefaccion || it.posibleReemplazoRefaccion
+        ? { posibleReemplazoRefaccion: true }
+        : {}),
     });
   }
 
