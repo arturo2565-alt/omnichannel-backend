@@ -40,23 +40,31 @@ export function runRefaccionMarketPipeline(input: {
   });
 }
 
+type RefaccionMarketServiceOpts = {
+  cache?: RefaccionMarketCache;
+  providers?: RefaccionPriceProvider[];
+  policy?: RefaccionMarketPolicy;
+};
+
 @Injectable()
 export class RefaccionMarketService {
-  private readonly cache: RefaccionMarketCache;
-  private readonly providers: RefaccionPriceProvider[];
-  private readonly policy: RefaccionMarketPolicy;
+  private cache: RefaccionMarketCache;
+  private providers: RefaccionPriceProvider[];
+  private policy: RefaccionMarketPolicy;
 
-  constructor(opts?: {
-    cache?: RefaccionMarketCache;
-    providers?: RefaccionPriceProvider[];
-    policy?: RefaccionMarketPolicy;
-  }) {
+  /** Sin parámetros: Nest no debe inyectar el objeto de opciones. */
+  constructor() {
+    this.applyOpts();
+  }
+
+  applyOpts(opts?: RefaccionMarketServiceOpts): this {
     this.cache = opts?.cache ?? new RefaccionMarketCache();
     this.providers = opts?.providers ?? [
       new GoogleWebSearchProvider(),
       new MercadoLibreProvider(),
     ];
     this.policy = opts?.policy ?? DEFAULT_REFACCION_MARKET_POLICY;
+    return this;
   }
 
   async estimate(identity: VehiclePartIdentity): Promise<RefaccionMarketEstimate> {
@@ -91,10 +99,8 @@ export class RefaccionMarketService {
   }
 }
 
-export function createRefaccionMarketService(opts?: {
-  cache?: RefaccionMarketCache;
-  providers?: RefaccionPriceProvider[];
-  policy?: RefaccionMarketPolicy;
-}): RefaccionMarketService {
-  return new RefaccionMarketService(opts);
+export function createRefaccionMarketService(
+  opts?: RefaccionMarketServiceOpts,
+): RefaccionMarketService {
+  return new RefaccionMarketService().applyOpts(opts);
 }
