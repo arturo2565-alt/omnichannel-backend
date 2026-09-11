@@ -3,6 +3,7 @@ import { coerceDamageLevelCode } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
 import { resolvePiecePriceForVehicleProfile } from '../catalog/vehicle-piece-pricing';
+import { computeCatalogPiecePrice } from '../catalog/catalog-pricing-rules';
 import {
   inferVehicleProfileFromLegacyBañoSeveridad,
   resolveIntegralPriceForVehicleProfile,
@@ -11,19 +12,27 @@ import type { CatalogPricingRules } from '../catalog/catalog-pricing-rules';
 import type { VehiclePricingProfile } from '../catalog/vehicle-pricing-profile';
 import { normalizeVehicleSizeTier } from '../catalog/vehicle-pricing-profile';
 import {
-  PANEL_PIEZA_REFACCION_CODE,
-  canonicalizePanelCode,
   findPanelPiezaOption,
   isInternalDamageRangePieza,
   isIntegralPanelPieza,
   isRefaccionPieza,
   isSpecialPanelPieza,
-  normalizePanelPiezaCode,
   resolveCatalogPiezaForMatrixLookup,
   resolveMatrixServicioRaw,
 } from '../catalog/panel-pieza-catalog';
-import { resolvePiezaDisplayLabel } from './draft-quote-resume';
 import { refaccionFallbackPrecioAlCliente } from './refaccion-mercado';
+import {
+  applyXorTreatmentsToInventory,
+  canonicalPhysicalPanelKey,
+  HIDDEN_DAMAGE_CLIENT_DISCLAIMER,
+  INCIERTO_SUBSTITUTION_DISCLAIMER,
+  isBillableQuoteRow,
+  needsMontajePinturaComponent,
+  structuredLineLabel,
+  type QuoteServiceType,
+  type RefaccionPriceSource,
+  type TreatmentDecision,
+} from './piece-treatment';
 
 /** Fila de cotización del panel / PATCH (QuoteRow). */
 export interface QuoteRowInput {
@@ -38,41 +47,15 @@ export interface QuoteRowInput {
   detallesRefaccion?: string;
   descripcionTecnica?: string;
   descripcion?: string;
-  /** Texto de línea al cliente (p. ej. montaje en cabina). */
+  description?: string;
+  /** @deprecated alias de description */
   descripcionServicio?: string;
-}
-
-const LARGE_REPLACEABLE_PANEL_CODES = new Set([
-  'Cofre',
-  'FD',
-  'FT',
-  'Tapa Cajuela',
-]);
-
-export const PRELIMINARY_REPLACEMENT_DISCLAIMER =
-  'Total Preliminar. Sujeto a desmontaje y revisión de marco frontal y bases de faros.';
-
-export function isLargeReplaceablePanel(pieza: string): boolean {
-  const code = canonicalizePanelCode(pieza);
-  if (LARGE_REPLACEABLE_PANEL_CODES.has(code)) return true;
-  const n = String(pieza ?? '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-  return /\b(cofre|fascia|porton|tapa\s+de\s+cajuela|tapa\s+cajuela)\b/.test(n);
-}
-
-export function needsLargePanelReplacementSplit(
-  item: Pick<DetectedDamageItem, 'pieza' | 'severidad' | 'posibleReemplazoRefaccion'>,
-): boolean {
-  if (!isLargeReplaceablePanel(item.pieza)) return false;
-  if (item.posibleReemplazoRefaccion === true) return true;
-  return coerceDamageLevelCode(String(item.severidad ?? '')) === 'DMFuerte';
-}
-
-export function cabinInstallServiceLabel(pieza: string): string {
-  const label = resolvePiezaDisplayLabel(pieza);
-  return `Montar, preparar y pintar ${label}`;
+  tratamiento?: TreatmentDecision;
+  serviceType?: QuoteServiceType;
+  physicalPanelKey?: string;
+  billable?: boolean;
+  priceSource?: RefaccionPriceSource;
+  disclaimer?: string;
 }
 
 export function resolveQuoteRowPrecioMaximo(
@@ -89,11 +72,23 @@ export function resolveQuoteRowPrecioMaximo(
   return Number.isFinite(n) ? n : undefined;
 }
 
-export type QuoteRowKind = 'internal_damage' | 'refaccion' | 'matrix' | 'integral';
+export type QuoteRowKind =
+  | 'internal_damage'
+  | 'refaccion'
+  | 'matrix'
+  | 'integral'
+  | 'montaje_pintura'
+  | 'pendiente';
 
 export function classifyQuoteRow(line: QuoteRowInput): QuoteRowKind {
-  if (isInternalDamageRangePieza(line.pieza)) return 'internal_damage';
-  if (isRefaccionPieza(line.pieza)) return 'refaccion';
+  if (line.serviceType === 'PENDIENTE') return 'pendiente';
+  if (line.serviceType === 'MONTAJE_PINTURA') return 'montaje_pintura';
+  if (line.serviceType === 'ADVERTENCIA' || isInternalDamageRangePieza(line.pieza)) {
+    return 'internal_damage';
+  }
+  if (line.serviceType === 'REFACCION' || isRefaccionPieza(line.pieza)) {
+    return 'refaccion';
+  }
   if (isIntegralPanelPieza(line.pieza)) return 'integral';
   const max = resolveQuoteRowPrecioMaximo(line);
   const min = Math.round(Number(line.precioMx) || 0);
@@ -107,8 +102,11 @@ export function classifyQuoteRow(line: QuoteRowInput): QuoteRowKind {
   return 'matrix';
 }
 
-/** Subtotal facturable: mínimo en daños internos; precio manual en refacciones. */
+/** Solo líneas cobrables. Pendientes y daños internos no confirmados = 0. */
 export function quoteRowSubtotalForTotal(line: QuoteRowInput): number {
+  if (!isBillableQuoteRow(line)) return 0;
+  const kind = classifyQuoteRow(line);
+  if (kind === 'internal_damage' || kind === 'pendiente') return 0;
   const u = Math.round(Number(line.precioMx) || 0);
   return Math.max(0, u);
 }
@@ -132,6 +130,31 @@ function refaccionLabelFromRow(line: QuoteRowInput): string {
   return desc || 'Sin especificar';
 }
 
+function displayPiezaName(pieza: string, snap?: MatrixPricingSnapshot): string {
+  const opt = findPanelPiezaOption(String(pieza).trim());
+  if (opt?.fullName) return opt.fullName;
+  if (snap) {
+    const matrixRaw = resolveMatrixServicioRaw(String(pieza).trim());
+    return snap.matchServicio(matrixRaw) ?? matrixRaw;
+  }
+  return String(pieza).trim();
+}
+
+function attachStructured(
+  line: DraftQuoteLine,
+  row: QuoteRowInput,
+): DraftQuoteLine {
+  return {
+    ...line,
+    tratamiento: row.tratamiento,
+    serviceType: row.serviceType,
+    physicalPanelKey: row.physicalPanelKey,
+    billable: row.billable !== false && quoteRowSubtotalForTotal(row) > 0,
+    ...(row.priceSource ? { priceSource: row.priceSource } : {}),
+    ...(row.disclaimer ? { disclaimer: row.disclaimer } : {}),
+  };
+}
+
 export function buildDraftQuoteLineFromQuoteRow(
   line: QuoteRowInput,
   idx: number,
@@ -139,28 +162,65 @@ export function buildDraftQuoteLineFromQuoteRow(
 ): DraftQuoteLine {
   const u = Math.round(Number(line.precioMx) || 0);
   const kind = classifyQuoteRow(line);
+  const structuredDesc = String(
+    line.description ?? line.descripcionServicio ?? '',
+  ).trim();
+
+  if (kind === 'pendiente') {
+    const label = displayPiezaName(line.pieza, snap);
+    return attachStructured(
+      {
+        priceItemId: `panel:${idx}:pendiente`,
+        description: structuredDesc || `${label} — pendiente de revisión`,
+        quantity: 1,
+        unitPrice: 0,
+        subtotal: 0,
+      },
+      line,
+    );
+  }
 
   if (kind === 'refaccion') {
     const label = refaccionLabelFromRow(line);
-    const custom = String(line.descripcionServicio ?? '').trim();
-    return {
-      priceItemId: `panel:${idx}:refaccion`,
-      description: custom || `Refacción estimada (${label}) — mercado +30%`,
-      quantity: 1,
-      unitPrice: u,
-      subtotal: u,
-    };
+    return attachStructured(
+      {
+        priceItemId: `panel:${idx}:refaccion`,
+        description: structuredDesc || `Refacción de ${label}`,
+        quantity: 1,
+        unitPrice: u,
+        subtotal: u,
+      },
+      line,
+    );
+  }
+
+  if (kind === 'montaje_pintura') {
+    const label = displayPiezaName(line.pieza, snap);
+    return attachStructured(
+      {
+        priceItemId: `panel:${idx}:montaje`,
+        description: structuredDesc || `Montar y pintar ${label}`,
+        quantity: 1,
+        unitPrice: u,
+        subtotal: u,
+      },
+      line,
+    );
   }
 
   if (kind === 'internal_damage') {
-    const maxU = Math.round(resolveQuoteRowPrecioMaximo(line) ?? u);
-    return {
-      priceItemId: `panel:${idx}:internal-damage`,
-      description: `Posibles daños internos — $${u.toLocaleString('es-MX')} - $${maxU.toLocaleString('es-MX')} MXN (sujeto a desarme)`,
-      quantity: 1,
-      unitPrice: u,
-      subtotal: u,
-    };
+    return attachStructured(
+      {
+        priceItemId: `panel:${idx}:internal-damage`,
+        description:
+          structuredDesc ||
+          `Posibles daños internos (sujeto a desarme) — no incluido en el total`,
+        quantity: 1,
+        unitPrice: 0,
+        subtotal: 0,
+      },
+      { ...line, billable: false, precioMx: 0 },
+    );
   }
 
   if (kind === 'integral') {
@@ -168,13 +228,16 @@ export function buildDraftQuoteLineFromQuoteRow(
       findPanelPiezaOption(String(line.pieza).trim())?.fullName ??
       String(line.pieza).trim();
     const tierLabel = String(line.severidad ?? '').trim() || 'Mediano';
-    return {
-      priceItemId: `panel:${idx}:integral:${displayName}`,
-      description: `${displayName} — ${tierLabel} (panel)`,
-      quantity: 1,
-      unitPrice: u,
-      subtotal: u,
-    };
+    return attachStructured(
+      {
+        priceItemId: `panel:${idx}:integral:${displayName}`,
+        description: structuredDesc || `${displayName} — ${tierLabel} (panel)`,
+        quantity: 1,
+        unitPrice: u,
+        subtotal: u,
+      },
+      line,
+    );
   }
 
   const matrixRaw = resolveMatrixServicioRaw(String(line.pieza).trim());
@@ -182,17 +245,22 @@ export function buildDraftQuoteLineFromQuoteRow(
   const lev = coerceDamageLevelCode(String(line.severidad));
   const displayName =
     findPanelPiezaOption(String(line.pieza).trim())?.fullName ?? canonical;
-  const custom = String(line.descripcionServicio ?? '').trim();
-  return {
-    priceItemId: `panel:${idx}:${canonical}:${lev}`,
-    description: custom || `${displayName} — nivel ${lev} (panel)`,
-    quantity: 1,
-    unitPrice: u,
-    subtotal: u,
-  };
+  const repairLabel =
+    line.tratamiento === 'INCIERTO'
+      ? `Reparación y pintura estimada de ${displayName}`
+      : `Reparar y pintar ${displayName}`;
+  return attachStructured(
+    {
+      priceItemId: `panel:${idx}:${canonical}:${lev}`,
+      description: structuredDesc || `${repairLabel} — nivel ${lev}`,
+      quantity: 1,
+      unitPrice: u,
+      subtotal: u,
+    },
+    line,
+  );
 }
 
-/** Perfil vehicular para cotizar servicios integrales desde severidad guardada en inventario. */
 function resolveProfileForIntegralInventoryRow(
   severidadStored: string,
   vehicleProfile?: VehiclePricingProfile | null,
@@ -216,9 +284,77 @@ function resolveProfileForIntegralInventoryRow(
   };
 }
 
+const MONTAJE_MATRIX_KEYS = ['MONTAJE_PINTURA', 'MONTAJE'] as const;
+
 /**
- * Una fila de cotización por código de panel (FD, FT, PDI…), sin colapsar Fascia.
- * Misma lógica que QuoteCartService.rebuildAndPersist.
+ * Mano de obra de sustituir: celda dedicada MONTAJE(_PINTURA), o cabina DL/LEVE.
+ * Nunca usa la severidad del golpe (p. ej. DMFuerte).
+ */
+export function resolveMontajePinturaPrice(
+  snap: MatrixPricingSnapshot,
+  catalogPieza: string,
+  vehicleProfile?: VehiclePricingProfile | null,
+  pricingRules?: CatalogPricingRules | null,
+): number {
+  const canonical = String(catalogPieza ?? '').trim();
+  if (!canonical) return 0;
+  for (const key of MONTAJE_MATRIX_KEYS) {
+    const explicit =
+      snap.getPriceForCanonical(canonical, key) ||
+      snap.getAmount(canonical, key);
+    if (explicit > 0) {
+      return computeCatalogPiecePrice({
+        basePrice: explicit,
+        sizeTier: vehicleProfile?.sizeTier ?? 'Compacto',
+        isPremium: vehicleProfile?.isPremium ?? false,
+        damageMagnitude: 'LEVE',
+        rules: pricingRules ?? undefined,
+      });
+    }
+  }
+  return resolvePiecePriceForVehicleProfile(
+    snap,
+    canonical,
+    'DL',
+    vehicleProfile,
+    pricingRules,
+  );
+}
+
+function matrixRepairPrice(
+  it: DetectedDamageItem,
+  panelCode: string,
+  snap: MatrixPricingSnapshot,
+  vehicleProfile?: VehiclePricingProfile | null,
+  pricingRules?: CatalogPricingRules | null,
+): { precio: number; storedSev: string } {
+  const sevRaw = String(it.severidad ?? '').trim();
+  const sev = coerceDamageLevelCode(sevRaw);
+  const catalogPieza =
+    resolveCatalogPiezaForMatrixLookup(panelCode) ??
+    snap.matchServicio(it.pieza) ??
+    it.pieza;
+  let precio = resolvePiecePriceForVehicleProfile(
+    snap,
+    catalogPieza,
+    sev,
+    vehicleProfile,
+    pricingRules,
+  );
+  if (precio <= 0) {
+    precio = resolvePiecePriceForVehicleProfile(
+      snap,
+      snap.matchServicio(it.pieza) ?? it.pieza,
+      sev,
+      vehicleProfile,
+      pricingRules,
+    );
+  }
+  return { precio, storedSev: sev };
+}
+
+/**
+ * Una decisión comercial por pieza física. REPARAR XOR SUSTITUIR.
  */
 export function quoteRowsFromDamageInventory(
   inventory: readonly DetectedDamageItem[],
@@ -226,62 +362,38 @@ export function quoteRowsFromDamageInventory(
   vehicleProfile?: VehiclePricingProfile | null,
   pricingRules?: CatalogPricingRules | null,
 ): QuoteRowInput[] {
+  const collapsed = applyXorTreatmentsToInventory(inventory);
   const rows: QuoteRowInput[] = [];
-  const refaccionBySource = new Set(
-    inventory
-      .filter((it) => isRefaccionPieza(it.pieza))
-      .map((it) =>
-        String(it.refaccionDePieza ?? it.pieza.replace(/^REFACCION\s*:\s*/i, ''))
-          .trim(),
-      )
-      .filter(Boolean)
-      .map((c) => canonicalizePanelCode(c) || c),
-  );
 
-  const pricePiece = (
-    pieza: string,
-    sev: string,
-  ): number => {
-    const catalogPieza =
-      resolveCatalogPiezaForMatrixLookup(pieza) ??
-      snap.matchServicio(pieza) ??
-      pieza;
-    let precio = resolvePiecePriceForVehicleProfile(
-      snap,
-      catalogPieza,
-      sev,
-      vehicleProfile,
-      pricingRules,
-    );
-    if (precio <= 0) {
-      precio = resolvePiecePriceForVehicleProfile(
-        snap,
-        snap.matchServicio(pieza) ?? pieza,
-        sev,
-        vehicleProfile,
-        pricingRules,
-      );
-    }
-    return Math.max(0, Math.round(precio));
-  };
-
-  for (const it of inventory) {
-    const panelCode = normalizePanelPiezaCode(it.pieza) || String(it.pieza ?? '').trim();
+  for (const it of collapsed) {
+    const panelCode =
+      canonicalPhysicalPanelKey(it.pieza) || String(it.pieza ?? '').trim();
     if (!panelCode) continue;
-    const sevRaw = String(it.severidad ?? '').trim();
-    let storedSev = sevRaw || 'DM';
-    let precio = 0;
-    const canon = canonicalizePanelCode(panelCode) || panelCode;
-    const hasRefaccionSibling = refaccionBySource.has(canon);
-    const splitReplacement = needsLargePanelReplacementSplit(it);
+    const tratamiento = it.tratamiento ?? 'REPARAR';
+    const display = displayPiezaName(panelCode, snap);
 
-    if (isIntegralPanelPieza(panelCode)) {
-      storedSev = sevRaw || vehicleProfile?.sizeTier || 'Mediano';
+    if (isInternalDamageRangePieza(panelCode)) {
+      rows.push({
+        pieza: panelCode,
+        severidad: 'N/A',
+        precioMx: 0,
+        tratamiento: 'PENDIENTE',
+        serviceType: 'ADVERTENCIA',
+        physicalPanelKey: panelCode,
+        billable: false,
+        disclaimer: HIDDEN_DAMAGE_CLIENT_DISCLAIMER,
+        description: 'Posibles daños internos (sujeto a desarme)',
+        descripcionServicio: 'Posibles daños internos (sujeto a desarme)',
+      });
+      continue;
+    }
+
+    if (isIntegralPanelPieza(panelCode) && !isRefaccionPieza(panelCode)) {
+      const sevRaw = String(it.severidad ?? '').trim();
+      const storedSev = sevRaw || vehicleProfile?.sizeTier || 'Mediano';
       const opt = findPanelPiezaOption(panelCode);
       const catalogPieza =
-        opt?.catalogPieza ??
-        snap.matchServicio(it.pieza) ??
-        it.pieza;
+        opt?.catalogPieza ?? snap.matchServicio(it.pieza) ?? it.pieza;
       const profile = resolveProfileForIntegralInventoryRow(
         storedSev,
         vehicleProfile,
@@ -292,75 +404,115 @@ export function quoteRowsFromDamageInventory(
         profile,
         pricingRules,
       );
-      precio = resolution?.unitPrice ?? 0;
+      const precio = resolution?.unitPrice ?? 0;
       rows.push({
         pieza: panelCode,
         severidad: storedSev,
         precioMx: Math.max(0, Math.round(precio)),
+        tratamiento: 'REPARAR',
+        serviceType: 'REPARACION_PINTURA',
+        physicalPanelKey: panelCode,
+        billable: precio > 0,
       });
       continue;
     }
 
-    if (isRefaccionPieza(it.pieza) || isRefaccionPieza(panelCode)) {
-      rows.push({
-        pieza: String(it.pieza ?? '').trim() || panelCode,
-        severidad: 'N/A',
-        precioMx: Math.max(0, Math.round(Number(it.precioMx) || 0)),
-        ...(it.detallesRefaccion
-          ? { detallesRefaccion: it.detallesRefaccion }
-          : {}),
-      });
-      continue;
-    }
-
-    if (isSpecialPanelPieza(panelCode)) {
+    if (tratamiento === 'PENDIENTE') {
       rows.push({
         pieza: panelCode,
-        severidad: coerceDamageLevelCode(sevRaw),
+        severidad: coerceDamageLevelCode(String(it.severidad ?? '').trim()),
         precioMx: 0,
+        tratamiento: 'PENDIENTE',
+        serviceType: 'PENDIENTE',
+        physicalPanelKey: panelCode,
+        billable: false,
+        description: `${display} — pendiente de revisión/cotización`,
+        descripcionServicio: `${display} — pendiente de revisión/cotización`,
       });
       continue;
     }
 
-    if (splitReplacement) {
-      const cabinPrice = pricePiece(panelCode, 'DL');
+    if (tratamiento === 'SUSTITUIR') {
+      const rawPart = Number(it.precioMx);
+      const hasValidPart = Number.isFinite(rawPart) && rawPart > 0;
+      const partPrice = hasValidPart
+        ? Math.round(rawPart)
+        : it.precioMx == null
+          ? refaccionFallbackPrecioAlCliente(panelCode)
+          : 0;
+      const priceSource =
+        it.priceSource ?? (hasValidPart ? undefined : 'FALLBACK');
       rows.push({
-        pieza: panelCode,
-        severidad: 'DL',
-        precioMx: cabinPrice,
-        descripcionServicio: cabinInstallServiceLabel(panelCode),
+        pieza: `REFACCION:${panelCode}`,
+        severidad: 'N/A',
+        precioMx: partPrice,
+        detallesRefaccion: it.detallesRefaccion || display,
+        tratamiento: 'SUSTITUIR',
+        serviceType: 'REFACCION',
+        physicalPanelKey: panelCode,
+        billable: partPrice > 0,
+        priceSource,
+        description: `Refacción de ${display}`,
+        descripcionServicio: `Refacción de ${display}`,
       });
-      if (!hasRefaccionSibling) {
-        const refPrecio =
-          Math.max(0, Math.round(Number(it.precioMx) || 0)) ||
-          refaccionFallbackPrecioAlCliente(panelCode);
+      if (needsMontajePinturaComponent(panelCode)) {
+        const catalogPieza =
+          resolveCatalogPiezaForMatrixLookup(panelCode) ??
+          snap.matchServicio(it.pieza) ??
+          it.pieza;
+        const montaje = resolveMontajePinturaPrice(
+          snap,
+          String(catalogPieza),
+          vehicleProfile,
+          pricingRules,
+        );
         rows.push({
-          pieza: `${PANEL_PIEZA_REFACCION_CODE}:${canon}`,
-          severidad: 'N/A',
-          precioMx: refPrecio,
-          detallesRefaccion: resolvePiezaDisplayLabel(panelCode),
-          descripcionServicio: `Refacción estimada (${resolvePiezaDisplayLabel(panelCode)}) — mercado +30%`,
+          pieza: panelCode,
+          severidad: 'DL',
+          precioMx: Math.max(0, Math.round(montaje)),
+          tratamiento: 'SUSTITUIR',
+          serviceType: 'MONTAJE_PINTURA',
+          physicalPanelKey: panelCode,
+          billable: montaje > 0,
+          description: `Montar y pintar ${display}`,
+          descripcionServicio: `Montar y pintar ${display}`,
         });
       }
       continue;
     }
 
-    if (hasRefaccionSibling) {
-      continue;
+    if (tratamiento === 'REPARAR' || tratamiento === 'INCIERTO') {
+      if (isSpecialPanelPieza(panelCode) && isRefaccionPieza(panelCode)) {
+        continue;
+      }
+      const { precio, storedSev } = matrixRepairPrice(
+        it,
+        panelCode,
+        snap,
+        vehicleProfile,
+        pricingRules,
+      );
+      const desc =
+        tratamiento === 'INCIERTO'
+          ? `Reparación y pintura estimada de ${display}`
+          : `Reparar y pintar ${display}`;
+      rows.push({
+        pieza: panelCode,
+        severidad: storedSev,
+        precioMx: Math.max(0, Math.round(precio)),
+        tratamiento,
+        serviceType: 'REPARACION_PINTURA',
+        physicalPanelKey: panelCode,
+        billable: precio > 0,
+        description: desc,
+        descripcionServicio: desc,
+        ...(tratamiento === 'INCIERTO'
+          ? { disclaimer: INCIERTO_SUBSTITUTION_DISCLAIMER }
+          : {}),
+      });
     }
-
-    const sev = coerceDamageLevelCode(sevRaw);
-    storedSev = sev;
-    precio = pricePiece(panelCode, sev);
-    rows.push({
-      pieza: panelCode,
-      severidad: storedSev,
-      precioMx: Math.max(0, Math.round(precio)),
-      ...(it.detallesRefaccion
-        ? { detallesRefaccion: it.detallesRefaccion }
-        : {}),
-    });
   }
+
   return rows;
 }
 
@@ -396,3 +548,5 @@ export function matrixServicioInputsWithCatalogResolve(
       severidad: it.severidad,
     }));
 }
+
+export { structuredLineLabel };

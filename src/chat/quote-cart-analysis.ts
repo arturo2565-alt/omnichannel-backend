@@ -18,6 +18,11 @@ import {
   normalizePanelPiezaCode,
 } from '../catalog/panel-pieza-catalog';
 import {
+  canonicalPhysicalPanelKey,
+  copyTreatmentFields,
+  mergePhysicalPanelItems,
+} from './piece-treatment';
+import {
   mergeDamageInventoryAccumulative,
   piezaLabelFromDraftLineDescription,
   type DamageInventoryMergeResult,
@@ -34,12 +39,9 @@ function pickWorstDamageLevel(levels: string[]): DamageLevel {
   return best;
 }
 
-/** Clave estable por línea del carrito (código panel FD, PDI, …). */
+/** Clave estable por pieza física (Cofre y REFACCION:Cofre → Cofre). */
 export function inventoryLineKey(pieza: string): string {
-  const trimmed = String(pieza ?? '').trim();
-  if (!trimmed) return '';
-  if (/^refacci[oó]n\s*:/i.test(trimmed)) return trimmed.toUpperCase();
-  return normalizePanelPiezaCode(trimmed) || trimmed;
+  return canonicalPhysicalPanelKey(pieza);
 }
 
 export function parseDraftImageUrls(imageUrl: string): string[] {
@@ -67,9 +69,7 @@ export function inventoryItemsToVehicleAnalysis(
     severidad: it.severidad,
     descripcionTecnica: it.descripcionTecnica,
     urls_origen: [...(it.urls_origen ?? [])],
-    ...(it.vehiculoDetectado?.trim()
-      ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
-      : {}),
+    ...copyTreatmentFields(it),
   }));
   const vehiculoDetectado = pickVehicleLabelFromDamageInventory(inv);
   const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
@@ -117,38 +117,13 @@ export function mergeCartInventoryItem(
         severidad: coerceDamageLevelCode(incoming.severidad),
         descripcionTecnica: String(incoming.descripcionTecnica ?? '').trim(),
         urls_origen: [...(incoming.urls_origen ?? [])],
-        ...(incoming.precioMx != null ? { precioMx: incoming.precioMx } : {}),
-        ...(incoming.detallesRefaccion
-          ? { detallesRefaccion: incoming.detallesRefaccion }
-          : {}),
-        ...(incoming.refaccionDePieza
-          ? { refaccionDePieza: incoming.refaccionDePieza }
-          : {}),
+        ...copyTreatmentFields(incoming),
       },
     ];
   }
 
-  const existing = inventory[idx]!;
-  const sevNew = coerceDamageLevelCode(incoming.severidad);
-  const sevOld = coerceDamageLevelCode(existing.severidad);
-  const worst =
-    damageLevelRank(sevNew) > damageLevelRank(sevOld) ? sevNew : sevOld;
-  const descParts = [existing.descripcionTecnica, incoming.descripcionTecnica]
-    .map((d) => String(d ?? '').trim())
-    .filter(Boolean);
-
   const next = [...inventory];
-  next[idx] = {
-    pieza: existing.pieza,
-    severidad: worst,
-    descripcionTecnica: [...new Set(descParts)].join(' | '),
-    urls_origen: [
-      ...new Set([
-        ...(existing.urls_origen ?? []),
-        ...(incoming.urls_origen ?? []),
-      ]),
-    ],
-  };
+  next[idx] = mergePhysicalPanelItems(inventory[idx]!, incoming);
   return next;
 }
 
@@ -201,6 +176,7 @@ export function extractPriorInventoryFromDraft(
       severidad: it.severidad,
       descripcionTecnica: it.descripcionTecnica,
       urls_origen: [...(it.urls_origen ?? [])],
+      ...copyTreatmentFields(it),
     }));
   }
   const fromBasis = existingDraft.quotePayload?.analysisBasis?.inventory;
@@ -210,6 +186,7 @@ export function extractPriorInventoryFromDraft(
       severidad: it.severidad,
       descripcionTecnica: it.descripcionTecnica,
       urls_origen: [...(it.urls_origen ?? [])],
+      ...copyTreatmentFields(it),
     }));
   }
   const lines = existingDraft.quotePayload?.lines ?? [];
@@ -247,9 +224,7 @@ export function mergeVisionIntoPriorInventory(
         severidad: it.severidad,
         descripcionTecnica: it.descripcionTecnica,
         urls_origen: [...(it.urls_origen ?? [])],
-        ...(it.vehiculoDetectado?.trim()
-          ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
-          : {}),
+        ...copyTreatmentFields(it),
       })),
       complementMeta: null,
     };
@@ -259,7 +234,10 @@ export function mergeVisionIntoPriorInventory(
     const mergedInv = mergeDamageInventoryAccumulative(
       priorInventory,
       newInventory,
-      (raw) => normalizePanelPiezaCode(raw) || raw,
+      (raw) =>
+        canonicalPhysicalPanelKey(raw) ||
+        normalizePanelPiezaCode(raw) ||
+        raw,
     );
     const mergedInventory = sanitizeCartInventoryForPricing(mergedInv.merged);
     const mode = detectCartPricingMode(mergedInventory);

@@ -43,10 +43,10 @@ describe('draft-quote-inventory-pricing', () => {
       },
       { pieza: 'PDI', severidad: 'DM', precioMx: 4200 },
     ];
-    expect(sumQuoteRowsSubtotal(lines)).toBe(3000 + 1500 + 4200);
+    expect(sumQuoteRowsSubtotal(lines)).toBe(1500 + 4200);
     expect(classifyQuoteRow(lines[0])).toBe('internal_damage');
     expect(classifyQuoteRow(lines[1])).toBe('refaccion');
-    expect(quoteRowSubtotalForTotal(lines[0])).toBe(3000);
+    expect(quoteRowSubtotalForTotal(lines[0])).toBe(0);
   });
 
   it('quoteRowsFromDamageInventory mantiene FD y FT como líneas separadas', () => {
@@ -137,13 +137,11 @@ describe('draft-quote-inventory-pricing', () => {
       ],
       snap,
     );
-    expect(rows.map((r) => r.pieza)).toEqual([
-      'REFACCION:Calavera_Izquierda',
-      'FT',
-    ]);
+    expect(rows.map((r) => r.serviceType)).toEqual(['REFACCION', 'REPARACION_PINTURA']);
     expect(rows[0]?.precioMx).toBe(2860);
     expect(classifyQuoteRow(rows[0]!)).toBe('refaccion');
     expect(rows[1]?.pieza).toBe('FT');
+    expect(rows[1]?.tratamiento).toBe('INCIERTO');
     expect(Number.isFinite(rows[1]?.precioMx)).toBe(true);
     expect(rows[1]!.precioMx).toBeGreaterThan(0);
     expect(sumQuoteRowsSubtotal(rows)).toBe(2860 + rows[1]!.precioMx);
@@ -175,12 +173,13 @@ describe('draft-quote-inventory-pricing', () => {
       snap,
     );
     expect(rows).toHaveLength(4);
-    expect(rows[0]?.descripcionServicio).toMatch(/Montar, preparar y pintar/i);
-    expect(rows[0]?.severidad).toBe('DL');
-    expect(rows[1]?.pieza).toMatch(/^REFACCION:/);
-    expect(rows[1]?.precioMx).toBeGreaterThan(0);
-    expect(rows[2]?.pieza).toBe('FD');
-    expect(rows[3]?.pieza).toMatch(/^REFACCION:/);
+    expect(rows.filter((r) => r.serviceType === 'REPARACION_PINTURA')).toHaveLength(0);
+    expect(rows.filter((r) => r.serviceType === 'REFACCION')).toHaveLength(2);
+    expect(rows.filter((r) => r.serviceType === 'MONTAJE_PINTURA')).toHaveLength(2);
+    expect(rows[0]?.descripcionServicio).toMatch(/Refacción de Cofre/i);
+    expect(rows[1]?.descripcionServicio).toMatch(/Montar y pintar/i);
+    expect(rows[1]?.severidad).toBe('DL');
+    expect(rows[1]?.precioMx).toBe(4000);
   });
 
   it('REFACCION con precio inválido no produce NaN', () => {

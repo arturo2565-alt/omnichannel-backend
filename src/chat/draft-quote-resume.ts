@@ -1,9 +1,14 @@
 import type { DraftQuoteLine } from './autofix-config';
-import { coerceDamageLevelCode, damageLevelRank } from './autofix-config';
+import { coerceDamageLevelCode } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { WORKSHOP_TIMEZONE } from './appointment-intent';
 import { findPanelPiezaOption } from '../catalog/panel-pieza-catalog';
 import { piezaMatchesQuery } from './quote-cart-analysis';
+import {
+  canonicalPhysicalPanelKey,
+  copyTreatmentFields,
+  mergePhysicalPanelItems,
+} from './piece-treatment';
 
 function dedupeStringListCaseInsensitive(values: readonly string[]): string[] {
   const out: string[] = [];
@@ -56,19 +61,16 @@ export function mergeDamageInventoryAccumulative(
   for (const it of prior) {
     const raw = String(it.pieza ?? '').trim();
     if (!raw) continue;
-    const canon = matchServicio(raw) ?? raw;
+    const canon =
+      canonicalPhysicalPanelKey(raw) || matchServicio(raw) || raw;
     previousCanonicals.add(canon);
     map.set(canon, {
+      ...it,
       pieza: canon,
       severidad: coerceDamageLevelCode(it.severidad),
       descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
       urls_origen: [...(it.urls_origen ?? [])],
-      ...(it.vehiculoDetectado?.trim()
-        ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
-        : {}),
-      ...(it.posibleReemplazoRefaccion
-        ? { posibleReemplazoRefaccion: true }
-        : {}),
+      ...copyTreatmentFields(it),
     });
   }
 
@@ -77,50 +79,24 @@ export function mergeDamageInventoryAccumulative(
   for (const it of incoming) {
     const raw = String(it.pieza ?? '').trim();
     if (!raw) continue;
-    const canon = matchServicio(raw) ?? raw;
+    const canon =
+      canonicalPhysicalPanelKey(raw) || matchServicio(raw) || raw;
     const existing = map.get(canon);
     if (!existing) {
       map.set(canon, {
+        ...it,
         pieza: canon,
         severidad: coerceDamageLevelCode(it.severidad),
         descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
         urls_origen: [...(it.urls_origen ?? [])],
-        ...(it.vehiculoDetectado?.trim()
-          ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
-          : {}),
-        ...(it.posibleReemplazoRefaccion
-          ? { posibleReemplazoRefaccion: true }
-          : {}),
+        ...copyTreatmentFields(it),
       });
       if (!previousCanonicals.has(canon)) {
         newPiezas.push(canon);
       }
       continue;
     }
-    const sevNew = coerceDamageLevelCode(it.severidad);
-    const sevOld = coerceDamageLevelCode(existing.severidad);
-    const worst =
-      damageLevelRank(sevNew) > damageLevelRank(sevOld) ? sevNew : sevOld;
-    const descParts = [existing.descripcionTecnica, it.descripcionTecnica]
-      .map((d) => String(d ?? '').trim())
-      .filter(Boolean);
-    map.set(canon, {
-      pieza: canon,
-      severidad: worst,
-      descripcionTecnica: [...new Set(descParts)].join(' | '),
-      urls_origen: [
-        ...new Set([...(existing.urls_origen ?? []), ...(it.urls_origen ?? [])]),
-      ],
-      ...(existing.vehiculoDetectado || it.vehiculoDetectado
-        ? {
-            vehiculoDetectado:
-              existing.vehiculoDetectado || it.vehiculoDetectado,
-          }
-        : {}),
-      ...(existing.posibleReemplazoRefaccion || it.posibleReemplazoRefaccion
-        ? { posibleReemplazoRefaccion: true }
-        : {}),
-    });
+    map.set(canon, mergePhysicalPanelItems(existing, it));
   }
 
   return {
@@ -298,14 +274,27 @@ export function buildDamagePhotoIntroForCliente(
 
 export function draftQuoteLinesToClientePiezaRows(
   lines: readonly DraftQuoteLine[],
-): { pieza: string; precioMx: number }[] {
+): {
+  pieza: string;
+  precioMx: number;
+  description?: string;
+  tratamiento?: DraftQuoteLine['tratamiento'];
+  serviceType?: DraftQuoteLine['serviceType'];
+  billable?: boolean;
+  disclaimer?: string;
+}[] {
   return lines
-    .filter((l) => l.subtotal > 0)
+    .filter((l) => (l.billable === false ? false : l.subtotal > 0) || l.serviceType === 'PENDIENTE')
     .map((l) => {
       const rawLabel = piezaLabelFromDraftLineDescription(l.description);
       return {
         pieza: resolvePiezaDisplayLabel(rawLabel),
         precioMx: Math.round(l.subtotal),
+        description: l.description,
+        tratamiento: l.tratamiento,
+        serviceType: l.serviceType,
+        billable: l.billable !== false && l.subtotal > 0,
+        ...(l.disclaimer ? { disclaimer: l.disclaimer } : {}),
       };
     });
 }
@@ -319,14 +308,17 @@ function formatClientePiezaLineExtra(pieza: string, precioMx: number): string {
 /** Mensaje al cliente cuando ya tiene cita (orden principal, no complemento). */
 export function buildClienteFormalNarrativeAgendado(opts: {
   contactName: string;
-  lineRows: readonly { pieza: string; precioMx: number }[];
+  lineRows: readonly { pieza: string; precioMx: number; description?: string }[];
   total: number;
   appointmentFormatted: string;
   damageIntro: string;
 }): string {
   const name = sanitizeClienteDisplayName(opts.contactName) || 'cliente';
   const linesText = opts.lineRows
-    .map((r) => formatDraftQuoteLineToolEmoji(r.pieza, r.precioMx))
+    .filter((r) => r.precioMx > 0)
+    .map((r) =>
+      formatDraftQuoteLineToolEmoji(r.description || r.pieza, r.precioMx),
+    )
     .join('\n');
   const total = Math.max(0, Math.round(Number(opts.total) || 0));
   const when = String(opts.appointmentFormatted ?? '').trim() || 'el día acordado para tu visita';
@@ -346,14 +338,17 @@ export function buildClienteFormalNarrativeAgendado(opts: {
 /** Mensaje al cliente sin cita (ubicación + invitación a agendar). */
 export function buildClienteFormalNarrativeSinCita(opts: {
   contactName: string;
-  lineRows: readonly { pieza: string; precioMx: number }[];
+  lineRows: readonly { pieza: string; precioMx: number; description?: string }[];
   total: number;
   mapsUrl: string;
   damageIntro: string;
 }): string {
   const name = sanitizeClienteDisplayName(opts.contactName) || 'cliente';
   const linesText = opts.lineRows
-    .map((r) => formatDraftQuoteLineToolEmoji(r.pieza, r.precioMx))
+    .filter((r) => r.precioMx > 0)
+    .map((r) =>
+      formatDraftQuoteLineToolEmoji(r.description || r.pieza, r.precioMx),
+    )
     .join('\n');
   const total = Math.max(0, Math.round(Number(opts.total) || 0));
   const mapLink = String(opts.mapsUrl ?? '').trim() || 'https://goo.gl/maps/tu-ubicacion-real';

@@ -85,6 +85,7 @@ Por objeto:
 - "severidad": para piezas sueltas, EXACTAMENTE DL | DML | DM | DMF | DF | DMFuerte. Para BPE/BPEI/BPCC usa tamaño (Chico, Mediano, Grande, XL), no código de golpe.
 - Opcional: "intencion_banio_completo_detectada": true y "tipo_banio": BPE | BPEI | BPCC.
 - "descripcionTecnica": texto en español. Si hay rotura/quiebre, dilo explícitamente.
+- Opcional: "tratamiento": REPARAR | SUSTITUIR | INCIERTO | PENDIENTE. El backend aplica exclusión mutua; no inventes dos cobros.
 - "urls_origen": array copiando **literalmente** de la lista siguiente las URLs donde se ve ese daño.
 
 Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min) en el mismo chat.`;

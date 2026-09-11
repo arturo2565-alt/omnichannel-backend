@@ -164,49 +164,38 @@ export function quoteRowsPreservingLastSend(
     draftLines,
   );
   const matrixOnly = piezaCodeSet(opts?.matrixPricePiezaCodes);
-  const rows: QuoteRowInput[] = [];
+  const xorRows = quoteRowsFromDamageInventory(
+    inventory,
+    snap,
+    vehicleProfile,
+    pricingRules,
+  );
 
-  for (const it of inventory) {
-    const panelCode =
-      normalizePanelPiezaCode(it.pieza) || String(it.pieza ?? '').trim();
-    if (!panelCode) continue;
-
-    if (shouldMatrixPricePieza(it.pieza, sentDesglose, matrixOnly)) {
-      rows.push(
-        matrixQuoteRowForItem(it, snap, vehicleProfile, pricingRules),
-      );
-      continue;
-    }
-
-    const sent = findSentPriceForInventoryPieza(it.pieza, sentDesglose);
-    if (!sent) {
-      rows.push(
-        matrixQuoteRowForItem(it, snap, vehicleProfile, pricingRules),
-      );
-      continue;
-    }
-
-    const row: QuoteRowInput = {
-      pieza: panelCode,
-      severidad: sent.severidad,
-      precioMx: sent.precioMx,
-    };
+  return xorRows.map((row) => {
+    const key = row.physicalPanelKey || row.pieza;
     if (
-      isInternalDamageRangePieza(panelCode) ||
-      isInternalDamageRangePieza(it.pieza)
+      row.serviceType === 'PENDIENTE' ||
+      row.serviceType === 'ADVERTENCIA'
     ) {
-      const max =
-        sent.precioMaximo ??
-        resolvePrecioMaximoFromDraftLines(draftLines) ??
-        sent.precioMx;
-      if (max > sent.precioMx) {
-        row.precioMaximo = max;
-      }
+      return row;
     }
-    rows.push(row);
-  }
-
-  return rows;
+    if (shouldMatrixPricePieza(key, sentDesglose, matrixOnly)) {
+      return row;
+    }
+    if (
+      row.serviceType === 'REFACCION' ||
+      row.serviceType === 'MONTAJE_PINTURA'
+    ) {
+      return row;
+    }
+    const sent = findSentPriceForInventoryPieza(key, sentDesglose);
+    if (!sent) return row;
+    return {
+      ...row,
+      precioMx: sent.precioMx,
+      severidad: sent.severidad || row.severidad,
+    };
+  });
 }
 
 /** Etiqueta legible para desglose de herramientas (FD → Fascia delantera). */

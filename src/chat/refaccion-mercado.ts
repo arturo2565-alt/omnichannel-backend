@@ -44,7 +44,8 @@ export type RefaccionMercadoEstimate = {
   anio: string | null;
   costoBase: number;
   precioAlCliente: number;
-  fuente: 'mercadolibre' | 'estimacion';
+  fuente: 'mercadolibre' | 'estimacion' | 'catalogo';
+  priceSource: RefaccionPriceSource;
   muestra: number;
   query: string;
   error?: string;
@@ -81,7 +82,16 @@ async function searchMercadoLibrePrices(query: string): Promise<number[]> {
   return prices;
 }
 
-/** Fallback conservador CDMX si no hay muestra de mercado. */
+export type RefaccionPriceSource = 'AUTOFIX_CATALOG' | 'MARKET' | 'FALLBACK';
+
+export type RefaccionClienteQuote = {
+  costoBase: number;
+  precioAlCliente: number;
+  priceSource: RefaccionPriceSource;
+  nombre?: string;
+};
+
+/** Fallback conservador CDMX: último recurso, nunca pisa un catálogo AutoFix. */
 export function fallbackCostoBase(pieza: string): number {
   const code = canonicalizePanelCode(pieza);
   const map: Record<string, number> = {
@@ -113,6 +123,44 @@ export function refaccionFallbackPrecioAlCliente(pieza: string): number {
   return precioAlClienteConMargen(fallbackCostoBase(pieza));
 }
 
+/** Prioridad: catálogo AutoFix → mercado → fallback genérico. */
+export function pickRefaccionClienteQuote(input: {
+  catalogo?: { precioAlCliente: number; costoReferenciaBase?: number; nombre?: string } | null;
+  mercado?: { precioAlCliente: number; costoBase: number; fuente: 'mercadolibre' | 'estimacion' } | null;
+  pieza: string;
+}): RefaccionClienteQuote {
+  const cat = input.catalogo;
+  if (cat && Number(cat.precioAlCliente) > 0) {
+    return {
+      costoBase: Math.round(Number(cat.costoReferenciaBase) || 0),
+      precioAlCliente: Math.round(Number(cat.precioAlCliente)),
+      priceSource: 'AUTOFIX_CATALOG',
+      nombre: cat.nombre,
+    };
+  }
+  const mkt = input.mercado;
+  if (mkt && mkt.fuente === 'mercadolibre' && Number(mkt.precioAlCliente) > 0) {
+    return {
+      costoBase: Math.round(Number(mkt.costoBase) || 0),
+      precioAlCliente: Math.round(Number(mkt.precioAlCliente)),
+      priceSource: 'MARKET',
+    };
+  }
+  if (mkt && Number(mkt.precioAlCliente) > 0 && mkt.fuente === 'estimacion') {
+    return {
+      costoBase: Math.round(Number(mkt.costoBase) || 0),
+      precioAlCliente: Math.round(Number(mkt.precioAlCliente)),
+      priceSource: 'FALLBACK',
+    };
+  }
+  const costo = fallbackCostoBase(input.pieza);
+  return {
+    costoBase: costo,
+    precioAlCliente: precioAlClienteConMargen(costo),
+    priceSource: 'FALLBACK',
+  };
+}
+
 export async function estimarRefaccionMercado(input: {
   pieza: string;
   vehiculo: string;
@@ -133,15 +181,24 @@ export async function estimarRefaccionMercado(input: {
   const costoBase = prices.length >= 3 ? median(prices) : fallbackCostoBase(pieza);
   const fuente: RefaccionMercadoEstimate['fuente'] =
     prices.length >= 3 ? 'mercadolibre' : 'estimacion';
+  const picked = pickRefaccionClienteQuote({
+    mercado: {
+      precioAlCliente: precioAlClienteConMargen(costoBase),
+      costoBase: Math.round(costoBase),
+      fuente,
+    },
+    pieza,
+  });
 
   return {
     success: true,
     pieza: piezaLabelForRefaccion(pieza),
     vehiculo,
     anio,
-    costoBase: Math.round(costoBase),
-    precioAlCliente: precioAlClienteConMargen(costoBase),
+    costoBase: picked.costoBase,
+    precioAlCliente: picked.precioAlCliente,
     fuente,
+    priceSource: picked.priceSource,
     muestra: prices.length,
     query,
   };
@@ -160,5 +217,7 @@ export function buildRefaccionInventoryItem(
     detallesRefaccion: estimate.pieza,
     precioMx: estimate.precioAlCliente,
     refaccionDePieza: canonicalizePanelCode(sourcePieza) || sourcePieza,
+    tratamiento: 'SUSTITUIR',
+    priceSource: estimate.priceSource ?? 'FALLBACK',
   };
 }

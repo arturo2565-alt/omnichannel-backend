@@ -3,11 +3,25 @@ import type { ChatCompletionMessageParam } from 'openai/resources/chat/completio
 import { openAiChatCompletionParams } from './openai-model-config';
 import { createTrackedChatCompletion } from './tracked-chat-completion';
 import { resolvePiezaDisplayLabel } from './draft-quote-resume';
+import {
+  HIDDEN_DAMAGE_CLIENT_DISCLAIMER,
+  narrativeRespectsStructuredLines,
+} from './piece-treatment';
 
 export type DraftClientMessageLineRow = {
   pieza: string;
   precioMx: number;
   precioMaximo?: number;
+  description?: string;
+  tratamiento?: 'REPARAR' | 'SUSTITUIR' | 'INCIERTO' | 'PENDIENTE';
+  serviceType?:
+    | 'REPARACION_PINTURA'
+    | 'REFACCION'
+    | 'MONTAJE_PINTURA'
+    | 'PENDIENTE'
+    | 'ADVERTENCIA';
+  billable?: boolean;
+  disclaimer?: string;
 };
 
 export type DraftClientMessagePeritajeItem = {
@@ -37,8 +51,12 @@ export type DraftClientMessageComposeInput = {
     justificacion?: string;
     vehiculoDetectado?: string;
     imageCount?: number;
+    possibleHiddenDamage?: {
+      detected: boolean;
+      areas: string[];
+      requiresDisassembly?: boolean;
+    };
   };
-  hasLargePanelReplacement?: boolean;
 };
 
 const DRAFT_CLIENT_MESSAGE_TECH_APPENDIX = `
@@ -47,6 +65,9 @@ Responde SOLO el texto final listo para WhatsApp/Messenger (sin JSON, sin meta-e
 
 Reglas obligatorias:
 - Usa EXACTAMENTE los montos de "cotizacion.lineRows" y "cotizacion.total"; PROHIBIDO calcular, redondear distinto o inventar precios.
+- Cada lineRow trae description, treatment y serviceType ya decididos por el valuador. Copia description tal cual (puedes añadir emoji). PROHIBIDO cambiar el sentido: no conviertas REFACCION/MONTAJE_PINTURA en "reparar y pintar" ni REPARACION_PINTURA en "sustituir".
+- Líneas con billable=false o treatment=PENDIENTE van en observaciones, sin precio, y NO alteran el total.
+- Si hay disclaimer o possibleHiddenDamage, menciónalo como advertencia SIN inventar un monto.
 - El bloque "reportePericial" viene del análisis de fotos; úsalo para contexto técnico, NO para cambiar precios.
 - Si "contextoOperativo.hasActiveAppointment" es true, indica que el monto puede sumarse a la orden de la cita confirmada.
 - Si es false, invita cordialmente a elegir día para ingresar la unidad e incluye mapsUrl si está presente.
@@ -55,7 +76,6 @@ Reglas obligatorias:
 - PROHIBIDO mostrar códigos internos de pieza (Calavera_TI, FD, PDI, REFACCION:…). Usa el nombre legible (ej. "calavera trasera izquierda").
 - Si una pieza rota no tiene vehículo confirmado y se confirma en taller, explícalo UNA sola vez en el cuerpo. El CTA debe ser SOLO invitar a agendar. PROHIBIDO un pie "Nota de Refacción" pidiendo marca, modelo o año.
 - No dupliques el tema de refacción si ya lo mencionaste en el cuerpo.
-- Si "contextoOperativo.hasLargePanelReplacement" es true, presenta el monto como Total Preliminar y aclara que está sujeto a desmontaje y revisión de marco frontal y bases de faros. No cobres esa pieza solo como hojalatería simple.
 - Mismo formato y tono para baño de pintura completo (BPC) y piezas sueltas: una sola voz comercial premium.
 - Sigue el estilo, emojis y estructura definidos en el system prompt principal (ChatAppointmentPrompt).`.trim();
 
@@ -85,11 +105,22 @@ export function buildDraftClientMessageStructuredPayload(
       vehiculoDetectado: input.peritaje.vehiculoDetectado ?? input.vehicleModel,
       fotosAnalizadas: input.peritaje.imageCount ?? 0,
       pricingMode: input.pricingMode,
+      ...(input.peritaje.possibleHiddenDamage?.detected
+        ? {
+            possibleHiddenDamage: input.peritaje.possibleHiddenDamage,
+            hiddenDamageDisclaimer: HIDDEN_DAMAGE_CLIENT_DISCLAIMER,
+          }
+        : {}),
     },
     cotizacion: {
       lineRows: input.lineRows.map((r) => ({
-        ...r,
         pieza: resolvePiezaDisplayLabel(r.pieza),
+        description: r.description || resolvePiezaDisplayLabel(r.pieza),
+        treatment: r.tratamiento ?? null,
+        serviceType: r.serviceType ?? null,
+        subtotal: r.precioMx,
+        billable: r.billable !== false && r.precioMx > 0,
+        ...(r.disclaimer ? { disclaimer: r.disclaimer } : {}),
       })),
       total: input.total,
       currency: input.currency,
@@ -103,7 +134,6 @@ export function buildDraftClientMessageStructuredPayload(
       mapsUrl: input.mapsUrl,
       vehicleModel: input.vehicleModel,
       isComplement: input.isComplement,
-      hasLargePanelReplacement: input.hasLargePanelReplacement === true,
       previousPiezas: input.previousPiezas.map((p) =>
         resolvePiezaDisplayLabel(p),
       ),
@@ -215,6 +245,11 @@ export async function composeDraftClientMessageWithLlm(
   const text = String(completion.choices[0]?.message?.content ?? '').trim();
   if (!validateDraftClientMessageOutput(text)) {
     throw new Error('composeDraftClientMessageWithLlm: respuesta inválida o vacía');
+  }
+  if (!narrativeRespectsStructuredLines(text, input.lineRows)) {
+    throw new Error(
+      'composeDraftClientMessageWithLlm: el texto invirtió reparación/sustitución',
+    );
   }
 
   console.log(

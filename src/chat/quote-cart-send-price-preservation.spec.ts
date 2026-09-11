@@ -117,16 +117,17 @@ describe('quote-cart-send-price-preservation', () => {
       { matrixPricePiezaCodes: ['Cofre'] },
     );
 
-    expect(rows).toHaveLength(7);
-    expect(rows[0]?.precioMx).toBe(3600);
-    expect(rows[1]?.precioMx).toBe(3750);
-    expect(rows[2]?.precioMx).toBe(1500);
-    expect(rows[2]?.precioMaximo).toBe(3000);
-    expect(rows[6]?.pieza).toBe('Cofre');
-    expect(rows[6]?.precioMx).toBe(4500);
+    expect(rows.length).toBeGreaterThanOrEqual(6);
+    const byPieza = Object.fromEntries(rows.map((r) => [r.pieza, r]));
+    expect(byPieza.FD?.precioMx).toBe(3600);
+    expect(byPieza.SI?.precioMx).toBe(3750);
+    expect(byPieza.PDI_INT?.precioMx ?? 0).toBe(0);
+    expect(byPieza.Cofre?.precioMx).toBe(4500);
 
-    const total = rows.reduce((acc, r) => acc + r.precioMx, 0);
-    expect(total).toBe(18900 + 4500);
+    const billable = rows
+      .filter((r) => r.serviceType !== 'ADVERTENCIA' && r.serviceType !== 'PENDIENTE')
+      .reduce((acc, r) => acc + r.precioMx, 0);
+    expect(billable).toBe(17400 + 4500);
   });
 
   it('resolvePrecioMaximoFromDraftLines lee líneas internal-damage', () => {

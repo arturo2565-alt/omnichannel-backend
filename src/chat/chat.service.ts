@@ -48,8 +48,6 @@ import { resolveMatrixServicioRaw, normalizePanelPiezaCode } from '../catalog/pa
 import {
   buildDraftQuoteLineFromQuoteRow,
   buildDraftQuoteLinesFromDamageInventory,
-  needsLargePanelReplacementSplit,
-  PRELIMINARY_REPLACEMENT_DISCLAIMER,
   quoteRowsFromDamageInventory,
   sumQuoteRowsSubtotal,
   type QuoteRowInput,
@@ -103,8 +101,6 @@ import {
   banioCompletoNeedsHeavyBodyworkDisclaimer,
   applyBanioCodePriceAdjustments,
   collapseVisionItemsToBpcIfNeeded,
-  extractVisionDetectedVehicle,
-  extractVisionIdentifiedVehicle,
   isBanioPinturaCompletoVisionInventory,
   isVisionBpcPiezaCode,
   pickVehicleLabelFromDamageInventory,
@@ -128,10 +124,17 @@ import {
   buildRefaccionDisclaimer,
   buildRefaccionInventoryItem,
   estimarRefaccionMercado,
-  looksLikeEvidentBreakage,
+  pickRefaccionClienteQuote,
   piezaLabelForRefaccion,
 } from './refaccion-mercado';
 import { canonicalizePanelCode } from '../catalog/panel-pieza-catalog';
+import { RefaccionesService } from '../catalog/refacciones.service';
+import {
+  applyXorTreatmentsToInventory,
+  canonicalPhysicalPanelKey,
+  inferTreatmentDecision,
+  parseTreatmentDecision,
+} from './piece-treatment';
 import { detectCartPricingMode } from './quote-cart-inventory-mode';
 import {
   matchAdButtonAutoReply,
@@ -482,21 +485,16 @@ function normalizeDetectedDamagesJson(raw: unknown): DetectedDamageItem[] {
           : [];
     let urls_origen = u.map((x) => String(x).trim()).filter(Boolean);
     if (!pieza || !severidad) continue;
-    const reemplazoRaw =
-      r['posible_reemplazo_refaccion'] ?? r['posibleReemplazoRefaccion'];
-    const posibleReemplazoRefaccion =
-      reemplazoRaw === true ||
-      reemplazoRaw === 1 ||
-      reemplazoRaw === '1' ||
-      (typeof reemplazoRaw === 'string' &&
-        /^(si|sí|yes|true)$/i.test(reemplazoRaw.trim()));
+    const tratamiento = parseTreatmentDecision(
+      r['tratamiento'] ?? r['treatment'],
+    );
     out.push({
       pieza,
       severidad,
       descripcionTecnica:
         descripcionTecnica || 'Sin descripción técnica disponible.',
       urls_origen,
-      ...(posibleReemplazoRefaccion ? { posibleReemplazoRefaccion: true } : {}),
+      ...(tratamiento ? { tratamiento } : {}),
     });
   }
   if (!out.length) {
@@ -528,14 +526,6 @@ function inventoryItemsToVehicleAnalysis(
     ...(it.vehiculoDetectado?.trim()
       ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
       : {}),
-    ...(it.posibleReemplazoRefaccion
-      ? { posibleReemplazoRefaccion: true }
-      : {}),
-    ...(it.precioMx != null ? { precioMx: it.precioMx } : {}),
-    ...(it.detallesRefaccion
-      ? { detallesRefaccion: it.detallesRefaccion }
-      : {}),
-    ...(it.refaccionDePieza ? { refaccionDePieza: it.refaccionDePieza } : {}),
   }));
   const vehiculoDetectado = pickVehicleLabelFromDamageInventory(inv);
   const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
@@ -749,6 +739,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly aiConfigService: AiConfigService,
 
     private readonly catalogService: CatalogService,
+
+    private readonly refaccionesService: RefaccionesService,
 
     private readonly tallerService: TallerService,
 
@@ -1587,48 +1579,57 @@ export class ChatService implements OnModuleDestroy {
     return 0;
   }
 
-  private collectPiecesForRefaccionEstimate(
-    analysis: VehicleDamageAnalysis,
-  ): DetectedDamageItem[] {
-    const inv = analysis.inventory ?? [];
-    const fromPrev = inv.flatMap((it) => it.inventarioVisualPrevio ?? []);
-    return [...inv, ...fromPrev].filter(
-      (it) =>
-        !isVisionBpcPiezaCode(it.pieza) &&
-        (looksLikeEvidentBreakage(it.severidad, it.descripcionTecnica) ||
-          needsLargePanelReplacementSplit(it)),
-    );
-  }
-
   private async enrichInventoryWithMarketRefacciones(
     analysis: VehicleDamageAnalysis,
+    tallerId?: string | null,
   ): Promise<VehicleDamageAnalysis> {
-    const candidates = this.collectPiecesForRefaccionEstimate(analysis);
-    if (!candidates.length) return analysis;
+    const collapsed = applyXorTreatmentsToInventory(analysis.inventory ?? []);
+    if (!collapsed.length) return analysis;
     const vehicleId = parseVehicleYearAndModel(
       analysis.vehiculoDetectado ?? '',
       '',
     );
-    if (!vehicleId.confirmed) {
-      return analysis;
-    }
-    const inventory = [...(analysis.inventory ?? [])];
-    const yearMatch = vehicleId.anio;
-    const seen = new Set<string>();
-    for (const it of candidates) {
-      const key = canonicalizePanelCode(it.pieza) || it.pieza;
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      const estimate = await estimarRefaccionMercado({
+    const next: DetectedDamageItem[] = [];
+    for (const it of collapsed) {
+      const tratamiento = inferTreatmentDecision(it, collapsed);
+      if (tratamiento !== 'SUSTITUIR') {
+        next.push({ ...it, tratamiento });
+        continue;
+      }
+      const catalogo = await this.refaccionesService.resolveClienteQuote(
+        tallerId,
+        it.pieza,
+      );
+      let mercado: Awaited<ReturnType<typeof estimarRefaccionMercado>> | null =
+        null;
+      if (!catalogo && vehicleId.confirmed) {
+        mercado = await estimarRefaccionMercado({
+          pieza: it.pieza,
+          vehiculo: vehicleId.modelo || analysis.vehiculoDetectado || '',
+          anio: vehicleId.anio,
+        });
+      }
+      const picked = pickRefaccionClienteQuote({
+        catalogo,
+        mercado:
+          mercado && mercado.success
+            ? {
+                precioAlCliente: mercado.precioAlCliente,
+                costoBase: mercado.costoBase,
+                fuente: mercado.fuente === 'catalogo' ? 'estimacion' : mercado.fuente,
+              }
+            : null,
         pieza: it.pieza,
-        vehiculo: vehicleId.modelo || analysis.vehiculoDetectado || '',
-        anio: yearMatch,
       });
-      if (!estimate.success || estimate.precioAlCliente <= 0) continue;
-      inventory.push(buildRefaccionInventoryItem(estimate, it.pieza));
+      next.push({
+        ...it,
+        tratamiento: 'SUSTITUIR',
+        precioMx: picked.precioAlCliente,
+        priceSource: picked.priceSource,
+        detallesRefaccion: picked.nombre || it.detallesRefaccion,
+      });
     }
-    if (inventory.length === (analysis.inventory ?? []).length) return analysis;
-    return { ...analysis, inventory };
+    return { ...analysis, inventory: next };
   }
 
   /**
@@ -2972,28 +2973,12 @@ export class ChatService implements OnModuleDestroy {
       return { items: [], viability: inviable };
     }
 
-    const identified = extractVisionIdentifiedVehicle(parsed);
-    const vehicleLabel =
-      identified?.label ?? extractVisionDetectedVehicle(parsed);
-    if (vehicleLabel) {
-      for (const it of items) {
-        if (!it.vehiculoDetectado) it.vehiculoDetectado = vehicleLabel;
-      }
-    }
-
     const collapsed = collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
-    if (vehicleLabel) {
-      for (const it of collapsed) {
-        if (!it.vehiculoDetectado) it.vehiculoDetectado = vehicleLabel;
-      }
-    }
     console.log(
       '[Vision] Inventario parseado',
       JSON.stringify({
         items: collapsed.length,
         piezas: collapsed.map((i) => i.pieza),
-        vehiculo: vehicleLabel ?? null,
-        vehiculoConfianza: identified?.confianza ?? null,
       }),
     );
     return { items: collapsed, viability: { peritajeViable: true } };
@@ -3108,7 +3093,10 @@ export class ChatService implements OnModuleDestroy {
         const merged = mergeDamageInventoryAccumulative(
           allDetectedDamages,
           batch.items,
-          (raw) => canonicalizePanelCode(raw) || raw,
+          (raw) =>
+            canonicalPhysicalPanelKey(raw) ||
+            canonicalizePanelCode(raw) ||
+            raw,
         );
         allDetectedDamages = merged.merged;
       }
@@ -3805,12 +3793,12 @@ export class ChatService implements OnModuleDestroy {
           previousPiezas: input.previousPiezas,
           newPiezas: input.newPiezas,
           pricingMode: this.resolvePricingModeForClientNarrative(input.analysis),
-          hasLargePanelReplacement: (input.analysis.inventory ?? []).some(
-            (it) => needsLargePanelReplacementSplit(it),
-          ),
           peritaje: {
             ...peritajeFromDamageAnalysisLike(input.analysis),
             imageCount: input.imageCount,
+            ...(input.analysis.possibleHiddenDamage
+              ? { possibleHiddenDamage: input.analysis.possibleHiddenDamage }
+              : {}),
           },
         },
         dialogue,
@@ -3951,19 +3939,9 @@ export class ChatService implements OnModuleDestroy {
         newPiezas: newDistinct,
         narrativeOptions,
       });
-    let narrative = replaceRawPiezaCodesInClientText(
+    draft.formalNarrative = replaceRawPiezaCodesInClientText(
       stripRedundantRefaccionAskFooter(llmNarrative || fallbackNarrative),
     );
-    const hasReplacement = (analysis.inventory ?? []).some((it) =>
-      needsLargePanelReplacementSplit(it),
-    );
-    if (
-      hasReplacement &&
-      !/total preliminar|marco frontal|bases de faros/i.test(narrative)
-    ) {
-      narrative = `${narrative.trim()}\n\n${PRELIMINARY_REPLACEMENT_DISCLAIMER}`;
-    }
-    draft.formalNarrative = narrative;
     console.log(
       '[DraftClientNarrative] applyClientFacingFormalNarrativeToDraft',
       JSON.stringify({
@@ -5310,6 +5288,13 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     const vehicleProfile = vehiclePricingProfileFromAnalysis(analysis);
 
+    if (analysis.inventory?.length && !esInventarioBPCGen) {
+      analysis = {
+        ...analysis,
+        inventory: applyXorTreatmentsToInventory(analysis.inventory),
+      };
+    }
+
     if (analysis.inventory?.length && esInventarioBPCGen) {
       const bpc = analysis.inventory[0]!;
       const canonical =
@@ -5697,6 +5682,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
 
     analysisForQuote = await this.enrichInventoryWithMarketRefacciones(
       analysisForQuote,
+      visionTallerId,
     );
 
     const estimateAmount = await this.computePrimaryMatrixEstimate(

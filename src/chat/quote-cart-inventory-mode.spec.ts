@@ -50,15 +50,18 @@ describe('quote-cart-inventory-mode', () => {
     const mixed = [puertaItem, refaccion];
     expect(detectCartPricingMode(mixed)).toBe('piezas');
     const sanitized = sanitizeCartInventoryForPricing(mixed);
-    expect(sanitized.map((i) => i.pieza)).toEqual([
-      'PDI',
-      'REFACCION:Calavera_Izquierda',
-    ]);
-    expect(sanitized[1]?.precioMx).toBe(2860);
+    expect(sanitized).toHaveLength(2);
+    expect(sanitized.map((i) => i.pieza)).toEqual(
+      expect.arrayContaining(['PDI', 'Calavera_Izquierda']),
+    );
+    expect(sanitized.find((i) => i.pieza !== 'PDI')?.precioMx).toBe(2860);
+    expect(sanitized.find((i) => i.pieza !== 'PDI')?.tratamiento).toBe(
+      'SUSTITUIR',
+    );
     expect(detectCartPricingMode([refaccion])).toBe('piezas');
     expect(
       sanitizeCartInventoryForPricing([refaccion]).map((i) => i.pieza),
-    ).toEqual(['REFACCION:Calavera_Izquierda']);
+    ).toEqual(['Calavera_Izquierda']);
   });
 
   it('mergeCartInventoryWithPricingMode: pieza nueva quita BPC previo', () => {

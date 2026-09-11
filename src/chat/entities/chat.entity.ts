@@ -31,8 +31,16 @@ export interface DetectedDamageItem {
   detallesRefaccion?: string;
   /** Código de panel que originó la refacción (FD, PDI…). */
   refaccionDePieza?: string;
-  /** Visión: la pieza conviene reemplazarse (no solo hojalatería). */
-  posibleReemplazoRefaccion?: boolean;
+  /** Decisión comercial del valuador: REPARAR XOR SUSTITUIR. */
+  tratamiento?: 'REPARAR' | 'SUSTITUIR' | 'INCIERTO' | 'PENDIENTE';
+  /** Origen del precio de refacción cuando tratamiento = SUSTITUIR. */
+  priceSource?: 'AUTOFIX_CATALOG' | 'MARKET' | 'FALLBACK';
+  /** Advertencia visual; no suma al total. */
+  possibleHiddenDamage?: {
+    detected: boolean;
+    areas: string[];
+    requiresDisassembly: boolean;
+  };
 }
 
 /** @deprecated usar DetectedDamageItem (descripcion → descripcionTecnica, urls_asociadas → urls_origen). */
@@ -71,6 +79,8 @@ export interface VehicleDamageAnalysis {
     /** Perfil vehicular para precios por tamaño + premium. */
     vehiclePricingProfile?: VehiclePricingProfile;
   };
+  /** Daños internos posibles (disclaimer; no suma al total). */
+  possibleHiddenDamage?: DetectedDamageItem['possibleHiddenDamage'];
 }
 
 @Entity()

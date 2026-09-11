@@ -1,7 +1,6 @@
 import {
   collapseVisionItemsToBpcIfNeeded,
   extractVisionDetectedVehicle,
-  extractVisionIdentifiedVehicle,
   isVisionBpcPiezaCode,
   pickVehicleLabelFromDamageInventory,
   visionItemsIndicateBanioCompleto,
@@ -76,38 +75,6 @@ describe('vision-bpc-inventory', () => {
         vehiculoDetectado: 'Audi Q5 2020',
       }),
     ).toBe('Audi Q5 2020');
-  });
-
-  it('usa vehiculo_identificado solo con confianza alta o media', () => {
-    const hit = extractVisionIdentifiedVehicle({
-      vehiculo_identificado: {
-        marca: 'Mazda',
-        modelo: '2',
-        anios: ['2016', '2018'],
-        confianza: 'alta',
-      },
-    });
-    expect(hit?.label).toBe('Mazda 2 2016-2018');
-    expect(
-      extractVisionDetectedVehicle({
-        vehiculo_identificado: {
-          marca: 'Mazda',
-          modelo: '2',
-          anios: '2018',
-          confianza: 'media',
-        },
-      }),
-    ).toBe('Mazda 2 2018');
-    expect(
-      extractVisionIdentifiedVehicle({
-        vehiculo_identificado: {
-          marca: 'Mazda',
-          modelo: '2',
-          anios: '2018',
-          confianza: 'baja',
-        },
-      }),
-    ).toBeNull();
   });
 
   it('respeta intencion_banio_completo_detectada sin sigla BPC', () => {

@@ -2,6 +2,7 @@ import type { DetectedDamageItem } from './entities/chat.entity';
 import { isVisionBpcPiezaCode } from './vision-bpc-inventory';
 import { isRefaccionPieza } from '../catalog/panel-pieza-catalog';
 import { mergeCartInventoryItem } from './quote-cart-analysis';
+import { applyXorTreatmentsToInventory } from './piece-treatment';
 
 export type CartPricingMode = 'bpc' | 'piezas' | 'vacio';
 
@@ -18,7 +19,13 @@ export function detectCartPricingMode(
 ): CartPricingMode {
   if (!inventory.length) return 'vacio';
   const hasBpc = inventory.some((it) => isVisionBpcPiezaCode(it.pieza));
-  const hasPiezas = inventory.some((it) => isIndividualPanelPieza(it.pieza));
+  const hasPiezas = inventory.some(
+    (it) =>
+      isIndividualPanelPieza(it.pieza) ||
+      isRefaccionPieza(it.pieza) ||
+      it.tratamiento === 'PENDIENTE' ||
+      it.tratamiento === 'SUSTITUIR',
+  );
   if (hasBpc && !hasPiezas) return 'bpc';
   if (hasPiezas) return 'piezas';
   return 'vacio';
@@ -31,29 +38,16 @@ export function detectCartPricingMode(
 export function sanitizeCartInventoryForPricing(
   inventory: readonly DetectedDamageItem[],
 ): DetectedDamageItem[] {
-  const mode = detectCartPricingMode(inventory);
+  const collapsed = applyXorTreatmentsToInventory(inventory);
+  const mode = detectCartPricingMode(collapsed);
   if (mode === 'piezas') {
-    return inventory
-      .filter((it) => isIndividualPanelPieza(it.pieza))
-      .map((it) => ({
-        pieza: it.pieza,
-        severidad: it.severidad,
-        descripcionTecnica: it.descripcionTecnica,
-        urls_origen: [...(it.urls_origen ?? [])],
-        ...(it.vehiculoDetectado?.trim()
-          ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
-          : {}),
-        ...(it.precioMx != null ? { precioMx: it.precioMx } : {}),
-        ...(it.detallesRefaccion
-          ? { detallesRefaccion: it.detallesRefaccion }
-          : {}),
-        ...(it.refaccionDePieza
-          ? { refaccionDePieza: it.refaccionDePieza }
-          : {}),
-        ...(it.posibleReemplazoRefaccion
-          ? { posibleReemplazoRefaccion: true }
-          : {}),
-      }));
+    return collapsed.filter(
+      (it) =>
+        isIndividualPanelPieza(it.pieza) ||
+        isRefaccionPieza(it.pieza) ||
+        it.tratamiento === 'PENDIENTE' ||
+        it.tratamiento === 'SUSTITUIR',
+    );
   }
   if (mode === 'bpc') {
     return inventory
@@ -73,9 +67,6 @@ export function sanitizeCartInventoryForPricing(
         ...(it.refaccionDePieza
           ? { refaccionDePieza: it.refaccionDePieza }
           : {}),
-        ...(it.posibleReemplazoRefaccion
-          ? { posibleReemplazoRefaccion: true }
-          : {}),
       }));
   }
   return [];
@@ -89,7 +80,13 @@ export function mergeCartInventoryWithPricingMode(
   incoming: DetectedDamageItem,
 ): DetectedDamageItem[] {
   if (isRefaccionPieza(incoming.pieza)) {
-    return mergeCartInventoryItem(inventory, incoming);
+    const stamped: DetectedDamageItem = {
+      ...incoming,
+      tratamiento: incoming.tratamiento ?? 'SUSTITUIR',
+    };
+    return applyXorTreatmentsToInventory(
+      mergeCartInventoryItem(inventory, stamped),
+    );
   }
   if (isVisionBpcPiezaCode(incoming.pieza)) {
     return [
@@ -106,5 +103,7 @@ export function mergeCartInventoryWithPricingMode(
   }
 
   const withoutBpc = inventory.filter((it) => !isVisionBpcPiezaCode(it.pieza));
-  return mergeCartInventoryItem(withoutBpc, incoming);
+  return applyXorTreatmentsToInventory(
+    mergeCartInventoryItem(withoutBpc, incoming),
+  );
 }

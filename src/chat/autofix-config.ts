@@ -192,6 +192,17 @@ export interface DraftQuoteLine {
   quantity: number;
   unitPrice: number;
   subtotal: number;
+  tratamiento?: 'REPARAR' | 'SUSTITUIR' | 'INCIERTO' | 'PENDIENTE';
+  serviceType?:
+    | 'REPARACION_PINTURA'
+    | 'REFACCION'
+    | 'MONTAJE_PINTURA'
+    | 'PENDIENTE'
+    | 'ADVERTENCIA';
+  physicalPanelKey?: string;
+  billable?: boolean;
+  priceSource?: 'AUTOFIX_CATALOG' | 'MARKET' | 'FALLBACK';
+  disclaimer?: string;
 }
 
 export type DraftQuoteStatus =
