@@ -89,6 +89,39 @@ export class CatalogController {
     return { ok: true, ...view };
   }
 
+  @Patch('montaje-pintura-bases')
+  @HttpCode(HttpStatus.OK)
+  async patchMontajePinturaBases(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body()
+    body: {
+      updates?: Array<{
+        servicio?: string;
+        precio?: unknown;
+        basePrice?: unknown;
+        diasEntrega?: unknown;
+        matrixRowId?: string | null;
+      }>;
+    },
+  ) {
+    const updates = body?.updates;
+    if (!Array.isArray(updates) || !updates.length) {
+      throw new BadRequestException(
+        'Envía updates con al menos una tarifa de montaje/pintura.',
+      );
+    }
+    for (const u of updates) {
+      await this.catalogService.upsertMontajePintura(user.tallerId, {
+        servicio: String(u.servicio ?? ''),
+        precio: Number(u.precio ?? u.basePrice),
+        diasEntrega: Number(u.diasEntrega),
+        matrixRowId: u.matrixRowId ?? null,
+      });
+    }
+    const view = await this.catalogService.getPieceBaseCatalog(user.tallerId);
+    return { ok: true, ...view };
+  }
+
   @Patch('integral-bases')
   @HttpCode(HttpStatus.OK)
   async patchIntegralBases(

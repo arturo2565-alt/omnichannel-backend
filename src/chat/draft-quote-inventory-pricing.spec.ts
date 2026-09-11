@@ -178,8 +178,9 @@ describe('draft-quote-inventory-pricing', () => {
     expect(rows.filter((r) => r.serviceType === 'MONTAJE_PINTURA')).toHaveLength(2);
     expect(rows[0]?.descripcionServicio).toMatch(/Refacción de Cofre/i);
     expect(rows[1]?.descripcionServicio).toMatch(/Montar y pintar/i);
-    expect(rows[1]?.severidad).toBe('DL');
+    expect(rows[1]?.severidad).toBe('MONTAJE_PINTURA');
     expect(rows[1]?.precioMx).toBe(4000);
+    expect(rows[1]?.priceSource).toBe('LEGACY_REPAIR_MATRIX_FALLBACK');
   });
 
   it('REFACCION con precio inválido no produce NaN', () => {

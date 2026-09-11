@@ -72,7 +72,12 @@ describe('panel-pieza-catalog', () => {
     expect(refaccionCatalogCodigoForPieza('faro de niebla derecho')).toBe(
       'FARO_NIEBLA_DER',
     );
-    expect(refaccionCatalogCodigoForPieza('Puerta')).toBeNull();
+    expect(refaccionCatalogCodigoForPieza('Puerta')).toBe('PUERTA');
+    expect(refaccionCatalogCodigoForPieza('Cofre')).toBe('COFRE');
+    expect(refaccionCatalogCodigoForPieza('FD')).toBe('FASCIA_DEL');
+    expect(refaccionCatalogCodigoForPieza('FT')).toBe('FASCIA_TRAS');
+    expect(refaccionCatalogCodigoForPieza('Tapa Cajuela')).toBe('TAPA_CAJUELA');
+    expect(refaccionCatalogCodigoForPieza('SI')).toBe('SALPICADERA');
   });
 
   it('resolveMatrixServicioRaw conserva texto libre si no hay mapeo', () => {

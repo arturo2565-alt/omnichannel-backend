@@ -33,4 +33,30 @@ describe('refaccion-mercado', () => {
     expect(picked.priceSource).toBe('AUTOFIX_CATALOG');
     expect(picked.precioAlCliente).toBe(9900);
   });
+
+  it('mercado gana sobre fallback hardcodeado', () => {
+    const picked = pickRefaccionClienteQuote({
+      catalogo: null,
+      mercado: { precioAlCliente: 7200, costoBase: 5500, fuente: 'mercadolibre' },
+      pieza: 'Cofre',
+    });
+    expect(picked.priceSource).toBe('MARKET');
+    expect(picked.precioAlCliente).toBe(7200);
+  });
+
+  it('FALLBACK queda identificado cuando no hay catálogo ni mercado', () => {
+    const picked = pickRefaccionClienteQuote({
+      catalogo: null,
+      mercado: null,
+      pieza: 'Cofre',
+    });
+    expect(picked.priceSource).toBe('FALLBACK');
+    expect(picked.precioAlCliente).toBe(5850);
+    expect(buildRefaccionDisclaimer('Cofre', picked.precioAlCliente, 'FALLBACK')).toMatch(
+      /estimado genérico/,
+    );
+    expect(buildRefaccionDisclaimer('Cofre', picked.precioAlCliente, 'FALLBACK')).toMatch(
+      /no es precio específico/,
+    );
+  });
 });

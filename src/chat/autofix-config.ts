@@ -201,7 +201,11 @@ export interface DraftQuoteLine {
     | 'ADVERTENCIA';
   physicalPanelKey?: string;
   billable?: boolean;
-  priceSource?: 'AUTOFIX_CATALOG' | 'MARKET' | 'FALLBACK';
+  priceSource?:
+    | 'AUTOFIX_CATALOG'
+    | 'MARKET'
+    | 'FALLBACK'
+    | 'LEGACY_REPAIR_MATRIX_FALLBACK';
   disclaimer?: string;
 }
 

@@ -21,6 +21,10 @@ import {
   type CatalogPricingRules,
 } from './catalog-pricing-rules';
 import { CatalogPricingRulesEntity } from './entities/catalog-pricing-rules.entity';
+import {
+  aggregateMontajePinturaRows,
+  MONTAJE_PINTURA_SEVERIDAD,
+} from './montaje-pintura-catalog';
 
 @Injectable()
 export class CatalogService {
@@ -118,7 +122,8 @@ export class CatalogService {
     const rules = await this.getPricingRules(tid);
     const pieceBases = aggregatePieceBaseRows(rows);
     const integralBases = aggregateIntegralBaseRows(rows);
-    return { rules, pieceBases, integralBases };
+    const montajePinturaBases = aggregateMontajePinturaRows(rows);
+    return { rules, pieceBases, integralBases, montajePinturaBases };
   }
 
   async upsertIntegralBase(
@@ -236,6 +241,66 @@ export class CatalogService {
     return this.createRow(tid, {
       servicio,
       severidad: PIECE_BASE_SEVERITY,
+      precio,
+      diasEntrega,
+      isInstantService: false,
+    });
+  }
+
+  async upsertMontajePintura(
+    tallerId: string,
+    dto: {
+      servicio: string;
+      precio: number;
+      diasEntrega: number;
+      matrixRowId?: string | null;
+    },
+  ): Promise<PriceMatrix> {
+    const tid = await this.resolveTallerId(tallerId);
+    const servicio = String(dto.servicio ?? '').trim().slice(0, 120);
+    if (!servicio) throw new BadRequestException('servicio obligatorio');
+    const precio = Math.max(0, Math.round(Number(dto.precio) || 0));
+    const diasEntrega = Math.max(
+      0,
+      Math.round(Number(dto.diasEntrega) || 0),
+    );
+
+    const rowId = String(dto.matrixRowId ?? '').trim();
+    if (rowId) {
+      const existing = await this.priceMatrixRepository.findOne({
+        where: { id: rowId, tallerId: tid },
+      });
+      if (existing) {
+        existing.precio = precio;
+        existing.diasEntrega = diasEntrega;
+        existing.severidad = MONTAJE_PINTURA_SEVERIDAD;
+        existing.isInstantService = false;
+        return this.priceMatrixRepository.save(existing);
+      }
+    }
+
+    const byDedicated = await this.priceMatrixRepository.findOne({
+      where: { tallerId: tid, servicio, severidad: MONTAJE_PINTURA_SEVERIDAD },
+    });
+    if (byDedicated) {
+      byDedicated.precio = precio;
+      byDedicated.diasEntrega = diasEntrega;
+      return this.priceMatrixRepository.save(byDedicated);
+    }
+
+    const byAlias = await this.priceMatrixRepository.findOne({
+      where: { tallerId: tid, servicio, severidad: 'MONTAJE' },
+    });
+    if (byAlias) {
+      byAlias.precio = precio;
+      byAlias.diasEntrega = diasEntrega;
+      byAlias.severidad = MONTAJE_PINTURA_SEVERIDAD;
+      return this.priceMatrixRepository.save(byAlias);
+    }
+
+    return this.createRow(tid, {
+      servicio,
+      severidad: MONTAJE_PINTURA_SEVERIDAD,
       precio,
       diasEntrega,
       isInstantService: false,

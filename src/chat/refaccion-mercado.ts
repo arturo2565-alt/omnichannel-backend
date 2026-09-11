@@ -20,15 +20,24 @@ export function looksLikeEvidentBreakage(
   return BREAKAGE_RE.test(blob);
 }
 
+export type RefaccionPriceSource = 'AUTOFIX_CATALOG' | 'MARKET' | 'FALLBACK';
+
 /** MXN al cliente: costo base + 30%, redondeo comercial a $50. */
 export function precioAlClienteConMargen(costoBase: number): number {
   const base = Math.max(0, Number(costoBase) || 0);
   return Math.round((base * 1.3) / 50) * 50;
 }
 
-export function buildRefaccionDisclaimer(pieza: string, monto: number): string {
+export function buildRefaccionDisclaimer(
+  pieza: string,
+  monto: number,
+  priceSource?: RefaccionPriceSource,
+): string {
   const label = String(pieza ?? '').trim() || 'la pieza';
   const amt = Math.max(0, Math.round(Number(monto) || 0));
+  if (priceSource === 'FALLBACK') {
+    return `📦 *Nota sobre Refacción:* Incluimos un estimado genérico de $${amt.toLocaleString('es-MX')} MXN para ${label} (no es precio específico de tu unidad). Se confirma con número de parte en físico.`;
+  }
   return `📦 *Nota sobre Refacción:* Por la magnitud del daño en ${label}, es muy probable que requiera reemplazo. Te incluimos un costo estimado de mercado de $${amt.toLocaleString('es-MX')} MXN (+30% margen logístico), sujeto a confirmación de número de parte en físico.`;
 }
 
@@ -81,8 +90,6 @@ async function searchMercadoLibrePrices(query: string): Promise<number[]> {
     .filter((n) => Number.isFinite(n) && n >= 200 && n <= 80_000);
   return prices;
 }
-
-export type RefaccionPriceSource = 'AUTOFIX_CATALOG' | 'MARKET' | 'FALLBACK';
 
 export type RefaccionClienteQuote = {
   costoBase: number;

@@ -33,6 +33,9 @@ import {
   type RefaccionPriceSource,
   type TreatmentDecision,
 } from './piece-treatment';
+import {
+  MONTAJE_PINTURA_SEVERIDAD_ALIASES,
+} from '../catalog/montaje-pintura-catalog';
 
 /** Fila de cotización del panel / PATCH (QuoteRow). */
 export interface QuoteRowInput {
@@ -284,41 +287,55 @@ function resolveProfileForIntegralInventoryRow(
   };
 }
 
-const MONTAJE_MATRIX_KEYS = ['MONTAJE_PINTURA', 'MONTAJE'] as const;
+export type MontajePinturaPriceResolution = {
+  precio: number;
+  priceSource: Extract<
+    RefaccionPriceSource,
+    'AUTOFIX_CATALOG' | 'LEGACY_REPAIR_MATRIX_FALLBACK'
+  >;
+};
 
 /**
- * Mano de obra de sustituir: celda dedicada MONTAJE(_PINTURA), o cabina DL/LEVE.
- * Nunca usa la severidad del golpe (p. ej. DMFuerte).
+ * Mano de obra de sustituir: celda dedicada MONTAJE(_PINTURA).
+ * Si no existe, reutiliza DL/LEVE solo como fallback etiquetado.
  */
 export function resolveMontajePinturaPrice(
   snap: MatrixPricingSnapshot,
   catalogPieza: string,
   vehicleProfile?: VehiclePricingProfile | null,
   pricingRules?: CatalogPricingRules | null,
-): number {
+): MontajePinturaPriceResolution {
   const canonical = String(catalogPieza ?? '').trim();
-  if (!canonical) return 0;
-  for (const key of MONTAJE_MATRIX_KEYS) {
+  if (!canonical) {
+    return { precio: 0, priceSource: 'LEGACY_REPAIR_MATRIX_FALLBACK' };
+  }
+  for (const key of MONTAJE_PINTURA_SEVERIDAD_ALIASES) {
     const explicit =
       snap.getPriceForCanonical(canonical, key) ||
       snap.getAmount(canonical, key);
     if (explicit > 0) {
-      return computeCatalogPiecePrice({
-        basePrice: explicit,
-        sizeTier: vehicleProfile?.sizeTier ?? 'Compacto',
-        isPremium: vehicleProfile?.isPremium ?? false,
-        damageMagnitude: 'LEVE',
-        rules: pricingRules ?? undefined,
-      });
+      return {
+        precio: computeCatalogPiecePrice({
+          basePrice: explicit,
+          sizeTier: vehicleProfile?.sizeTier ?? 'Compacto',
+          isPremium: vehicleProfile?.isPremium ?? false,
+          damageMagnitude: 'LEVE',
+          rules: pricingRules ?? undefined,
+        }),
+        priceSource: 'AUTOFIX_CATALOG',
+      };
     }
   }
-  return resolvePiecePriceForVehicleProfile(
-    snap,
-    canonical,
-    'DL',
-    vehicleProfile,
-    pricingRules,
-  );
+  return {
+    precio: resolvePiecePriceForVehicleProfile(
+      snap,
+      canonical,
+      'DL',
+      vehicleProfile,
+      pricingRules,
+    ),
+    priceSource: 'LEGACY_REPAIR_MATRIX_FALLBACK',
+  };
 }
 
 function matrixRepairPrice(
@@ -468,12 +485,13 @@ export function quoteRowsFromDamageInventory(
         );
         rows.push({
           pieza: panelCode,
-          severidad: 'DL',
-          precioMx: Math.max(0, Math.round(montaje)),
+          severidad: 'MONTAJE_PINTURA',
+          precioMx: Math.max(0, Math.round(montaje.precio)),
           tratamiento: 'SUSTITUIR',
           serviceType: 'MONTAJE_PINTURA',
           physicalPanelKey: panelCode,
-          billable: montaje > 0,
+          billable: montaje.precio > 0,
+          priceSource: montaje.priceSource,
           description: `Montar y pintar ${display}`,
           descripcionServicio: `Montar y pintar ${display}`,
         });

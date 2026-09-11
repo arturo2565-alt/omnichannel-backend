@@ -34,7 +34,11 @@ export interface DetectedDamageItem {
   /** Decisión comercial del valuador: REPARAR XOR SUSTITUIR. */
   tratamiento?: 'REPARAR' | 'SUSTITUIR' | 'INCIERTO' | 'PENDIENTE';
   /** Origen del precio de refacción cuando tratamiento = SUSTITUIR. */
-  priceSource?: 'AUTOFIX_CATALOG' | 'MARKET' | 'FALLBACK';
+  priceSource?:
+    | 'AUTOFIX_CATALOG'
+    | 'MARKET'
+    | 'FALLBACK'
+    | 'LEGACY_REPAIR_MATRIX_FALLBACK';
   /** Advertencia visual; no suma al total. */
   possibleHiddenDamage?: {
     detected: boolean;

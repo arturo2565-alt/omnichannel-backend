@@ -6920,6 +6920,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       disclaimer: buildRefaccionDisclaimer(
         piezaLabelForRefaccion(pieza),
         estimate.precioAlCliente,
+        estimate.priceSource,
       ),
       inserted: true,
     };
@@ -6967,6 +6968,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       disclaimer: buildRefaccionDisclaimer(
         piezaLabelForRefaccion(pieza),
         estimate.precioAlCliente,
+        estimate.priceSource,
       ),
     };
   }

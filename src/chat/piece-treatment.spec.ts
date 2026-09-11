@@ -87,8 +87,9 @@ describe('piece-treatment XOR valuador', () => {
       'MONTAJE_PINTURA',
     ]);
     expect(rows[0]?.precioMx).toBe(8500);
-    expect(rows[1]?.severidad).toBe('DL');
+    expect(rows[1]?.severidad).toBe('MONTAJE_PINTURA');
     expect(rows[1]?.precioMx).toBe(4000);
+    expect(rows[1]?.priceSource).toBe('LEGACY_REPAIR_MATRIX_FALLBACK');
   });
 
   it('TEST C: FD REPARAR solo una línea de reparación, sin REFACCION', () => {

@@ -172,12 +172,16 @@ export class RefaccionesService {
   }
 
   private async ensureDefaults(tallerId: string): Promise<void> {
-    const count = await this.repo.count({ where: { tallerId } });
-    if (count > 0) return;
-    const rows = REFACCION_CATALOG_DEFAULTS.map((d) =>
-      this.repo.create({ tallerId, ...d }),
+    const existing = await this.repo.find({
+      where: { tallerId },
+      select: ['codigo'],
+    });
+    const have = new Set(existing.map((r) => r.codigo));
+    const missing = REFACCION_CATALOG_DEFAULTS.filter((d) => !have.has(d.codigo));
+    if (!missing.length) return;
+    await this.repo.save(
+      missing.map((d) => this.repo.create({ tallerId, ...d })),
     );
-    await this.repo.save(rows);
   }
 
   private parseWriteInput(

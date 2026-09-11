@@ -39,9 +39,11 @@ export const REFACCION_PRICE_SOURCES = [
   'AUTOFIX_CATALOG',
   'MARKET',
   'FALLBACK',
+  'LEGACY_REPAIR_MATRIX_FALLBACK',
 ] as const;
 
 export type RefaccionPriceSource = (typeof REFACCION_PRICE_SOURCES)[number];
+export type QuotePriceSource = RefaccionPriceSource;
 
 export type PossibleHiddenDamage = {
   detected: boolean;

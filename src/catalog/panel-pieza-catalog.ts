@@ -438,11 +438,65 @@ const REFACCION_CATALOG_CODES = new Set([
   'FARO_NIEBLA_DER',
   'MOLD_FD',
   'GUIA_FD',
+  'COFRE',
+  'FASCIA_DEL',
+  'FASCIA_TRAS',
+  'PUERTA',
+  'SALPICADERA',
+  'TAPA_CAJUELA',
+  'TOLDO',
+  'ESTRIBO',
+  'ESPEJO',
+  'POSTE',
+  'BICO',
+  'PARILLA',
 ]);
 
+/** Sigla de panel → código de `refaccion_catalog`. */
+const PANEL_CODE_TO_REFACCION_CODIGO: Readonly<Record<string, string>> = {
+  Cofre: 'COFRE',
+  FD: 'FASCIA_DEL',
+  FT: 'FASCIA_TRAS',
+  PDI: 'PUERTA',
+  PDD: 'PUERTA',
+  PTI: 'PUERTA',
+  PTD: 'PUERTA',
+  SI: 'SALPICADERA',
+  SD: 'SALPICADERA',
+  STI: 'SALPICADERA',
+  STD: 'SALPICADERA',
+  CTI: 'SALPICADERA',
+  CTD: 'SALPICADERA',
+  'Tapa Cajuela': 'TAPA_CAJUELA',
+  Toldo: 'TOLDO',
+  EI: 'ESTRIBO',
+  ED: 'ESTRIBO',
+  ESI: 'ESPEJO',
+  ESD: 'ESPEJO',
+  Espejo: 'ESPEJO',
+  POI: 'POSTE',
+  POD: 'POSTE',
+  BiCO: 'BICO',
+  Parilla: 'PARILLA',
+};
+
+const CATALOG_PIEZA_TO_REFACCION_CODIGO: Readonly<Record<string, string>> = {
+  Cofre: 'COFRE',
+  Fascia: 'FASCIA_DEL',
+  Puerta: 'PUERTA',
+  Salpicadera: 'SALPICADERA',
+  'Tapa Cajuela': 'TAPA_CAJUELA',
+  Toldo: 'TOLDO',
+  Espejo: 'ESPEJO',
+  Estribo: 'ESTRIBO',
+  Poste: 'POSTE',
+  BiCO: 'BICO',
+  Parilla: 'PARILLA',
+};
+
 /**
- * Pieza de visión/panel → código de `refaccion_catalog` (FARO_IZQ, CAL_IZQ…).
- * `null` si no hay equivalente en el catálogo semilla.
+ * Pieza de visión/panel → código de `refaccion_catalog` (FARO_IZQ, COFRE…).
+ * `null` si no hay equivalente en el catálogo.
  */
 export function refaccionCatalogCodigoForPieza(raw: unknown): string | null {
   const t = String(raw ?? '')
@@ -481,6 +535,21 @@ export function refaccionCatalogCodigoForPieza(raw: unknown): string | null {
   }
   if (guia && (fasciaDel || /\bfd\b/.test(n) || /guia_fd/i.test(t))) {
     return 'GUIA_FD';
+  }
+
+  const panelCode = canonicalizePanelCode(t);
+  if (PANEL_CODE_TO_REFACCION_CODIGO[panelCode]) {
+    return PANEL_CODE_TO_REFACCION_CODIGO[panelCode]!;
+  }
+  if (/\bfascia\b/.test(n)) {
+    return /\btras/.test(n) || panelCode === 'FT' ? 'FASCIA_TRAS' : 'FASCIA_DEL';
+  }
+  const catalogPieza = resolveCatalogPiezaForMatrixLookup(t);
+  if (catalogPieza && CATALOG_PIEZA_TO_REFACCION_CODIGO[catalogPieza]) {
+    if (catalogPieza === 'Fascia') {
+      return /\btras/.test(n) ? 'FASCIA_TRAS' : 'FASCIA_DEL';
+    }
+    return CATALOG_PIEZA_TO_REFACCION_CODIGO[catalogPieza]!;
   }
   return null;
 }
