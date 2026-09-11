@@ -501,10 +501,14 @@ export function quoteRowsFromDamageInventory(
         cantidadMuestras: it.cantidadMuestras,
         cantidadDominios: it.cantidadDominios,
         disclaimer: insufficient
-          ? `Refacción de ${display}: sin muestra de mercado suficiente para esta unidad. Se confirma en físico.`
+          ? `Refacción de ${display}: precio pendiente de estimación. El montaje/pintura no cubre la pieza de reemplazo.`
           : undefined,
-        description: `Refacción de ${display}`,
-        descripcionServicio: `Refacción de ${display}`,
+        description: insufficient
+          ? `Refacción de ${display}: precio pendiente de estimación`
+          : `Refacción de ${display}`,
+        descripcionServicio: insufficient
+          ? `Refacción de ${display}: precio pendiente de estimación`
+          : `Refacción de ${display}`,
       });
       if (needsMontajePinturaComponent(panelCode)) {
         const catalogPieza =
@@ -558,7 +562,7 @@ export function quoteRowsFromDamageInventory(
         billable: precio > 0,
         description: desc,
         descripcionServicio: desc,
-        ...(tratamiento === 'INCIERTO'
+        ...(tratamiento === 'INCIERTO' || it.posibleReemplazoRefaccion
           ? { disclaimer: INCIERTO_SUBSTITUTION_DISCLAIMER }
           : {}),
       });

@@ -45,6 +45,7 @@ export type DraftClientMessageComposeInput = {
   previousPiezas: string[];
   newPiezas: string[];
   pricingMode: 'bpc' | 'piezas' | 'unknown';
+  pricingIncomplete?: boolean;
   peritaje: {
     inventario: DraftClientMessagePeritajeItem[];
     descripcionTecnica?: string;
@@ -67,6 +68,7 @@ Reglas obligatorias:
 - Usa EXACTAMENTE los montos de "cotizacion.lineRows" y "cotizacion.total"; PROHIBIDO calcular, redondear distinto o inventar precios.
 - Cada lineRow trae description, treatment y serviceType ya decididos por el valuador. Copia description tal cual (puedes añadir emoji). PROHIBIDO cambiar el sentido: no conviertas REFACCION/MONTAJE_PINTURA en "reparar y pintar" ni REPARACION_PINTURA en "sustituir".
 - Líneas con billable=false o treatment=PENDIENTE van en observaciones, sin precio, y NO alteran el total.
+- Si cotizacion.pricingIncomplete es true: el total es PARCIAL. PROHIBIDO presentarlo como presupuesto cerrado o como si el montaje/pintura cubriera la sustitución completa. Conserva visible el concepto de refacción con "precio pendiente de estimación".
 - Si hay disclaimer o possibleHiddenDamage, menciónalo como advertencia SIN inventar un monto.
 - El bloque "reportePericial" viene del análisis de fotos; úsalo para contexto técnico, NO para cambiar precios.
 - Si "contextoOperativo.hasActiveAppointment" es true, indica que el monto puede sumarse a la orden de la cita confirmada.
@@ -125,6 +127,8 @@ export function buildDraftClientMessageStructuredPayload(
       total: input.total,
       currency: input.currency,
       reference: input.reference ?? '',
+      pricingIncomplete: Boolean(input.pricingIncomplete),
+      totalEsParcial: Boolean(input.pricingIncomplete),
     },
     contextoOperativo: {
       contactName: input.contactName,

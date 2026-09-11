@@ -40,7 +40,10 @@ describe('draft-client-message-composer', () => {
       pricingMode: 'piezas',
       fotosAnalizadas: 2,
     });
-    expect(payload.cotizacion).toMatchObject({ total: 12000 });
+    expect(payload.cotizacion).toMatchObject({
+      total: 12000,
+      pricingIncomplete: false,
+    });
     expect(
       (payload.cotizacion as { lineRows: Array<{ description?: string }> })
         .lineRows[0]?.description,

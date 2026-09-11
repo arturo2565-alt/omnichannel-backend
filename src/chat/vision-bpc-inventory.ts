@@ -1,4 +1,7 @@
-import type { DetectedDamageItem } from './entities/chat.entity';
+import type {
+  DetectedDamageItem,
+  VehicleDamageAnalysis,
+} from './entities/chat.entity';
 import { coerceDamageLevelCode, damageLevelRank, type DamageLevel } from './autofix-config';
 import {
   cambioDeColorAddonMxForSizeTier,
@@ -166,6 +169,26 @@ export function pickVehicleLabelFromDamageInventory(
     if (v) return v;
   }
   return null;
+}
+
+/** Vehículo para mercado de refacciones: root de análisis primero, no cada ítem. */
+export function resolveMarketVehicleText(
+  analysis: Pick<
+    VehicleDamageAnalysis,
+    'vehiculoDetectado' | 'inventory' | 'quoteCartMeta'
+  >,
+): string {
+  return (
+    pickUsableVisionVehicleLabel(analysis.vehiculoDetectado) ||
+    pickVehicleLabelFromDamageInventory(
+      analysis.inventory,
+      analysis.vehiculoDetectado,
+    ) ||
+    pickUsableVisionVehicleLabel(
+      analysis.quoteCartMeta?.vehiclePricingProfile?.vehicleLabel,
+    ) ||
+    ''
+  );
 }
 
 export function visionJsonIndicatesBanioCompleto(root: unknown): boolean {

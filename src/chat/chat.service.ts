@@ -103,10 +103,13 @@ import {
   collapseVisionItemsToBpcIfNeeded,
   isBanioPinturaCompletoVisionInventory,
   isVisionBpcPiezaCode,
+  extractVisionDetectedVehicle,
   pickVehicleLabelFromDamageInventory,
+  resolveMarketVehicleText,
   visionItemsIndicateBanioCompleto,
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
+import { parseVisionDamageItems } from './vision-item-normalize';
 import {
   extractVisionViability,
   mergeVisionViability,
@@ -134,9 +137,10 @@ import { RefaccionesService } from '../catalog/refacciones.service';
 import {
   applyXorTreatmentsToInventory,
   canonicalPhysicalPanelKey,
+  cloneDetectedDamageItem,
   inferTreatmentDecision,
-  parseTreatmentDecision,
 } from './piece-treatment';
+import { inventoryItemsToVehicleAnalysis } from './quote-cart-analysis';
 import { detectCartPricingMode } from './quote-cart-inventory-mode';
 import {
   matchAdButtonAutoReply,
@@ -455,50 +459,17 @@ function pickWorstDamageLevel(levels: string[]): DamageLevel {
 function normalizeDetectedDamagesJson(raw: unknown): DetectedDamageItem[] {
   const o =
     raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
-  const direct = Array.isArray(raw) ? raw : null;
-  const arr =
-    (Array.isArray(o['items']) ? o['items'] : null) ??
-    (Array.isArray(o['detectedDamages']) ? o['detectedDamages'] : null) ??
-    (Array.isArray(o['resultado']) ? o['resultado'] : null) ??
-    direct;
-  if (!Array.isArray(arr)) {
+  const hasArray =
+    Array.isArray(raw) ||
+    Array.isArray(o['items']) ||
+    Array.isArray(o['detectedDamages']) ||
+    Array.isArray(o['resultado']);
+  if (!hasArray) {
     throw new Error(
       'Se esperaba JSON con la clave "items" u otro array de daños ({ pieza, severidad, descripcionTecnica, urls_origen })',
     );
   }
-  const out: DetectedDamageItem[] = [];
-  for (const el of arr) {
-    if (!el || typeof el !== 'object') continue;
-    const r = el as Record<string, unknown>;
-    const pieza = typeof r['pieza'] === 'string' ? r['pieza'].trim() : '';
-    const severidad =
-      typeof r['severidad'] === 'string' ? r['severidad'].trim() : '';
-    const descripcionTecnica =
-      typeof r['descripcionTecnica'] === 'string'
-        ? r['descripcionTecnica'].trim()
-        : typeof r['descripcion'] === 'string'
-          ? String(r['descripcion']).trim()
-          : '';
-    const u =
-      Array.isArray(r['urls_origen'])
-        ? r['urls_origen']
-        : Array.isArray(r['urls_asociadas'])
-          ? r['urls_asociadas']
-          : [];
-    let urls_origen = u.map((x) => String(x).trim()).filter(Boolean);
-    if (!pieza || !severidad) continue;
-    const tratamiento = parseTreatmentDecision(
-      r['tratamiento'] ?? r['treatment'],
-    );
-    out.push({
-      pieza,
-      severidad,
-      descripcionTecnica:
-        descripcionTecnica || 'Sin descripción técnica disponible.',
-      urls_origen,
-      ...(tratamiento ? { tratamiento } : {}),
-    });
-  }
+  const out = parseVisionDamageItems(raw);
   if (!out.length) {
     throw new Error(
       'El array de daños detectados está vacío o sin filas con pieza y severidad válidas',
@@ -516,47 +487,6 @@ function parseDetectedDamageItemsAllowEmpty(parsed: unknown): DetectedDamageItem
   }
 }
 
-function inventoryItemsToVehicleAnalysis(
-  items: DetectedDamageItem[],
-  sourceUrls: string[],
-): VehicleDamageAnalysis {
-  const inv: DetectedDamageItem[] = items.map((it) => ({
-    pieza: it.pieza,
-    severidad: it.severidad,
-    descripcionTecnica: it.descripcionTecnica,
-    urls_origen: [...(it.urls_origen ?? [])],
-    ...(it.vehiculoDetectado?.trim()
-      ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
-      : {}),
-  }));
-  const vehiculoDetectado = pickVehicleLabelFromDamageInventory(inv);
-  const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
-  const worst = pickWorstDamageLevel(inv.map((i) => i.severidad));
-  const piezaLabel =
-    partes.length === 1
-      ? partes[0]
-      : partes.length > 1
-        ? `${partes.slice(0, 2).join(' + ')}${partes.length > 2 ? ` (+${partes.length - 2} más)` : ''}`
-        : 'No identificada';
-  const desc = inv
-    .map(
-      (it) =>
-        `• ${it.pieza} (${coerceDamageLevelCode(it.severidad)}): ${it.descripcionTecnica}`,
-    )
-    .join('\n');
-  const just = `Inventario unificado (${inv.length} daño(s) detectado(s) en el grupo de imágenes de la sesión). Las piezas repetidas entre fotos se consolidan tomando la severidad más alta. Imágenes analizadas: ${sourceUrls.length}.`;
-
-  return {
-    pieza: piezaLabel,
-    severidad: worst,
-    severidadDelDano: worst,
-    descripcionTecnica: desc,
-    justificacion: just,
-    partesAfectadas: partes.length ? partes : [],
-    inventory: inv,
-    ...(vehiculoDetectado ? { vehiculoDetectado } : {}),
-  };
-}
 
 /** URLs almacenadas en `draft_quotes.imageUrl` (una URL o JSON array). */
 function parseDraftImageUrls(imageUrl: string): string[] {
@@ -1597,7 +1527,7 @@ export class ChatService implements OnModuleDestroy {
         continue;
       }
       const identity = parseVehiclePartIdentity({
-        vehiculoText: analysis.vehiculoDetectado ?? '',
+        vehiculoText: resolveMarketVehicleText(analysis),
         pieza: it.pieza,
       });
       const estimate = await this.refaccionMarketService.estimate(identity);
@@ -2770,7 +2700,11 @@ export class ChatService implements OnModuleDestroy {
       tallerId?: string | null;
       conversationId?: string | null;
     },
-  ): Promise<{ items: DetectedDamageItem[]; viability: VisionViability }> {
+  ): Promise<{
+    items: DetectedDamageItem[];
+    viability: VisionViability;
+    vehiculoDetectado?: string | null;
+  }> {
     const urls = [
       ...new Set(imageUrls.map((u) => String(u).trim()).filter(Boolean)),
     ];
@@ -2808,7 +2742,11 @@ export class ChatService implements OnModuleDestroy {
       tallerId?: string | null;
       conversationId?: string | null;
     },
-  ): Promise<{ items: DetectedDamageItem[]; viability: VisionViability }> {
+  ): Promise<{
+    items: DetectedDamageItem[];
+    viability: VisionViability;
+    vehiculoDetectado?: string | null;
+  }> {
     const systemPrompt =
       options?.systemPrompt != null && String(options.systemPrompt).trim() !== ''
         ? String(options.systemPrompt).trim()
@@ -2926,10 +2864,14 @@ export class ChatService implements OnModuleDestroy {
       .join('\n');
 
     const viability = extractVisionViability(parsed);
+    const rootVehicle = extractVisionDetectedVehicle(parsed);
     const rawItems = parseDetectedDamageItemsAllowEmpty(parsed);
     const items = rawItems.map((it) => ({
       ...it,
       pieza: canonicalizePanelCode(it.pieza) || it.pieza,
+      ...(rootVehicle && !it.vehiculoDetectado
+        ? { vehiculoDetectado: rootVehicle }
+        : {}),
     }));
 
     if (!viability.peritajeViable || items.length === 0) {
@@ -2964,7 +2906,11 @@ export class ChatService implements OnModuleDestroy {
         piezas: collapsed.map((i) => i.pieza),
       }),
     );
-    return { items: collapsed, viability: { peritajeViable: true } };
+    return {
+      items: collapsed,
+      viability: { peritajeViable: true },
+      vehiculoDetectado: rootVehicle,
+    };
   }
 
   /** Parte URLs en lotes de hasta {@link ChatService.VISION_MAX_CHUNK_SIZE}. */
@@ -2997,7 +2943,11 @@ export class ChatService implements OnModuleDestroy {
       tallerId?: string | null;
       conversationId?: string | null;
     },
-  ): Promise<{ items: DetectedDamageItem[]; viability: VisionViability }> {
+  ): Promise<{
+    items: DetectedDamageItem[];
+    viability: VisionViability;
+    vehiculoDetectado?: string | null;
+  }> {
     const VISION_MAX_CHUNK_SIZE = ChatService.VISION_MAX_CHUNK_SIZE;
     const lotes = this.chunkImageUrlsForVision(
       imageUrls,
@@ -3057,21 +3007,17 @@ export class ChatService implements OnModuleDestroy {
         continue;
       }
 
-      const batchVehicle = pickVehicleLabelFromDamageInventory(batch.items);
+      const batchVehicle =
+        batch.vehiculoDetectado ||
+        pickVehicleLabelFromDamageInventory(batch.items);
       if (batchVehicle) {
         accumulatedVisionVehicle = batchVehicle;
       }
 
       if (!allDetectedDamages.length) {
-        allDetectedDamages = batch.items.map((it) => ({
-          pieza: it.pieza,
-          severidad: it.severidad,
-          descripcionTecnica: it.descripcionTecnica,
-          urls_origen: [...(it.urls_origen ?? [])],
-          ...(it.vehiculoDetectado?.trim()
-            ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
-            : {}),
-        }));
+        allDetectedDamages = batch.items.map((it) =>
+          cloneDetectedDamageItem(it),
+        );
       } else {
         const merged = mergeDamageInventoryAccumulative(
           allDetectedDamages,
@@ -3109,6 +3055,7 @@ export class ChatService implements OnModuleDestroy {
         visionRootForCollapse,
       ),
       viability: { peritajeViable: true },
+      vehiculoDetectado: accumulatedVisionVehicle,
     };
   }
 
@@ -3776,6 +3723,7 @@ export class ChatService implements OnModuleDestroy {
           previousPiezas: input.previousPiezas,
           newPiezas: input.newPiezas,
           pricingMode: this.resolvePricingModeForClientNarrative(input.analysis),
+          pricingIncomplete: Boolean(input.draft.pricingIncomplete),
           peritaje: {
             ...peritajeFromDamageAnalysisLike(input.analysis),
             imageCount: input.imageCount,
@@ -5329,6 +5277,12 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     }
 
     const subtotal = lines.reduce((acc, l) => acc + l.subtotal, 0);
+    const pricingIncomplete = lines.some(
+      (l) =>
+        l.serviceType === 'REFACCION' &&
+        (l.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE' ||
+          (l.billable === false && (Number(l.subtotal) || 0) <= 0)),
+    );
     const reference = `COT-AF-${randomUUID().slice(0, 8).toUpperCase()}`;
     const generatedAt = new Date().toISOString();
 
@@ -5405,6 +5359,11 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       lineText,
       '',
       `Subtotal propuesto: ${formatAutoFixMoney(subtotal)} ${AUTO_FIX_CURRENCY}.`,
+      ...(pricingIncomplete
+        ? [
+            'Estado económico: INCOMPLETO. El subtotal es parcial; falta el precio de una o más refacciones (pendiente de estimación). El montaje/pintura listado no cubre la pieza de reemplazo.',
+          ]
+        : []),
       `Referencia interna: ${reference}. Fecha de emisión (UTC): ${generatedAt}.`,
       '',
       'Atentamente,',
@@ -5419,6 +5378,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
       lines,
       subtotal,
       total: subtotal,
+      pricingIncomplete,
       formalNarrative,
       analysisBasis: {
         pieza: analysis.pieza,
@@ -5626,6 +5586,7 @@ Los servicios InstantQuote (p. ej. baño de pintura exterior por tamaño, cerám
     const analysis = inventoryItemsToVehicleAnalysis(
       mergedInventory,
       allImageUrls,
+      visionResult.vehiculoDetectado,
     );
 
     const banioIntent = visionItemsIndicateBanioCompleto(newInventory);

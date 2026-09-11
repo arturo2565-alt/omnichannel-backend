@@ -62,6 +62,16 @@ export const HIDDEN_DAMAGE_CLIENT_DISCLAIMER =
 const REPLACE_CUE_RE =
   /\b(colapsad|aplastad|irrecuperable|inservible|no\s+reparable|sustitu|reemplaz|cambio\s+de\s+pieza|hecha\s+pedazos)\w*\b/i;
 
+const POSIBLE_REEMPLAZO_PHRASE_RE =
+  /posible[_ ]+reemplazo(?:[_ ]+de[_ ]+refacci[oó]n)?/gi;
+
+export function stripPosibleReemplazoPhrases(text: string): string {
+  return String(text ?? '')
+    .replace(POSIBLE_REEMPLAZO_PHRASE_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 const OPTICS_RE = /\b(faro|calavera|niebla)\b/i;
 
 const TREATMENT_RANK: Record<TreatmentDecision, number> = {
@@ -135,12 +145,13 @@ export function looksLikeReplacementCue(
   severidad: string,
   descripcionTecnica?: string,
 ): boolean {
+  const raw = String(descripcionTecnica ?? '').trim();
+  const blob = stripPosibleReemplazoPhrases(raw);
   const level = coerceDamageLevelCode(severidad);
   if (damageLevelRank(level) >= damageLevelRank('DF')) {
-    const blob = String(descripcionTecnica ?? '').trim();
-    if (!blob || BREAKAGE_RE.test(blob)) return true;
+    if (!raw || BREAKAGE_RE.test(blob)) return true;
   }
-  return REPLACE_CUE_RE.test(String(descripcionTecnica ?? ''));
+  return REPLACE_CUE_RE.test(blob);
 }
 
 export function strongerTreatment(
@@ -265,6 +276,12 @@ export function mergePhysicalPanelItems(
             b.possibleHiddenDamage ?? a.possibleHiddenDamage,
         }
       : {}),
+    ...(a.posibleReemplazoRefaccion || b.posibleReemplazoRefaccion
+      ? { posibleReemplazoRefaccion: true }
+      : {}),
+    ...(b.pricingStatus || a.pricingStatus
+      ? { pricingStatus: b.pricingStatus || a.pricingStatus }
+      : {}),
   };
 }
 
@@ -283,10 +300,27 @@ export function copyTreatmentFields(
       ? { refaccionDePieza: it.refaccionDePieza }
       : {}),
     ...(it.tratamiento ? { tratamiento: it.tratamiento } : {}),
+    ...(it.posibleReemplazoRefaccion
+      ? { posibleReemplazoRefaccion: true }
+      : {}),
     ...(it.priceSource ? { priceSource: it.priceSource } : {}),
+    ...(it.pricingStatus ? { pricingStatus: it.pricingStatus } : {}),
+    ...(it.pricingType ? { pricingType: it.pricingType } : {}),
     ...(it.possibleHiddenDamage
       ? { possibleHiddenDamage: it.possibleHiddenDamage }
       : {}),
+  };
+}
+
+export function cloneDetectedDamageItem(
+  it: DetectedDamageItem,
+): DetectedDamageItem {
+  return {
+    pieza: it.pieza,
+    severidad: it.severidad,
+    descripcionTecnica: it.descripcionTecnica,
+    urls_origen: [...(it.urls_origen ?? [])],
+    ...copyTreatmentFields(it),
   };
 }
 

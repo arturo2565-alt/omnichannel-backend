@@ -33,6 +33,8 @@ export interface DetectedDamageItem {
   refaccionDePieza?: string;
   /** Decisión comercial del valuador: REPARAR XOR SUSTITUIR. */
   tratamiento?: 'REPARAR' | 'SUSTITUIR' | 'INCIERTO' | 'PENDIENTE';
+  /** Visión: posible sustitución al revisar en físico. No cambia el tratamiento. */
+  posibleReemplazoRefaccion?: boolean;
   /** Origen del precio de refacción cuando tratamiento = SUSTITUIR. */
   priceSource?:
     | 'AUTOFIX_CATALOG'

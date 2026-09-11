@@ -19,6 +19,7 @@ import {
 } from '../catalog/panel-pieza-catalog';
 import {
   canonicalPhysicalPanelKey,
+  cloneDetectedDamageItem,
   copyTreatmentFields,
   mergePhysicalPanelItems,
 } from './piece-treatment';
@@ -63,15 +64,15 @@ export function parseDraftImageUrls(imageUrl: string): string[] {
 export function inventoryItemsToVehicleAnalysis(
   items: DetectedDamageItem[],
   sourceUrls: string[],
+  rootVehicle?: string | null,
 ): VehicleDamageAnalysis {
-  const inv: DetectedDamageItem[] = items.map((it) => ({
-    pieza: it.pieza,
-    severidad: it.severidad,
-    descripcionTecnica: it.descripcionTecnica,
-    urls_origen: [...(it.urls_origen ?? [])],
-    ...copyTreatmentFields(it),
-  }));
-  const vehiculoDetectado = pickVehicleLabelFromDamageInventory(inv);
+  const inv: DetectedDamageItem[] = items.map((it) =>
+    cloneDetectedDamageItem(it),
+  );
+  const vehiculoDetectado = pickVehicleLabelFromDamageInventory(
+    inv,
+    rootVehicle,
+  );
   const partes = [...new Set(inv.map((i) => i.pieza).filter(Boolean))];
   const worst = pickWorstDamageLevel(inv.map((i) => i.severidad));
   const piezaLabel =
@@ -257,15 +258,7 @@ export function mergeVisionIntoPriorInventory(
   }
 
   return {
-    mergedInventory: newInventory.map((it) => ({
-      pieza: it.pieza,
-      severidad: it.severidad,
-      descripcionTecnica: it.descripcionTecnica,
-      urls_origen: [...(it.urls_origen ?? [])],
-      ...(it.vehiculoDetectado?.trim()
-        ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
-        : {}),
-    })),
+    mergedInventory: newInventory.map((it) => cloneDetectedDamageItem(it)),
     complementMeta: null,
   };
 }

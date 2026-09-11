@@ -78,4 +78,32 @@ describe('quote-cart-analysis mergeVisionIntoPriorInventory', () => {
     expect(result.mergedInventory.map((i) => i.pieza)).toEqual(['Toldo']);
     expect(result.complementMeta?.previousPiezas ?? []).not.toContain('BPC');
   });
+
+  it('conserva tratamiento en el merge inicial sin carrito previo', () => {
+    const result = mergeVisionIntoPriorInventory(
+      [],
+      [
+        {
+          pieza: 'FD',
+          severidad: 'DMFuerte',
+          descripcionTecnica: 'Fascia',
+          urls_origen: [],
+          tratamiento: 'SUSTITUIR',
+        },
+        {
+          pieza: 'Cofre',
+          severidad: 'DMFuerte',
+          descripcionTecnica: 'posible reemplazo de refacción',
+          urls_origen: [],
+          tratamiento: 'REPARAR',
+          posibleReemplazoRefaccion: true,
+        },
+      ],
+    );
+    const fd = result.mergedInventory.find((i) => i.pieza === 'FD');
+    const cofre = result.mergedInventory.find((i) => i.pieza === 'Cofre');
+    expect(fd?.tratamiento).toBe('SUSTITUIR');
+    expect(cofre?.tratamiento).toBe('REPARAR');
+    expect(cofre?.posibleReemplazoRefaccion).toBe(true);
+  });
 });

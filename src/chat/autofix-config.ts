@@ -246,6 +246,8 @@ export interface DraftQuote {
   lines: DraftQuoteLine[];
   subtotal: number;
   total: number;
+  /** True si hay REFACCION sin precio de mercado; el total es parcial. */
+  pricingIncomplete?: boolean;
   /** Última versión enviada al cliente por WhatsApp/panel. */
   lastSendSnapshot?: QuoteSendSnapshot;
   /** Historial reciente de envíos (máx. ~20 en backend). */

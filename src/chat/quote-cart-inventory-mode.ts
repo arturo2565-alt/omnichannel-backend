@@ -2,7 +2,10 @@ import type { DetectedDamageItem } from './entities/chat.entity';
 import { isVisionBpcPiezaCode } from './vision-bpc-inventory';
 import { isRefaccionPieza } from '../catalog/panel-pieza-catalog';
 import { mergeCartInventoryItem } from './quote-cart-analysis';
-import { applyXorTreatmentsToInventory } from './piece-treatment';
+import {
+  applyXorTreatmentsToInventory,
+  cloneDetectedDamageItem,
+} from './piece-treatment';
 
 export type CartPricingMode = 'bpc' | 'piezas' | 'vacio';
 
@@ -52,22 +55,7 @@ export function sanitizeCartInventoryForPricing(
   if (mode === 'bpc') {
     return inventory
       .filter((it) => isVisionBpcPiezaCode(it.pieza) || isRefaccionPieza(it.pieza))
-      .map((it) => ({
-        pieza: it.pieza,
-        severidad: it.severidad,
-        descripcionTecnica: it.descripcionTecnica,
-        urls_origen: [...(it.urls_origen ?? [])],
-        ...(it.vehiculoDetectado?.trim()
-          ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
-          : {}),
-        ...(it.precioMx != null ? { precioMx: it.precioMx } : {}),
-        ...(it.detallesRefaccion
-          ? { detallesRefaccion: it.detallesRefaccion }
-          : {}),
-        ...(it.refaccionDePieza
-          ? { refaccionDePieza: it.refaccionDePieza }
-          : {}),
-      }));
+      .map((it) => cloneDetectedDamageItem(it));
   }
   return [];
 }

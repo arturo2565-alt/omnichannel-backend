@@ -284,7 +284,13 @@ export function draftQuoteLinesToClientePiezaRows(
   disclaimer?: string;
 }[] {
   return lines
-    .filter((l) => (l.billable === false ? false : l.subtotal > 0) || l.serviceType === 'PENDIENTE')
+    .filter(
+      (l) =>
+        l.serviceType === 'PENDIENTE' ||
+        (l.serviceType === 'REFACCION' &&
+          l.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE') ||
+        (l.billable === false ? false : l.subtotal > 0),
+    )
     .map((l) => {
       const rawLabel = piezaLabelFromDraftLineDescription(l.description);
       return {
@@ -297,6 +303,41 @@ export function draftQuoteLinesToClientePiezaRows(
         ...(l.disclaimer ? { disclaimer: l.disclaimer } : {}),
       };
     });
+}
+
+function formatClienteQuoteLinesBlock(
+  lineRows: readonly {
+    pieza: string;
+    precioMx: number;
+    description?: string;
+    billable?: boolean;
+    serviceType?: string;
+  }[],
+  total: number,
+): { linesText: string; totalLine: string } {
+  const priced = lineRows.filter((r) => r.precioMx > 0);
+  const pending = lineRows.filter(
+    (r) =>
+      r.precioMx <= 0 &&
+      (r.serviceType === 'REFACCION' ||
+        /precio pendiente de estimaci/i.test(r.description ?? '')),
+  );
+  const linesText = [
+    ...priced.map((r) =>
+      formatDraftQuoteLineToolEmoji(r.description || r.pieza, r.precioMx),
+    ),
+    ...pending.map(
+      (r) => `🛠️ ${r.description || `Refacción de ${r.pieza}: precio pendiente de estimación`}`,
+    ),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const amt = Math.max(0, Math.round(Number(total) || 0));
+  const totalLine =
+    pending.length > 0
+      ? `💰 **Subtotal parcial: $${amt.toLocaleString('es-MX')} MXN** *(cotización incompleta: falta el precio de refacción. El montaje/pintura no cubre la pieza de reemplazo).*`
+      : `💰 **Inversión Total Estimada: $${amt.toLocaleString('es-MX')} MXN** *(Sujeto a revisión física. Incluye materiales premium Sikkens y garantía).*`;
+  return { linesText, totalLine };
 }
 
 function formatClientePiezaLineExtra(pieza: string, precioMx: number): string {
@@ -314,20 +355,17 @@ export function buildClienteFormalNarrativeAgendado(opts: {
   damageIntro: string;
 }): string {
   const name = sanitizeClienteDisplayName(opts.contactName) || 'cliente';
-  const linesText = opts.lineRows
-    .filter((r) => r.precioMx > 0)
-    .map((r) =>
-      formatDraftQuoteLineToolEmoji(r.description || r.pieza, r.precioMx),
-    )
-    .join('\n');
-  const total = Math.max(0, Math.round(Number(opts.total) || 0));
+  const { linesText, totalLine } = formatClienteQuoteLinesBlock(
+    opts.lineRows,
+    opts.total,
+  );
   const when = String(opts.appointmentFormatted ?? '').trim() || 'el día acordado para tu visita';
   return [
     `👋 ¡Listo, ${name}! ${opts.damageIntro}`,
     `Aquí tienes el desglose de tu cotización:`,
     ``,
     linesText,
-    `💰 **Inversión Total Estimada: $${total.toLocaleString('es-MX')} MXN** *(Sujeto a revisión física. Incluye materiales premium Sikkens y garantía).*`,
+    totalLine,
     ``,
     `**Te esperamos este ${when} con tu vehículo en el taller.**`,
     ``,
@@ -344,20 +382,17 @@ export function buildClienteFormalNarrativeSinCita(opts: {
   damageIntro: string;
 }): string {
   const name = sanitizeClienteDisplayName(opts.contactName) || 'cliente';
-  const linesText = opts.lineRows
-    .filter((r) => r.precioMx > 0)
-    .map((r) =>
-      formatDraftQuoteLineToolEmoji(r.description || r.pieza, r.precioMx),
-    )
-    .join('\n');
-  const total = Math.max(0, Math.round(Number(opts.total) || 0));
+  const { linesText, totalLine } = formatClienteQuoteLinesBlock(
+    opts.lineRows,
+    opts.total,
+  );
   const mapLink = String(opts.mapsUrl ?? '').trim() || 'https://goo.gl/maps/tu-ubicacion-real';
   return [
     `👋 ¡Listo, ${name}! ${opts.damageIntro}`,
     `Aquí tienes el desglose de tu cotización:`,
     ``,
     linesText,
-    `💰 **Inversión Total Estimada: $${total.toLocaleString('es-MX')} MXN** *(Sujeto a revisión física. Incluye garantía y materiales premium Sikkens)*`,
+    totalLine,
     ``,
     `📍 Estamos aquí, fácil de llegar: ${mapLink}`,
     ``,
