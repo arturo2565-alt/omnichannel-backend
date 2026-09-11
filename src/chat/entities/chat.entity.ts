@@ -38,7 +38,21 @@ export interface DetectedDamageItem {
     | 'AUTOFIX_CATALOG'
     | 'MARKET'
     | 'FALLBACK'
-    | 'LEGACY_REPAIR_MATRIX_FALLBACK';
+    | 'LEGACY_REPAIR_MATRIX_FALLBACK'
+    | 'WEB_MARKET_ESTIMATE'
+    | 'INSUFFICIENT_MARKET_SAMPLE';
+  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE';
+  pricingType?: 'RANGE' | 'NONE';
+  precioMinEstimado?: number;
+  precioMaxEstimado?: number;
+  precioCentral?: number;
+  marketPrecioMin?: number;
+  marketPrecioMax?: number;
+  marketPrecioCentral?: number;
+  cantidadMuestras?: number;
+  cantidadDominios?: number;
+  providersUsed?: string[];
+  partTypeGroup?: string;
   /** Advertencia visual; no suma al total. */
   possibleHiddenDamage?: {
     detected: boolean;

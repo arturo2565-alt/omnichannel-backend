@@ -7,10 +7,20 @@ export type WebPriceHit = {
   price: number;
   source: 'serper' | 'tavily' | 'openai' | 'mercadolibre';
   snippet?: string;
+  title?: string;
+  url?: string;
 };
 
-const PRICE_MIN_MXN = 600;
-const PRICE_MAX_MXN = 12_000;
+export type WebOrganicHit = {
+  source: 'serper' | 'tavily' | 'openai';
+  title: string;
+  snippet: string;
+  url?: string;
+  prices: number[];
+};
+
+const PRICE_MIN_MXN = 400;
+const PRICE_MAX_MXN = 50_000;
 
 /** Query abierta México/CDMX. */
 export function buildRefaccionWebQuery(input: {
@@ -19,15 +29,32 @@ export function buildRefaccionWebQuery(input: {
   modelo?: string | null;
   anio?: string | null;
 }): string {
+  return buildRefaccionWebQueries(input)[0] ?? '';
+}
+
+export function buildRefaccionWebQueries(input: {
+  pieza: string;
+  marca?: string | null;
+  modelo?: string | null;
+  anio?: string | null;
+}): string[] {
   const pieza = String(input.pieza ?? '').trim();
-  const identity = [input.marca, input.modelo]
-    .map((s) => String(s ?? '').trim())
-    .filter(Boolean)
-    .join(' ');
+  const marca = String(input.marca ?? '').trim();
+  const modelo = String(input.modelo ?? '').trim();
+  const identity = [marca, modelo].filter(Boolean).join(' ');
+  const compact = `${marca}${modelo}`.replace(/\s+/g, '');
   const anio = String(input.anio ?? '').replace(/\D/g, '').slice(0, 4);
-  return `precio "${pieza}" "${identity}" ${anio} comprar mexico cdmx`
-    .replace(/\s+/g, ' ')
-    .trim();
+  const yearNum = Number(anio);
+  const yearBand =
+    Number.isFinite(yearNum) && yearNum >= 1990
+      ? `${yearNum - 1} ${anio} ${yearNum + 1}`
+      : anio;
+  const queries = [
+    [pieza, identity, anio, 'precio nuevo México'].filter(Boolean).join(' '),
+    [pieza, identity, anio, 'comprar'].filter(Boolean).join(' '),
+    [pieza, compact || identity, yearBand, 'precio'].filter(Boolean).join(' '),
+  ];
+  return [...new Set(queries.map((q) => q.replace(/\s+/g, ' ').trim()).filter(Boolean))];
 }
 
 function looksLikeYear(n: number): boolean {
@@ -88,7 +115,27 @@ function collectFromSnippets(
   return hits;
 }
 
-async function searchSerper(query: string): Promise<WebPriceHit[]> {
+function organicsFromRows(
+  source: WebOrganicHit['source'],
+  rows: Array<{ title?: string; snippet?: string; url?: string }>,
+): WebOrganicHit[] {
+  return rows
+    .map((r) => {
+      const title = String(r.title ?? '').trim();
+      const snippet = String(r.snippet ?? '').trim();
+      const blob = `${title} ${snippet}`;
+      return {
+        source,
+        title,
+        snippet,
+        url: String(r.url ?? '').trim() || undefined,
+        prices: extractMxnPricesFromText(blob),
+      };
+    })
+    .filter((r) => r.title || r.snippet);
+}
+
+async function searchSerperOrganics(query: string): Promise<WebOrganicHit[]> {
   const key = String(process.env.SERPER_API_KEY ?? '').trim();
   if (!key) return [];
   const res = await fetch('https://google.serper.dev/search', {
@@ -102,18 +149,36 @@ async function searchSerper(query: string): Promise<WebPriceHit[]> {
   });
   if (!res.ok) return [];
   const json = (await res.json()) as {
-    organic?: Array<{ title?: string; snippet?: string }>;
+    organic?: Array<{ title?: string; snippet?: string; link?: string }>;
     answerBox?: { answer?: string; snippet?: string };
   };
-  const snippets = [
-    json.answerBox?.answer,
-    json.answerBox?.snippet,
-    ...(json.organic ?? []).flatMap((r) => [r.title, r.snippet]),
-  ].filter((s): s is string => Boolean(s?.trim()));
-  return collectFromSnippets(snippets, 'serper');
+  const rows = [
+    {
+      title: json.answerBox?.answer,
+      snippet: json.answerBox?.snippet,
+    },
+    ...(json.organic ?? []).map((r) => ({
+      title: r.title,
+      snippet: r.snippet,
+      url: r.link,
+    })),
+  ];
+  return organicsFromRows('serper', rows);
 }
 
-async function searchTavily(query: string): Promise<WebPriceHit[]> {
+async function searchSerper(query: string): Promise<WebPriceHit[]> {
+  return (await searchSerperOrganics(query)).flatMap((o) =>
+    o.prices.map((price) => ({
+      price,
+      source: 'serper' as const,
+      snippet: o.snippet.slice(0, 180),
+      title: o.title,
+      url: o.url,
+    })),
+  );
+}
+
+async function searchTavilyOrganics(query: string): Promise<WebOrganicHit[]> {
   const key = String(process.env.TAVILY_API_KEY ?? '').trim();
   if (!key) return [];
   const res = await fetch('https://api.tavily.com/search', {
@@ -131,13 +196,28 @@ async function searchTavily(query: string): Promise<WebPriceHit[]> {
   if (!res.ok) return [];
   const json = (await res.json()) as {
     answer?: string;
-    results?: Array<{ title?: string; content?: string }>;
+    results?: Array<{ title?: string; content?: string; url?: string }>;
   };
-  const snippets = [
-    json.answer,
-    ...(json.results ?? []).flatMap((r) => [r.title, r.content]),
-  ].filter((s): s is string => Boolean(s?.trim()));
-  return collectFromSnippets(snippets, 'tavily');
+  return organicsFromRows('tavily', [
+    { title: json.answer, snippet: json.answer },
+    ...(json.results ?? []).map((r) => ({
+      title: r.title,
+      snippet: r.content,
+      url: r.url,
+    })),
+  ]);
+}
+
+async function searchTavily(query: string): Promise<WebPriceHit[]> {
+  return (await searchTavilyOrganics(query)).flatMap((o) =>
+    o.prices.map((price) => ({
+      price,
+      source: 'tavily' as const,
+      snippet: o.snippet.slice(0, 180),
+      title: o.title,
+      url: o.url,
+    })),
+  );
 }
 
 async function searchOpenAiWeb(query: string): Promise<WebPriceHit[]> {
@@ -198,4 +278,36 @@ export async function searchRefaccionWebPrices(
     }
   }
   return all;
+}
+
+/** Orgánicos con título/url para el provider de web search. */
+export async function searchRefaccionWebOrganics(
+  queries: readonly string[],
+): Promise<WebOrganicHit[]> {
+  if (webSearchDisabled()) return [];
+  const q = queries.filter(Boolean).slice(0, 2);
+  const serper = (
+    await Promise.all(q.map((query) => searchSerperOrganics(query).catch(() => [])))
+  ).flat();
+  if (serper.length >= 3) return serper;
+  const tavily = (
+    await Promise.all(q.map((query) => searchTavilyOrganics(query).catch(() => [])))
+  ).flat();
+  const merged = [...serper, ...tavily];
+  if (merged.length >= 3) return merged;
+  try {
+    const openaiHits = await searchOpenAiWeb(q[0] ?? '');
+    for (const h of openaiHits) {
+      merged.push({
+        source: 'openai',
+        title: h.title || h.snippet || '',
+        snippet: h.snippet ?? '',
+        url: h.url,
+        prices: [h.price],
+      });
+    }
+  } catch {
+    /* sin OpenAI */
+  }
+  return merged;
 }

@@ -2,7 +2,6 @@ import {
   looksLikeEvidentBreakage,
   precioAlClienteConMargen,
   buildRefaccionDisclaimer,
-  pickRefaccionClienteQuote,
 } from './refaccion-mercado';
 
 describe('refaccion-mercado', () => {
@@ -24,39 +23,12 @@ describe('refaccion-mercado', () => {
     expect(buildRefaccionDisclaimer('Fascia delantera', 1450)).toMatch(/1,450/);
   });
 
-  it('prioriza catálogo AutoFix sobre mercado y fallback', () => {
-    const picked = pickRefaccionClienteQuote({
-      catalogo: { precioAlCliente: 9900, costoReferenciaBase: 7600, nombre: 'Cofre OEM' },
-      mercado: { precioAlCliente: 5850, costoBase: 4500, fuente: 'estimacion' },
-      pieza: 'Cofre',
-    });
-    expect(picked.priceSource).toBe('AUTOFIX_CATALOG');
-    expect(picked.precioAlCliente).toBe(9900);
-  });
-
-  it('mercado gana sobre fallback hardcodeado', () => {
-    const picked = pickRefaccionClienteQuote({
-      catalogo: null,
-      mercado: { precioAlCliente: 7200, costoBase: 5500, fuente: 'mercadolibre' },
-      pieza: 'Cofre',
-    });
-    expect(picked.priceSource).toBe('MARKET');
-    expect(picked.precioAlCliente).toBe(7200);
-  });
-
-  it('FALLBACK queda identificado cuando no hay catálogo ni mercado', () => {
-    const picked = pickRefaccionClienteQuote({
-      catalogo: null,
-      mercado: null,
-      pieza: 'Cofre',
-    });
-    expect(picked.priceSource).toBe('FALLBACK');
-    expect(picked.precioAlCliente).toBe(5850);
-    expect(buildRefaccionDisclaimer('Cofre', picked.precioAlCliente, 'FALLBACK')).toMatch(
-      /estimado genérico/,
-    );
-    expect(buildRefaccionDisclaimer('Cofre', picked.precioAlCliente, 'FALLBACK')).toMatch(
-      /no es precio específico/,
-    );
+  it('INSUFFICIENT_MARKET_SAMPLE no inventa precio de unidad', () => {
+    expect(
+      buildRefaccionDisclaimer('Cofre', 0, 'INSUFFICIENT_MARKET_SAMPLE'),
+    ).toMatch(/muestras de mercado suficientes/);
+    expect(
+      buildRefaccionDisclaimer('Cofre', 0, 'INSUFFICIENT_MARKET_SAMPLE'),
+    ).not.toMatch(/5,850|4500/);
   });
 });

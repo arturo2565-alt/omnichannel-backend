@@ -40,6 +40,8 @@ export const REFACCION_PRICE_SOURCES = [
   'MARKET',
   'FALLBACK',
   'LEGACY_REPAIR_MATRIX_FALLBACK',
+  'WEB_MARKET_ESTIMATE',
+  'INSUFFICIENT_MARKET_SAMPLE',
 ] as const;
 
 export type RefaccionPriceSource = (typeof REFACCION_PRICE_SOURCES)[number];

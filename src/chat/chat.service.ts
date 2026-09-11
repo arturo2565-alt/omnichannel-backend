@@ -124,9 +124,11 @@ import {
   buildRefaccionDisclaimer,
   buildRefaccionInventoryItem,
   estimarRefaccionMercado,
-  pickRefaccionClienteQuote,
   piezaLabelForRefaccion,
 } from './refaccion-mercado';
+import { applyMarketEstimateToItem } from './refaccion-market/apply-estimate-to-item';
+import { parseVehiclePartIdentity } from './refaccion-market/parse-vehicle-part-identity';
+import { RefaccionMarketService } from './refaccion-market/refaccion-market.orchestrator';
 import { canonicalizePanelCode } from '../catalog/panel-pieza-catalog';
 import { RefaccionesService } from '../catalog/refacciones.service';
 import {
@@ -741,6 +743,8 @@ export class ChatService implements OnModuleDestroy {
     private readonly catalogService: CatalogService,
 
     private readonly refaccionesService: RefaccionesService,
+
+    private readonly refaccionMarketService: RefaccionMarketService,
 
     private readonly tallerService: TallerService,
 
@@ -1581,14 +1585,10 @@ export class ChatService implements OnModuleDestroy {
 
   private async enrichInventoryWithMarketRefacciones(
     analysis: VehicleDamageAnalysis,
-    tallerId?: string | null,
+    _tallerId?: string | null,
   ): Promise<VehicleDamageAnalysis> {
     const collapsed = applyXorTreatmentsToInventory(analysis.inventory ?? []);
     if (!collapsed.length) return analysis;
-    const vehicleId = parseVehicleYearAndModel(
-      analysis.vehiculoDetectado ?? '',
-      '',
-    );
     const next: DetectedDamageItem[] = [];
     for (const it of collapsed) {
       const tratamiento = inferTreatmentDecision(it, collapsed);
@@ -1596,38 +1596,21 @@ export class ChatService implements OnModuleDestroy {
         next.push({ ...it, tratamiento });
         continue;
       }
-      const catalogo = await this.refaccionesService.resolveClienteQuote(
-        tallerId,
-        it.pieza,
-      );
-      let mercado: Awaited<ReturnType<typeof estimarRefaccionMercado>> | null =
-        null;
-      if (!catalogo && vehicleId.confirmed) {
-        mercado = await estimarRefaccionMercado({
-          pieza: it.pieza,
-          vehiculo: vehicleId.modelo || analysis.vehiculoDetectado || '',
-          anio: vehicleId.anio,
-        });
-      }
-      const picked = pickRefaccionClienteQuote({
-        catalogo,
-        mercado:
-          mercado && mercado.success
-            ? {
-                precioAlCliente: mercado.precioAlCliente,
-                costoBase: mercado.costoBase,
-                fuente: mercado.fuente === 'catalogo' ? 'estimacion' : mercado.fuente,
-              }
-            : null,
+      const identity = parseVehiclePartIdentity({
+        vehiculoText: analysis.vehiculoDetectado ?? '',
         pieza: it.pieza,
       });
-      next.push({
-        ...it,
-        tratamiento: 'SUSTITUIR',
-        precioMx: picked.precioAlCliente,
-        priceSource: picked.priceSource,
-        detallesRefaccion: picked.nombre || it.detallesRefaccion,
-      });
+      const estimate = await this.refaccionMarketService.estimate(identity);
+      next.push(
+        applyMarketEstimateToItem(
+          {
+            ...it,
+            tratamiento: 'SUSTITUIR',
+            detallesRefaccion: it.detallesRefaccion,
+          },
+          estimate,
+        ),
+      );
     }
     return { ...analysis, inventory: next };
   }

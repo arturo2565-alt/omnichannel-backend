@@ -205,7 +205,16 @@ export interface DraftQuoteLine {
     | 'AUTOFIX_CATALOG'
     | 'MARKET'
     | 'FALLBACK'
-    | 'LEGACY_REPAIR_MATRIX_FALLBACK';
+    | 'LEGACY_REPAIR_MATRIX_FALLBACK'
+    | 'WEB_MARKET_ESTIMATE'
+    | 'INSUFFICIENT_MARKET_SAMPLE';
+  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE';
+  pricingType?: 'RANGE' | 'NONE';
+  precioMinEstimado?: number;
+  precioMaxEstimado?: number;
+  precioCentral?: number;
+  cantidadMuestras?: number;
+  cantidadDominios?: number;
   disclaimer?: string;
 }
 

@@ -1,7 +1,4 @@
 import {
-  pickRefaccionClienteQuote,
-} from './refaccion-mercado';
-import {
   quoteRowsFromDamageInventory,
   resolveMontajePinturaPrice,
 } from './draft-quote-inventory-pricing';
@@ -79,40 +76,33 @@ describe('substitution pricing sources', () => {
     expect(montaje?.precioMx).toBe(2900);
     expect(montaje?.priceSource).toBe('LEGACY_REPAIR_MATRIX_FALLBACK');
     const refaccion = rows.find((r) => r.serviceType === 'REFACCION');
-    expect(refaccion?.priceSource).toBe('FALLBACK');
+    expect(refaccion?.precioMx).toBe(3650);
   });
 
-  it('precio AutoFix de refacción gana sobre mercado y fallback', () => {
-    const picked = pickRefaccionClienteQuote({
-      catalogo: {
-        precioAlCliente: 11200,
-        costoReferenciaBase: 8600,
-        nombre: 'Cofre AutoFix',
-      },
-      mercado: { precioAlCliente: 7200, costoBase: 5500, fuente: 'mercadolibre' },
-      pieza: 'Cofre',
+  it('REFACCION sin muestra no inventa Cofre=4500', () => {
+    const snap = mockPricingSnap({
+      'Cofre|MONTAJE_PINTURA': 6900,
     });
-    expect(picked.priceSource).toBe('AUTOFIX_CATALOG');
-    expect(picked.precioAlCliente).toBe(11200);
-  });
-
-  it('mercado gana sobre fallback', () => {
-    const picked = pickRefaccionClienteQuote({
-      catalogo: null,
-      mercado: { precioAlCliente: 7200, costoBase: 5500, fuente: 'mercadolibre' },
-      pieza: 'FD',
-    });
-    expect(picked.priceSource).toBe('MARKET');
-    expect(picked.precioAlCliente).toBe(7200);
-  });
-
-  it('FALLBACK queda identificado y no se presenta como catálogo', () => {
-    const picked = pickRefaccionClienteQuote({
-      catalogo: null,
-      mercado: { precioAlCliente: 5850, costoBase: 4500, fuente: 'estimacion' },
-      pieza: 'Cofre',
-    });
-    expect(picked.priceSource).toBe('FALLBACK');
-    expect(picked.precioAlCliente).toBe(5850);
+    const rows = quoteRowsFromDamageInventory(
+      [
+        {
+          pieza: 'Cofre',
+          severidad: 'DMFuerte',
+          descripcionTecnica: 'Cofre',
+          urls_origen: [],
+          tratamiento: 'SUSTITUIR',
+          pricingStatus: 'INSUFFICIENT_MARKET_SAMPLE',
+          priceSource: 'INSUFFICIENT_MARKET_SAMPLE',
+        },
+      ],
+      snap,
+    );
+    const refaccion = rows.find((r) => r.serviceType === 'REFACCION');
+    expect(refaccion?.precioMx).toBe(0);
+    expect(refaccion?.billable).toBe(false);
+    expect(refaccion?.priceSource).toBe('INSUFFICIENT_MARKET_SAMPLE');
+    expect(refaccion?.pricingStatus).toBe('INSUFFICIENT_MARKET_SAMPLE');
+    const montaje = rows.find((r) => r.serviceType === 'MONTAJE_PINTURA');
+    expect(montaje?.precioMx).toBe(6900);
   });
 });

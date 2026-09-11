@@ -20,7 +20,6 @@ import {
   resolveCatalogPiezaForMatrixLookup,
   resolveMatrixServicioRaw,
 } from '../catalog/panel-pieza-catalog';
-import { refaccionFallbackPrecioAlCliente } from './refaccion-mercado';
 import {
   applyXorTreatmentsToInventory,
   canonicalPhysicalPanelKey,
@@ -58,6 +57,13 @@ export interface QuoteRowInput {
   physicalPanelKey?: string;
   billable?: boolean;
   priceSource?: RefaccionPriceSource;
+  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE';
+  pricingType?: 'RANGE' | 'NONE';
+  precioMinEstimado?: number;
+  precioMaxEstimado?: number;
+  precioCentral?: number;
+  cantidadMuestras?: number;
+  cantidadDominios?: number;
   disclaimer?: string;
 }
 
@@ -154,6 +160,21 @@ function attachStructured(
     physicalPanelKey: row.physicalPanelKey,
     billable: row.billable !== false && quoteRowSubtotalForTotal(row) > 0,
     ...(row.priceSource ? { priceSource: row.priceSource } : {}),
+    ...(row.pricingStatus ? { pricingStatus: row.pricingStatus } : {}),
+    ...(row.pricingType ? { pricingType: row.pricingType } : {}),
+    ...(row.precioMinEstimado != null
+      ? { precioMinEstimado: row.precioMinEstimado }
+      : {}),
+    ...(row.precioMaxEstimado != null
+      ? { precioMaxEstimado: row.precioMaxEstimado }
+      : {}),
+    ...(row.precioCentral != null ? { precioCentral: row.precioCentral } : {}),
+    ...(row.cantidadMuestras != null
+      ? { cantidadMuestras: row.cantidadMuestras }
+      : {}),
+    ...(row.cantidadDominios != null
+      ? { cantidadDominios: row.cantidadDominios }
+      : {}),
     ...(row.disclaimer ? { disclaimer: row.disclaimer } : {}),
   };
 }
@@ -452,13 +473,14 @@ export function quoteRowsFromDamageInventory(
     if (tratamiento === 'SUSTITUIR') {
       const rawPart = Number(it.precioMx);
       const hasValidPart = Number.isFinite(rawPart) && rawPart > 0;
-      const partPrice = hasValidPart
-        ? Math.round(rawPart)
-        : it.precioMx == null
-          ? refaccionFallbackPrecioAlCliente(panelCode)
-          : 0;
+      const insufficient =
+        it.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE' ||
+        it.priceSource === 'INSUFFICIENT_MARKET_SAMPLE' ||
+        !hasValidPart;
+      const partPrice = hasValidPart ? Math.round(rawPart) : 0;
       const priceSource =
-        it.priceSource ?? (hasValidPart ? undefined : 'FALLBACK');
+        it.priceSource ??
+        (hasValidPart ? 'WEB_MARKET_ESTIMATE' : 'INSUFFICIENT_MARKET_SAMPLE');
       rows.push({
         pieza: `REFACCION:${panelCode}`,
         severidad: 'N/A',
@@ -467,8 +489,20 @@ export function quoteRowsFromDamageInventory(
         tratamiento: 'SUSTITUIR',
         serviceType: 'REFACCION',
         physicalPanelKey: panelCode,
-        billable: partPrice > 0,
+        billable: partPrice > 0 && !insufficient,
         priceSource,
+        pricingStatus: insufficient
+          ? 'INSUFFICIENT_MARKET_SAMPLE'
+          : it.pricingStatus ?? 'OK',
+        pricingType: it.pricingType ?? (hasValidPart ? 'RANGE' : 'NONE'),
+        precioMinEstimado: it.precioMinEstimado,
+        precioMaxEstimado: it.precioMaxEstimado,
+        precioCentral: it.precioCentral,
+        cantidadMuestras: it.cantidadMuestras,
+        cantidadDominios: it.cantidadDominios,
+        disclaimer: insufficient
+          ? `Refacción de ${display}: sin muestra de mercado suficiente para esta unidad. Se confirma en físico.`
+          : undefined,
         description: `Refacción de ${display}`,
         descripcionServicio: `Refacción de ${display}`,
       });
