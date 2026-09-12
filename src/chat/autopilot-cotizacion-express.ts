@@ -17,8 +17,12 @@ import {
   isEsteticaAutomotrizCanonical,
   materializeIntegralQuoteResolution,
   mentionsBañoDePinturaIntent,
-  resolveBañoCanonicalFromSnap,
 } from './instant-quote-from-text';
+import {
+  PRODUCT_CONFIGURATION_REQUIRED,
+  resolveBanioCodeFromServicioText,
+  lookupBanioCatalogBase,
+} from '../catalog/banio-service-identity';
 import {
   findPanelPiezaOption,
   PANEL_PIEZA_OPTIONS,
@@ -203,46 +207,59 @@ export function buildObtenerCotizacionExpressPayload(
   const piezaRequests = servicioList.filter((s) => !servicioSolicitudLooksLikeBano(s));
 
   if (banoRequests.length > 0) {
-    const banoCanonical = resolveBañoCanonicalFromSnap(snap);
-    if (!banoCanonical) {
-      return {
-        success: false,
-        error: 'Baño de pintura no disponible en el catálogo actual.',
-      };
-    }
+    const codes = [
+      ...new Set(banoRequests.map((s) => resolveBanioCodeFromServicioText(s))),
+    ];
+    for (const code of codes) {
+      const lookup = lookupBanioCatalogBase(snap, code);
+      if (lookup.status === 'UNCONFIGURED') {
+        return {
+          success: false,
+          error: `${PRODUCT_CONFIGURATION_REQUIRED}: ${code} (${lookup.catalogName}) no tiene precio de catálogo.`,
+          producto: PRODUCT_CONFIGURATION_REQUIRED,
+          banioCode: code,
+        } as ObtenerCotizacionExpressResult & {
+          producto: string;
+          banioCode: string;
+        };
+      }
 
-    const resolution = materializeIntegralQuoteResolution(snap, {
-      canonical: banoCanonical,
-      vehicleProfile,
-      pricingRules: options?.pricingRules,
-      tierSourceForCambioColor: tierCtx,
-      resolveVia: 'bano_pintura_synonym',
-      latestPreview: modelo,
-      fullCtxPreview: tierCtx,
-    });
-
-    if (!resolution) {
-      return {
-        success: false,
-        error: 'No se pudo calcular el baño de pintura para ese vehículo.',
-      };
-    }
-
-    for (const line of resolution.lines) {
-      lines.push({
-        servicio: line.label,
-        canonical: banoCanonical,
-        tipo: 'bano_pintura',
-        severidad: vehicleProfile.sizeTier,
-        cantidad: 1,
-        precioUnitarioMx: Math.round(line.amount),
-        precioLineaMx: Math.round(line.amount),
+      const resolution = materializeIntegralQuoteResolution(snap, {
+        canonical: lookup.catalogName,
+        vehicleProfile,
+        pricingRules: options?.pricingRules,
+        tierSourceForCambioColor: tierCtx,
+        resolveVia: 'bano_pintura_synonym',
+        latestPreview: modelo,
+        fullCtxPreview: tierCtx,
+        skipCambioDeColorAddon: true,
       });
+
+      if (!resolution) {
+        return {
+          success: false,
+          error: `${PRODUCT_CONFIGURATION_REQUIRED}: no se pudo cotizar ${code}.`,
+          producto: PRODUCT_CONFIGURATION_REQUIRED,
+          banioCode: code,
+        } as ObtenerCotizacionExpressResult & {
+          producto: string;
+          banioCode: string;
+        };
+      }
+
+      for (const line of resolution.lines) {
+        lines.push({
+          servicio: line.label,
+          canonical: lookup.catalogName,
+          tipo: 'bano_pintura',
+          severidad: vehicleProfile.sizeTier,
+          cantidad: 1,
+          precioUnitarioMx: Math.round(line.amount),
+          precioLineaMx: Math.round(line.amount),
+        });
+      }
+      diasEntrega = Math.max(diasEntrega, resolution.diasEntrega);
     }
-    for (const ex of resolution.extras) {
-      extras.push({ label: ex.label, amount: Math.round(ex.amount) });
-    }
-    diasEntrega = Math.max(diasEntrega, resolution.diasEntrega);
   }
 
   const occurrenceByCanonical = new Map<string, number>();

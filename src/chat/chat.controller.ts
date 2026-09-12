@@ -225,10 +225,14 @@ export class ChatController {
   @Post('draft-quote/preview-narrative')
   @HttpCode(HttpStatus.OK)
   async previewDraftQuoteNarrative(
+    @CurrentUser() user: AuthenticatedUser,
     @Body() body: PreviewDraftQuoteNarrativeBody,
   ) {
     const narrative =
-      await this.chatService.previewDraftQuoteClientNarrative(body);
+      await this.chatService.previewDraftQuoteClientNarrative(
+        body,
+        user.tallerId,
+      );
     return { narrative };
   }
 

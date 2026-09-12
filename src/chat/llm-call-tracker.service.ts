@@ -92,6 +92,25 @@ export class LlmCallTrackerService implements OnModuleInit, OnModuleDestroy {
       cachedTokens,
       estimatedCostUsd: cost.toFixed(6),
       durationMs: Math.max(0, Math.floor(Number(input.durationMs) || 0)),
+      visionPromptVersion: input.visionPromptVersion
+        ? String(input.visionPromptVersion).trim().slice(0, 32)
+        : null,
+      chatPromptVersion: input.chatPromptVersion
+        ? String(input.chatPromptVersion).trim().slice(0, 32)
+        : null,
+      baseChatPromptVersion: input.baseChatPromptVersion
+        ? String(input.baseChatPromptVersion).trim().slice(0, 32)
+        : null,
+      catalogAppendVersion: input.catalogAppendVersion
+        ? String(input.catalogAppendVersion).trim().slice(0, 32)
+        : null,
+      effectiveChatPromptHash: input.effectiveChatPromptHash
+        ? String(input.effectiveChatPromptHash).trim().slice(0, 32)
+        : null,
+      caseId: input.caseId ? String(input.caseId).trim().slice(0, 128) : null,
+      promptLabel: input.promptLabel
+        ? String(input.promptLabel).trim().slice(0, 64)
+        : null,
     });
     return this.llmCallRepository.save(row);
   }

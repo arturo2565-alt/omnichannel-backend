@@ -4,6 +4,9 @@ export type CotizacionDesgloseLine = {
   precioMx: number;
   /** Rango superior — posibles daños internos (sujeto a desarme). */
   precioMaximo?: number;
+  quoteLineId?: string;
+  damageItemId?: string;
+  serviceType?: string;
 };
 
 export type CotizacionToolEnvelope = {

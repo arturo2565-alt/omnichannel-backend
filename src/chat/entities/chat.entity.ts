@@ -25,7 +25,7 @@ export interface DetectedDamageItem {
   vehiculoDetectado?: string;
   /** Copia del inventario antes de colapsar a BPC (solo en fila BPC). */
   inventarioVisualPrevio?: DetectedDamageItem[];
-  /** Precio manual (refacción de mercado). */
+  /** Precio de investigación de mercado (CANONICAL). No catálogo genérico. */
   precioMx?: number;
   /** Nombre de la refacción (panel / tool estimarRefaccionMercado). */
   detallesRefaccion?: string;
@@ -33,6 +33,20 @@ export interface DetectedDamageItem {
   refaccionDePieza?: string;
   /** Decisión comercial del valuador: REPARAR XOR SUSTITUIR. */
   tratamiento?: 'REPARAR' | 'SUSTITUIR' | 'INCIERTO' | 'PENDIENTE';
+  /** Identidad vehicular estable cuando se conoce (merge key canónico). */
+  vehicleId?: string;
+  /** Identidad estable del daño (vehicleId + physicalPanelKey). */
+  damageItemId?: string;
+  /** Origen del tratamiento: lock vs inferencia legacy. */
+  treatmentSource?:
+    | 'vision'
+    | 'user'
+    | 'operator'
+    | 'merge_rule'
+    | 'degraded'
+    | 'legacy';
+  /** Razón trazable de la resolución (lock / legacy / missing). */
+  treatmentReason?: string;
   /** Visión: posible sustitución al revisar en físico. No cambia el tratamiento. */
   posibleReemplazoRefaccion?: boolean;
   /** Origen del precio de refacción cuando tratamiento = SUSTITUIR. */
@@ -42,7 +56,8 @@ export interface DetectedDamageItem {
     | 'FALLBACK'
     | 'LEGACY_REPAIR_MATRIX_FALLBACK'
     | 'WEB_MARKET_ESTIMATE'
-    | 'INSUFFICIENT_MARKET_SAMPLE';
+    | 'INSUFFICIENT_MARKET_SAMPLE'
+    | 'UNCONFIGURED';
   pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE';
   pricingType?: 'RANGE' | 'NONE';
   precioMinEstimado?: number;

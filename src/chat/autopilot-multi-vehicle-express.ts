@@ -1,4 +1,8 @@
 import type { CotizacionExpressDesgloseLine } from './autopilot-cotizacion-express';
+import {
+  CANONICAL_LLM_TOOL_INSTRUCTION,
+  sanitizeToolResultForLlm,
+} from './llm-tool-result-sanitize';
 
 export type MultiVehicleExpressEntry = {
   modeloVehiculo: string;
@@ -9,9 +13,14 @@ export type MultiVehicleExpressEntry = {
   servicios?: string[];
 };
 
+/**
+ * Agregado INTERNO. combinedTotal / totalCombinadoMx no se exponen al LLM.
+ * El mensaje al cliente se compone desde CanonicalQuotes individuales.
+ */
 export type CotizacionMultiVehiculoAggregate = {
   cantidadVehiculos: number;
   vehiculos: MultiVehicleExpressEntry[];
+  /** Presentación interna. No enviar al modelo. */
   totalCombinadoMx: number;
   instruccionParaModelo: string;
 };
@@ -28,7 +37,23 @@ export function buildCotizacionMultiVehiculoAggregate(
     cantidadVehiculos: vehiculos.length,
     vehiculos,
     totalCombinadoMx,
-    instruccionParaModelo: `Cotización simultánea de ${vehiculos.length} vehículos. Presenta cada presupuesto por separado (modelo + desglose + totalMx de ese vehículo). Para el gran total combinado usa EXACTAMENTE totalCombinadoMx (${totalCombinadoMx.toLocaleString('es-MX')} MXN). PROHIBIDO sumar precios mentalmente.`,
+    instruccionParaModelo: `Cotización simultánea de ${vehiculos.length} vehículos. ${CANONICAL_LLM_TOOL_INSTRUCTION}`,
+  };
+}
+
+export function buildMultiVehicleLlmView(
+  entries: readonly MultiVehicleExpressEntry[],
+): Record<string, unknown> {
+  const labels = entries
+    .map((e) => String(e.vehicleDisplayLabel || e.modeloVehiculo || '').trim())
+    .filter(Boolean);
+  return {
+    quoteUpdated: true,
+    quoteMode: 'CANONICAL',
+    requiresCanonicalComposition: true,
+    vehicleCount: entries.length,
+    vehicleLabels: labels,
+    instruccionParaModelo: `Cotización simultánea de ${entries.length} vehículos. ${CANONICAL_LLM_TOOL_INSTRUCTION}`,
   };
 }
 
@@ -97,30 +122,36 @@ export class MultiVehicleExpressTracker {
 
     return {
       ...payload,
-      cotizacionMultiVehiculo: buildCotizacionMultiVehiculoAggregate(
-        this.entries,
-      ),
+      /** Interno: el sanitizer lo retira antes de enviarlo al modelo. */
+      _internalMultiVehicle: buildCotizacionMultiVehiculoAggregate(this.entries),
+      ...buildMultiVehicleLlmView(this.entries),
     };
   }
 
-  /** Inyecta el agregado en todas las salidas express del mismo batch. */
+  /** Inyecta la vista LLM (sin importes) en todas las salidas express del batch. */
   patchBatchOutputs(
     batch: ReadonlyArray<{ name: string; output: string }>,
   ): void {
     if (this.entries.length < 2) return;
-    const aggregate = buildCotizacionMultiVehiculoAggregate(this.entries);
+    const llmView = buildMultiVehicleLlmView(this.entries);
     for (const item of batch) {
       if (item.name !== 'obtenerCotizacionExpress') continue;
       try {
         const parsed = JSON.parse(item.output) as Record<string, unknown>;
         if (parsed.success !== true) continue;
-        item.output = JSON.stringify({
-          ...parsed,
-          cotizacionMultiVehiculo: aggregate,
-        });
+        item.output = JSON.stringify(
+          sanitizeToolResultForLlm(
+            { ...parsed, ...llmView, quoteFlowMode: 'CANONICAL' },
+            { toolName: 'obtenerCotizacionExpress' },
+          ),
+        );
       } catch {
         /* ignore malformed output */
       }
     }
+  }
+
+  getInternalEntries(): readonly MultiVehicleExpressEntry[] {
+    return this.entries;
   }
 }

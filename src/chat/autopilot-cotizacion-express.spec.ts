@@ -86,7 +86,7 @@ describe('autopilot-cotizacion-express', () => {
     expect(result.totalMx).toBe(31850);
   });
 
-  it('BPCC se cotiza como un solo servicio llave en mano, sin extras', () => {
+  it('BPCC sin fila propia no se cotiza como BPE', () => {
     const snap = createMatrixPricingSnapshot(
       matrixRows([
         {
@@ -102,11 +102,7 @@ describe('autopilot-cotizacion-express', () => {
       isPremium: false,
     });
     const result = buildObtenerCotizacionExpressPayload(snap, ['BPCC'], profile);
-    expect(result.success).toBe(true);
-    expect(result.extras).toBeUndefined();
-    expect(result.lines).toHaveLength(1);
-    expect(result.lines?.[0]?.servicio).toMatch(/Transformación Total/);
-    expect(result.totalMx).toBe(result.subtotalMx);
-    expect(result.totalMx).toBe(31_000);
+    expect(result.success).toBe(false);
+    expect(String(result.error ?? '')).toMatch(/PRODUCT_CONFIGURATION_REQUIRED/);
   });
 });

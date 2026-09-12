@@ -25,6 +25,7 @@ import {
   aggregateMontajePinturaRows,
   MONTAJE_PINTURA_SEVERIDAD,
 } from './montaje-pintura-catalog';
+import { ensureBanioIntegralSlots } from './banio-service-identity';
 
 @Injectable()
 export class CatalogService {
@@ -121,7 +122,12 @@ export class CatalogService {
     const rows = await this.findAllPriceMatrixRows(tid);
     const rules = await this.getPricingRules(tid);
     const pieceBases = aggregatePieceBaseRows(rows);
-    const integralBases = aggregateIntegralBaseRows(rows);
+    const integralBases = ensureBanioIntegralSlots(
+      aggregateIntegralBaseRows(rows).map((r) => ({
+        ...r,
+        configStatus: r.basePrice > 0 ? 'READY' : 'UNCONFIGURED',
+      })),
+    );
     const montajePinturaBases = aggregateMontajePinturaRows(rows);
     return { rules, pieceBases, integralBases, montajePinturaBases };
   }

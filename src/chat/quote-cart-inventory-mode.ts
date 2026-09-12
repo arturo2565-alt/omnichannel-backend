@@ -77,17 +77,7 @@ export function mergeCartInventoryWithPricingMode(
     );
   }
   if (isVisionBpcPiezaCode(incoming.pieza)) {
-    return [
-      {
-        pieza: incoming.pieza,
-        severidad: incoming.severidad,
-        descripcionTecnica: incoming.descripcionTecnica,
-        urls_origen: [...(incoming.urls_origen ?? [])],
-        ...(incoming.vehiculoDetectado?.trim()
-          ? { vehiculoDetectado: incoming.vehiculoDetectado.trim() }
-          : {}),
-      },
-    ];
+    return [cloneDetectedDamageItem(incoming)];
   }
 
   const withoutBpc = inventory.filter((it) => !isVisionBpcPiezaCode(it.pieza));

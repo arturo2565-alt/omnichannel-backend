@@ -99,7 +99,10 @@ export function resolveVisionBanioCode(
   return 'BPE';
 }
 
-/** BPEI: +15% interiores. BPCC: suplemento de cambio de color / desarmado. */
+/**
+ * @deprecated LEGACY (+15% / $8k–$10k). CANONICAL no la llama.
+ * Precio moderno = fila de catálogo del código × tamaño × premium.
+ */
 export function applyBanioCodePriceAdjustments(
   unitPrice: number,
   banioCode: string,

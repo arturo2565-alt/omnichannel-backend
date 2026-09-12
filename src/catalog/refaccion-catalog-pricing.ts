@@ -1,4 +1,7 @@
-/** Precio al cliente: costo × (1 + margen/100). Nunca NaN. */
+/**
+ * @deprecated LEGACY_ONLY — no usar en CANONICAL.
+ * Precio al cliente: costo × (1 + margen/100). Nunca NaN.
+ */
 export function precioSugeridoAlCliente(
   costoReferenciaBase: unknown,
   margenPorcentaje: unknown = 30,

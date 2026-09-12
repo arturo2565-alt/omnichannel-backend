@@ -19,9 +19,6 @@ export type RefaccionCatalogDto = {
   codigo: string;
   nombre: string;
   categoria: RefaccionCategoria;
-  costoReferenciaBase: number;
-  margenPorcentaje: number;
-  precioSugerido: number;
 };
 
 export type RefaccionCatalogQuote = {
@@ -33,6 +30,9 @@ export type RefaccionCatalogQuote = {
   fuente: 'catalogo';
 };
 
+const FINANCIAL_WRITE_REJECTED =
+  'Los precios de refacción ya no se administran. CANONICAL cotiza solo por investigación de mercado.';
+
 const CATEGORIAS = new Set<string>(Object.values(RefaccionCategoria));
 
 @Injectable()
@@ -43,23 +43,15 @@ export class RefaccionesService {
   ) {}
 
   toDto(row: RefaccionCatalog): RefaccionCatalogDto {
-    const costo = Math.max(0, Math.round(Number(row.costoReferenciaBase) || 0));
-    const margen = Number.isFinite(Number(row.margenPorcentaje))
-      ? Math.round(Number(row.margenPorcentaje))
-      : 30;
     return {
       id: row.id,
       codigo: row.codigo,
       nombre: row.nombre,
       categoria: row.categoria,
-      costoReferenciaBase: costo,
-      margenPorcentaje: margen,
-      precioSugerido: precioSugeridoAlCliente(costo, margen),
     };
   }
 
   async findAll(tallerId: string): Promise<RefaccionCatalogDto[]> {
-    await this.ensureDefaults(tallerId);
     const rows = await this.repo.find({
       where: { tallerId },
       order: { categoria: 'ASC', codigo: 'ASC' },
@@ -77,6 +69,7 @@ export class RefaccionesService {
       margenPorcentaje?: unknown;
     },
   ): Promise<RefaccionCatalogDto> {
+    this.rejectFinancialWrites(input);
     const parsed = this.parseWriteInput(input, { requireCodigo: true });
     const exists = await this.repo.findOne({
       where: { tallerId, codigo: parsed.codigo },
@@ -108,6 +101,7 @@ export class RefaccionesService {
       margenPorcentaje?: unknown;
     },
   ): Promise<RefaccionCatalogDto> {
+    this.rejectFinancialWrites(input);
     const row = await this.repo.findOne({ where: { id, tallerId } });
     if (!row) throw new NotFoundException('Refacción no encontrada.');
     const parsed = this.parseWriteInput(input, { requireCodigo: false });
@@ -142,8 +136,8 @@ export class RefaccionesService {
   }
 
   /**
-   * Precio de catálogo para una pieza de visión/panel.
-   * `null` si el taller no tiene esa refacción (el caller usa mercado).
+   * @deprecated LEGACY_ONLY — no llamar desde CANONICAL.
+   * Conservado por si un proceso histórico aún lo referencia.
    */
   async resolveClienteQuote(
     tallerId: string | null | undefined,
@@ -171,6 +165,29 @@ export class RefaccionesService {
     };
   }
 
+  private rejectFinancialWrites(input: {
+    costoReferenciaBase?: unknown;
+    margenPorcentaje?: unknown;
+    precioSugerido?: unknown;
+  }): void {
+    const hasCosto =
+      input.costoReferenciaBase !== undefined &&
+      input.costoReferenciaBase !== null &&
+      String(input.costoReferenciaBase) !== '';
+    const hasMargen =
+      input.margenPorcentaje !== undefined &&
+      input.margenPorcentaje !== null &&
+      String(input.margenPorcentaje) !== '';
+    const hasPrecio =
+      input.precioSugerido !== undefined &&
+      input.precioSugerido !== null &&
+      String(input.precioSugerido) !== '';
+    if (hasCosto || hasMargen || hasPrecio) {
+      throw new BadRequestException(FINANCIAL_WRITE_REJECTED);
+    }
+  }
+
+  /** @deprecated LEGACY_ONLY — no sembrar precios. */
   private async ensureDefaults(tallerId: string): Promise<void> {
     const existing = await this.repo.find({
       where: { tallerId },
@@ -242,8 +259,6 @@ export class RefaccionesService {
         throw new BadRequestException('costoReferenciaBase entero >= 0');
       }
       costoReferenciaBase = n;
-    } else if (opts.requireCodigo) {
-      throw new BadRequestException('costoReferenciaBase entero >= 0');
     }
     const margenRaw = input.margenPorcentaje;
     const margenProvided =

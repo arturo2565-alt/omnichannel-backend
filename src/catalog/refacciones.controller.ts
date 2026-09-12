@@ -16,6 +16,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 
+/** @deprecated LEGACY_ONLY — metadata; no administra precios. */
 @Controller('catalog/refacciones')
 @UseGuards(JwtAuthGuard)
 export class RefaccionesController {

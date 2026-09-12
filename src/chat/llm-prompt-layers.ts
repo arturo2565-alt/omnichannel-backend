@@ -50,6 +50,10 @@ export type LlmPromptLayers = {
   stablePrefix: string;
   /** Bloque 3: efímero. Va en mensaje de contexto antes del historial. */
   dynamicContext: string;
+  baseChatPromptVersion?: string;
+  catalogAppendVersion?: string;
+  effectiveChatPromptHash?: string;
+  catalogAppendLabel?: string;
 };
 
 /** Une capas con separadores claros (útil en APIs que solo aceptan un string). */

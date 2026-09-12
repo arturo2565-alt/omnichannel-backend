@@ -1,5 +1,6 @@
 import type { DetectedDamageItem } from './entities/chat.entity';
 import {
+  deriveStableVehicleId,
   parseTreatmentDecision,
   type TreatmentDecision,
 } from './piece-treatment';
@@ -116,16 +117,50 @@ export function normalizeVisionDamageItem(
       : [];
   const urls_origen = u.map((x) => String(x).trim()).filter(Boolean);
   const mapped = tratamientoFromVisionFields(r);
+  const vehiculoDetectado =
+    typeof r['vehiculoDetectado'] === 'string'
+      ? r['vehiculoDetectado'].trim()
+      : typeof r['vehiculo_detectado'] === 'string'
+        ? r['vehiculo_detectado'].trim()
+        : '';
+  const hiddenRaw = r['possibleHiddenDamage'] ?? r['possible_hidden_damage'];
+  const possibleHiddenDamage =
+    hiddenRaw && typeof hiddenRaw === 'object'
+      ? {
+          detected: Boolean((hiddenRaw as { detected?: unknown }).detected),
+          areas: Array.isArray((hiddenRaw as { areas?: unknown }).areas)
+            ? ((hiddenRaw as { areas: unknown[] }).areas).map(String)
+            : [],
+          requiresDisassembly: Boolean(
+            (hiddenRaw as { requiresDisassembly?: unknown }).requiresDisassembly,
+          ),
+        }
+      : undefined;
+  const vehicleId = deriveStableVehicleId({
+    vehiculoDetectado: vehiculoDetectado || undefined,
+  });
   return {
     pieza,
     severidad,
     descripcionTecnica:
       descripcionTecnica || 'Sin descripción técnica disponible.',
     urls_origen,
-    ...(mapped.tratamiento ? { tratamiento: mapped.tratamiento } : {}),
+    ...(vehiculoDetectado ? { vehiculoDetectado } : {}),
+    ...(vehicleId ? { vehicleId } : {}),
+    ...(mapped.tratamiento
+      ? {
+          tratamiento: mapped.tratamiento,
+          treatmentSource: 'vision' as const,
+          treatmentReason: 'vision_structured',
+        }
+      : {
+          treatmentSource: 'vision' as const,
+          treatmentReason: 'missing_structured_treatment',
+        }),
     ...(mapped.posibleReemplazoRefaccion
       ? { posibleReemplazoRefaccion: true }
       : {}),
+    ...(possibleHiddenDamage ? { possibleHiddenDamage } : {}),
   };
 }
 

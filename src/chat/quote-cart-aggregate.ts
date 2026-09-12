@@ -39,6 +39,9 @@ export function desgloseFromCartEntity(
         pieza: label,
         severidad: String(it.severidad ?? '').trim() || 'DL',
         precioMx,
+        ...(it.quoteLineId ? { quoteLineId: it.quoteLineId } : {}),
+        ...(it.damageItemId ? { damageItemId: it.damageItemId } : {}),
+        ...(it.serviceType ? { serviceType: it.serviceType } : {}),
       };
       if (
         isInternalDamageRangePieza(it.pieza) &&

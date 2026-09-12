@@ -192,6 +192,9 @@ export interface DraftQuoteLine {
   quantity: number;
   unitPrice: number;
   subtotal: number;
+  damageItemId?: string;
+  quoteLineId?: string;
+  vehicleId?: string;
   tratamiento?: 'REPARAR' | 'SUSTITUIR' | 'INCIERTO' | 'PENDIENTE';
   serviceType?:
     | 'REPARACION_PINTURA'
@@ -206,8 +209,10 @@ export interface DraftQuoteLine {
     | 'MARKET'
     | 'FALLBACK'
     | 'LEGACY_REPAIR_MATRIX_FALLBACK'
+    | 'UNCONFIGURED'
     | 'WEB_MARKET_ESTIMATE'
-    | 'INSUFFICIENT_MARKET_SAMPLE';
+    | 'INSUFFICIENT_MARKET_SAMPLE'
+    | 'MANUAL';
   pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE';
   pricingType?: 'RANGE' | 'NONE';
   precioMinEstimado?: number;
@@ -234,8 +239,35 @@ export type QuoteSendSnapshot = {
     precioMx: number;
     /** Rango superior — posibles daños internos. */
     precioMaximo?: number;
+    quoteLineId?: string;
+    damageItemId?: string;
+    serviceType?: string;
   }[];
   formalNarrative?: string;
+  /** Mensaje exacto enviado al cliente (autoridad narrativa moderna). */
+  finalMessage?: string;
+  /** Bloque financiero determinista renderizado al enviar. */
+  financialBlock?: string;
+  /** Warnings canónicos mostrados al cliente. */
+  shownWarnings?: string[];
+  narrativeFlow?: 'CANONICAL_NARRATIVE_FLOW' | 'LEGACY_NARRATIVE_FLOW';
+  /** Congelación canónica. Posteriores edits no mutan este bloque. */
+  canonicalFreeze?: {
+    schemaVersion: string;
+    quoteId: string;
+    quoteLineIds: string[];
+    amounts: Array<{
+      quoteLineId: string;
+      amount: number;
+      serviceType?: string;
+      damageItemId?: string;
+    }>;
+    subtotal: number;
+    total: number;
+    isPartial: boolean;
+    warnings: string[];
+    generatedAt: string;
+  };
 };
 
 export interface DraftQuote {
@@ -254,12 +286,30 @@ export interface DraftQuote {
   sendHistory?: QuoteSendSnapshot[];
   /** Contador de envíos al cliente. */
   sendCount?: number;
-  /** Mensaje al cliente (plantilla premium / variante A-B-C). */
+  /** Mensaje al cliente (sincronizado con clientMessage). */
   formalNarrative: string;
-  /** Alias de `formalNarrative` para el panel y sockets. */
+  /** Alias de compatibilidad; no diverge de clientMessage. */
   generatedMessage?: string;
-  /** Alias de `formalNarrative` para el panel y sockets. */
+  /**
+   * FINAL CLIENT MESSAGE (flujo moderno).
+   * formalNarrative y generatedMessage se copian a este valor.
+   */
   clientMessage?: string;
+  narrativeFlow?: 'CANONICAL_NARRATIVE_FLOW' | 'LEGACY_NARRATIVE_FLOW';
+  quoteFlowMode?: 'CANONICAL' | 'LEGACY';
+  /** Autoridad financiera por vehículo. No mezclar en un único DamageItem namespace. */
+  vehicleQuotesById?: Record<string, import('../domain/peritaje-v1').CanonicalQuoteV1>;
+  vehicleQuoteLabels?: Record<string, string>;
+  aggregateQuoteView?: import('../domain/peritaje-v1').AggregateQuoteView;
+  commercialEntries?: Array<{
+    commercialItemId: string;
+    vehicleId: string;
+    serviceKey: string;
+    serviceLabel: string;
+    source: string;
+  }>;
+  renderedFinancialBlock?: string;
+  shownWarnings?: string[];
   analysisBasis: {
     pieza: string;
     severidad: string;

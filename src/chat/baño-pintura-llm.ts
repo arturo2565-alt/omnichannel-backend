@@ -9,6 +9,8 @@ import {
   mentionsCambioDeColor,
   tierSourceMentionsBora,
 } from './instant-quote-from-text';
+import { composeModernClientQuoteMessage } from './canonical-quote-narrative';
+import { canonicalQuoteFromInstantResolution } from './canonical-commercial-quote';
 
 export type BañoLlmClassification = {
   vehicleLabel: string;
@@ -362,7 +364,10 @@ function buildBañoDraftSystemMessage(chatAppointmentSystemPrompt: string): stri
 }
 
 /**
- * Redacción dinámica del mensaje BPC (gpt-4o) con chatAppointmentPrompt como system principal.
+ * @deprecated Fase 8 — desconectada del flujo moderno. Ningún caller productivo.
+ * Conservada solo por compatibilidad histórica. Envía `precio`/`totalMx` al LLM
+ * y no debe reintroducirse en rutas CANONICAL.
+ * Producción: `composeBañoNaturalInstantReply` → `composeModernClientQuoteMessage`.
  */
 export async function composeBañoDraftMessageWithLlm(
   openai: OpenAI,
@@ -418,6 +423,10 @@ export async function composeBañoDraftMessageWithLlm(
     mapsUrl,
   };
 
+  console.warn(
+    '[LEGACY] composeBañoDraftMessageWithLlm is deprecated and disconnected from the modern quote flow. Do not use for CANONICAL conversations.',
+  );
+
   const temperature = Math.max(0.7, Number(options?.temperature) || 0.75);
 
   const completion = await createTrackedChatCompletion(
@@ -443,9 +452,6 @@ export async function composeBañoDraftMessageWithLlm(
   if (!text || text.length < 80) {
     throw new Error('composeBañoDraftMessageWithLlm: respuesta vacía o demasiado corta');
   }
-  if (!text.includes('💰')) {
-    throw new Error('composeBañoDraftMessageWithLlm: falta línea de total con 💰');
-  }
   if (!text.includes('🎨')) {
     throw new Error('composeBañoDraftMessageWithLlm: falta encabezado 🎨');
   }
@@ -458,6 +464,7 @@ export async function composeBañoDraftMessageWithLlm(
       totalMx: pricing.totalMx,
       heavyDisclaimer: input.needsHeavyBodyworkDisclaimer,
       chars: text.length,
+      note: 'legacy_path_unused_when_modern_compose_succeeds',
     }),
   );
 
@@ -607,7 +614,8 @@ export type ComposeBañoNaturalInstantReplyOptions = {
 };
 
 /**
- * Mensaje al cliente para baño de pintura: gpt-4o + chatAppointmentPrompt (variantes A/B/C).
+ * Mensaje al cliente para baño de pintura: CanonicalQuote + renderer determinista.
+ * El LLM solo narra; no redacta montos.
  */
 export async function composeBañoNaturalInstantReply(
   openai: OpenAI,
@@ -623,26 +631,28 @@ export async function composeBañoNaturalInstantReply(
         options?.variantSalt ?? facts.severidadLiteral,
       ));
 
-  console.log('[BañoDraftCliente] LLM gpt-4o', {
-    variant,
-    forceRandomVariant: options?.forceRandomVariant === true,
-    vehiculo: facts.vehicleLabel,
-    total: facts.resolution?.total,
+  const quote = canonicalQuoteFromInstantResolution(facts.resolution, {
+    conversationId: options?.conversationId,
+    vehicleLabel: facts.vehicleLabel,
   });
 
-  return composeBañoDraftMessageWithLlm(
+  console.log('[BañoDraftCliente] compositor canónico', {
+    variant,
+    vehiculo: facts.vehicleLabel,
+    quoteId: quote.quoteId,
+    total: quote.total,
+  });
+
+  const composed = await composeModernClientQuoteMessage({
+    canonicalQuote: quote,
+    contactName: 'Estimado cliente',
+    hasActiveAppointment: false,
+    mapsUrl: options?.mapsUrl,
+    damageIntro: `Ya preparamos la cotización de ${facts.servicioDb} para tu ${facts.vehicleLabel}.`,
+    vehicleModel: facts.vehicleLabel,
     openai,
     chatAppointmentSystemPrompt,
-    {
-      ...facts,
-      variant,
-      inventarioDanos: options?.inventarioDanos ?? [],
-      needsHeavyBodyworkDisclaimer:
-        options?.needsHeavyBodyworkDisclaimer === true,
-      mapsUrl: options?.mapsUrl,
-      servicioCode: options?.servicioCode ?? 'BPC',
-      origenVision: options?.origenVision !== false,
-    },
-    { temperature: options?.temperature ?? 0.75 },
-  );
+    temperature: options?.temperature ?? 0.75,
+  });
+  return composed.finalMessage;
 }

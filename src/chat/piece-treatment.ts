@@ -13,6 +13,15 @@ import {
   refaccionCatalogCodigoForPieza,
   resolveCatalogPiezaForMatrixLookup,
 } from '../catalog/panel-pieza-catalog';
+import {
+  UNKNOWN_VEHICLE_ID,
+  createDamageItemId,
+  createVehicleId,
+  isStructuredTreatment,
+  mergeLockedTreatments,
+  parseStructuredTreatment,
+  type TreatmentResolution,
+} from '../domain/peritaje-v1';
 const BREAKAGE_RE =
   /\b(rota|roto|rotura|quebrada|quebrado|partida|partido|destruida|destruido|desprendida|desprendido|faltante|hueco|perforad|estrellad|hecha\s+pedazos)\b/i;
 
@@ -42,6 +51,8 @@ export const REFACCION_PRICE_SOURCES = [
   'LEGACY_REPAIR_MATRIX_FALLBACK',
   'WEB_MARKET_ESTIMATE',
   'INSUFFICIENT_MARKET_SAMPLE',
+  'MANUAL',
+  'UNCONFIGURED',
 ] as const;
 
 export type RefaccionPriceSource = (typeof REFACCION_PRICE_SOURCES)[number];
@@ -111,18 +122,81 @@ export function canonicalPhysicalPanelKey(raw: string): string {
 export function parseTreatmentDecision(
   raw: unknown,
 ): TreatmentDecision | undefined {
-  const t = String(raw ?? '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toUpperCase();
-  if (t === 'REPARAR' || t === 'REPAIR') return 'REPARAR';
-  if (t === 'SUSTITUIR' || t === 'REEMPLAZAR' || t === 'REPLACE') {
-    return 'SUSTITUIR';
-  }
-  if (t === 'INCIERTO' || t === 'UNCERTAIN') return 'INCIERTO';
-  if (t === 'PENDIENTE' || t === 'PENDING') return 'PENDIENTE';
-  return undefined;
+  return parseStructuredTreatment(raw);
+}
+
+export function isLockedTreatment(item: {
+  tratamiento?: unknown;
+}): boolean {
+  return isStructuredTreatment(parseStructuredTreatment(item.tratamiento));
+}
+
+/**
+ * Ítem moderno (visión/canónico) sin treatment estructurado.
+ * No es un carrito histórico: no debe inferirse desde texto.
+ */
+export function isModernUnlockedItem(item: {
+  tratamiento?: unknown;
+  treatmentSource?: string;
+  treatmentReason?: string;
+}): boolean {
+  if (isLockedTreatment(item)) return false;
+  const source = String(item.treatmentSource ?? '').trim();
+  const reason = String(item.treatmentReason ?? '').trim();
+  return (
+    source === 'vision' ||
+    source === 'user' ||
+    source === 'operator' ||
+    reason === 'missing_structured_treatment'
+  );
+}
+
+export function deriveStableVehicleId(
+  item: Pick<DetectedDamageItem, 'vehicleId' | 'vehiculoDetectado'>,
+): string | undefined {
+  const explicit = String(item.vehicleId ?? '').trim();
+  if (explicit && explicit !== UNKNOWN_VEHICLE_ID) return explicit;
+  const label = String(item.vehiculoDetectado ?? '').trim();
+  if (!label) return undefined;
+  const id = createVehicleId({ displayLabel: label });
+  return id === UNKNOWN_VEHICLE_ID ? undefined : id;
+}
+
+/**
+ * Key de merge progresivo.
+ * Con vehicleId estable: vehicleId + physicalPanelKey.
+ * Fallback legacy (sin vehicleId): solo physicalPanelKey — ver collapseInventoryByPhysicalPanel.
+ */
+export function physicalInventoryMergeKey(item: DetectedDamageItem): string {
+  const panel = canonicalPhysicalPanelKey(item.pieza);
+  const vid = deriveStableVehicleId(item);
+  return vid ? `${vid}::${panel}` : panel;
+}
+
+/**
+ * Fórmula damageItemId: dmg_sha1(vehicleId | physicalPanelKey).
+ * damageHint no altera la identidad. Sin vehículo → UNKNOWN_VEHICLE_ID.
+ */
+export function ensureDamageIdentity(
+  it: DetectedDamageItem,
+): DetectedDamageItem {
+  const vehicleId = deriveStableVehicleId(it);
+  const panel =
+    canonicalPhysicalPanelKey(it.pieza) ||
+    String(it.pieza ?? '').trim() ||
+    'unknown';
+  const existing = String(it.damageItemId ?? '').trim();
+  const damageItemId =
+    existing ||
+    createDamageItemId({
+      vehicleId: vehicleId ?? UNKNOWN_VEHICLE_ID,
+      physicalPanelKey: panel,
+    });
+  return {
+    ...it,
+    ...(vehicleId ? { vehicleId } : {}),
+    damageItemId,
+  };
 }
 
 export function isOpticsLikePieza(raw: string): boolean {
@@ -164,8 +238,8 @@ export function strongerTreatment(
 }
 
 /**
- * Compatibilidad: carritos viejos sin `tratamiento`.
- * Un hermano `REFACCION:*` o rotura evidente implica SUSTITUIR.
+ * Compatibilidad: carritos viejos sin `tratamiento` estructurado.
+ * Si el ítem ya está locked, devuelve esa decisión y NO consulta texto.
  */
 export function inferTreatmentDecision(
   item: DetectedDamageItem,
@@ -207,6 +281,60 @@ export function inferTreatmentDecision(
   return 'REPARAR';
 }
 
+export type InventoryTreatmentResolution = TreatmentResolution & {
+  usedLegacyInference: boolean;
+};
+
+/**
+ * Resolución única para pricing/merge.
+ * locked → preservar; moderno sin treatment → PENDIENTE; legacy → infer.
+ */
+export function resolveInventoryTreatment(
+  item: DetectedDamageItem,
+  group: readonly DetectedDamageItem[] = [item],
+): InventoryTreatmentResolution {
+  const locked = parseTreatmentDecision(item.tratamiento);
+  if (locked) {
+    return {
+      treatment: locked,
+      source: item.treatmentSource ?? 'vision',
+      reason: item.treatmentReason ?? 'preserved_locked_treatment',
+      locked: true,
+      usedLegacyInference: false,
+    };
+  }
+  if (isModernUnlockedItem(item)) {
+    return {
+      treatment: 'PENDIENTE',
+      source: (item.treatmentSource as InventoryTreatmentResolution['source']) ??
+        'vision',
+      reason: 'missing_structured_treatment',
+      locked: false,
+      usedLegacyInference: false,
+    };
+  }
+  const inferred = inferTreatmentDecision(item, group);
+  return {
+    treatment: inferred,
+    source: 'legacy',
+    reason: 'legacy_inferred',
+    locked: false,
+    usedLegacyInference: true,
+  };
+}
+
+function applyTreatmentResolution(
+  item: DetectedDamageItem,
+  resolved: InventoryTreatmentResolution,
+): DetectedDamageItem {
+  return {
+    ...item,
+    tratamiento: resolved.treatment,
+    treatmentSource: resolved.source,
+    treatmentReason: resolved.reason,
+  };
+}
+
 function preferPanelPiezaCode(a: string, b: string): string {
   if (isRefaccionPieza(a) && !isRefaccionPieza(b)) {
     return canonicalizePanelCode(stripRefaccionPrefix(b)) || stripRefaccionPrefix(b) || a;
@@ -234,17 +362,32 @@ export function mergePhysicalPanelItems(
     .filter(Boolean);
   const priced =
     (Number(b.precioMx) || 0) > (Number(a.precioMx) || 0) ? b : a;
-  const tratamiento = inferTreatmentDecision(
-    {
-      ...a,
-      tratamiento: strongerTreatment(
-        parseTreatmentDecision(a.tratamiento),
-        parseTreatmentDecision(b.tratamiento),
-      ),
-    },
-    [a, b],
-  );
-  return {
+  const aLocked = parseTreatmentDecision(a.tratamiento);
+  const bLocked = parseTreatmentDecision(b.tratamiento);
+  let tratamiento: TreatmentDecision | undefined;
+  let treatmentSource = b.treatmentSource || a.treatmentSource;
+  let treatmentReason = b.treatmentReason || a.treatmentReason;
+  if (aLocked || bLocked) {
+    const merged = mergeLockedTreatments(aLocked, bLocked);
+    tratamiento = merged.treatment;
+    treatmentSource = merged.source;
+    treatmentReason = merged.reason;
+  } else if (isModernUnlockedItem(a) || isModernUnlockedItem(b)) {
+    tratamiento = 'PENDIENTE';
+    treatmentSource = a.treatmentSource || b.treatmentSource || 'vision';
+    treatmentReason = 'missing_structured_treatment';
+  } else {
+    tratamiento = inferTreatmentDecision(
+      {
+        ...a,
+        tratamiento: strongerTreatment(aLocked, bLocked),
+      },
+      [a, b],
+    );
+    treatmentSource = 'legacy';
+    treatmentReason = 'legacy_inferred';
+  }
+  const merged: DetectedDamageItem = {
     pieza: preferPanelPiezaCode(a.pieza, b.pieza),
     severidad: worst,
     descripcionTecnica: [...new Set(descParts)].join(' | '),
@@ -254,7 +397,12 @@ export function mergePhysicalPanelItems(
     ...(a.vehiculoDetectado || b.vehiculoDetectado
       ? { vehiculoDetectado: b.vehiculoDetectado || a.vehiculoDetectado }
       : {}),
+    ...(deriveStableVehicleId(b) || deriveStableVehicleId(a)
+      ? { vehicleId: deriveStableVehicleId(b) || deriveStableVehicleId(a) }
+      : {}),
     tratamiento,
+    ...(treatmentSource ? { treatmentSource } : {}),
+    ...(treatmentReason ? { treatmentReason } : {}),
     ...(priced.precioMx != null ? { precioMx: priced.precioMx } : {}),
     ...(b.detallesRefaccion || a.detallesRefaccion
       ? { detallesRefaccion: b.detallesRefaccion || a.detallesRefaccion }
@@ -282,15 +430,53 @@ export function mergePhysicalPanelItems(
     ...(b.pricingStatus || a.pricingStatus
       ? { pricingStatus: b.pricingStatus || a.pricingStatus }
       : {}),
+    ...(a.damageItemId && a.damageItemId === b.damageItemId
+      ? { damageItemId: a.damageItemId }
+      : {}),
   };
+  return ensureDamageIdentity(merged);
 }
 
-export function copyTreatmentFields(
+/** Copia semántica técnica (+ extras comerciales ya presentes). Un solo listado. */
+export function copyDetectedDamageSemantics(
   it: DetectedDamageItem,
 ): Partial<DetectedDamageItem> {
+  const locked = parseTreatmentDecision(it.tratamiento);
+  const vehicleId = deriveStableVehicleId(it);
+  const identified = ensureDamageIdentity({
+    ...it,
+    ...(vehicleId ? { vehicleId } : {}),
+  });
   return {
     ...(it.vehiculoDetectado?.trim()
       ? { vehiculoDetectado: it.vehiculoDetectado.trim() }
+      : {}),
+    ...(vehicleId ? { vehicleId } : {}),
+    ...(identified.damageItemId
+      ? { damageItemId: identified.damageItemId }
+      : {}),
+    ...(locked ? { tratamiento: locked } : {}),
+    ...(it.treatmentSource ? { treatmentSource: it.treatmentSource } : {}),
+    ...(it.treatmentReason ? { treatmentReason: it.treatmentReason } : {}),
+    ...(it.posibleReemplazoRefaccion
+      ? { posibleReemplazoRefaccion: true }
+      : {}),
+    ...(it.possibleHiddenDamage
+      ? {
+          possibleHiddenDamage: {
+            detected: it.possibleHiddenDamage.detected,
+            areas: [...(it.possibleHiddenDamage.areas ?? [])],
+            requiresDisassembly: it.possibleHiddenDamage.requiresDisassembly,
+          },
+        }
+      : {}),
+    ...(it.inventarioVisualPrevio?.length
+      ? {
+          inventarioVisualPrevio: it.inventarioVisualPrevio.map((row) => ({
+            ...row,
+            urls_origen: [...(row.urls_origen ?? [])],
+          })),
+        }
       : {}),
     ...(it.precioMx != null ? { precioMx: it.precioMx } : {}),
     ...(it.detallesRefaccion
@@ -299,17 +485,37 @@ export function copyTreatmentFields(
     ...(it.refaccionDePieza
       ? { refaccionDePieza: it.refaccionDePieza }
       : {}),
-    ...(it.tratamiento ? { tratamiento: it.tratamiento } : {}),
-    ...(it.posibleReemplazoRefaccion
-      ? { posibleReemplazoRefaccion: true }
-      : {}),
     ...(it.priceSource ? { priceSource: it.priceSource } : {}),
     ...(it.pricingStatus ? { pricingStatus: it.pricingStatus } : {}),
     ...(it.pricingType ? { pricingType: it.pricingType } : {}),
-    ...(it.possibleHiddenDamage
-      ? { possibleHiddenDamage: it.possibleHiddenDamage }
+    ...(it.precioMinEstimado != null
+      ? { precioMinEstimado: it.precioMinEstimado }
       : {}),
+    ...(it.precioMaxEstimado != null
+      ? { precioMaxEstimado: it.precioMaxEstimado }
+      : {}),
+    ...(it.precioCentral != null ? { precioCentral: it.precioCentral } : {}),
+    ...(it.marketPrecioMin != null ? { marketPrecioMin: it.marketPrecioMin } : {}),
+    ...(it.marketPrecioMax != null ? { marketPrecioMax: it.marketPrecioMax } : {}),
+    ...(it.marketPrecioCentral != null
+      ? { marketPrecioCentral: it.marketPrecioCentral }
+      : {}),
+    ...(it.cantidadMuestras != null
+      ? { cantidadMuestras: it.cantidadMuestras }
+      : {}),
+    ...(it.cantidadDominios != null
+      ? { cantidadDominios: it.cantidadDominios }
+      : {}),
+    ...(it.providersUsed ? { providersUsed: [...it.providersUsed] } : {}),
+    ...(it.partTypeGroup ? { partTypeGroup: it.partTypeGroup } : {}),
   };
+}
+
+/** @deprecated usar copyDetectedDamageSemantics */
+export function copyTreatmentFields(
+  it: DetectedDamageItem,
+): Partial<DetectedDamageItem> {
+  return copyDetectedDamageSemantics(it);
 }
 
 export function cloneDetectedDamageItem(
@@ -320,22 +526,27 @@ export function cloneDetectedDamageItem(
     severidad: it.severidad,
     descripcionTecnica: it.descripcionTecnica,
     urls_origen: [...(it.urls_origen ?? [])],
-    ...copyTreatmentFields(it),
+    ...copyDetectedDamageSemantics(it),
   };
 }
 
+/**
+ * Colapsa por identidad física.
+ * Fallback legacy: sin vehicleId se usa solo physicalPanelKey.
+ * Con vehicleId en ambos lados, no fusiona vehículos distintos.
+ */
 export function collapseInventoryByPhysicalPanel(
   inventory: readonly DetectedDamageItem[],
 ): DetectedDamageItem[] {
   const map = new Map<string, DetectedDamageItem>();
   const order: string[] = [];
   for (const it of inventory) {
-    const key = canonicalPhysicalPanelKey(it.pieza);
+    const key = physicalInventoryMergeKey(it);
     if (!key) continue;
     const existing = map.get(key);
     if (!existing) {
       map.set(key, {
-        ...it,
+        ...cloneDetectedDamageItem(it),
         pieza: preferPanelPiezaCode(it.pieza, it.pieza),
       });
       order.push(key);
@@ -345,10 +556,7 @@ export function collapseInventoryByPhysicalPanel(
   }
   return order.map((key) => {
     const item = map.get(key)!;
-    return {
-      ...item,
-      tratamiento: inferTreatmentDecision(item, [item]),
-    };
+    return applyTreatmentResolution(item, resolveInventoryTreatment(item, [item]));
   });
 }
 

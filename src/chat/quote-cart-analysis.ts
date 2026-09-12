@@ -20,9 +20,15 @@ import {
 import {
   canonicalPhysicalPanelKey,
   cloneDetectedDamageItem,
-  copyTreatmentFields,
+  copyDetectedDamageSemantics,
+  ensureDamageIdentity,
   mergePhysicalPanelItems,
+  parseTreatmentDecision,
 } from './piece-treatment';
+import {
+  collapseInventoryByDamageItemId,
+  resolvePrevInventoryForPanelLine,
+} from './quote-line-identity';
 import {
   mergeDamageInventoryAccumulative,
   piezaLabelFromDraftLineDescription,
@@ -118,7 +124,7 @@ export function mergeCartInventoryItem(
         severidad: coerceDamageLevelCode(incoming.severidad),
         descripcionTecnica: String(incoming.descripcionTecnica ?? '').trim(),
         urls_origen: [...(incoming.urls_origen ?? [])],
-        ...copyTreatmentFields(incoming),
+        ...copyDetectedDamageSemantics(incoming),
       },
     ];
   }
@@ -177,7 +183,7 @@ export function extractPriorInventoryFromDraft(
       severidad: it.severidad,
       descripcionTecnica: it.descripcionTecnica,
       urls_origen: [...(it.urls_origen ?? [])],
-      ...copyTreatmentFields(it),
+      ...copyDetectedDamageSemantics(it),
     }));
   }
   const fromBasis = existingDraft.quotePayload?.analysisBasis?.inventory;
@@ -187,7 +193,7 @@ export function extractPriorInventoryFromDraft(
       severidad: it.severidad,
       descripcionTecnica: it.descripcionTecnica,
       urls_origen: [...(it.urls_origen ?? [])],
-      ...copyTreatmentFields(it),
+      ...copyDetectedDamageSemantics(it),
     }));
   }
   const lines = existingDraft.quotePayload?.lines ?? [];
@@ -220,13 +226,7 @@ export function mergeVisionIntoPriorInventory(
 ): VisionInventoryMergeResult {
   if (isBanioPinturaCompletoVisionInventory(newInventory)) {
     return {
-      mergedInventory: newInventory.map((it) => ({
-        pieza: it.pieza,
-        severidad: it.severidad,
-        descripcionTecnica: it.descripcionTecnica,
-        urls_origen: [...(it.urls_origen ?? [])],
-        ...copyTreatmentFields(it),
-      })),
+      mergedInventory: newInventory.map((it) => cloneDetectedDamageItem(it)),
       complementMeta: null,
     };
   }
@@ -280,14 +280,29 @@ export function mapPanelInventoryLinesToItems(
     detallesRefaccion?: string;
     urls_origen?: string[];
     urls_asociadas?: string[];
+    tratamiento?: string;
+    vehiculoDetectado?: string;
+    damageItemId?: string;
+    quoteLineId?: string;
+    vehicleId?: string;
+    serviceType?: string;
+    physicalPanelKey?: string;
+    possibleHiddenDamage?: DetectedDamageItem['possibleHiddenDamage'];
   }>,
   prevInv: readonly DetectedDamageItem[],
 ): DetectedDamageItem[] {
-  return linesDto.map((L, i) => {
-    const prev = prevInv[i] as DetectedDamageItem & {
-      descripcion?: string;
-      urls_asociadas?: string[];
-    };
+  const mapped = linesDto.map((L, i) => {
+    const resolved = resolvePrevInventoryForPanelLine({
+      line: L,
+      prevInv,
+      index: i,
+    });
+    const prev = resolved.item as
+      | (DetectedDamageItem & {
+          descripcion?: string;
+          urls_asociadas?: string[];
+        })
+      | undefined;
     const refaccionDetalle = String(L.detallesRefaccion ?? '').trim();
     const descFromDto =
       refaccionDetalle ||
@@ -323,11 +338,29 @@ export function mapPanelInventoryLinesToItems(
     }
 
     const panelOpt = findPanelPiezaOption(String(L.pieza).trim());
-    return {
+    const dtoTreatment = parseTreatmentDecision(L.tratamiento);
+    return ensureDamageIdentity({
       pieza: panelOpt?.code ?? String(L.pieza).trim(),
       severidad: String(L.severidad).trim(),
       descripcionTecnica: desc,
       urls_origen,
-    };
+      ...(prev ? copyDetectedDamageSemantics(prev) : {}),
+      ...(dtoTreatment
+        ? {
+            tratamiento: dtoTreatment,
+            treatmentSource: 'operator' as const,
+            treatmentReason: 'panel_structured',
+          }
+        : {}),
+      ...(L.vehiculoDetectado?.trim()
+        ? { vehiculoDetectado: L.vehiculoDetectado.trim() }
+        : {}),
+      ...(L.vehicleId ? { vehicleId: L.vehicleId } : {}),
+      ...(L.damageItemId ? { damageItemId: L.damageItemId } : {}),
+      ...(L.possibleHiddenDamage
+        ? { possibleHiddenDamage: L.possibleHiddenDamage }
+        : {}),
+    });
   });
+  return collapseInventoryByDamageItemId(mapped);
 }

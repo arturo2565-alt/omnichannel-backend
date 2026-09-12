@@ -3,6 +3,7 @@
   "compilerOptions": {
     "module": "CommonJS",
     "moduleResolution": "node",
+    "resolvePackageJsonExports": false,
     "noEmit": true
   },
   "include": ["scripts/**/*.ts", "src/**/*.ts"]

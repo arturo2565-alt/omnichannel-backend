@@ -8,7 +8,10 @@ export type RefaccionSeedRow = {
   margenPorcentaje: number;
 };
 
-/** Semilla inicial de ópticas y plásticos frecuentes (MXN). */
+/**
+ * @deprecated LEGACY_ONLY — no sembrar precios en CANONICAL.
+ * Solo metadatos (codigo/nombre/categoría). Los importes no cotizan.
+ */
 export const REFACCION_CATALOG_DEFAULTS: readonly RefaccionSeedRow[] = [
   {
     codigo: 'FARO_IZQ',

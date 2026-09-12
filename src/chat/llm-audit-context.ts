@@ -8,6 +8,13 @@ export type LlmAuditContext = {
   /** Propósito por defecto si el wrapper no pasa uno. */
   purpose?: string;
   provider?: string;
+  visionPromptVersion?: string | null;
+  chatPromptVersion?: string | null;
+  baseChatPromptVersion?: string | null;
+  catalogAppendVersion?: string | null;
+  effectiveChatPromptHash?: string | null;
+  caseId?: string | null;
+  promptLabel?: string | null;
 };
 
 export type LlmUsageReportInput = {
@@ -23,6 +30,13 @@ export type LlmUsageReportInput = {
   durationMs?: number;
   tallerId?: string | null;
   conversationId?: string | null;
+  visionPromptVersion?: string | null;
+  chatPromptVersion?: string | null;
+  baseChatPromptVersion?: string | null;
+  catalogAppendVersion?: string | null;
+  effectiveChatPromptHash?: string | null;
+  caseId?: string | null;
+  promptLabel?: string | null;
 };
 
 type LlmUsageReporter = (input: LlmUsageReportInput) => void;
@@ -55,6 +69,16 @@ export function runWithLlmAuditContext<T>(
     conversationId: ctx.conversationId ?? parent?.conversationId ?? null,
     purpose: ctx.purpose ?? parent?.purpose,
     provider: ctx.provider ?? parent?.provider ?? 'openai',
+    visionPromptVersion: ctx.visionPromptVersion ?? parent?.visionPromptVersion,
+    chatPromptVersion: ctx.chatPromptVersion ?? parent?.chatPromptVersion,
+    baseChatPromptVersion:
+      ctx.baseChatPromptVersion ?? parent?.baseChatPromptVersion,
+    catalogAppendVersion:
+      ctx.catalogAppendVersion ?? parent?.catalogAppendVersion,
+    effectiveChatPromptHash:
+      ctx.effectiveChatPromptHash ?? parent?.effectiveChatPromptHash,
+    caseId: ctx.caseId ?? parent?.caseId,
+    promptLabel: ctx.promptLabel ?? parent?.promptLabel,
   };
   return llmAuditAls.run(merged, () => {
     applySentryAlsTags(merged);
@@ -72,6 +96,16 @@ export async function runWithLlmAuditContextAsync<T>(
     conversationId: ctx.conversationId ?? parent?.conversationId ?? null,
     purpose: ctx.purpose ?? parent?.purpose,
     provider: ctx.provider ?? parent?.provider ?? 'openai',
+    visionPromptVersion: ctx.visionPromptVersion ?? parent?.visionPromptVersion,
+    chatPromptVersion: ctx.chatPromptVersion ?? parent?.chatPromptVersion,
+    baseChatPromptVersion:
+      ctx.baseChatPromptVersion ?? parent?.baseChatPromptVersion,
+    catalogAppendVersion:
+      ctx.catalogAppendVersion ?? parent?.catalogAppendVersion,
+    effectiveChatPromptHash:
+      ctx.effectiveChatPromptHash ?? parent?.effectiveChatPromptHash,
+    caseId: ctx.caseId ?? parent?.caseId,
+    promptLabel: ctx.promptLabel ?? parent?.promptLabel,
   };
   return llmAuditAls.run(merged, async () => {
     applySentryAlsTags(merged);
@@ -100,6 +134,18 @@ export function reportLlmUsage(input: LlmUsageReportInput): void {
         input.conversationId !== undefined
           ? input.conversationId
           : (ctx?.conversationId ?? null),
+      visionPromptVersion:
+        input.visionPromptVersion ?? ctx?.visionPromptVersion ?? null,
+      chatPromptVersion:
+        input.chatPromptVersion ?? ctx?.chatPromptVersion ?? null,
+      baseChatPromptVersion:
+        input.baseChatPromptVersion ?? ctx?.baseChatPromptVersion ?? null,
+      catalogAppendVersion:
+        input.catalogAppendVersion ?? ctx?.catalogAppendVersion ?? null,
+      effectiveChatPromptHash:
+        input.effectiveChatPromptHash ?? ctx?.effectiveChatPromptHash ?? null,
+      caseId: input.caseId ?? ctx?.caseId ?? null,
+      promptLabel: input.promptLabel ?? ctx?.promptLabel ?? null,
     });
   } catch (err) {
     console.warn('[reportLlmUsage] falló el reporter:', err);

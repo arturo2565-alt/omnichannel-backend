@@ -6,7 +6,7 @@ import { findPanelPiezaOption } from '../catalog/panel-pieza-catalog';
 import { piezaMatchesQuery } from './quote-cart-analysis';
 import {
   canonicalPhysicalPanelKey,
-  copyTreatmentFields,
+  copyDetectedDamageSemantics,
   mergePhysicalPanelItems,
 } from './piece-treatment';
 
@@ -70,7 +70,7 @@ export function mergeDamageInventoryAccumulative(
       severidad: coerceDamageLevelCode(it.severidad),
       descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
       urls_origen: [...(it.urls_origen ?? [])],
-      ...copyTreatmentFields(it),
+      ...copyDetectedDamageSemantics(it),
     });
   }
 
@@ -89,7 +89,7 @@ export function mergeDamageInventoryAccumulative(
         severidad: coerceDamageLevelCode(it.severidad),
         descripcionTecnica: String(it.descripcionTecnica ?? '').trim(),
         urls_origen: [...(it.urls_origen ?? [])],
-        ...copyTreatmentFields(it),
+        ...copyDetectedDamageSemantics(it),
       });
       if (!previousCanonicals.has(canon)) {
         newPiezas.push(canon);

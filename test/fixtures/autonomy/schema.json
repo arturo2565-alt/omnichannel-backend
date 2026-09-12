@@ -1,0 +1,21 @@
+{
+  "caseId": "string",
+  "description": "string",
+  "input": {
+    "images": ["optional paths"],
+    "userMessages": ["optional"],
+    "vehicleContext": "optional",
+    "visionItems": []
+  },
+  "expected": {
+    "vehicle": "optional",
+    "damages": [],
+    "treatments": [],
+    "quoteLines": [],
+    "total": 0,
+    "isPartial": false,
+    "requiredWarnings": [],
+    "forbiddenServiceTypes": [],
+    "shouldRequestMoreEvidence": false
+  }
+}

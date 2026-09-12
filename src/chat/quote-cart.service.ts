@@ -46,6 +46,30 @@ import type { ObtenerCotizacionExpressResult } from './autopilot-cotizacion-expr
 import { isBañoDePinturaServicio, isCeramicoCanonical, isEsteticaAutomotrizCanonical } from './instant-quote-from-text';
 import { VISION_BPC_PIEZA_CODE } from './vision-bpc-inventory';
 import { ChatGateway } from './chat.gateway';
+import { commitVisionShadowToDraft } from './canonical-shadow-write';
+import {
+  buildCanonicalFreeze,
+  resolveAuthoritativeDraftFinance,
+} from './canonical-quote-engine';
+import {
+  commercialBundleFromExpress,
+  commercialLinesFromExtras,
+} from './canonical-commercial-quote';
+import { createVehicleId } from '../domain/peritaje-v1';
+import {
+  buildAggregateQuoteView,
+  type AggregateQuoteView,
+} from '../domain/peritaje-v1/aggregate-quote';
+import { shouldPreferCanonicalOnCartMutation } from './llm-tool-result-sanitize';
+import {
+  renderCanonicalQuoteFinancialBlock,
+  renderCanonicalQuoteWarningsBlock,
+} from '../domain/peritaje-v1/quote-narrative';
+import { buildPersistedDraftQuoteItemRows } from './quote-line-identity';
+import type {
+  CanonicalPeritajeV1,
+  CanonicalQuoteV1,
+} from '../domain/peritaje-v1';
 import {
   buildActiveCartViewFromEntity,
   desgloseFromCartEntity,
@@ -255,20 +279,34 @@ export class QuoteCartService {
           '',
       ).trim();
 
+    const canonical = cart.canonicalQuoteV1;
+    const payload = cart.quotePayload ?? emptyPayloadFallback();
+    const financialBlock = String(payload.renderedFinancialBlock ?? '').trim();
+    const shownWarnings = payload.shownWarnings ?? [];
+    const narrativeFlow = payload.narrativeFlow;
     const snapshot: QuoteSendSnapshot = {
       sentAt: new Date().toISOString(),
-      total: Math.max(0, Math.round(Number(cart.estimateAmount) || 0)),
-      subtotal: Math.max(
-        0,
-        Math.round(
-          Number(cart.quotePayload?.subtotal ?? cart.estimateAmount) || 0,
-        ),
-      ),
+      total: canonical
+        ? canonical.total
+        : Math.max(0, Math.round(Number(cart.estimateAmount) || 0)),
+      subtotal: canonical
+        ? canonical.subtotal
+        : Math.max(
+            0,
+            Math.round(
+              Number(cart.quotePayload?.subtotal ?? cart.estimateAmount) || 0,
+            ),
+          ),
       desglose,
-      ...(narrative ? { formalNarrative: narrative } : {}),
+      ...(narrative
+        ? { formalNarrative: narrative, finalMessage: narrative }
+        : {}),
+      ...(financialBlock ? { financialBlock } : {}),
+      ...(shownWarnings.length ? { shownWarnings: [...shownWarnings] } : {}),
+      ...(narrativeFlow ? { narrativeFlow } : {}),
+      ...(canonical ? { canonicalFreeze: buildCanonicalFreeze(canonical) } : {}),
     };
 
-    const payload = cart.quotePayload ?? emptyPayloadFallback();
     const sendCount = Math.max(0, Number(payload.sendCount) || 0) + 1;
     cart.quotePayload = {
       ...payload,
@@ -306,6 +344,8 @@ export class QuoteCartService {
       items: active.items ?? [],
       messageId: active.messageId,
       createdAt: active.createdAt,
+      canonicalQuoteV1: active.canonicalQuoteV1,
+      canonicalPeritajeV1: active.canonicalPeritajeV1,
     };
     return {
       ...view,
@@ -321,7 +361,11 @@ export class QuoteCartService {
     tallerId?: string | null,
   ): Promise<Record<string, unknown>> {
     const active = await this.resolveActiveCart(conversationId, tallerId);
-    return buildActiveCartViewFromEntity(active);
+    return {
+      ...buildActiveCartViewFromEntity(active),
+      quoteFlowMode: active?.quotePayload?.quoteFlowMode,
+      quoteMode: active?.quotePayload?.quoteFlowMode,
+    };
   }
 
   async getCartEnvelope(
@@ -384,6 +428,8 @@ export class QuoteCartService {
     estimateAmount: number;
     allImageUrls: readonly string[];
     existingCart: DraftQuoteEntity | null;
+    canonicalPeritajeV1?: CanonicalPeritajeV1 | null;
+    canonicalQuoteV1?: CanonicalQuoteV1 | null;
   }): Promise<{ savedDraft: DraftQuoteEntity; priorMessageId: string | null }> {
     const persistedImageUrl = persistDraftImageUrlField(input.allImageUrls);
     const draftQuoteForClient = input.draftQuoteDoc;
@@ -397,6 +443,15 @@ export class QuoteCartService {
       input.existingCart.quotePayload = draftQuoteForClient;
       input.existingCart.tallerId = input.tallerId;
       input.existingCart.status = ACTIVE_CART_STATUS;
+      if (input.canonicalQuoteV1) {
+        input.existingCart.canonicalQuoteV1 = input.canonicalQuoteV1;
+      }
+      commitVisionShadowToDraft({
+        draft: input.existingCart,
+        incoming: input.canonicalPeritajeV1,
+        analysis: input.analysis,
+        quotePayload: draftQuoteForClient,
+      });
       const savedDraft = await this.draftQuoteRepository.save(input.existingCart);
 
       this.chatGateway.emitDraftQuoteReady({
@@ -421,6 +476,15 @@ export class QuoteCartService {
       estimateAmount: input.estimateAmount,
       quotePayload: draftQuoteForClient,
       status: ACTIVE_CART_STATUS,
+      ...(input.canonicalQuoteV1
+        ? { canonicalQuoteV1: input.canonicalQuoteV1 }
+        : {}),
+    });
+    commitVisionShadowToDraft({
+      draft: row,
+      incoming: input.canonicalPeritajeV1,
+      analysis: input.analysis,
+      quotePayload: draftQuoteForClient,
     });
     const savedDraft = await this.draftQuoteRepository.save(row);
 
@@ -469,9 +533,16 @@ export class QuoteCartService {
     const cart = await this.resolveMutableCart(conversationId, tallerId);
     const inventory = cart.damageAnalysis?.inventory ?? [];
     const merged = mergeCartInventoryWithPricingMode(inventory, item);
-    const saved = await this.rebuildAndPersist(cart, merged, tallerId, undefined, null, {
-      matrixPricePiezaCodes: [storedPieza],
-    });
+    const preferCanonical = shouldPreferCanonicalOnCartMutation(cart);
+    await this.rebuildAndPersist(
+      cart,
+      merged,
+      tallerId,
+      undefined,
+      null,
+      { matrixPricePiezaCodes: [storedPieza] },
+      { preferCanonical },
+    );
     return this.getCartSummaryEnvelope(conversationId, tallerId);
   }
 
@@ -716,6 +787,10 @@ export class QuoteCartService {
     const cart = await this.resolveMutableCart(conversationId, tallerId);
     let inventory = [...(cart.damageAnalysis?.inventory ?? [])];
     const expressPiezaCodes: string[] = [];
+    const vehicleLabel =
+      String(express.vehicleDisplayLabel || express.modeloVehiculo || '').trim() ||
+      'vehiculo';
+    const vehicleId = createVehicleId({ displayLabel: vehicleLabel });
 
     for (const line of express.lines ?? []) {
       const canonical = String(line.canonical ?? '').trim();
@@ -736,6 +811,8 @@ export class QuoteCartService {
           : coerceDamageLevelCode(line.severidad),
         descripcionTecnica: `Cotización express — ${line.servicio}.`,
         urls_origen: [],
+        vehicleId,
+        vehiculoDetectado: vehicleLabel,
       };
       inventory = mergeCartInventoryWithPricingMode(inventory, item);
     }
@@ -747,14 +824,62 @@ export class QuoteCartService {
       express.extras,
       express.vehiclePricingProfile ?? null,
       { matrixPricePiezaCodes: expressPiezaCodes },
+      { fromExpress: true },
     );
+    const savedAfterRebuild = await this.resolveActiveCart(conversationId, tallerId);
+    if (savedAfterRebuild) {
+      await this.upsertVehicleCanonicalQuote(
+        savedAfterRebuild,
+        express,
+        conversationId,
+        vehicleId,
+        vehicleLabel,
+      );
+    }
+    const envelope = await this.getCartSummaryEnvelope(conversationId, tallerId);
+    const saved = await this.resolveActiveCart(conversationId, tallerId);
+    const canonical = saved?.canonicalQuoteV1;
     return {
-      ...(await this.getCartSummaryEnvelope(conversationId, tallerId)),
-      expressSubtotalMx: express.subtotalMx,
-      expressTotalMx: express.totalMx,
+      ...envelope,
+      expressSubtotalMx: canonical?.subtotal ?? express.subtotalMx,
+      expressTotalMx: canonical?.total ?? express.totalMx,
       diasEntrega: express.diasEntrega,
       vehicleDisplayLabel: express.vehicleDisplayLabel,
+      modeloVehiculo: express.modeloVehiculo,
+      canonicalQuoteV1: canonical,
+      quoteFlowMode: saved?.quotePayload?.quoteFlowMode ?? 'CANONICAL',
+      quoteMode: 'CANONICAL',
     };
+  }
+
+  /**
+   * Cada vehículo conserva su CanonicalQuote. El agregado es presentación.
+   */
+  private async upsertVehicleCanonicalQuote(
+    row: DraftQuoteEntity,
+    express: ObtenerCotizacionExpressResult,
+    conversationId: string,
+    vehicleId: string,
+    vehicleLabel: string,
+  ): Promise<void> {
+    const bundle = commercialBundleFromExpress(express, conversationId);
+    const prior = row.quotePayload ?? emptyPayloadFallback();
+    const byId = { ...(prior.vehicleQuotesById ?? {}) };
+    const labels = { ...(prior.vehicleQuoteLabels ?? {}) };
+    byId[bundle.vehicleId || vehicleId] = bundle.quote;
+    labels[bundle.vehicleId || vehicleId] = vehicleLabel;
+    const quotes = Object.values(byId);
+    const aggregate: AggregateQuoteView | undefined =
+      quotes.length > 1 ? buildAggregateQuoteView(quotes) : undefined;
+    row.canonicalQuoteV1 = bundle.quote;
+    row.quotePayload = {
+      ...prior,
+      vehicleQuotesById: byId,
+      vehicleQuoteLabels: labels,
+      ...(aggregate ? { aggregateQuoteView: aggregate } : {}),
+      quoteFlowMode: 'CANONICAL',
+    };
+    await this.draftQuoteRepository.save(row);
   }
 
   private async rebuildAndPersist(
@@ -764,6 +889,10 @@ export class QuoteCartService {
     extras?: ReadonlyArray<{ label: string; amount: number }>,
     vehicleProfileOverride?: VehiclePricingProfile | null,
     priceOpts?: RebuildPriceOpts,
+    modernOpts?: {
+      fromExpress?: boolean;
+      preferCanonical?: boolean;
+    },
   ): Promise<DraftQuoteEntity> {
     const sanitized = sanitizeCartInventoryForPricing(inventory);
     const snap = await this.catalogService.getMatrixPricingSnapshot(
@@ -816,32 +945,46 @@ export class QuoteCartService {
           pricingRules,
         );
 
-    let lines = quoteRows.map((r, i) =>
+    const lines = quoteRows.map((r, i) =>
       buildDraftQuoteLineFromQuoteRow(r, i, snap),
     );
-    let subtotal = sumQuoteRowsSubtotal(quoteRows);
-
-    for (const ex of extras ?? []) {
-      const amt = Math.max(0, Math.round(Number(ex.amount) || 0));
-      if (amt <= 0) continue;
-      lines = [
-        ...lines,
-        {
-          priceItemId: `extra:${lines.length}:${ex.label}`,
-          description: ex.label,
-          quantity: 1,
-          unitPrice: amt,
-          subtotal: amt,
-        },
-      ];
-      subtotal += amt;
+    const rowsSubtotal = sumQuoteRowsSubtotal(quoteRows);
+    const vehicleId = createVehicleId({
+      displayLabel:
+        vehicleProfile?.vehicleLabel ||
+        analysis.vehiculoDetectado ||
+        'vehiculo',
+    });
+    const extraCommercial = commercialLinesFromExtras(
+      extras,
+      vehicleId,
+      'express',
+    );
+    const commercialEntries = [
+      ...(priorPayload.commercialEntries ?? []).map((e) => ({
+        commercialItemId: e.commercialItemId,
+        vehicleId: e.vehicleId,
+        serviceKey: e.serviceKey,
+        serviceLabel: e.serviceLabel,
+        source: e.source as 'express' | 'bpc' | 'operator',
+      })),
+      ...extraCommercial.entries,
+    ];
+    const commercialExtraLines = extraCommercial.lines;
+    if ((extras?.length ?? 0) > 0 && extraCommercial.lines.length === 0) {
+      this.logger.warn(
+        JSON.stringify({
+          event: 'UNMODELED_EXTRA_AMOUNT',
+          conversationId: row.conversationId,
+        }),
+      );
     }
 
-    const doc: DraftQuote = {
+    const legacyDoc: DraftQuote = {
       ...priorPayload,
       lines,
-      subtotal,
-      total: subtotal,
+      subtotal: rowsSubtotal,
+      total: rowsSubtotal,
       analysisBasis: {
         pieza: analysis.pieza,
         severidad: analysis.severidad,
@@ -852,11 +995,46 @@ export class QuoteCartService {
       },
     };
 
+    const finance = resolveAuthoritativeDraftFinance({
+      peritaje: row.canonicalPeritajeV1,
+      pricedInventory: sanitized,
+      snap,
+      vehicleProfile,
+      pricingRules,
+      priorDraft: priorPayload,
+      legacyDraft: legacyDoc,
+      legacyEstimate: rowsSubtotal,
+      conversationId: row.conversationId,
+      quoteId: row.canonicalQuoteV1?.quoteId,
+      sentSnapshot,
+      commercialEntries,
+      commercialExtraLines,
+      pricedRows: quoteRows,
+      fromExpress: modernOpts?.fromExpress === true,
+      preferCanonical: modernOpts?.preferCanonical === true,
+      existingQuote: row.canonicalQuoteV1,
+    });
+
+    let persistRows = quoteRows;
+    if (finance.mode === 'canonical') {
+      row.canonicalQuoteV1 = finance.quote;
+      persistRows = finance.rows;
+      const financial = renderCanonicalQuoteFinancialBlock(finance.quote);
+      const warnings = renderCanonicalQuoteWarningsBlock(finance.quote);
+      finance.draft.renderedFinancialBlock = financial.text;
+      finance.draft.shownWarnings = warnings.shownWarnings;
+      finance.draft.quoteFlowMode = 'CANONICAL';
+    } else if (finance.mode === 'canonical_blocked') {
+      row.damageAnalysis = analysis;
+      const savedBlocked = await this.draftQuoteRepository.save(row);
+      return savedBlocked;
+    }
+
     row.damageAnalysis = analysis;
-    row.estimateAmount = subtotal;
-    row.quotePayload = doc;
+    row.estimateAmount = finance.estimateAmount;
+    row.quotePayload = finance.draft;
     const saved = await this.draftQuoteRepository.save(row);
-    await this.syncLineItems(saved.id, inventory, quoteRows, imageUrls);
+    await this.syncLineItems(saved.id, inventory, persistRows, imageUrls);
 
     const reloaded = await this.draftQuoteRepository.findOne({
       where: { id: saved.id },
@@ -905,7 +1083,7 @@ export class QuoteCartService {
     );
     const total = sumQuoteRowsSubtotal(linesDto);
     const priorPayload = row.quotePayload ?? emptyPayloadFallback();
-    const doc: DraftQuote = {
+    const legacyDoc: DraftQuote = {
       ...priorPayload,
       lines: manualLines,
       subtotal: total,
@@ -921,11 +1099,45 @@ export class QuoteCartService {
       },
     };
 
+    const pricingRules = await this.catalogService.getPricingRules(tallerId);
+    const vehicleProfile = vehiclePricingProfileFromAnalysis(analysis);
+    const finance = resolveAuthoritativeDraftFinance({
+      peritaje: row.canonicalPeritajeV1,
+      pricedInventory: inventory,
+      snap,
+      vehicleProfile,
+      pricingRules,
+      priorDraft: priorPayload,
+      legacyDraft: legacyDoc,
+      legacyEstimate: total,
+      conversationId: row.conversationId,
+      quoteId: row.canonicalQuoteV1?.quoteId,
+      sentSnapshot: priorPayload.lastSendSnapshot,
+      manualOverrides: linesDto.map((L) => ({
+        quoteLineId: L.quoteLineId,
+        damageItemId: L.damageItemId,
+        serviceType: L.serviceType,
+        amount: Math.round(Number(L.precioMx) || 0),
+      })),
+    });
+
+    if (finance.mode === 'canonical') {
+      row.canonicalQuoteV1 = finance.quote;
+    } else if (finance.mode === 'canonical_blocked') {
+      row.damageAnalysis = analysis;
+      return this.draftQuoteRepository.save(row);
+    }
+
     row.damageAnalysis = analysis;
-    row.estimateAmount = total;
-    row.quotePayload = doc;
+    row.estimateAmount = finance.estimateAmount;
+    row.quotePayload = finance.draft;
     const saved = await this.draftQuoteRepository.save(row);
-    await this.syncLineItems(saved.id, inventory, linesDto, sourceUrls);
+    await this.syncLineItems(
+      saved.id,
+      inventory,
+      finance.mode === 'canonical' ? finance.rows : linesDto,
+      sourceUrls,
+    );
 
     const reloaded = await this.draftQuoteRepository.findOne({
       where: { id: saved.id },
@@ -945,24 +1157,11 @@ export class QuoteCartService {
     await this.draftQuoteItemRepository.delete({ draftQuoteId });
     if (!quoteRows.length) return;
 
-    const rows: Omit<DraftQuoteItem, 'id' | 'draftQuote' | 'draftQuoteId'>[] =
-      quoteRows.map((row, idx) => {
-        const inv = inventory[idx];
-        const urls =
-          inv && Array.isArray(inv.urls_origen) && inv.urls_origen.length > 0
-            ? [...inv.urls_origen]
-            : fallbackUrls.length > 0
-              ? [...fallbackUrls]
-              : null;
-        return {
-          sortOrder: idx,
-          pieza: row.pieza,
-          severidad: row.severidad,
-          precioMx: Math.round(Number(row.precioMx) || 0),
-          descripcionTecnica: inv?.descripcionTecnica ?? null,
-          urlsOrigen: urls,
-        };
-      });
+    const { rows } = buildPersistedDraftQuoteItemRows({
+      lines: quoteRows,
+      inventory,
+      fallbackUrls,
+    });
 
     await this.draftQuoteItemRepository.insert(
       rows.map((r) => ({ ...r, draftQuoteId })),

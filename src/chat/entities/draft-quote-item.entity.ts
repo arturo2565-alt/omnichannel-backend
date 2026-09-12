@@ -40,4 +40,21 @@ export class DraftQuoteItem {
   /** Fotos evidencia enlazadas a esta pieza/línea. */
   @Column({ type: 'jsonb', nullable: true })
   urlsOrigen: string[] | null;
+
+  /** Identidad del daño que originó esta línea. Nullable para históricos. */
+  @Column({ type: 'text', nullable: true })
+  damageItemId: string | null;
+
+  /** Identidad estable de la línea económica. Nullable para históricos. */
+  @Column({ type: 'text', nullable: true })
+  quoteLineId: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  vehicleId: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  serviceType: string | null;
+
+  @Column({ type: 'boolean', nullable: true })
+  billable: boolean | null;
 }

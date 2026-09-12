@@ -90,14 +90,14 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
   {
     code: PANEL_PIEZA_BPEI_CODE,
     fullName: 'Baño de Pintura Exterior e Interiores',
-    catalogPieza: 'Baño de Pintura Exterior',
+    catalogPieza: 'Baño de Pintura Exterior e Interiores',
     banioCompleto: true,
     integralService: true,
   },
   {
     code: PANEL_PIEZA_BPCC_CODE,
     fullName: 'Baño de Pintura con Cambio de Color',
-    catalogPieza: 'Baño de Pintura Exterior',
+    catalogPieza: 'Baño de Pintura con Cambio de Color',
     banioCompleto: true,
     integralService: true,
   },
@@ -452,7 +452,7 @@ const REFACCION_CATALOG_CODES = new Set([
   'PARILLA',
 ]);
 
-/** Sigla de panel → código de `refaccion_catalog`. */
+/** Sigla de panel → código canónico de pieza (metadata, no precio). */
 const PANEL_CODE_TO_REFACCION_CODIGO: Readonly<Record<string, string>> = {
   Cofre: 'COFRE',
   FD: 'FASCIA_DEL',
@@ -495,8 +495,8 @@ const CATALOG_PIEZA_TO_REFACCION_CODIGO: Readonly<Record<string, string>> = {
 };
 
 /**
- * Pieza de visión/panel → código de `refaccion_catalog` (FARO_IZQ, COFRE…).
- * `null` si no hay equivalente en el catálogo.
+ * Pieza de visión/panel → código canónico (FARO_IZQ, COFRE…).
+ * Diccionario de identidad / aliases. No es lookup de precio.
  */
 export function refaccionCatalogCodigoForPieza(raw: unknown): string | null {
   const t = String(raw ?? '')

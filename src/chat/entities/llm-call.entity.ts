@@ -47,6 +47,27 @@ export class LlmCall {
   @Column({ type: 'int', default: 0 })
   durationMs: number;
 
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  visionPromptVersion: string | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  chatPromptVersion: string | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  baseChatPromptVersion: string | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  catalogAppendVersion: string | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  effectiveChatPromptHash: string | null;
+
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  caseId: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  promptLabel: string | null;
+
   @Index()
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

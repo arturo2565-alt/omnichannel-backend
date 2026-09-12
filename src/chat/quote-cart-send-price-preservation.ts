@@ -171,6 +171,19 @@ export function quoteRowsPreservingLastSend(
     pricingRules,
   );
 
+  const freeze = sentSnapshot.canonicalFreeze;
+  if (freeze?.amounts?.length) {
+    const byId = new Map(
+      freeze.amounts.map((a) => [a.quoteLineId, a.amount]),
+    );
+    return xorRows.map((row) => {
+      const qid = String(row.quoteLineId ?? '').trim();
+      if (!qid || !byId.has(qid)) return row;
+      const amount = Math.max(0, Math.round(byId.get(qid) ?? 0));
+      return { ...row, precioMx: amount };
+    });
+  }
+
   return xorRows.map((row) => {
     const key = row.physicalPanelKey || row.pieza;
     if (

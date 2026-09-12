@@ -90,6 +90,8 @@ function capitalizeWords(s: string): string {
 export function parseVehiclePartIdentity(input: {
   vehiculoText?: string | null;
   anio?: string | null;
+  marca?: string | null;
+  modelo?: string | null;
   version?: string | null;
   pieza: string;
 }): VehiclePartIdentity {
@@ -99,12 +101,14 @@ export function parseVehiclePartIdentity(input: {
     (/^(19|20)\d{2}$/.test(anioFromField) ? anioFromField : null) ??
     extractVehicleYear(raw);
   const withoutYear = raw.replace(/\b((?:19|20)\d{2})\b/g, ' ').replace(/\s+/g, ' ').trim();
-  const { marca, modelo } = splitBrandModel(withoutYear);
-  const modeloOrLabel = modelo || withoutYear;
-  const confirmed = hasConfirmedYearAndModel(anio, modeloOrLabel || marca);
+  const parsed = splitBrandModel(withoutYear);
+  const marca = String(input.marca ?? '').trim() || parsed.marca;
+  const modelo =
+    String(input.modelo ?? '').trim() || parsed.modelo || withoutYear;
+  const confirmed = hasConfirmedYearAndModel(anio, modelo || marca);
   return {
     marca,
-    modelo: modeloOrLabel,
+    modelo,
     anio,
     version: String(input.version ?? '').trim() || null,
     pieza: String(input.pieza ?? '').trim(),

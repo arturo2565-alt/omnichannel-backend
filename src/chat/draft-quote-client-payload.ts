@@ -1,8 +1,8 @@
 import type { DraftQuote } from './autofix-config';
 
 /**
- * Mensaje listo para copiar/enviar al cliente (misma fuente que `formalNarrative`).
- * El frontend también lee `generatedMessage` y `clientMessage` por compatibilidad.
+ * `clientMessage` es el FINAL CLIENT MESSAGE (flujo moderno).
+ * `formalNarrative` y `generatedMessage` se sincronizan para no divergir.
  */
 export function normalizeDraftQuoteForClient(
   draft: DraftQuote | null | undefined,

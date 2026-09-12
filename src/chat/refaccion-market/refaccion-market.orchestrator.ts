@@ -14,13 +14,20 @@ import type {
   VehiclePartIdentity,
 } from './refaccion-market.types';
 import { DEFAULT_REFACCION_MARKET_POLICY } from './refaccion-market.types';
+import {
+  logRefaccionMarketEvent,
+  REFACCION_MARKET_EVENTS,
+  type RefaccionMarketEventSink,
+} from './refaccion-market-events';
 
 export function runRefaccionMarketPipeline(input: {
   identity: VehiclePartIdentity;
   rawHits: RawProviderHit[];
   providersUsed: MarketProviderId[];
   policy?: RefaccionMarketPolicy;
+  emit?: RefaccionMarketEventSink;
 }): RefaccionMarketEstimate {
+  const emit = input.emit ?? logRefaccionMarketEvent;
   const query = input.rawHits[0]?.query ?? input.identity.piezaLabel;
   if (!input.identity.confirmed) {
     return insufficientEstimate(input.identity, query, {
@@ -30,6 +37,15 @@ export function runRefaccionMarketPipeline(input: {
   const normalized = input.rawHits
     .map((h) => normalizeRawHit(h, input.identity))
     .filter((s): s is NonNullable<typeof s> => s != null);
+  if (input.rawHits.length > 0 && normalized.length === 0) {
+    emit(REFACCION_MARKET_EVENTS.COMPATIBILITY_REJECTED, {
+      pieza: input.identity.piezaLabel,
+      marca: input.identity.marca,
+      modelo: input.identity.modelo,
+      anio: input.identity.anio,
+      rawHits: input.rawHits.length,
+    });
+  }
   const unique = dedupeMarketSamples(normalized);
   return buildMarketEstimate({
     identity: input.identity,

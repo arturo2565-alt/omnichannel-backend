@@ -19,6 +19,12 @@ import {
   normalizeTextForMatch,
 } from './autofix-config';
 import { AD_BUTTON_AUTO_REPLIES } from './ad-button-auto-reply';
+import { canonicalQuoteFromInstantResolution } from './canonical-commercial-quote';
+import {
+  assembleClientQuoteMessage,
+  renderCanonicalQuoteFinancialBlock,
+  renderDeterministicClientQuoteFallback,
+} from '../domain/peritaje-v1/quote-narrative';
 
 export type InstantQuoteLine = { label: string; amount: number };
 
@@ -547,27 +553,33 @@ export function resolvePiezaPinturaInstant(
 export function formatPiezaPinturaInstantReplyText(
   resolution: PiezaPinturaInstantResolution,
 ): string {
-  const total = Math.round(resolution.totalMx);
-  const linesText = resolution.lines
-    .map(
-      (l) =>
-        `🛠️ ${l.servicio}: $${Math.round(l.precioMx).toLocaleString('es-MX')} MXN`,
-    )
-    .join('\n');
+  const quote = canonicalQuoteFromInstantResolution({
+    lines: resolution.lines.map((l) => ({
+      label: l.servicio,
+      amount: l.precioMx,
+    })),
+    extras: [],
+    subtotal: resolution.totalMx,
+    total: resolution.totalMx,
+    precioMx: resolution.totalMx,
+    diasEntrega: 3,
+    currency: AUTO_FIX_CURRENCY,
+  }, { vehicleLabel: resolution.vehicleDisplayLabel || resolution.vehicleLabel });
+  const financial = renderCanonicalQuoteFinancialBlock(quote);
   const vehicle =
     resolution.vehicleDisplayLabel?.trim() ||
     resolution.vehicleLabel?.trim() ||
     'tu vehículo';
-
-  return [
-    `🚗💨 ¡Todo listo para renovar tu ${vehicle}!`,
-    `Aquí tienes el desglose de tu cotización:`,
-    ``,
-    linesText,
-    `💰 **Total Estimado: $${total.toLocaleString('es-MX')} MXN** *(Garantía total y materiales premium incluidos. Sujeto a revisión en taller).*`,
-    ``,
-    `⏳ Tenemos espacios esta semana. ¿Qué día te queda mejor para ingresar tu unidad?`,
-  ].join('\n');
+  const fallback = renderDeterministicClientQuoteFallback({
+    contactName: 'Estimado cliente',
+    canonicalQuote: quote,
+    hasActiveAppointment: false,
+    damageIntro: `¡Todo listo para renovar tu ${vehicle}!`,
+  });
+  return assembleClientQuoteMessage({
+    ...fallback,
+    financialBlock: financial.text,
+  });
 }
 
 /**
@@ -1191,7 +1203,9 @@ export function extractBañoColorDetailHeuristic(userText: string): string | nul
   return detail.length >= 8 ? detail : null;
 }
 
-/** Suplemento MXN por cambio de color con baño de pintura (según tamaño). */
+/**
+ * @deprecated LEGACY. CANONICAL no suma este suplemento; BPCC es fila de catálogo.
+ */
 export function cambioDeColorAddonMx(severidadBaño: string): number {
   const s = normalizeTextForMatch(severidadBaño);
   if (/\b(grande|xl)\b/.test(s)) return 10_000;
@@ -1242,6 +1256,8 @@ export function materializeIntegralQuoteResolution(
     resolveVia: CanonicalVia;
     latestPreview: string;
     fullCtxPreview: string;
+    /** CANONICAL: siempre true. El addon $8k/$10k está deprecated. */
+    skipCambioDeColorAddon?: boolean;
   },
 ): InstantQuoteResolution | null {
   const {
@@ -1252,6 +1268,7 @@ export function materializeIntegralQuoteResolution(
     resolveVia,
     latestPreview,
     fullCtxPreview,
+    skipCambioDeColorAddon = true,
   } = params;
 
   if (!isIntegralServiceName(canonical)) return null;
@@ -1297,6 +1314,7 @@ export function materializeIntegralQuoteResolution(
   const extras: InstantQuoteLine[] = [];
   let add = 0;
   if (
+    !skipCambioDeColorAddon &&
     isBañoDePinturaServicio(canonical) &&
     mentionsCambioDeColor(tierSourceForCambioColor)
   ) {
@@ -1358,6 +1376,7 @@ export function materializeInstantQuoteResolution(
       resolveVia,
       latestPreview,
       fullCtxPreview,
+      skipCambioDeColorAddon: true,
     });
   }
 
@@ -1394,14 +1413,7 @@ export function materializeInstantQuoteResolution(
     { label: `${canonical} (${severidadLiteral})`, amount: base },
   ];
   const extras: InstantQuoteLine[] = [];
-  let add = 0;
-  if (isBañoDePinturaServicio(canonical) && mentionsCambioDeColor(tierSourceForCambioColor)) {
-    add = cambioDeColorAddonMx(severidadLiteral);
-    extras.push({
-      label: 'Cambio de color',
-      amount: add,
-    });
-  }
+  const add = 0;
 
   const subtotal = base;
   const total = base + add;
@@ -1480,6 +1492,7 @@ export function tryResolveInstantQuoteFromUserText(
       resolveVia: via,
       latestPreview: latest,
       fullCtxPreview: fullCtxRaw,
+      skipCambioDeColorAddon: true,
     });
   }
 
@@ -1531,22 +1544,17 @@ export function tryResolveInstantQuoteFromUserText(
 
 /** Formato amigable tipo WhatsApp / panel (negritas con *). */
 export function formatInstantQuoteClientMessage(r: InstantQuoteResolution): string {
-  const blocks: string[] = [
-    '¡Hola! Con gusto te comparto la cotización según nuestro catálogo vigente:',
-    '',
-    ...r.lines.map((l) => `• *${l.label}*: ${formatAutoFixMoney(l.amount)} ${r.currency}`),
-  ];
-  if (r.extras.length) {
-    blocks.push(
-      '',
-      ...r.extras.map((l) => `• *${l.label}*: ${formatAutoFixMoney(l.amount)} ${r.currency}`),
-    );
-  }
-  blocks.push(
-    '',
-    `*Total: ${formatAutoFixMoney(r.total)} ${r.currency}*`,
-    '',
-    'Si quieres, te ayudo a agendar una visita al taller.',
-  );
-  return blocks.join('\n');
+  const quote = canonicalQuoteFromInstantResolution(r);
+  const financial = renderCanonicalQuoteFinancialBlock(quote);
+  const fallback = renderDeterministicClientQuoteFallback({
+    contactName: 'Estimado cliente',
+    canonicalQuote: quote,
+    hasActiveAppointment: false,
+    damageIntro:
+      'Con gusto te comparto la cotización según nuestro catálogo vigente.',
+  });
+  return assembleClientQuoteMessage({
+    ...fallback,
+    financialBlock: financial.text,
+  });
 }

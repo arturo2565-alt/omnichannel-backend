@@ -17,8 +17,14 @@ export enum RefaccionCategoria {
 }
 
 /**
- * Catálogo de refacciones y ópticas por taller (costo base + margen).
+ * Diccionario legacy por taller. Ya NO es fuente de precio en CANONICAL.
+ *
+ * Fase 1: el Quote Engine no lee costo/margen.
+ * Fase 3: cleanup de columnas financieras cuando no quede dependencia histórica.
+ *
  * Tabla física: `refaccion_catalog`.
+ *
+ * @deprecated LEGACY_ONLY — conservar filas históricas; no usar para cotizar.
  */
 @Entity({ name: 'refaccion_catalog' })
 @Unique(['tallerId', 'codigo'])
@@ -45,11 +51,11 @@ export class RefaccionCatalog {
   @Column({ type: 'varchar', length: 24 })
   categoria: RefaccionCategoria;
 
-  /** Costo de referencia de la pieza nueva (MXN). */
+  /** @deprecated LEGACY_ONLY — no es fuente CANONICAL. Columna: costo_referencia_base */
   @Column({ type: 'int', name: 'costo_referencia_base' })
   costoReferenciaBase: number;
 
-  /** Margen del taller sobre el costo base (porcentaje entero). */
+  /** @deprecated LEGACY_ONLY — no es fuente CANONICAL. Columna: margen_porcentaje */
   @Column({ type: 'int', name: 'margen_porcentaje', default: 30 })
   margenPorcentaje: number;
 }

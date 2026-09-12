@@ -4,7 +4,7 @@ import {
   resolveBanioCodeUnitPrice,
 } from './vehicle-piece-pricing';
 
-describe('resolveBanioCodeUnitPrice / BPCC llave en mano', () => {
+describe('resolveBanioCodeUnitPrice / BPCC llave en mano (LEGACY, no CANONICAL)', () => {
   it('BPE deja la base exterior', () => {
     expect(resolveBanioCodeUnitPrice(20_000, 'BPE', 'Mediano')).toBe(20_000);
   });

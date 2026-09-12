@@ -12,10 +12,16 @@ import {
   type VehicleSizeTier,
 } from './vehicle-pricing-profile';
 
-/** Una sola línea comercial para BPCC: exterior + interiores + cambio de color. */
+/**
+ * @deprecated LEGACY. CANONICAL usa la fila de catálogo BPCC ($39,000 BASE).
+ * No llamar desde Quote Engine, express ni materializeIntegralQuoteResolution.
+ */
 export const BPCC_TURNKEY_LABEL =
   'Transformación Total / Cambio de Color (Exterior e Interiores completos)';
 
+/**
+ * @deprecated LEGACY $8,000 / $10,000. No gobierna cotizaciones CANONICAL.
+ */
 export function cambioDeColorAddonMxForSizeTier(
   sizeTier?: VehicleSizeTier | null,
 ): number {
@@ -33,9 +39,9 @@ export function normalizeBanioPricingCode(
 }
 
 /**
- * Precio llave en mano del baño.
- * BPE = base exterior. BPEI = base + interiores (+15%).
- * BPCC = BPEI + suplemento de color, **sin desglosar** líneas extra.
+ * @deprecated LEGACY (+15% / suplemento de color).
+ * CANONICAL: lookupBanioCatalogBase + computeCatalogIntegralPrice.
+ * No llamar desde flujos modernos.
  */
 export function resolveBanioCodeUnitPrice(
   exteriorBase: number,
