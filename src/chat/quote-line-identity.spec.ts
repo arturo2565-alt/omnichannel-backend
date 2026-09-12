@@ -5,6 +5,7 @@ import {
   stampQuoteLineId,
   validateModernQuoteAssociations,
 } from './quote-line-identity';
+import { parseVisionDamageItems } from './vision-item-normalize';
 import {
   cloneDetectedDamageItem,
   ensureDamageIdentity,
@@ -456,6 +457,94 @@ describe('Fase 4 — identidad DamageItem 1:N QuoteLine', () => {
     );
     expect(rows.map((r) => r.pieza)).toEqual(['FD', 'FT', 'PDI', 'Cofre']);
     expect(sumQuoteRowsSubtotal(rows)).toBe(14850);
+  });
+
+  it('una foto con tres DamageItems conserva la misma evidence URL por damageItemId', () => {
+    const photo = 'https://cdn.example/lado-derecho.jpg';
+    const parsed = parseVisionDamageItems({
+      items: [
+        {
+          pieza: 'PTD',
+          severidad: 'DM',
+          descripcionTecnica: 'Puerta',
+          tipo_dano: 'REPARACION',
+          requiere_refaccion: false,
+          urls_origen: [photo],
+        },
+        {
+          pieza: 'STD',
+          severidad: 'DM',
+          descripcionTecnica: 'Salpicadera',
+          tipo_dano: 'REPARACION',
+          requiere_refaccion: false,
+          urls_origen: [],
+        },
+        {
+          pieza: 'ED',
+          severidad: 'DM',
+          descripcionTecnica: 'Estribo',
+          tipo_dano: 'REPARACION',
+          requiere_refaccion: false,
+          urls_origen: [],
+        },
+      ],
+    });
+    expect(parsed).toHaveLength(3);
+    expect(parsed.map((it) => it.urls_origen)).toEqual([
+      [photo],
+      [photo],
+      [photo],
+    ]);
+
+    const inventory = parsed.map((it) =>
+      ensureDamageIdentity({ ...it, vehicleId: mazda }),
+    );
+    const rows = quoteRowsFromDamageInventory(inventory, snap());
+    expect(rows).toHaveLength(3);
+    expect(new Set(rows.map((r) => r.damageItemId)).size).toBe(3);
+
+    const { rows: persisted } = buildPersistedDraftQuoteItemRows({
+      lines: rows,
+      inventory,
+    });
+    expect(persisted).toHaveLength(3);
+    for (const dmg of inventory) {
+      const resolved = resolveDamageForQuoteRow({
+        row: { damageItemId: dmg.damageItemId },
+        inventory,
+        index: 99,
+        log: false,
+      });
+      expect(resolved.method).toBe('identity');
+      expect(resolved.item?.urls_origen).toEqual([photo]);
+      expect(
+        persisted.find((p) => p.damageItemId === dmg.damageItemId)?.urlsOrigen,
+      ).toEqual([photo]);
+    }
+    expect(new Set(inventory.map((d) => d.damageItemId)).size).toBe(3);
+  });
+
+  it('persistencia: una sola fallback URL se asocia a cada DamageItem moderno vacío', () => {
+    const photo = 'https://cdn.example/lado-derecho.jpg';
+    const inventory = ['PTD', 'STD', 'ED'].map((pieza) =>
+      ensureDamageIdentity(
+        item({
+          pieza,
+          tratamiento: 'REPARAR',
+          treatmentSource: 'vision',
+          vehicleId: mazda,
+          urls_origen: [],
+        }),
+      ),
+    );
+    const rows = quoteRowsFromDamageInventory(inventory, snap());
+    const { rows: persisted } = buildPersistedDraftQuoteItemRows({
+      lines: rows,
+      inventory,
+      fallbackUrls: [photo],
+    });
+    expect(persisted).toHaveLength(3);
+    expect(persisted.every((r) => r.urlsOrigen?.[0] === photo)).toBe(true);
   });
 
   it('invariantes modernas: IDs presentes, únicos y referenciados', () => {

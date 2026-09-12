@@ -128,4 +128,43 @@ describe('visión → tratamiento canónico', () => {
       confirmed: true,
     });
   });
+
+  it('una foto en el primer ítem se comparte con PTD/STD/ED, no se consume', () => {
+    const photo = 'https://cdn.example/lado-derecho.jpg';
+    const items = parseVisionDamageItems({
+      items: [
+        {
+          pieza: 'PTD',
+          severidad: 'DM',
+          descripcionTecnica: 'Puerta',
+          tipo_dano: 'REPARACION',
+          requiere_refaccion: false,
+          urls_origen: [photo],
+        },
+        {
+          pieza: 'STD',
+          severidad: 'DM',
+          descripcionTecnica: 'Salpicadera',
+          tipo_dano: 'REPARACION',
+          requiere_refaccion: false,
+          urls_origen: [],
+        },
+        {
+          pieza: 'ED',
+          severidad: 'DM',
+          descripcionTecnica: 'Estribo',
+          tipo_dano: 'REPARACION',
+          requiere_refaccion: false,
+          urls_origen: [],
+        },
+      ],
+    });
+    expect(items.map((it) => it.pieza)).toEqual(['PTD', 'STD', 'ED']);
+    expect(items.map((it) => it.urls_origen)).toEqual([
+      [photo],
+      [photo],
+      [photo],
+    ]);
+    expect(items[0]?.urls_origen).toEqual([photo]);
+  });
 });

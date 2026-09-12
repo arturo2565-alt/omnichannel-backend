@@ -107,7 +107,10 @@ import {
   visionItemsIndicateBanioCompleto,
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
-import { parseVisionDamageItems } from './vision-item-normalize';
+import {
+  parseVisionDamageItems,
+  shareSinglePhotoEvidenceAcrossDamages,
+} from './vision-item-normalize';
 import {
   extractVisionViability,
   mergeVisionViability,
@@ -2911,7 +2914,7 @@ export class ChatService implements OnModuleDestroy {
       }),
     );
     return {
-      items: collapsed,
+      items: shareSinglePhotoEvidenceAcrossDamages(collapsed, urls),
       viability: { peritajeViable: true },
       vehiculoDetectado: rootVehicle,
     };
@@ -3053,10 +3056,13 @@ export class ChatService implements OnModuleDestroy {
         { vehiculo_detectado: accumulatedVisionVehicle }
       : undefined;
     return {
-      items: collapseVisionItemsToBpcIfNeeded(
-        allDetectedDamages,
-        tierContext,
-        visionRootForCollapse,
+      items: shareSinglePhotoEvidenceAcrossDamages(
+        collapseVisionItemsToBpcIfNeeded(
+          allDetectedDamages,
+          tierContext,
+          visionRootForCollapse,
+        ),
+        imageUrls,
       ),
       viability: { peritajeViable: true },
       vehiculoDetectado: accumulatedVisionVehicle,
@@ -5761,7 +5767,10 @@ ${catalogAppend}`;
         conversationTextHistory,
       },
     );
-    const newInventory = visionResult.items;
+    const newInventory = shareSinglePhotoEvidenceAcrossDamages(
+      visionResult.items,
+      imageUrls,
+    );
 
     if (!visionResult.viability.peritajeViable || newInventory.length === 0) {
       const aclaracion = resolveClienteAclaracion(visionResult.viability);

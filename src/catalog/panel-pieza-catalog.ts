@@ -335,6 +335,33 @@ export function findPanelPiezaOption(raw: string): PanelPiezaOption | null {
   return null;
 }
 
+/**
+ * Nombres en singular que el cliente debe ver (el catálogo del panel
+ * puede seguir en plural: "Estribos derechos").
+ */
+const CLIENT_PIECE_LABEL_OVERRIDES: Readonly<Record<string, string>> = {
+  ED: 'Estribo derecho',
+  EI: 'Estribo izquierdo',
+};
+
+/**
+ * Código interno de panel → nombre humano para el mensaje al cliente.
+ * No sustituye frases ya humanas ("fascia delantera") para no alterar
+ * etiquetas derivadas de QuoteLine.description.
+ */
+export function humanizeClientPieceLabel(raw: string): string {
+  const t = String(raw ?? '').trim();
+  if (!t) return t;
+  const opt = findPanelPiezaOption(t);
+  if (!opt) return t;
+  const override = CLIENT_PIECE_LABEL_OVERRIDES[opt.code];
+  const isCode = opt.code.toLowerCase() === t.toLowerCase();
+  const isCatalogName = opt.fullName.toLowerCase() === t.toLowerCase();
+  if (override && (isCode || isCatalogName)) return override;
+  if (isCode) return opt.fullName;
+  return t;
+}
+
 /** Normaliza texto/sigla de visión o inventario al código del panel (FD, SI, …). */
 export function normalizePanelPiezaCode(raw: string): string {
   return canonicalizePanelCode(raw);

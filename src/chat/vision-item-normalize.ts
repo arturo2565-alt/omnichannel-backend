@@ -164,6 +164,46 @@ export function normalizeVisionDamageItem(
   };
 }
 
+function uniqueTrimmedUrls(urls: readonly string[] | undefined): string[] {
+  return [
+    ...new Set(
+      (urls ?? []).map((u) => String(u ?? '').trim()).filter(Boolean),
+    ),
+  ];
+}
+
+/**
+ * Una misma URL puede evidenciar varios DamageItems.
+ * No consume ni mueve la evidencia del primer ítem: la copia (unión)
+ * cuando hay exactamente una foto atribuible en el lote.
+ */
+export function shareSinglePhotoEvidenceAcrossDamages(
+  items: readonly DetectedDamageItem[],
+  sessionUrls: readonly string[] = [],
+): DetectedDamageItem[] {
+  if (!items.length) return [];
+  const present = uniqueTrimmedUrls(items.flatMap((it) => it.urls_origen ?? []));
+  const session = uniqueTrimmedUrls(sessionUrls);
+  const shared =
+    present.length === 1
+      ? present[0]
+      : present.length === 0 && session.length === 1
+        ? session[0]
+        : undefined;
+  if (!shared) {
+    return items.map((it) => ({
+      ...it,
+      urls_origen: uniqueTrimmedUrls(it.urls_origen),
+    }));
+  }
+  return items.map((it) => {
+    const urls = uniqueTrimmedUrls(it.urls_origen);
+    if (urls.includes(shared)) return { ...it, urls_origen: urls };
+    if (urls.length === 0) return { ...it, urls_origen: [shared] };
+    return { ...it, urls_origen: urls };
+  });
+}
+
 export function parseVisionDamageItems(raw: unknown): DetectedDamageItem[] {
   const o =
     raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
@@ -179,5 +219,5 @@ export function parseVisionDamageItems(raw: unknown): DetectedDamageItem[] {
     const item = normalizeVisionDamageItem(el);
     if (item) out.push(item);
   }
-  return out;
+  return shareSinglePhotoEvidenceAcrossDamages(out);
 }

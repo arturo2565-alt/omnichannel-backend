@@ -1,3 +1,4 @@
+import { peritajeFromLegacyAnalysis } from './from-legacy';
 import { QUOTE_SCHEMA_VERSION } from './types';
 import type { CanonicalQuoteV1, QuoteLine } from './types';
 import {
@@ -321,5 +322,74 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
   it('isCanonicalNarrativeEligible distingue legacy', () => {
     expect(isCanonicalNarrativeEligible(null)).toBe(false);
     expect(isCanonicalNarrativeEligible(quote({ lines: [montaje3400] }))).toBe(true);
+  });
+
+  it('PTD/STD/ED se humanizan en el bloque financiero y el total sigue $9,750', () => {
+    const peritaje = peritajeFromLegacyAnalysis({
+      conversationId: 'conv_smoke_ptd_std_ed',
+      analysis: {
+        inventory: [
+          {
+            pieza: 'PTD',
+            severidad: 'DM',
+            descripcionTecnica: 'Golpe en puerta trasera derecha',
+            urls_origen: ['https://cdn.example/lado.jpg'],
+            tratamiento: 'REPARAR',
+          },
+          {
+            pieza: 'STD',
+            severidad: 'DM',
+            descripcionTecnica: 'Golpe en salpicadera trasera derecha',
+            urls_origen: [],
+            tratamiento: 'REPARAR',
+          },
+          {
+            pieza: 'ED',
+            severidad: 'DM',
+            descripcionTecnica: 'Golpe en estribo derecho',
+            urls_origen: [],
+            tratamiento: 'REPARAR',
+          },
+        ],
+      },
+    });
+    expect(peritaje.damages.map((d) => d.pieceCode)).toEqual([
+      'PTD',
+      'STD',
+      'ED',
+    ]);
+    expect(peritaje.damages.map((d) => d.pieceLabel)).toEqual([
+      'Puerta trasera derecha',
+      'Salpicadera trasera derecha',
+      'Estribo derecho',
+    ]);
+
+    const amounts = [3250, 3350, 3150] as const;
+    const q = quote({
+      lines: peritaje.damages.map((d, i) =>
+        line({
+          quoteLineId: `ql_${d.pieceCode}`,
+          damageItemId: d.damageItemId,
+          serviceType: 'REPARACION_PINTURA',
+          amount: amounts[i]!,
+          description: d.pieceCode,
+        }),
+      ),
+      total: 9750,
+      subtotal: 9750,
+    });
+    expect(q.total).toBe(9750);
+    expect(q.lines.reduce((s, l) => s + l.amount, 0)).toBe(9750);
+
+    const block = renderCanonicalQuoteFinancialBlock(q, peritaje);
+    expect(block.text).toContain('Reparación y pintura Puerta trasera derecha');
+    expect(block.text).toContain(
+      'Reparación y pintura Salpicadera trasera derecha',
+    );
+    expect(block.text).toContain('Reparación y pintura Estribo derecho');
+    expect(block.text).not.toMatch(/Reparación y pintura PTD/);
+    expect(block.text).not.toMatch(/Reparación y pintura STD\b/);
+    expect(block.text).not.toMatch(/Reparación y pintura ED\b/);
+    expect(block.text).toContain('$9,750');
   });
 });

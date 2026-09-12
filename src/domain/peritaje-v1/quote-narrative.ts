@@ -2,6 +2,7 @@
  * Fase 6 — presentación y conciliación del mensaje al cliente.
  * No calcula precios. CanonicalQuoteV1 es la única autoridad financiera.
  */
+import { humanizeClientPieceLabel } from '../../catalog/panel-pieza-catalog';
 import { isChargeableQuoteLine } from './quote-engine';
 import { QUOTE_SCHEMA_VERSION } from './types';
 import type {
@@ -131,8 +132,8 @@ export function resolveQuoteLinePieceLabel(
   const fromPeritaje = peritaje?.damages.find(
     (d) => d.damageItemId === line.damageItemId,
   )?.pieceLabel;
-  if (fromPeritaje?.trim()) return fromPeritaje.trim();
-  return inferPieceLabelFromQuoteLine(line);
+  const raw = fromPeritaje?.trim() || inferPieceLabelFromQuoteLine(line);
+  return humanizeClientPieceLabel(raw) || raw;
 }
 
 export function buildControlledQuoteLineLabel(

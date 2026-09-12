@@ -1,6 +1,7 @@
 import {
   canonicalizePanelCode,
   findPanelPiezaOption,
+  humanizeClientPieceLabel,
   normalizePanelPiezaCode,
   refaccionCatalogCodigoForPieza,
   resolveCatalogPiezaForMatrixLookup,
@@ -61,6 +62,14 @@ describe('panel-pieza-catalog', () => {
     expect(resolveCatalogPiezaForMatrixLookup('CTI')).toBe('Salpicadera');
     expect(resolveCatalogPiezaForMatrixLookup('ESI')).toBe('Espejo');
     expect(resolveCatalogPiezaForMatrixLookup('BPE')).toBeNull();
+  });
+
+  it('humanizeClientPieceLabel traduce códigos internos, no frases humanas', () => {
+    expect(humanizeClientPieceLabel('PTD')).toBe('Puerta trasera derecha');
+    expect(humanizeClientPieceLabel('STD')).toBe('Salpicadera trasera derecha');
+    expect(humanizeClientPieceLabel('ED')).toBe('Estribo derecho');
+    expect(humanizeClientPieceLabel('fascia delantera')).toBe('fascia delantera');
+    expect(humanizeClientPieceLabel('Cofre')).toBe('Cofre');
   });
 
   it('refaccionCatalogCodigoForPieza mapea visión a código de catálogo', () => {

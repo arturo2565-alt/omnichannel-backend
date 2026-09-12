@@ -7,6 +7,7 @@ import {
   UNKNOWN_VEHICLE_ID,
 } from './ids';
 import { parseStructuredTreatment, treatmentImpliesReplacement } from './treatment';
+import { humanizeClientPieceLabel } from '../../catalog/panel-pieza-catalog';
 import {
   PERITAJE_SCHEMA_VERSION,
   type CanonicalPeritajeV1,
@@ -135,7 +136,7 @@ export function damageItemFromLegacy(
     }),
     vehicleId: ctx.vehicleId,
     pieceCode,
-    pieceLabel: pieceCode,
+    pieceLabel: humanizeClientPieceLabel(pieceCode) || pieceCode,
     physicalPanelKey,
     severity: trim(item.severidad),
     descriptionTechnical,
