@@ -107,10 +107,8 @@ import {
   visionItemsIndicateBanioCompleto,
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
-import {
-  parseVisionDamageItems,
-  shareSinglePhotoEvidenceAcrossDamages,
-} from './vision-item-normalize';
+import { parseVisionDamageItems } from './vision-item-normalize';
+import { recoverVisionEvidenceForPeritaje } from './vision-evidence';
 import {
   extractVisionViability,
   mergeVisionViability,
@@ -2873,6 +2871,16 @@ export class ChatService implements OnModuleDestroy {
     const viability = extractVisionViability(parsed);
     const rootVehicle = extractVisionDetectedVehicle(parsed);
     const rawItems = parseDetectedDamageItemsAllowEmpty(parsed);
+    console.log(
+      '[Vision] urls_origen crudas (pre-recovery)',
+      JSON.stringify({
+        inputCount: urls.length,
+        items: rawItems.map((it) => ({
+          pieza: it.pieza,
+          urls_origen: [...(it.urls_origen ?? [])],
+        })),
+      }),
+    );
     const items = rawItems.map((it) => ({
       ...it,
       pieza: canonicalizePanelCode(it.pieza) || it.pieza,
@@ -2914,7 +2922,7 @@ export class ChatService implements OnModuleDestroy {
       }),
     );
     return {
-      items: shareSinglePhotoEvidenceAcrossDamages(collapsed, urls),
+      items: recoverVisionEvidenceForPeritaje(collapsed, urls),
       viability: { peritajeViable: true },
       vehiculoDetectado: rootVehicle,
     };
@@ -3056,7 +3064,7 @@ export class ChatService implements OnModuleDestroy {
         { vehiculo_detectado: accumulatedVisionVehicle }
       : undefined;
     return {
-      items: shareSinglePhotoEvidenceAcrossDamages(
+      items: recoverVisionEvidenceForPeritaje(
         collapseVisionItemsToBpcIfNeeded(
           allDetectedDamages,
           tierContext,
@@ -5767,7 +5775,7 @@ ${catalogAppend}`;
         conversationTextHistory,
       },
     );
-    const newInventory = shareSinglePhotoEvidenceAcrossDamages(
+    const newInventory = recoverVisionEvidenceForPeritaje(
       visionResult.items,
       imageUrls,
     );

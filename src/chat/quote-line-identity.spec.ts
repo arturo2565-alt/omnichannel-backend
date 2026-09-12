@@ -6,6 +6,7 @@ import {
   validateModernQuoteAssociations,
 } from './quote-line-identity';
 import { parseVisionDamageItems } from './vision-item-normalize';
+import { applyVisionEvidenceRules } from './vision-evidence';
 import {
   cloneDetectedDamageItem,
   ensureDamageIdentity,
@@ -490,13 +491,14 @@ describe('Fase 4 — identidad DamageItem 1:N QuoteLine', () => {
       ],
     });
     expect(parsed).toHaveLength(3);
-    expect(parsed.map((it) => it.urls_origen)).toEqual([
+    const recovered = applyVisionEvidenceRules(parsed, [photo]).items;
+    expect(recovered.map((it) => it.urls_origen)).toEqual([
       [photo],
       [photo],
       [photo],
     ]);
 
-    const inventory = parsed.map((it) =>
+    const inventory = recovered.map((it) =>
       ensureDamageIdentity({ ...it, vehicleId: mazda }),
     );
     const rows = quoteRowsFromDamageInventory(inventory, snap());

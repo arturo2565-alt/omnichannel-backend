@@ -129,7 +129,7 @@ describe('visión → tratamiento canónico', () => {
     });
   });
 
-  it('una foto en el primer ítem se comparte con PTD/STD/ED, no se consume', () => {
+  it('el parser no inventa urls_origen: deja vacío lo que Vision omitió', () => {
     const photo = 'https://cdn.example/lado-derecho.jpg';
     const items = parseVisionDamageItems({
       items: [
@@ -149,22 +149,10 @@ describe('visión → tratamiento canónico', () => {
           requiere_refaccion: false,
           urls_origen: [],
         },
-        {
-          pieza: 'ED',
-          severidad: 'DM',
-          descripcionTecnica: 'Estribo',
-          tipo_dano: 'REPARACION',
-          requiere_refaccion: false,
-          urls_origen: [],
-        },
       ],
     });
-    expect(items.map((it) => it.pieza)).toEqual(['PTD', 'STD', 'ED']);
-    expect(items.map((it) => it.urls_origen)).toEqual([
-      [photo],
-      [photo],
-      [photo],
-    ]);
+    expect(items.map((it) => it.pieza)).toEqual(['PTD', 'STD']);
     expect(items[0]?.urls_origen).toEqual([photo]);
+    expect(items[1]?.urls_origen).toEqual([]);
   });
 });

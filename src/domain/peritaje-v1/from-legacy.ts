@@ -125,7 +125,9 @@ export function damageItemFromLegacy(
     trim(item.descripcion) ||
     'Sin descripción técnica disponible.';
   const imageUrls = [
-    ...((item.urls_origen ?? item.urls_asociadas ?? []).map(trim).filter(Boolean)),
+    ...new Set(
+      (item.urls_origen ?? item.urls_asociadas ?? []).map(trim).filter(Boolean),
+    ),
   ];
   const locked = parseStructuredTreatment(item.tratamiento);
 
