@@ -559,12 +559,10 @@ export function formatPiezaPinturaInstantReplyText(
       amount: l.precioMx,
     })),
     extras: [],
-    subtotal: resolution.totalMx,
-    total: resolution.totalMx,
-    precioMx: resolution.totalMx,
-    diasEntrega: 3,
-    currency: AUTO_FIX_CURRENCY,
-  }, { vehicleLabel: resolution.vehicleDisplayLabel || resolution.vehicleLabel });
+  }, {
+    vehicleLabel:
+      resolution.vehicleDisplayLabel || resolution.vehicleLabel || undefined,
+  });
   const financial = renderCanonicalQuoteFinancialBlock(quote);
   const vehicle =
     resolution.vehicleDisplayLabel?.trim() ||

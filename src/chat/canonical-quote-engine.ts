@@ -610,7 +610,9 @@ export function resolveAuthoritativeDraftFinance(input: {
           blocked: true,
           reason: 'build_failed_keep_prior',
         });
-        return finishCanonical(input.existingQuote, input.pricedRows ?? []);
+        return finishCanonical(input.existingQuote, [
+          ...(input.pricedRows ?? []),
+        ]);
       }
       logCanonicalBuildFailed({
         conversationId: input.conversationId,

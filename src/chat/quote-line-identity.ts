@@ -110,7 +110,9 @@ export function isModernIdentityObject(
     return true;
   }
   if (String(obj.damageItemId ?? '').startsWith('dmg_')) return true;
-  if (String(obj.quoteLineId ?? '').startsWith('ql_')) return true;
+  if (String((obj as QuoteIdentityCarrier).quoteLineId ?? '').startsWith('ql_')) {
+    return true;
+  }
   return false;
 }
 

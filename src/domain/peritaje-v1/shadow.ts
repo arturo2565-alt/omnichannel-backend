@@ -73,6 +73,7 @@ export type LegacyProjectionShape = {
     pieza?: string;
     tratamiento?: string;
     urls_origen?: string[];
+    urls_asociadas?: string[];
     possibleHiddenDamage?: { detected?: boolean };
     vehiculoDetectado?: string;
   }>;
