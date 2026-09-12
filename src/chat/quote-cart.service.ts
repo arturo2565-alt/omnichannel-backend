@@ -342,6 +342,7 @@ export class QuoteCartService {
       quotePayload,
       damageAnalysis: active.damageAnalysis,
       items: active.items ?? [],
+      imageUrl: active.imageUrl ?? '',
       messageId: active.messageId,
       createdAt: active.createdAt,
       canonicalQuoteV1: active.canonicalQuoteV1,

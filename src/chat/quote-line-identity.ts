@@ -376,13 +376,12 @@ export function buildPersistedDraftQuoteItemRows(input: {
     let urlsOrigen: string[] | null =
       evidence.length > 0 ? [...evidence] : null;
     const fallback = [...(input.fallbackUrls ?? [])].filter(Boolean);
-    if (!urlsOrigen && fallback.length > 0) {
-      if (resolved.method === 'positional_legacy') {
-        urlsOrigen = [...fallback];
-      } else if (resolved.item && fallback.length === 1) {
-        // Una sola foto de sesión: pertenece a todos los DamageItems, no solo al primero.
-        urlsOrigen = [fallback[0]!];
-      }
+    if (
+      !urlsOrigen &&
+      resolved.method === 'positional_legacy' &&
+      fallback.length > 0
+    ) {
+      urlsOrigen = [...fallback];
     }
 
     if (

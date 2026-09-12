@@ -526,7 +526,7 @@ describe('Fase 4 — identidad DamageItem 1:N QuoteLine', () => {
     expect(new Set(inventory.map((d) => d.damageItemId)).size).toBe(3);
   });
 
-  it('persistencia: una sola fallback URL se asocia a cada DamageItem moderno vacío', () => {
+  it('persistencia moderna no rellena urlsOrigen desde imageUrl/fallback', () => {
     const photo = 'https://cdn.example/lado-derecho.jpg';
     const inventory = ['PTD', 'STD', 'ED'].map((pieza) =>
       ensureDamageIdentity(
@@ -546,7 +546,7 @@ describe('Fase 4 — identidad DamageItem 1:N QuoteLine', () => {
       fallbackUrls: [photo],
     });
     expect(persisted).toHaveLength(3);
-    expect(persisted.every((r) => r.urlsOrigen?.[0] === photo)).toBe(true);
+    expect(persisted.every((r) => r.urlsOrigen == null)).toBe(true);
   });
 
   it('invariantes modernas: IDs presentes, únicos y referenciados', () => {

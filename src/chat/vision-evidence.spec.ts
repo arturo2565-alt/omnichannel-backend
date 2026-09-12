@@ -78,6 +78,29 @@ describe('visión evidence — single/multi image, persistencia y merge', () => 
     ).toEqual([]);
   });
 
+  it('2b. una imagen + tres items vacíos → los tres reciben la URL', () => {
+    const parsed = parseVisionDamageItems({
+      items: [
+        visionItem('PTD', []),
+        visionItem('STD', []),
+        visionItem('PDD', []),
+      ],
+    });
+    const { items } = applyVisionEvidenceRules(parsed, [PHOTO]);
+    expect(items.map((it) => it.urls_origen)).toEqual([
+      [PHOTO],
+      [PHOTO],
+      [PHOTO],
+    ]);
+  });
+
+  it('2c. un item ya tiene URL → no se duplica', () => {
+    const parsed = parsePtdStd([PHOTO], []);
+    const { items } = applyVisionEvidenceRules(parsed, [PHOTO]);
+    expect(items[0]?.urls_origen).toEqual([PHOTO]);
+    expect(items[1]?.urls_origen).toEqual([PHOTO]);
+  });
+
   it('2. 1 imagen → segundo item sin urls_origen recupera la única URL', () => {
     const parsed = parsePtdStd([PHOTO], []);
     expect(parsed[1]?.urls_origen).toEqual([]);
@@ -88,13 +111,21 @@ describe('visión evidence — single/multi image, persistencia y merge', () => 
 
   it('3. recovery genera EVIDENCE_RECOVERED_SINGLE_INPUT', () => {
     const parsed = parsePtdStd([], []);
-    const { events } = applyVisionEvidenceRules(parsed, [PHOTO]);
+    const { events } = applyVisionEvidenceRules(parsed, [PHOTO], {
+      conversationId: 'conv_audit',
+      visionRunId: 'visrun_test',
+    });
     const recovered = events.filter(
       (e) => e.event === EVIDENCE_EVENTS.EVIDENCE_RECOVERED_SINGLE_INPUT,
     );
     expect(recovered).toHaveLength(2);
-    expect(recovered.map((e) => e.pieza).sort()).toEqual(['PTD', 'STD']);
+    expect(recovered.map((e) => e.pieceCode).sort()).toEqual(['PTD', 'STD']);
     expect(recovered.every((e) => e.url === PHOTO)).toBe(true);
+    expect(recovered.every((e) => e.cantidadInputImages === 1)).toBe(true);
+    expect(recovered.every((e) => e.conversationId === 'conv_audit')).toBe(
+      true,
+    );
+    expect(recovered.every((e) => e.visionRunId === 'visrun_test')).toBe(true);
   });
 
   it('4. 3 imágenes → item sin urls NO recibe las 3', () => {
@@ -115,8 +146,8 @@ describe('visión evidence — single/multi image, persistencia y merge', () => 
       expect.arrayContaining([
         expect.objectContaining({
           event: EVIDENCE_EVENTS.EVIDENCE_MISSING_FROM_VISION,
-          pieza: 'STD',
-          inputCount: 2,
+          pieceCode: 'STD',
+          cantidadInputImages: 2,
         }),
       ]),
     );
@@ -274,7 +305,7 @@ describe('visión evidence — single/multi image, persistencia y merge', () => 
         }),
         expect.objectContaining({
           event: EVIDENCE_EVENTS.EVIDENCE_RECOVERED_SINGLE_INPUT,
-          pieza: 'PTD',
+          pieceCode: 'PTD',
           url: PHOTO,
         }),
       ]),

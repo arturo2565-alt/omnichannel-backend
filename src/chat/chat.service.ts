@@ -108,7 +108,10 @@ import {
   VISION_BPC_PIEZA_CODE,
 } from './vision-bpc-inventory';
 import { parseVisionDamageItems } from './vision-item-normalize';
-import { recoverVisionEvidenceForPeritaje } from './vision-evidence';
+import {
+  auditEvidenceRefs,
+  recoverVisionEvidenceForPeritaje,
+} from './vision-evidence';
 import {
   extractVisionViability,
   mergeVisionViability,
@@ -2871,14 +2874,18 @@ export class ChatService implements OnModuleDestroy {
     const viability = extractVisionViability(parsed);
     const rootVehicle = extractVisionDetectedVehicle(parsed);
     const rawItems = parseDetectedDamageItemsAllowEmpty(parsed);
+    const visionRunId = `visrun_${randomUUID().slice(0, 8)}`;
+    const evidenceCtx = {
+      conversationId: options?.conversationId ?? null,
+      visionRunId,
+    };
     console.log(
       '[Vision] urls_origen crudas (pre-recovery)',
       JSON.stringify({
-        inputCount: urls.length,
-        items: rawItems.map((it) => ({
-          pieza: it.pieza,
-          urls_origen: [...(it.urls_origen ?? [])],
-        })),
+        conversationId: evidenceCtx.conversationId,
+        visionRunId,
+        cantidadInputImages: urls.length,
+        items: auditEvidenceRefs(rawItems),
       }),
     );
     const items = rawItems.map((it) => ({
@@ -2913,7 +2920,25 @@ export class ChatService implements OnModuleDestroy {
       return { items: [], viability: inviable };
     }
 
-    const collapsed = collapseVisionItemsToBpcIfNeeded(items, tierContext, parsed);
+    const recovered = recoverVisionEvidenceForPeritaje(
+      items,
+      urls,
+      evidenceCtx,
+    );
+    console.log(
+      '[Vision] urls_origen (post-recovery)',
+      JSON.stringify({
+        conversationId: evidenceCtx.conversationId,
+        visionRunId,
+        cantidadInputImages: urls.length,
+        items: auditEvidenceRefs(recovered),
+      }),
+    );
+    const collapsed = collapseVisionItemsToBpcIfNeeded(
+      recovered,
+      tierContext,
+      parsed,
+    );
     console.log(
       '[Vision] Inventario parseado',
       JSON.stringify({
@@ -2922,7 +2947,7 @@ export class ChatService implements OnModuleDestroy {
       }),
     );
     return {
-      items: recoverVisionEvidenceForPeritaje(collapsed, urls),
+      items: collapsed,
       viability: { peritajeViable: true },
       vehiculoDetectado: rootVehicle,
     };
@@ -3071,6 +3096,7 @@ export class ChatService implements OnModuleDestroy {
           visionRootForCollapse,
         ),
         imageUrls,
+        { conversationId: options?.conversationId ?? null },
       ),
       viability: { peritajeViable: true },
       vehiculoDetectado: accumulatedVisionVehicle,
@@ -5778,6 +5804,7 @@ ${catalogAppend}`;
     const newInventory = recoverVisionEvidenceForPeritaje(
       visionResult.items,
       imageUrls,
+      { conversationId },
     );
 
     if (!visionResult.viability.peritajeViable || newInventory.length === 0) {

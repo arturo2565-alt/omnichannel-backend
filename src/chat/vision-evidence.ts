@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import type { DetectedDamageItem } from './entities/chat.entity';
 
 export const EVIDENCE_EVENTS = {
@@ -9,11 +10,19 @@ export const EVIDENCE_EVENTS = {
 export type EvidenceEventCode =
   (typeof EVIDENCE_EVENTS)[keyof typeof EVIDENCE_EVENTS];
 
+export type VisionEvidenceContext = {
+  conversationId?: string | null;
+  visionRunId?: string | null;
+};
+
 export type VisionEvidenceEvent = {
   event: EvidenceEventCode;
-  pieza?: string;
+  pieceCode?: string;
+  conversationId?: string;
+  visionRunId?: string;
+  cantidadInputImages?: number;
+  /** Solo para tests; no se imprime en logs. */
   url?: string;
-  inputCount?: number;
 };
 
 export function uniqueTrimmedUrls(
@@ -26,29 +35,50 @@ export function uniqueTrimmedUrls(
   ];
 }
 
+function redactEvidenceUrlForLog(url: string): string {
+  const s = String(url ?? '');
+  if (/^data:image\//i.test(s)) return `[data-url ${s.length}]`;
+  return s;
+}
+
+export function auditEvidenceRefs(
+  items: readonly DetectedDamageItem[],
+): Array<{ pieceCode: string; urls_origen: string[] }> {
+  return items.map((it) => ({
+    pieceCode: String(it.pieza ?? ''),
+    urls_origen: uniqueTrimmedUrls(it.urls_origen).map(redactEvidenceUrlForLog),
+  }));
+}
+
 export function logVisionEvidenceEvents(
   events: readonly VisionEvidenceEvent[],
 ): void {
   for (const ev of events) {
-    console.log('[VisionEvidence]', JSON.stringify(ev));
+    const { url: _omit, ...safe } = ev;
+    console.log('[VisionEvidence]', JSON.stringify(safe));
   }
 }
 
 /**
- * Reglas de evidencia post-parser, pre-CanonicalPeritaje.
- *
- * - Una URL de entrada puede pertenecer a varios DamageItems (copia, no consume).
- * - Batch de 1 imagen: ítem sin urls_origen recibe esa URL (sin ambigüedad).
- * - Batch de 2+ imágenes: no adivinar; evidence vacío se queda vacío.
- * - URLs que Vision inventó (fuera del input) no se confían.
+ * Recovery post-parser, pre-CanonicalPeritaje.
+ * Una URL de entrada puede pertenecer a varios DamageItems (copia, no consume).
  */
 export function applyVisionEvidenceRules(
   items: readonly DetectedDamageItem[],
   inputUrls: readonly string[],
+  ctx: VisionEvidenceContext = {},
 ): { items: DetectedDamageItem[]; events: VisionEvidenceEvent[] } {
   const input = uniqueTrimmedUrls(inputUrls);
   const inputSet = new Set(input);
   const events: VisionEvidenceEvent[] = [];
+  const conversationId = String(ctx.conversationId ?? '').trim() || undefined;
+  const visionRunId = String(ctx.visionRunId ?? '').trim() || undefined;
+
+  const baseMeta = {
+    ...(conversationId ? { conversationId } : {}),
+    ...(visionRunId ? { visionRunId } : {}),
+    cantidadInputImages: input.length,
+  };
 
   const sanitized = items.map((it) => {
     const raw = uniqueTrimmedUrls(it.urls_origen);
@@ -60,9 +90,9 @@ export function applyVisionEvidenceRules(
       }
       events.push({
         event: EVIDENCE_EVENTS.UNKNOWN_INPUT_URL,
-        pieza: it.pieza,
+        pieceCode: it.pieza,
         url,
-        inputCount: input.length,
+        ...baseMeta,
       });
     }
     return { ...it, urls_origen: trusted };
@@ -75,9 +105,10 @@ export function applyVisionEvidenceRules(
         if (it.urls_origen.length > 0) return it;
         events.push({
           event: EVIDENCE_EVENTS.EVIDENCE_RECOVERED_SINGLE_INPUT,
-          pieza: it.pieza,
+          pieceCode: it.pieza,
           url: only,
-          inputCount: 1,
+          ...baseMeta,
+          cantidadInputImages: 1,
         });
         return { ...it, urls_origen: [only] };
       }),
@@ -90,8 +121,8 @@ export function applyVisionEvidenceRules(
       if (it.urls_origen.length > 0) continue;
       events.push({
         event: EVIDENCE_EVENTS.EVIDENCE_MISSING_FROM_VISION,
-        pieza: it.pieza,
-        inputCount: input.length,
+        pieceCode: it.pieza,
+        ...baseMeta,
       });
     }
   }
@@ -99,15 +130,19 @@ export function applyVisionEvidenceRules(
   return { items: sanitized, events };
 }
 
-/**
- * Aplica las reglas y deja el inventario listo para CanonicalPeritaje.
- * No muta treatment ni precios.
- */
 export function recoverVisionEvidenceForPeritaje(
   items: readonly DetectedDamageItem[],
   inputUrls: readonly string[],
+  ctx: VisionEvidenceContext = {},
 ): DetectedDamageItem[] {
-  const { items: next, events } = applyVisionEvidenceRules(items, inputUrls);
+  const visionRunId =
+    String(ctx.visionRunId ?? '').trim() || `visrun_${randomUUID().slice(0, 8)}`;
+  const nextCtx = { ...ctx, visionRunId };
+  const { items: next, events } = applyVisionEvidenceRules(
+    items,
+    inputUrls,
+    nextCtx,
+  );
   logVisionEvidenceEvents(events);
   return next;
 }
