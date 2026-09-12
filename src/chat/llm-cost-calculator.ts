@@ -13,6 +13,9 @@ export type LlmTokenRatesPerMillion = {
 export const LLM_MODEL_RATES_PER_MILLION: Record<string, LlmTokenRatesPerMillion> =
   {
     // GPT-5.x (defaults de producción en openai-model-config)
+    // gpt-5.6-sol: OpenAI API $4 / $20 / cached $0.40 por 1M (docs 2026)
+    'gpt-5.6-sol': { input: 4.0, output: 20.0, cachedInput: 0.4 },
+    'gpt-5.6': { input: 4.0, output: 20.0, cachedInput: 0.4 },
     'gpt-5.5': { input: 2.5, output: 10.0, cachedInput: 1.25 },
     'gpt-5.4-mini': { input: 0.15, output: 0.6, cachedInput: 0.075 },
     'gpt-5.4': { input: 2.5, output: 10.0, cachedInput: 1.25 },

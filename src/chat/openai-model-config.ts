@@ -4,7 +4,7 @@ import type { ReasoningEffort } from 'openai/resources/shared';
 /**
  * Capas de modelo OpenAI (override vía env).
  *
- * OPENAI_MODEL_VISION      — peritaje por fotos (default gpt-5.5)
+ * OPENAI_MODEL_VISION      — peritaje por fotos (default gpt-5.6-sol)
  * OPENAI_MODEL_CHAT        — autopilot + tools (default gpt-5.5)
  * OPENAI_MODEL_NARRATIVE   — redacción cotización / baño (default gpt-5.5)
  * OPENAI_MODEL_FAST        — clasificación / probes (default gpt-5.4-mini)
@@ -30,7 +30,7 @@ const REASONING_EFFORT_ENV: Record<OpenAiModelTier, string> = {
 };
 
 export const OPENAI_MODEL_DEFAULTS: Record<OpenAiModelTier, string> = {
-  vision: 'gpt-5.5',
+  vision: 'gpt-5.6-sol',
   chat: 'gpt-5.5',
   narrative: 'gpt-5.5',
   fast: 'gpt-5.4-mini',
@@ -43,6 +43,7 @@ const REASONING_EFFORT_VALUES = new Set<string>([
   'medium',
   'high',
   'xhigh',
+  'max',
 ]);
 
 export const OPENAI_REASONING_EFFORT_DEFAULTS: Record<

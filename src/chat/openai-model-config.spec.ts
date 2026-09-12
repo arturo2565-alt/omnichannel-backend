@@ -10,7 +10,9 @@ describe('openai-model-config', () => {
   beforeEach(() => {
     process.env = { ...env };
     delete process.env.OPENAI_MODEL_CHAT;
+    delete process.env.OPENAI_MODEL_VISION;
     delete process.env.OPENAI_REASONING_EFFORT_CHAT;
+    delete process.env.OPENAI_REASONING_EFFORT_VISION;
   });
 
   afterAll(() => {
@@ -19,6 +21,19 @@ describe('openai-model-config', () => {
 
   it('defaults chat tier to gpt-5.5', () => {
     expect(resolveOpenAiModel('chat')).toBe('gpt-5.5');
+  });
+
+  it('defaults vision tier to gpt-5.6-sol', () => {
+    expect(resolveOpenAiModel('vision')).toBe('gpt-5.6-sol');
+  });
+
+  it('visión chat.completions usa gpt-5.6-sol', () => {
+    const p = openAiChatCompletionParams({
+      tier: 'vision',
+      maxOutputTokens: 12_000,
+    });
+    expect(p.model).toBe('gpt-5.6-sol');
+    expect(p.reasoning_effort).toBe('high');
   });
 
   it('respects OPENAI_MODEL_CHAT override', () => {

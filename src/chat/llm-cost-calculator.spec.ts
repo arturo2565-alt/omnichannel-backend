@@ -12,6 +12,10 @@ describe('llm-cost-calculator', () => {
   it('resuelve tarifas por prefijo versionado', () => {
     expect(resolveLlmModelRates('gpt-5.5-2026-03')?.input).toBe(2.5);
     expect(resolveLlmModelRates('gpt-4o-mini')?.output).toBe(0.6);
+    expect(resolveLlmModelRates('gpt-5.6-sol')?.input).toBe(4.0);
+    expect(resolveLlmModelRates('gpt-5.6-sol')?.output).toBe(20.0);
+    expect(resolveLlmModelRates('gpt-5.6-sol')?.cachedInput).toBe(0.4);
+    expect(resolveLlmModelRates('gpt-5.6')?.input).toBe(4.0);
   });
 
   it('calcula costo con cached tokens', () => {
