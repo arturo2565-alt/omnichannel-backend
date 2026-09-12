@@ -1,4 +1,8 @@
 import { randomUUID } from 'crypto';
+import {
+  mergeCanonicalTraceContext,
+  traceVisionEvidenceRecovery,
+} from './canonical-trace';
 import type { DetectedDamageItem } from './entities/chat.entity';
 
 export const EVIDENCE_EVENTS = {
@@ -138,11 +142,26 @@ export function recoverVisionEvidenceForPeritaje(
   const visionRunId =
     String(ctx.visionRunId ?? '').trim() || `visrun_${randomUUID().slice(0, 8)}`;
   const nextCtx = { ...ctx, visionRunId };
+  mergeCanonicalTraceContext({
+    conversationId: String(ctx.conversationId ?? '').trim() || undefined,
+    visionRunId,
+  });
   const { items: next, events } = applyVisionEvidenceRules(
     items,
     inputUrls,
     nextCtx,
   );
   logVisionEvidenceEvents(events);
+  traceVisionEvidenceRecovery({
+    itemsBefore: items,
+    itemsAfter: next,
+    inputImageCount: uniqueTrimmedUrls(inputUrls).length,
+    recoveredPieceCodes: events
+      .filter((e) => e.event === EVIDENCE_EVENTS.EVIDENCE_RECOVERED_SINGLE_INPUT)
+      .map((e) => String(e.pieceCode ?? '')),
+    missingPieceCodes: events
+      .filter((e) => e.event === EVIDENCE_EVENTS.EVIDENCE_MISSING_FROM_VISION)
+      .map((e) => String(e.pieceCode ?? '')),
+  });
   return next;
 }

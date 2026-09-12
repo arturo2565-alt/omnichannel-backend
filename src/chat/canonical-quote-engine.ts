@@ -34,6 +34,11 @@ import {
   logFlowEvent,
   resolveQuoteFlowMode,
 } from '../domain/peritaje-v1/quote-flow-mode';
+import {
+  mergeCanonicalTraceContext,
+  traceCanonicalQuoteBuilt,
+  traceQuoteFlowMode,
+} from './canonical-trace';
 import type { CommercialItemV1 } from '../domain/peritaje-v1';
 import {
   buildCanonicalQuoteFromPricedSources,
@@ -535,6 +540,11 @@ export function resolveAuthoritativeDraftFinance(input: {
     fromExpress: input.fromExpress,
     preferCanonical: input.preferCanonical,
   });
+  mergeCanonicalTraceContext({
+    conversationId: input.conversationId,
+    peritajeId: input.peritaje?.peritajeId,
+  });
+  traceQuoteFlowMode(flow);
 
   const stampDraft = (draft: DraftQuote, quote?: CanonicalQuoteV1): DraftQuote => ({
     ...draft,
@@ -581,6 +591,7 @@ export function resolveAuthoritativeDraftFinance(input: {
       ),
       merged,
     );
+    traceCanonicalQuoteBuilt(merged, input.peritaje);
     return {
       mode: 'canonical',
       quote: merged,

@@ -23,6 +23,7 @@ import {
   type NarrativeFlow,
   type NarrativeObservabilityEvent,
 } from '../domain/peritaje-v1/quote-narrative';
+import { traceFinalClientMessageSummary } from './canonical-trace';
 
 export type ComposedClientQuote = {
   flow: NarrativeFlow;
@@ -236,6 +237,18 @@ export async function composeModernClientQuoteMessage(
     isComplement: input.isComplement,
   });
 
+  const finish = (
+    composed: ComposedClientQuote,
+    financialIntegrityValid: boolean,
+  ): ComposedClientQuote => {
+    traceFinalClientMessageSummary({
+      composed,
+      canonicalQuote: input.canonicalQuote,
+      financialIntegrityValid,
+    });
+    return composed;
+  };
+
   const useFallback = (reason: string, extra?: NarrativeObservabilityEvent[]) => {
     events.push({
       event: NARRATIVE_EVENTS.DETERMINISTIC_FALLBACK_USED,
@@ -245,17 +258,20 @@ export async function composeModernClientQuoteMessage(
     if (extra) events.push(...extra);
     logNarrativeEvents(events);
     const finalMessage = assembleClientQuoteMessage(fallbackParts);
-    return {
-      flow: NARRATIVE_FLOW.CANONICAL,
-      finalMessage,
-      financialBlock: financial.text,
-      warningsBlock: warnings.text,
-      shownWarnings: warnings.shownWarnings,
-      llmUsed: false,
-      fallbackUsed: true,
-      events,
-      parts: fallbackParts,
-    } satisfies ComposedClientQuote;
+    return finish(
+      {
+        flow: NARRATIVE_FLOW.CANONICAL,
+        finalMessage,
+        financialBlock: financial.text,
+        warningsBlock: warnings.text,
+        shownWarnings: warnings.shownWarnings,
+        llmUsed: false,
+        fallbackUsed: true,
+        events,
+        parts: fallbackParts,
+      } satisfies ComposedClientQuote,
+      reason !== 'reconciliation_failed',
+    );
   };
 
   const llmInjected = Object.prototype.hasOwnProperty.call(input, 'llmParts');
@@ -318,17 +334,20 @@ export async function composeModernClientQuoteMessage(
     return useFallback('reconciliation_failed', validation.events);
   }
 
-  return {
-    flow: NARRATIVE_FLOW.CANONICAL,
-    finalMessage,
-    financialBlock: financial.text,
-    warningsBlock: warnings.text,
-    shownWarnings: warnings.shownWarnings,
-    llmUsed: true,
-    fallbackUsed: false,
-    events,
-    parts,
-  };
+  return finish(
+    {
+      flow: NARRATIVE_FLOW.CANONICAL,
+      finalMessage,
+      financialBlock: financial.text,
+      warningsBlock: warnings.text,
+      shownWarnings: warnings.shownWarnings,
+      llmUsed: true,
+      fallbackUsed: false,
+      events,
+      parts,
+    },
+    true,
+  );
 }
 
 export function previewModernFinancialBlock(

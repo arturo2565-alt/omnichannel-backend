@@ -21,6 +21,7 @@ import {
   mergeCartInventoryWithPricingMode,
   sanitizeCartInventoryForPricing,
 } from './quote-cart-inventory-mode';
+import { mergeCanonicalTraceContext, traceDamageMerge } from './canonical-trace';
 import type { VehiclePricingProfile } from '../catalog/vehicle-pricing-profile';
 import { vehiclePricingProfileFromAnalysis } from '../catalog/vehicle-pricing-profile';
 import type { PatchCartInventoryLineDto } from './quote-cart.types';
@@ -406,6 +407,18 @@ export class QuoteCartService {
       priorInventory,
       newInventory,
     );
+
+    mergeCanonicalTraceContext({
+      conversationId,
+      draftQuoteId: existingCart?.id,
+    });
+    traceDamageMerge({
+      priorCount: priorInventory.length,
+      incomingCount: newInventory.length,
+      mergedCount: mergedInventory.length,
+      previousPiezas: complementMeta?.previousPiezas,
+      newPiezas: complementMeta?.newPiezas,
+    });
 
     this.logger.log(
       `[CARRITO] mergeVision conversation=${conversationId} prior=${priorInventory.length} new=${newInventory.length} merged=${mergedInventory.length}`,

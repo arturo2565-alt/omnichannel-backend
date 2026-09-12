@@ -155,6 +155,11 @@ import {
 } from './canonical-shadow-write';
 import { resolveAuthoritativeDraftFinance } from './canonical-quote-engine';
 import {
+  mergeCanonicalTraceContext,
+  runWithCanonicalTraceContext,
+  traceVisionInput,
+} from './canonical-trace';
+import {
   applyComposedNarrativeToDraft,
   composeModernClientQuoteMessage,
   isCanonicalNarrativeEligible,
@@ -5736,10 +5741,12 @@ ${catalogAppend}`;
   ): Promise<void> {
     this.consolidatedVisionInFlight.add(conversationId);
     try {
-      await this.processConsolidatedInboundImagesCore(
-        conversationId,
-        attachingMessageId,
-        burstUrls,
+      await runWithCanonicalTraceContext({ conversationId }, () =>
+        this.processConsolidatedInboundImagesCore(
+          conversationId,
+          attachingMessageId,
+          burstUrls,
+        ),
       );
     } finally {
       this.consolidatedVisionInFlight.delete(conversationId);
@@ -5792,6 +5799,9 @@ ${catalogAppend}`;
 
     const conversationTextHistory =
       await this.buildVisionTextHistoryForConversation(conversationId);
+
+    mergeCanonicalTraceContext({ conversationId });
+    traceVisionInput({ inputImageCount: imageUrls.length });
 
     const visionResult = await this.analyzeDamageImageInSequentialChunks(
       imageUrls,
@@ -5854,6 +5864,10 @@ ${catalogAppend}`;
       allImageUrls,
       existingCart,
     } = visionMerge;
+    mergeCanonicalTraceContext({
+      conversationId,
+      draftQuoteId: existingCart?.id,
+    });
 
     const analysis = inventoryItemsToVehicleAnalysis(
       mergedInventory,

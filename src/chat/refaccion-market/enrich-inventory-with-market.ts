@@ -15,12 +15,20 @@ import {
   REFACCION_MARKET_EVENTS,
   type RefaccionMarketEventSink,
 } from './refaccion-market-events';
-import type { RefaccionMarketEstimate } from './refaccion-market.types';
+import {
+  DEFAULT_REFACCION_MARKET_POLICY,
+  type RefaccionMarketEstimate,
+} from './refaccion-market.types';
 
 function emitEstimateOutcome(
   estimate: RefaccionMarketEstimate,
   emit: RefaccionMarketEventSink,
+  item: DetectedDamageItem,
 ): void {
+  const ids = {
+    damageItemId: item.damageItemId,
+    pieceCode: item.pieza,
+  };
   if (estimate.pricingStatus === 'OK') {
     emit(REFACCION_MARKET_EVENTS.ESTIMATE_READY, {
       pieza: estimate.identity.piezaLabel,
@@ -28,7 +36,16 @@ function emitEstimateOutcome(
       modelo: estimate.identity.modelo,
       anio: estimate.identity.anio,
       sampleCount: estimate.cantidadMuestras,
+      compatibleSampleCount: estimate.cantidadMuestras,
       priceSource: estimate.priceSource,
+      pricingSource: estimate.priceSource,
+      pricingStatus: estimate.pricingStatus,
+      selectedPartType: estimate.partTypeGroup,
+      partTypeGroup: estimate.partTypeGroup,
+      priceRange: estimate.customerPriceRange ?? estimate.marketPriceRange,
+      amount: estimate.customerPriceRange?.precioCentral,
+      confidence: estimate.confidence,
+      ...ids,
     });
     return;
   }
@@ -39,6 +56,7 @@ function emitEstimateOutcome(
     anio: estimate.identity.anio,
     confirmed: estimate.identity.confirmed,
     sampleCount: estimate.cantidadMuestras,
+    ...ids,
   });
 }
 
@@ -71,9 +89,12 @@ export async function enrichInventoryWithMarketRefacciones(
       modelo: identity.modelo,
       anio: identity.anio,
       confirmed: identity.confirmed,
+      damageItemId: it.damageItemId,
+      pieceCode: it.pieza,
+      preferredPartTypes: DEFAULT_REFACCION_MARKET_POLICY.preferredPartTypes,
     });
     const estimate = await marketService.estimate(identity);
-    emitEstimateOutcome(estimate, emit);
+    emitEstimateOutcome(estimate, emit, it);
     next.push(
       applyMarketEstimateToItem(
         {

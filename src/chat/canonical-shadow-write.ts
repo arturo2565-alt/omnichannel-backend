@@ -12,6 +12,7 @@ import {
   type CanonicalPeritajeV1,
   type CanonicalShadowComparison,
 } from '../domain/peritaje-v1';
+import { traceCanonicalPeritajeBuilt } from './canonical-trace';
 import { isBanioPinturaCompletoVisionInventory } from './vision-bpc-inventory';
 import {
   adaptCalculatedRowsToCanonicalQuoteV1,
@@ -51,13 +52,14 @@ export function buildVisionShadowSafe(
   try {
     const cartProfile = input.existingCart?.damageAnalysis?.quoteCartMeta
       ?.vehiclePricingProfile;
-    return tryBuildVisionCanonicalShadow({
+    const priorCanonical = priorCanonicalFromCart(input.existingCart);
+    const built = tryBuildVisionCanonicalShadow({
       conversationId: input.conversationId,
       tallerId: input.tallerId,
       messageId: input.messageId,
       incomingInventory: input.incomingInventory,
       priorInventory: input.priorInventory,
-      priorCanonical: priorCanonicalFromCart(input.existingCart),
+      priorCanonical,
       visionVehicleLabel: input.visionVehicleLabel,
       analysisVehicleLabel: input.analysis?.vehiculoDetectado,
       cartVehicleLabel:
@@ -72,6 +74,12 @@ export function buildVisionShadowSafe(
       canonicalizePanel: canonicalPhysicalPanelKey,
       viability: input.viability,
     });
+    traceCanonicalPeritajeBuilt(built, {
+      merged: Boolean(priorCanonical || (input.priorInventory?.length ?? 0) > 0),
+      priorDamageCount:
+        priorCanonical?.damages.length ?? input.priorInventory?.length ?? 0,
+    });
+    return built;
   } catch (err) {
     logger.warn(
       formatShadowLogPayload({
