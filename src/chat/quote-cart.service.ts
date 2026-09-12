@@ -66,7 +66,12 @@ import {
   renderCanonicalQuoteFinancialBlock,
   renderCanonicalQuoteWarningsBlock,
 } from '../domain/peritaje-v1/quote-narrative';
-import { buildPersistedDraftQuoteItemRows } from './quote-line-identity';
+import {
+  buildPersistedDraftQuoteItemRows,
+  logPersistIdentityAudit,
+  logPersistIdentityAuditPersistedRows,
+} from './quote-line-identity';
+import { stampInventoryFromCanonicalPeritaje } from './canonical-identity';
 import type {
   CanonicalPeritajeV1,
   CanonicalQuoteV1,
@@ -908,7 +913,10 @@ export class QuoteCartService {
       preferCanonical?: boolean;
     },
   ): Promise<DraftQuoteEntity> {
-    const sanitized = sanitizeCartInventoryForPricing(inventory);
+    const sanitized = stampInventoryFromCanonicalPeritaje(
+      sanitizeCartInventoryForPricing(inventory),
+      row.canonicalPeritajeV1,
+    );
     const snap = await this.catalogService.getMatrixPricingSnapshot(
       tallerId ?? undefined,
     );
@@ -1048,7 +1056,13 @@ export class QuoteCartService {
     row.estimateAmount = finance.estimateAmount;
     row.quotePayload = finance.draft;
     const saved = await this.draftQuoteRepository.save(row);
-    await this.syncLineItems(saved.id, inventory, persistRows, imageUrls);
+    await this.syncLineItems(
+      saved.id,
+      inventory,
+      persistRows,
+      imageUrls,
+      row.canonicalPeritajeV1,
+    );
 
     const reloaded = await this.draftQuoteRepository.findOne({
       where: { id: saved.id },
@@ -1151,6 +1165,7 @@ export class QuoteCartService {
       inventory,
       finance.mode === 'canonical' ? finance.rows : linesDto,
       sourceUrls,
+      row.canonicalPeritajeV1,
     );
 
     const reloaded = await this.draftQuoteRepository.findOne({
@@ -1167,15 +1182,23 @@ export class QuoteCartService {
     inventory: DetectedDamageItem[],
     quoteRows: QuoteRowInput[],
     fallbackUrls: string[],
+    canonicalPeritaje?: CanonicalPeritajeV1 | null,
   ): Promise<void> {
     await this.draftQuoteItemRepository.delete({ draftQuoteId });
     if (!quoteRows.length) return;
 
+    logPersistIdentityAudit({
+      inventory,
+      lines: quoteRows,
+      canonicalPeritaje,
+    });
     const { rows } = buildPersistedDraftQuoteItemRows({
       lines: quoteRows,
       inventory,
       fallbackUrls,
+      canonicalPeritaje,
     });
+    logPersistIdentityAuditPersistedRows(rows);
 
     await this.draftQuoteItemRepository.insert(
       rows.map((r) => ({ ...r, draftQuoteId })),

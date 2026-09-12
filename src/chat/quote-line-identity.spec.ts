@@ -577,4 +577,5 @@ describe('Fase 4 — identidad DamageItem 1:N QuoteLine', () => {
       rows.filter((r) => r.billable !== false).reduce((a, r) => a + r.precioMx, 0),
     );
   });
+
 });

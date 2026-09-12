@@ -21,10 +21,16 @@ import {
   QUOTE_SCHEMA_VERSION,
   createQuoteId,
   createQuoteLineId,
+  type CanonicalPeritajeV1,
   type CanonicalQuoteV1,
   type QuoteLine,
   type QuoteServiceType,
 } from '../domain/peritaje-v1';
+import {
+  CANONICAL_TRACE_EVENTS,
+  isPegCanonicalTraceEnabled,
+  pegCanonicalTrace,
+} from './canonical-trace';
 import { coerceDamageLevelCode } from './autofix-config';
 import type { DraftQuoteLine } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
@@ -37,6 +43,7 @@ import {
   mergePhysicalPanelItems,
   type QuoteServiceType as LegacyQuoteServiceType,
 } from './piece-treatment';
+import { inventoryItemFromCanonicalDamage } from './canonical-identity';
 
 const logger = new Logger('QuoteIdentity');
 
@@ -44,6 +51,7 @@ export const QUOTE_IDENTITY_DIVERGENCES = [
   'POSITIONAL_FALLBACK_USED',
   'ORPHAN_QUOTE_LINE',
   'MISSING_DAMAGE_ITEM_ID',
+  'MISSING_CANONICAL_DAMAGE_ID',
   'EVIDENCE_ASSOCIATION_MISMATCH',
   'DUPLICATE_QUOTE_LINE_ID',
 ] as const;
@@ -65,6 +73,7 @@ export type QuoteIdentityCarrier = {
 };
 
 export type DamageResolveMethod =
+  | 'canonical_identity'
   | 'identity'
   | 'positional_legacy'
   | 'unresolved';
@@ -137,6 +146,111 @@ export function stampQuoteLineId(input: {
   });
 }
 
+/** Auditoría temporal de persistencia. No muta filas ni usa fallback. */
+export function logPersistIdentityAudit(input: {
+  inventory: readonly DetectedDamageItem[];
+  lines: readonly QuoteIdentityCarrier[];
+  canonicalPeritaje?: CanonicalPeritajeV1 | null;
+}): void {
+  if (!isPegCanonicalTraceEnabled()) return;
+  const identified = input.inventory.map((it) => ensureDamageIdentity(it));
+  const inventoryIds = identified
+    .map((it) => String(it.damageItemId ?? '').trim())
+    .filter(Boolean);
+  console.log(
+    '[PERSIST_IDENTITY_AUDIT] INVENTORY',
+    JSON.stringify(
+      input.inventory.map((raw, idx) => {
+        const it = identified[idx]!;
+        return {
+          pieceCode: raw.pieza,
+          vehicleId: it.vehicleId ?? deriveStableVehicleId(raw) ?? null,
+          damageItemId: it.damageItemId ?? null,
+          rawDamageItemId: String(raw.damageItemId ?? '').trim() || null,
+          physicalPanelKey: canonicalPhysicalPanelKey(raw.pieza) || raw.pieza,
+          urlsOrigenCount: Array.isArray(raw.urls_origen)
+            ? raw.urls_origen.length
+            : 0,
+          vehiculoDetectadoPresent: Boolean(
+            String(raw.vehiculoDetectado ?? '').trim(),
+          ),
+        };
+      }),
+    ),
+  );
+  console.log(
+    '[PERSIST_IDENTITY_AUDIT] QUOTE_ROWS',
+    JSON.stringify(
+      input.lines.map((line) => ({
+        pieceCode: line.pieza ?? line.physicalPanelKey ?? null,
+        vehicleId: line.vehicleId ?? null,
+        damageItemId: line.damageItemId ?? null,
+        quoteLineId: line.quoteLineId ?? null,
+        serviceType: line.serviceType ?? null,
+        expectedQuoteLineId: stampQuoteLineId({
+          damageItemId: line.damageItemId,
+          serviceType: line.serviceType,
+        }),
+      })),
+    ),
+  );
+  console.log(
+    '[PERSIST_IDENTITY_AUDIT] CANONICAL_DAMAGES',
+    JSON.stringify(
+      (input.canonicalPeritaje?.damages ?? []).map((d) => ({
+        pieceCode: d.pieceCode,
+        vehicleId: d.vehicleId,
+        damageItemId: d.damageItemId,
+        evidenceCount: d.evidence?.length ?? 0,
+      })),
+    ),
+  );
+  console.log(
+    '[PERSIST_IDENTITY_AUDIT] LOOKUP',
+    JSON.stringify(
+      input.lines.map((line, index) => {
+        const quoteRowDamageItemId = String(line.damageItemId ?? '').trim();
+        const canonicalHit = (input.canonicalPeritaje?.damages ?? []).some(
+          (d) => d.damageItemId === quoteRowDamageItemId,
+        );
+        const hit = identified.find(
+          (it) => String(it.damageItemId ?? '').trim() === quoteRowDamageItemId,
+        );
+        return {
+          index,
+          quoteRowDamageItemId: quoteRowDamageItemId || null,
+          quoteLineId: line.quoteLineId ?? null,
+          inventoryDamageItemIds: inventoryIds,
+          lookup: canonicalHit
+            ? 'canonicalPeritaje.damages[damageItemId]'
+            : 'inventory.find(it.damageItemId === quoteRow.damageItemId)',
+          matched: canonicalHit || Boolean(hit),
+          orphan: Boolean(quoteRowDamageItemId) && !canonicalHit && !hit,
+        };
+      }),
+    ),
+  );
+}
+
+export function logPersistIdentityAuditPersistedRows(
+  rows: ReadonlyArray<
+    Pick<PersistableDraftQuoteItem, 'damageItemId' | 'quoteLineId' | 'urlsOrigen'>
+  >,
+): void {
+  if (!isPegCanonicalTraceEnabled()) return;
+  console.log(
+    '[PERSIST_IDENTITY_AUDIT] DRAFT_QUOTE_ITEMS',
+    JSON.stringify(
+      rows.map((r) => ({
+        damageItemId: r.damageItemId ?? null,
+        quoteLineId: r.quoteLineId ?? null,
+        urlsOrigenCount: Array.isArray(r.urlsOrigen) ? r.urlsOrigen.length : 0,
+        urlsOrigenIsNull: r.urlsOrigen == null,
+      })),
+    ),
+  );
+}
+
 export function logQuoteIdentityDivergence(
   code: QuoteIdentityDivergence,
   fields: Omit<QuoteIdentityLogEntry, 'code'>,
@@ -163,8 +277,20 @@ export function resolveDamageForQuoteRow(input: {
   inventory: readonly DetectedDamageItem[];
   index: number;
   log?: boolean;
+  canonicalPeritaje?: CanonicalPeritajeV1 | null;
 }): DamageResolveResult {
   const rowId = String(input.row.damageItemId ?? '').trim();
+  if (rowId && input.canonicalPeritaje?.damages?.length) {
+    const canonical = input.canonicalPeritaje.damages.find(
+      (d) => d.damageItemId === rowId,
+    );
+    if (canonical) {
+      return {
+        item: inventoryItemFromCanonicalDamage(canonical),
+        method: 'canonical_identity',
+      };
+    }
+  }
   if (rowId) {
     const hit = input.inventory.find(
       (it) => String(it.damageItemId ?? '').trim() === rowId,
@@ -350,6 +476,7 @@ export function buildPersistedDraftQuoteItemRows(input: {
   analysisPieza?: string;
   analysisSeveridad?: string;
   analysisDescripcion?: string;
+  canonicalPeritaje?: CanonicalPeritajeV1 | null;
 }): {
   rows: PersistableDraftQuoteItem[];
   divergences: QuoteIdentityLogEntry[];
@@ -362,7 +489,15 @@ export function buildPersistedDraftQuoteItemRows(input: {
       row: line,
       inventory: identifiedInv,
       index: idx,
+      canonicalPeritaje: input.canonicalPeritaje,
     });
+    if (resolved.method === 'canonical_identity' || resolved.method === 'identity') {
+      pegCanonicalTrace(CANONICAL_TRACE_EVENTS.PERSIST_DAMAGE_RESOLUTION, {
+        quoteLineId: line.quoteLineId,
+        damageItemId: line.damageItemId || resolved.item?.damageItemId,
+        method: resolved.method,
+      });
+    }
     if (resolved.divergence) {
       divergences.push({
         code: resolved.divergence,

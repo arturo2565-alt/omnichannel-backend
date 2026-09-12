@@ -147,12 +147,15 @@ import {
 import {
   buildLegacyPositionalPersistRows,
   buildPersistedDraftQuoteItemRows,
+  logPersistIdentityAudit,
+  logPersistIdentityAuditPersistedRows,
   shouldUseLegacyPositionalPersist,
 } from './quote-line-identity';
 import {
   buildVisionShadowSafe,
   commitVisionShadowToDraft,
 } from './canonical-shadow-write';
+import { stampAnalysisFromCanonicalPeritaje } from './canonical-identity';
 import { resolveAuthoritativeDraftFinance } from './canonical-quote-engine';
 import {
   mergeCanonicalTraceContext,
@@ -1171,12 +1174,18 @@ export class ChatService implements OnModuleDestroy {
     doc: DraftQuote,
     fallbackUrls: string[],
     tallerId?: string | null,
+    canonicalPeritaje?: CanonicalPeritajeV1 | null,
   ): Promise<Omit<DraftQuoteItem, 'id' | 'draftQuote' | 'draftQuoteId'>[]> {
     const lines = doc.lines ?? [];
     if (!lines.length) return [];
 
     const inv = analysis.inventory ?? [];
 
+    logPersistIdentityAudit({
+      inventory: inv,
+      lines,
+      canonicalPeritaje,
+    });
     console.log(
       '[DraftQuoteItems] buildDraftQuoteLineRowsForPersist',
       JSON.stringify({
@@ -1226,6 +1235,7 @@ export class ChatService implements OnModuleDestroy {
       analysisPieza: analysis.pieza,
       analysisSeveridad: analysis.severidad || analysis.severidadDelDano,
       analysisDescripcion: analysis.descripcionTecnica,
+      canonicalPeritaje,
     });
     if (rows.length) return rows;
 
@@ -1324,6 +1334,7 @@ export class ChatService implements OnModuleDestroy {
     doc: DraftQuote,
     fallbackUrls: string[],
     tallerId?: string | null,
+    canonicalPeritaje?: CanonicalPeritajeV1 | null,
   ): Promise<void> {
     await this.draftQuoteItemRepository.delete({ draftQuoteId });
     const rows = await this.buildDraftQuoteLineRowsForPersist(
@@ -1331,8 +1342,10 @@ export class ChatService implements OnModuleDestroy {
       doc,
       fallbackUrls,
       tallerId,
+      canonicalPeritaje,
     );
     if (!rows.length) return;
+    logPersistIdentityAuditPersistedRows(rows);
     await this.draftQuoteItemRepository.insert(
       rows.map((r) => ({ ...r, draftQuoteId })),
     );
@@ -3417,19 +3430,23 @@ export class ChatService implements OnModuleDestroy {
       analysis,
       visionVehicleLabel: analysis.vehiculoDetectado,
     });
+    const stampedAnalysis = stampAnalysisFromCanonicalPeritaje(
+      analysisWithGate,
+      shadowPeritaje,
+    );
 
     let saved: DraftQuoteEntity;
     if (existing) {
       existing.messageId = messageId;
       existing.imageUrl = persistedImageUrl;
-      existing.damageAnalysis = analysisWithGate;
+      existing.damageAnalysis = stampedAnalysis;
       existing.estimateAmount = 0;
       existing.quotePayload = emptyQuote;
       existing.tallerId = tallerId;
       commitVisionShadowToDraft({
         draft: existing,
         incoming: shadowPeritaje,
-        analysis: analysisWithGate,
+        analysis: stampedAnalysis,
         quotePayload: emptyQuote,
       });
       saved = await this.draftQuoteRepository.save(existing);
@@ -3439,7 +3456,7 @@ export class ChatService implements OnModuleDestroy {
         tallerId,
         messageId,
         imageUrl: persistedImageUrl,
-        damageAnalysis: analysisWithGate,
+        damageAnalysis: stampedAnalysis,
         estimateAmount: 0,
         quotePayload: emptyQuote,
         status: DRAFT_QUOTE_STATUS_AWAITING_VEHICLE,
@@ -3447,7 +3464,7 @@ export class ChatService implements OnModuleDestroy {
       commitVisionShadowToDraft({
         draft: row,
         incoming: shadowPeritaje,
-        analysis: analysisWithGate,
+        analysis: stampedAnalysis,
         quotePayload: emptyQuote,
       });
       saved = await this.draftQuoteRepository.save(row);
@@ -3455,15 +3472,16 @@ export class ChatService implements OnModuleDestroy {
 
     await this.syncDraftQuoteLineItems(
       saved.id,
-      analysisWithGate,
+      stampedAnalysis,
       emptyQuote,
       [...imageUrls],
       tallerId,
+      shadowPeritaje,
     );
 
     await this.messageRepository.update(
       { id: messageId },
-      { damageAnalysis: analysisWithGate, draftQuote: null },
+      { damageAnalysis: stampedAnalysis, draftQuote: null },
     );
 
     await this.conversationRepository.update(
@@ -3537,6 +3555,17 @@ export class ChatService implements OnModuleDestroy {
 
     const tallerId = row.tallerId;
     const imageUrls = parseDraftImageUrls(row.imageUrl ?? '');
+    const shadowPeritaje = buildVisionShadowSafe({
+      conversationId,
+      tallerId,
+      messageId: row.messageId ?? undefined,
+      incomingInventory: analysis.inventory ?? [],
+      existingCart: row,
+      analysis,
+      visionVehicleLabel: analysis.vehiculoDetectado,
+      userConfirmedVehicleLabel: vehicle,
+    });
+    analysis = stampAnalysisFromCanonicalPeritaje(analysis, shadowPeritaje);
     const estimateAmount = await this.computePrimaryMatrixEstimate(
       analysis,
       tallerId,
@@ -3566,16 +3595,7 @@ export class ChatService implements OnModuleDestroy {
     row.status = 'PENDING_APPROVAL';
     commitVisionShadowToDraft({
       draft: row,
-      incoming: buildVisionShadowSafe({
-        conversationId,
-        tallerId,
-        messageId: row.messageId ?? undefined,
-        incomingInventory: analysis.inventory ?? [],
-        existingCart: row,
-        analysis,
-        visionVehicleLabel: analysis.vehiculoDetectado,
-        userConfirmedVehicleLabel: vehicle,
-      }),
+      incoming: shadowPeritaje,
       analysis,
       quotePayload: draftQuoteForClient,
     });
@@ -3587,6 +3607,7 @@ export class ChatService implements OnModuleDestroy {
       draftQuoteForClient,
       imageUrls,
       tallerId,
+      shadowPeritaje,
     );
 
     if (row.messageId) {
@@ -5921,6 +5942,10 @@ ${catalogAppend}`;
       visionVehicleLabel: visionResult.vehiculoDetectado,
       viability: visionResult.viability,
     });
+    analysisForQuote = stampAnalysisFromCanonicalPeritaje(
+      analysisForQuote,
+      shadowPeritaje,
+    );
 
     analysisForQuote = await this.enrichInventoryWithMarketRefacciones(
       analysisForQuote,
@@ -6053,6 +6078,7 @@ ${catalogAppend}`;
       draftQuoteForClient,
       allImageUrls,
       visionTallerId,
+      shadowPeritaje,
     );
 
     if (priorMessageId && priorMessageId !== messageId) {
@@ -6201,10 +6227,14 @@ ${catalogAppend}`;
       const fallbackUrls = parseDraftImageUrls(row.imageUrl);
       const sourceUrls = flatUrls.length > 0 ? flatUrls : fallbackUrls;
 
-      const analysisMerged = inventoryItemsToVehicleAnalysis(
-        items,
-        sourceUrls.length ? sourceUrls : fallbackUrls,
+      const analysisMerged = stampAnalysisFromCanonicalPeritaje(
+        inventoryItemsToVehicleAnalysis(
+          items,
+          sourceUrls.length ? sourceUrls : fallbackUrls,
+        ),
+        row.canonicalPeritajeV1,
       );
+      const stampedItems = analysisMerged.inventory ?? items;
 
       const snap = await this.catalogService.getMatrixPricingSnapshot(tallerId);
 
@@ -6233,7 +6263,7 @@ ${catalogAppend}`;
           severidadDelDano: analysisMerged.severidadDelDano,
           descripcionTecnica: analysisMerged.descripcionTecnica,
           justificacion: analysisMerged.justificacion,
-          inventory: items,
+          inventory: stampedItems,
         },
       };
 
@@ -6244,7 +6274,7 @@ ${catalogAppend}`;
       const panelRules = await this.catalogService.getPricingRules(tallerId);
       const panelFinance = resolveAuthoritativeDraftFinance({
         peritaje: row.canonicalPeritajeV1,
-        pricedInventory: items,
+        pricedInventory: stampedItems,
         snap,
         vehicleProfile: vehiclePricingProfileFromAnalysis(analysisMerged),
         pricingRules: panelRules,
@@ -6299,6 +6329,7 @@ ${catalogAppend}`;
         quotePayloadForClient,
         sourceUrls.length ? sourceUrls : parseDraftImageUrls(row.imageUrl),
         tallerId,
+        row.canonicalPeritajeV1,
       );
 
       if (row.messageId) {
@@ -6314,10 +6345,13 @@ ${catalogAppend}`;
       return this.loadDraftQuoteWithItemsOrThrow(saved.id, tallerId);
     }
 
-    const analysis: VehicleDamageAnalysis = {
-      ...row.damageAnalysis,
-      partesAfectadas: [...(row.damageAnalysis.partesAfectadas ?? [])],
-    };
+    const analysis: VehicleDamageAnalysis = stampAnalysisFromCanonicalPeritaje(
+      {
+        ...row.damageAnalysis,
+        partesAfectadas: [...(row.damageAnalysis.partesAfectadas ?? [])],
+      },
+      row.canonicalPeritajeV1,
+    );
 
     if (body.pieza !== undefined) {
       const p = String(body.pieza).trim();
@@ -6399,6 +6433,7 @@ ${catalogAppend}`;
       quotePayload,
       parseDraftImageUrls(row.imageUrl),
       tallerId,
+      row.canonicalPeritajeV1,
     );
 
     if (row.messageId) {

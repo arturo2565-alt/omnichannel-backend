@@ -16,7 +16,7 @@ import {
 import {
   UNKNOWN_VEHICLE_ID,
   createDamageItemId,
-  createVehicleId,
+  resolveModernVehicleIdentity,
   isStructuredTreatment,
   mergeLockedTreatments,
   parseStructuredTreatment,
@@ -158,7 +158,7 @@ export function deriveStableVehicleId(
   if (explicit && explicit !== UNKNOWN_VEHICLE_ID) return explicit;
   const label = String(item.vehiculoDetectado ?? '').trim();
   if (!label) return undefined;
-  const id = createVehicleId({ displayLabel: label });
+  const id = resolveModernVehicleIdentity(label).vehicleId;
   return id === UNKNOWN_VEHICLE_ID ? undefined : id;
 }
 
@@ -173,29 +173,54 @@ export function physicalInventoryMergeKey(item: DetectedDamageItem): string {
   return vid ? `${vid}::${panel}` : panel;
 }
 
+function isModernIdentityCarrier(it: DetectedDamageItem): boolean {
+  const src = String(it.treatmentSource ?? '').trim();
+  if (
+    src === 'vision' ||
+    src === 'user' ||
+    src === 'operator' ||
+    src === 'merge_rule' ||
+    src === 'degraded'
+  ) {
+    return true;
+  }
+  return String(it.treatmentReason ?? '').trim() === 'missing_structured_treatment';
+}
+
 /**
  * Fórmula damageItemId: dmg_sha1(vehicleId | physicalPanelKey).
- * damageHint no altera la identidad. Sin vehículo → UNKNOWN_VEHICLE_ID.
+ * Si damageItemId ya existe, se preserva. No inventa una segunda identidad
+ * moderna con fórmula distinta.
  */
 export function ensureDamageIdentity(
   it: DetectedDamageItem,
 ): DetectedDamageItem {
+  const existing = String(it.damageItemId ?? '').trim();
   const vehicleId = deriveStableVehicleId(it);
+  if (existing.startsWith('dmg_')) {
+    return {
+      ...it,
+      ...(vehicleId ? { vehicleId } : {}),
+      damageItemId: existing,
+    };
+  }
+
   const panel =
     canonicalPhysicalPanelKey(it.pieza) ||
     String(it.pieza ?? '').trim() ||
     'unknown';
-  const existing = String(it.damageItemId ?? '').trim();
-  const damageItemId =
-    existing ||
-    createDamageItemId({
-      vehicleId: vehicleId ?? UNKNOWN_VEHICLE_ID,
-      physicalPanelKey: panel,
-    });
+
+  if (isModernIdentityCarrier(it) && !vehicleId) {
+    return { ...it };
+  }
+
   return {
     ...it,
     ...(vehicleId ? { vehicleId } : {}),
-    damageItemId,
+    damageItemId: createDamageItemId({
+      vehicleId: vehicleId ?? UNKNOWN_VEHICLE_ID,
+      physicalPanelKey: panel,
+    }),
   };
 }
 

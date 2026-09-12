@@ -16,6 +16,7 @@ import {
   buildVisionCanonicalShadow,
   compareLegacyVsCanonical,
   createVehicleId,
+  resolveModernVehicleIdentity,
 } from '../domain/peritaje-v1';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
@@ -134,7 +135,7 @@ describe('Fase 3 — treatment lock', () => {
     expect(cloned.possibleHiddenDamage).toEqual(src.possibleHiddenDamage);
     expect(cloned.vehiculoDetectado).toBe('Mazda 3 2020');
     expect(cloned.vehicleId).toBe(
-      createVehicleId({ displayLabel: 'Mazda 3 2020' }),
+      resolveModernVehicleIdentity('Mazda 3 2020').vehicleId,
     );
   });
 

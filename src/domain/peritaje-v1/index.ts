@@ -79,6 +79,7 @@ export {
 
 export {
   vehicleIdentityFromLegacyLabel,
+  resolveModernVehicleIdentity,
   damageItemFromLegacy,
   peritajeFromLegacyAnalysis,
 } from './from-legacy';

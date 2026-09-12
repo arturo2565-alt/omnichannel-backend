@@ -61,6 +61,7 @@ function parseYear(label: string): string | undefined {
 }
 
 /**
+ * Autoridad única de VehicleIdentity / vehicleId moderno.
  * Convierte la etiqueta libre `vehiculoDetectado` en VehicleIdentity.
  * No confirma al usuario: eso vive en gates legacy.
  */
@@ -104,6 +105,9 @@ export function vehicleIdentityFromLegacyLabel(
     confirmedByUser: opts?.confirmedByUser === true,
   };
 }
+
+/** Alias explícito: un solo resolver moderno de vehicleId. */
+export const resolveModernVehicleIdentity = vehicleIdentityFromLegacyLabel;
 
 export function damageItemFromLegacy(
   item: LegacyDetectedDamageShape,
