@@ -70,7 +70,7 @@ export interface DetectedDamageItem {
     | 'WEB_MARKET_ESTIMATE'
     | 'INSUFFICIENT_MARKET_SAMPLE'
     | 'UNCONFIGURED';
-  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE';
+  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE' | 'UNCONFIGURED';
   pricingType?: 'RANGE' | 'NONE';
   precioMinEstimado?: number;
   precioMaxEstimado?: number;
