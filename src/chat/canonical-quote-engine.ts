@@ -123,6 +123,9 @@ function damageToPricedItem(
       ? { moldingPosition: damage.moldingPosition }
       : {}),
     ...(damage.finishType ? { finishType: damage.finishType } : {}),
+    ...(damage.damageEvidenceStatus
+      ? { damageEvidenceStatus: damage.damageEvidenceStatus }
+      : {}),
     ...(damage.possibleReplacement ? { posibleReemplazoRefaccion: true } : {}),
     ...(damage.possibleHiddenDamage
       ? { possibleHiddenDamage: damage.possibleHiddenDamage }

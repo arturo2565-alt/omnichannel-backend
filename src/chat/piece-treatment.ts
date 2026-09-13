@@ -15,6 +15,7 @@ import {
   refaccionCatalogCodigoForPieza,
   resolveCatalogPiezaForMatrixLookup,
 } from '../catalog/panel-pieza-catalog';
+import { mergeDamageEvidenceStatus } from '../catalog/damage-evidence';
 import {
   UNKNOWN_VEHICLE_ID,
   createDamageItemId,
@@ -521,6 +522,14 @@ export function mergePhysicalPanelItems(
     ...(a.posibleReemplazoRefaccion || b.posibleReemplazoRefaccion
       ? { posibleReemplazoRefaccion: true }
       : {}),
+    ...(mergeDamageEvidenceStatus(a.damageEvidenceStatus, b.damageEvidenceStatus)
+      ? {
+          damageEvidenceStatus: mergeDamageEvidenceStatus(
+            a.damageEvidenceStatus,
+            b.damageEvidenceStatus,
+          ),
+        }
+      : {}),
     ...(b.pricingStatus || a.pricingStatus
       ? { pricingStatus: b.pricingStatus || a.pricingStatus }
       : {}),
@@ -554,6 +563,9 @@ export function copyDetectedDamageSemantics(
     ...(it.treatmentReason ? { treatmentReason: it.treatmentReason } : {}),
     ...(it.posibleReemplazoRefaccion
       ? { posibleReemplazoRefaccion: true }
+      : {}),
+    ...(it.damageEvidenceStatus
+      ? { damageEvidenceStatus: it.damageEvidenceStatus }
       : {}),
     ...(it.moldingPosition
       ? { moldingPosition: it.moldingPosition }

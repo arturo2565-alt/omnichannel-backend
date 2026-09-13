@@ -321,6 +321,9 @@ export async function runDeterministicAutonomyCase(
       physicalPanelKey: d.physicalPanelKey,
       ...(d.moldingPosition ? { moldingPosition: d.moldingPosition } : {}),
       ...(d.finishType ? { finishType: d.finishType } : {}),
+      ...(d.damageEvidenceStatus
+        ? { damageEvidenceStatus: d.damageEvidenceStatus }
+        : {}),
       vehiculoDetectado: certCase.input.vehicleContext,
       ...(d.possibleHiddenDamage
         ? { possibleHiddenDamage: d.possibleHiddenDamage }

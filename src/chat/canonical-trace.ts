@@ -45,6 +45,7 @@ export const CANONICAL_TRACE_EVENTS = {
   CANONICAL_IDENTITY_STAMPED: 'CANONICAL_IDENTITY_STAMPED',
   CANONICAL_IDENTITY_PROJECTION_MISMATCH:
     'CANONICAL_IDENTITY_PROJECTION_MISMATCH',
+  PRICING_ELIGIBILITY: 'PRICING_ELIGIBILITY',
   PERSIST_DAMAGE_RESOLUTION: 'PERSIST_DAMAGE_RESOLUTION',
   MISSING_CANONICAL_DAMAGE_ID: 'MISSING_CANONICAL_DAMAGE_ID',
 } as const;
@@ -273,6 +274,7 @@ export function summarizeDamageItem(damage: DamageItem): Record<string, unknown>
     treatmentSource: damage.treatmentSource,
     treatmentReason: damage.treatmentReason,
     possibleReplacement: damage.possibleReplacement,
+    damageEvidenceStatus: damage.damageEvidenceStatus ?? null,
     possibleHiddenDamageDetected: damage.possibleHiddenDamage?.detected ?? false,
     evidenceCount: damage.evidence?.length ?? 0,
     evidenceIds: (damage.evidence ?? []).map((ev) => ev.evidenceId),

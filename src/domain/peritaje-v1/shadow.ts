@@ -13,6 +13,7 @@ import {
   type LegacyViabilityShape,
 } from './from-legacy';
 import { parseStructuredTreatment, resolveLockedTreatment } from './treatment';
+import { mergeDamageEvidenceStatus } from '../../catalog/damage-evidence';
 import { validateCanonicalPeritajeV1 } from './invariants';
 import {
   PERITAJE_SCHEMA_VERSION,
@@ -271,6 +272,17 @@ function mergeShadowDamage(prior: DamageItem, incoming: DamageItem): DamageItem 
     requiresReplacement: resolved.treatment === 'SUSTITUIR',
     possibleReplacement:
       prior.possibleReplacement || incoming.possibleReplacement,
+    ...(mergeDamageEvidenceStatus(
+      prior.damageEvidenceStatus,
+      incoming.damageEvidenceStatus,
+    )
+      ? {
+          damageEvidenceStatus: mergeDamageEvidenceStatus(
+            prior.damageEvidenceStatus,
+            incoming.damageEvidenceStatus,
+          ),
+        }
+      : {}),
     ...(incoming.possibleHiddenDamage || prior.possibleHiddenDamage
       ? {
           possibleHiddenDamage:

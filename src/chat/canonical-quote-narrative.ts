@@ -66,6 +66,7 @@ Reglas:
 - cta: invitación a agendar o confirmar visita según contextoOperativo. SIN precios.
 - PROHIBIDO: $, pesos, MXN, "mil pesos", importes aproximados ("unos 10 mil"), decidir si es parcial, serviceType, cantidades cobrables.
 - PROHIBIDO explicar la causa de cotización parcial o mencionar "falta el precio de refacción". El bloque financiero ya declara la razón.
+- Puedes mencionar piezas pendientes de revisión (desalineación o posible involucramiento) sin importes. PROHIBIDO presentarlas como cargo confirmado.
 - PROHIBIDO incluir IDs de plataforma o códigos internos de pieza.
 - Puedes mencionar el año del vehículo, una hora de cita o "garantía de 1 año" si aplica; eso no es un importe.
 `.trim();

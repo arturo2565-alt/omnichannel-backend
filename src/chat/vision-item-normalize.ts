@@ -4,6 +4,7 @@ import {
   parseMoldingFinishType,
   parseMoldingPosition,
 } from '../catalog/moldura';
+import { parseDamageEvidenceStatus } from '../catalog/damage-evidence';
 import {
   deriveStableVehicleId,
   parseTreatmentDecision,
@@ -166,6 +167,15 @@ export function normalizeVisionDamageItem(
       ? { posibleReemplazoRefaccion: true }
       : {}),
     ...(possibleHiddenDamage ? { possibleHiddenDamage } : {}),
+    ...(parseDamageEvidenceStatus(
+      r['damageEvidenceStatus'] ?? r['damage_evidence_status'],
+    )
+      ? {
+          damageEvidenceStatus: parseDamageEvidenceStatus(
+            r['damageEvidenceStatus'] ?? r['damage_evidence_status'],
+          ),
+        }
+      : {}),
     ...(isMolduraPieza(pieza)
       ? {
           moldingPosition: parseMoldingPosition(

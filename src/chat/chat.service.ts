@@ -134,6 +134,7 @@ import {
 import { RefaccionMarketService } from './refaccion-market/refaccion-market.orchestrator';
 import { canonicalizePanelCode } from '../catalog/panel-pieza-catalog';
 import { MOLDURA_VISION_CONTRACT } from '../catalog/moldura';
+import { DAMAGE_EVIDENCE_VISION_CONTRACT } from '../catalog/damage-evidence';
 import { enrichInventoryWithMarketRefacciones } from './refaccion-market/enrich-inventory-with-market';
 import {
   applyXorTreatmentsToInventory,
@@ -346,6 +347,18 @@ function appendMolduraVisionContract(text: string): string {
   const t = String(text ?? '').trim();
   if (/moldingPosition|pieza "MOLDURA"|pieza MOLDURA/i.test(t)) return t;
   return t ? `${t}\n\n${MOLDURA_VISION_CONTRACT}` : MOLDURA_VISION_CONTRACT;
+}
+
+function appendDamageEvidenceVisionContract(text: string): string {
+  const t = String(text ?? '').trim();
+  if (/damageEvidenceStatus/i.test(t)) return t;
+  return t
+    ? `${t}\n\n${DAMAGE_EVIDENCE_VISION_CONTRACT}`
+    : DAMAGE_EVIDENCE_VISION_CONTRACT;
+}
+
+function appendVisionContracts(text: string): string {
+  return appendDamageEvidenceVisionContract(appendMolduraVisionContract(text));
 }
 
 /** Imagen entrante: URL, data URL base64 o ya alojada en Cloudinary */
@@ -2774,7 +2787,7 @@ export class ChatService implements OnModuleDestroy {
     viability: VisionViability;
     vehiculoDetectado?: string | null;
   }> {
-    const systemPrompt = appendMolduraVisionContract(
+    const systemPrompt = appendVisionContracts(
       options?.systemPrompt != null && String(options.systemPrompt).trim() !== ''
         ? String(options.systemPrompt).trim()
         : await this.aiConfigService.getValue(
@@ -2788,7 +2801,7 @@ export class ChatService implements OnModuleDestroy {
         : await this.aiConfigService.getValue(
             AI_CONFIG_KEYS.VISION_JSON_USER_INSTRUCTION,
           );
-    const userSchemaHint = appendMolduraVisionContract(userSchemaHintRaw);
+    const userSchemaHint = appendVisionContracts(userSchemaHintRaw);
 
     const intro = urls
       .map((_, i) => `Imagen ${i + 1}: posición ${i + 1} en el bloque de imágenes`)

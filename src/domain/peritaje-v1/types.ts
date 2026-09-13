@@ -163,6 +163,14 @@ export interface DamageItem {
   treatmentReason: string;
   requiresReplacement: boolean;
   possibleReplacement: boolean;
+  /**
+   * Confirmación visual de daño. Independiente de `treatment`.
+   * Ausente en legacy = cobrar con reglas previas (CONFIRMED_VISIBLE).
+   */
+  damageEvidenceStatus?:
+    | 'CONFIRMED_VISIBLE'
+    | 'SUSPECTED_INVOLVEMENT'
+    | 'NOT_ASSESSABLE';
   possibleHiddenDamage?: PossibleHiddenDamage;
   evidence: DamageEvidence[];
   source: DamageItemSource;

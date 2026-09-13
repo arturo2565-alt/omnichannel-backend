@@ -32,6 +32,14 @@ import {
   parseMoldingFinishType,
 } from '../catalog/moldura';
 import {
+  pricingEligibilityReason,
+  resolveDamageEvidenceStatusForPricing,
+} from '../catalog/damage-evidence';
+import {
+  CANONICAL_TRACE_EVENTS,
+  pegCanonicalTrace,
+} from './canonical-trace';
+import {
   applyXorTreatmentsToInventory,
   canonicalPhysicalPanelKey,
   ensureDamageIdentity,
@@ -566,6 +574,39 @@ export function quoteRowsFromDamageInventory(
           ...(unconfigured
             ? { priceSource: 'UNCONFIGURED' as const }
             : { priceSource: 'AUTOFIX_CATALOG' as const }),
+        }),
+      );
+      continue;
+    }
+
+    const evidenceStatus = resolveDamageEvidenceStatusForPricing(
+      it.damageEvidenceStatus,
+    );
+    const billableEligible = evidenceStatus === 'CONFIRMED_VISIBLE';
+    pegCanonicalTrace(CANONICAL_TRACE_EVENTS.PRICING_ELIGIBILITY, {
+      damageItemId: it.damageItemId ?? null,
+      pieceCode: it.pieza,
+      damageEvidenceStatus: evidenceStatus,
+      treatment: tratamiento,
+      billableEligible,
+      reason: pricingEligibilityReason(evidenceStatus),
+    });
+    if (!billableEligible) {
+      const pendingWhy =
+        evidenceStatus === 'NOT_ASSESSABLE'
+          ? 'no valorable con las imágenes actuales'
+          : 'posible involucramiento; pendiente de revisión en taller';
+      rows.push(
+        stampRowFromDamage(it, {
+          pieza: panelCode,
+          severidad: coerceDamageLevelCode(String(it.severidad ?? '').trim()),
+          precioMx: 0,
+          tratamiento,
+          serviceType: 'PENDIENTE',
+          physicalPanelKey: panelCode,
+          billable: false,
+          description: `${display} — ${pendingWhy}`,
+          descripcionServicio: `${display} — ${pendingWhy}`,
         }),
       );
       continue;

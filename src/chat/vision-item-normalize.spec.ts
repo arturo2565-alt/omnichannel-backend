@@ -95,6 +95,28 @@ describe('visión → tratamiento canónico', () => {
     expect(items[1]?.posibleReemplazoRefaccion).toBe(true);
   });
 
+  it('parser persiste damageEvidenceStatus y no lo inventa', () => {
+    const items = parseVisionDamageItems({
+      items: [
+        {
+          pieza: 'Cofre',
+          severidad: 'DM',
+          descripcionTecnica: 'posible desalineación',
+          tratamiento: 'INCIERTO',
+          damageEvidenceStatus: 'SUSPECTED_INVOLVEMENT',
+        },
+        {
+          pieza: 'SI',
+          severidad: 'DL',
+          descripcionTecnica: 'abolladura visible',
+          tratamiento: 'REPARAR',
+        },
+      ],
+    });
+    expect(items[0]?.damageEvidenceStatus).toBe('SUSPECTED_INVOLVEMENT');
+    expect(items[1]?.damageEvidenceStatus).toBeUndefined();
+  });
+
   it('tratamiento y vehiculo_detectado sobreviven analysis + merge', () => {
     const items = parseVisionDamageItems({
       items: [

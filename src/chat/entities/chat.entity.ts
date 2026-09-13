@@ -45,6 +45,14 @@ export interface DetectedDamageItem {
   refaccionDePieza?: string;
   /** Decisión comercial del valuador: REPARAR XOR SUSTITUIR. */
   tratamiento?: 'REPARAR' | 'SUSTITUIR' | 'INCIERTO' | 'PENDIENTE';
+  /**
+   * Evidencia visual de daño, independiente del tratamiento.
+   * No inferir desde descripcionTecnica.
+   */
+  damageEvidenceStatus?:
+    | 'CONFIRMED_VISIBLE'
+    | 'SUSPECTED_INVOLVEMENT'
+    | 'NOT_ASSESSABLE';
   /** Identidad vehicular estable cuando se conoce (merge key canónico). */
   vehicleId?: string;
   /** Identidad estable del daño (vehicleId + physicalPanelKey). */

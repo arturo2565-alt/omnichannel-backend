@@ -87,6 +87,10 @@ export const CANONICAL_WARNING_COPY: Record<string, string> = {
     'La moldura queda pendiente de valoración para confirmar si requiere reinstalación, reparación o sustitución.',
   MOLDURA_MONTAJE_PENDIENTE:
     'El montaje de la moldura queda pendiente de confirmación en revisión física.',
+  SUSPECTED_INVOLVEMENT:
+    'Hay piezas con posible involucramiento (desalineación o transferencia del golpe) que deben revisarse en taller antes de cotizarlas.',
+  NOT_ASSESSABLE:
+    'Hay piezas que no pueden valorarse con las imágenes actuales; se requiere revisión o evidencia adicional.',
 };
 
 export const PARTIAL_QUOTE_REASON = {
@@ -94,6 +98,8 @@ export const PARTIAL_QUOTE_REASON = {
   MOLDURA_NO_PINTABLE_REQUIERE_REVISION:
     'MOLDURA_NO_PINTABLE_REQUIERE_REVISION',
   MOLDURA_PINTADA_UNCONFIGURED: 'MOLDURA_PINTADA_UNCONFIGURED',
+  SUSPECTED_INVOLVEMENT: 'SUSPECTED_INVOLVEMENT',
+  NOT_ASSESSABLE: 'NOT_ASSESSABLE',
   PENDING_TREATMENT: 'PENDING_TREATMENT',
   UNCONFIGURED: 'UNCONFIGURED',
 } as const;
@@ -184,6 +190,29 @@ export function derivePartialQuoteReasons(
       push(
         PARTIAL_QUOTE_REASON.MOLDURA_NO_PINTABLE_REQUIERE_REVISION,
         molduraPendingRevisionCopy(pieceLabel),
+      );
+      continue;
+    }
+
+    if (
+      damage?.damageEvidenceStatus === 'SUSPECTED_INVOLVEMENT' ||
+      /posible involucramiento/i.test(line.description)
+    ) {
+      const labeled = pieceLabel && pieceLabel !== 'pieza' ? pieceLabel : 'esta pieza';
+      push(
+        PARTIAL_QUOTE_REASON.SUSPECTED_INVOLVEMENT,
+        `${/^el\s|^la\s|^los\s|^las\s/i.test(labeled) ? labeled : `El ${labeled}`} presenta posible involucramiento respecto de la zona afectada y debe revisarse en taller.`,
+      );
+      continue;
+    }
+
+    if (
+      damage?.damageEvidenceStatus === 'NOT_ASSESSABLE' ||
+      /no valorable con las im[aá]genes actuales/i.test(line.description)
+    ) {
+      push(
+        PARTIAL_QUOTE_REASON.NOT_ASSESSABLE,
+        'Hay piezas que no pueden valorarse con las imágenes actuales; se requiere revisión o evidencia adicional.',
       );
       continue;
     }
@@ -328,6 +357,11 @@ export function renderCanonicalQuoteFinancialBlock(
         !line.billable)
     ) {
       lineTexts.push(`🛠️ ${label}: precio pendiente de estimación`);
+      continue;
+    }
+
+    if (line.serviceType === 'PENDIENTE') {
+      lineTexts.push(`🛠️ Pieza pendiente de revisión: ${piece}`);
     }
   }
 

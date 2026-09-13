@@ -37,6 +37,9 @@ export function inventoryItemFromCanonicalDamage(
       ? { moldingPosition: damage.moldingPosition }
       : {}),
     ...(damage.finishType ? { finishType: damage.finishType } : {}),
+    ...(damage.damageEvidenceStatus
+      ? { damageEvidenceStatus: damage.damageEvidenceStatus }
+      : {}),
   };
 }
 
@@ -78,6 +81,9 @@ function projectCanonicalIdentity(
       ? { moldingPosition: match.moldingPosition }
       : {}),
     ...(match.finishType ? { finishType: match.finishType } : {}),
+    ...(match.damageEvidenceStatus
+      ? { damageEvidenceStatus: match.damageEvidenceStatus }
+      : {}),
   };
 }
 

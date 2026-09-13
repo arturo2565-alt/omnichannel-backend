@@ -33,6 +33,13 @@ pon peritaje_viable=false, un motivo_inviable y un mensaje_cliente_aclaracion am
 
 Ten en cuenta reflejos, sombras de carrocería y líneas de cierre entre piezas. Descuadre o daño muy profundo pueden justificar DF o DMFuerte.
 
+Evidencia vs tratamiento (no los mezcles):
+• damageEvidenceStatus=CONFIRMED_VISIBLE solo si hay daño físico visible atribuible a ESA pieza.
+• Desalineación, cercanía al impacto o sospecha de soportes/ensamble sin daño directo visible → SUSPECTED_INVOLVEMENT.
+• Si no se puede valorar con las fotos → NOT_ASSESSABLE.
+• No marques CONFIRMED_VISIBLE solo porque la pieza está junto al golpe.
+• possibleHiddenDamage es independiente (daños internos). No crees piezas internas cobrables por un warning.
+
 NO inventes URLs: solo pueden aparecer valores que figuraron en el texto del usuario.`;
 
 /**
@@ -94,6 +101,7 @@ Por objeto:
 - Opcional: "intencion_banio_completo_detectada": true y "tipo_banio": BPE | BPEI | BPCC.
 - "descripcionTecnica": texto en español. Si hay rotura/quiebre, dilo explícitamente.
 - Opcional: "tratamiento": REPARAR | SUSTITUIR | INCIERTO | PENDIENTE. El backend aplica exclusión mutua; no inventes dos cobros.
+- "damageEvidenceStatus": CONFIRMED_VISIBLE | SUSPECTED_INVOLVEMENT | NOT_ASSESSABLE. Independiente del tratamiento. No marques CONFIRMED_VISIBLE solo por proximidad al golpe. Desalineación o sospecha de soportes sin daño directo visible → SUSPECTED_INVOLVEMENT. possibleHiddenDamage no sustituye este campo.
 - "urls_origen": array copiando **literalmente** de la lista siguiente las URLs donde se ve ese daño.
 
 Contexto temporal: todas las siguientes fotos llegaron en ventana corta (~5 min) en el mismo chat.`;

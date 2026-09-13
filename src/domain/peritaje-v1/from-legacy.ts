@@ -19,6 +19,7 @@ import {
   parseMoldingFinishType,
   parseMoldingPosition,
 } from '../../catalog/moldura';
+import { parseDamageEvidenceStatus } from '../../catalog/damage-evidence';
 import {
   PERITAJE_SCHEMA_VERSION,
   type CanonicalPeritajeV1,
@@ -46,6 +47,7 @@ export type LegacyDetectedDamageShape = {
   moldingPosition?: string;
   finishType?: string;
   posibleReemplazoRefaccion?: boolean;
+  damageEvidenceStatus?: string;
   possibleHiddenDamage?: {
     detected: boolean;
     areas: string[];
@@ -195,6 +197,13 @@ export function damageItemFromLegacy(
       : 'missing_structured_treatment',
     requiresReplacement: treatmentImpliesReplacement(locked ?? 'PENDIENTE'),
     possibleReplacement: item.posibleReemplazoRefaccion === true,
+    ...(parseDamageEvidenceStatus(item.damageEvidenceStatus)
+      ? {
+          damageEvidenceStatus: parseDamageEvidenceStatus(
+            item.damageEvidenceStatus,
+          )!,
+        }
+      : {}),
     ...(item.possibleHiddenDamage
       ? { possibleHiddenDamage: item.possibleHiddenDamage }
       : {}),

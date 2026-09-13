@@ -26,6 +26,8 @@ export const CANONICAL_QUOTE_WARNINGS = {
   MOLDURA_NO_PINTABLE_REQUIERE_REVISION:
     'MOLDURA_NO_PINTABLE_REQUIERE_REVISION',
   MOLDURA_MONTAJE_PENDIENTE: 'MOLDURA_MONTAJE_PENDIENTE',
+  SUSPECTED_INVOLVEMENT: 'SUSPECTED_INVOLVEMENT',
+  NOT_ASSESSABLE: 'NOT_ASSESSABLE',
 } as const;
 
 export const FINANCIAL_DIFF_TYPES = [
@@ -105,6 +107,12 @@ export function deriveCanonicalWarnings(
     }
     if (d.treatment === 'PENDIENTE') {
       warnings.add(CANONICAL_QUOTE_WARNINGS.PENDING_TREATMENT);
+    }
+    if (d.damageEvidenceStatus === 'SUSPECTED_INVOLVEMENT') {
+      warnings.add(CANONICAL_QUOTE_WARNINGS.SUSPECTED_INVOLVEMENT);
+    }
+    if (d.damageEvidenceStatus === 'NOT_ASSESSABLE') {
+      warnings.add(CANONICAL_QUOTE_WARNINGS.NOT_ASSESSABLE);
     }
     if (
       isMolduraPieza(d.pieceCode) &&
