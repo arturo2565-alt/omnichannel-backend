@@ -3,9 +3,24 @@ import {
   extractVehicleYear,
   hasConfirmedYearAndModel,
 } from '../refaccion-vehicle-gate';
+import {
+  isMolduraPieza,
+  molduraMarketSearchLabel,
+} from '../../catalog/moldura';
 import type { VehiclePartIdentity } from './refaccion-market.types';
 
-function piezaLabel(raw: string): string {
+function piezaLabel(
+  raw: string,
+  molding?: { moldingPosition?: string | null; finishType?: string | null },
+): string {
+  if (isMolduraPieza(raw) || molding?.moldingPosition || molding?.finishType) {
+    if (isMolduraPieza(raw)) {
+      return molduraMarketSearchLabel({
+        moldingPosition: molding?.moldingPosition,
+        finishType: molding?.finishType,
+      });
+    }
+  }
   const label = resolvePiezaDisplayLabel(String(raw ?? '').trim());
   return label && label !== 'Servicio' ? label : String(raw ?? '').trim() || 'pieza';
 }
@@ -94,6 +109,8 @@ export function parseVehiclePartIdentity(input: {
   modelo?: string | null;
   version?: string | null;
   pieza: string;
+  moldingPosition?: string | null;
+  finishType?: string | null;
 }): VehiclePartIdentity {
   const raw = String(input.vehiculoText ?? '').trim();
   const anioFromField = String(input.anio ?? '').replace(/\D/g, '').slice(0, 4);
@@ -112,8 +129,15 @@ export function parseVehiclePartIdentity(input: {
     anio,
     version: String(input.version ?? '').trim() || null,
     pieza: String(input.pieza ?? '').trim(),
-    piezaLabel: piezaLabel(input.pieza),
+    piezaLabel: piezaLabel(input.pieza, {
+      moldingPosition: input.moldingPosition,
+      finishType: input.finishType,
+    }),
     confirmed,
+    ...(input.moldingPosition
+      ? { moldingPosition: input.moldingPosition }
+      : {}),
+    ...(input.finishType ? { finishType: input.finishType } : {}),
   };
 }
 
@@ -124,6 +148,7 @@ export function marketCacheKey(identity: VehiclePartIdentity): string {
     identity.anio ?? '',
     identity.piezaLabel,
     identity.version ?? '',
+    identity.moldingPosition ?? '',
   ]
     .map((s) => String(s).toLowerCase().replace(/\s+/g, ''))
     .join('|');

@@ -2,6 +2,8 @@
  * Quote Engine de dominio: totales, isPartial, warnings e invariantes
  * financieras. No calcula precios de catálogo/mercado.
  */
+import { isMolduraPieza } from '../../catalog/panel-pieza-catalog';
+import { isMolduraNonPaintableFinish } from '../../catalog/moldura';
 import { createQuoteId } from './ids';
 import {
   validateCanonicalPeritajeV1,
@@ -21,6 +23,9 @@ export const CANONICAL_QUOTE_WARNINGS = {
   HIDDEN_DAMAGE: 'HIDDEN_DAMAGE',
   POSSIBLE_SUBSTITUTION: 'POSSIBLE_SUBSTITUTION',
   PENDING_TREATMENT: 'PENDING_TREATMENT',
+  MOLDURA_NO_PINTABLE_REQUIERE_REVISION:
+    'MOLDURA_NO_PINTABLE_REQUIERE_REVISION',
+  MOLDURA_MONTAJE_PENDIENTE: 'MOLDURA_MONTAJE_PENDIENTE',
 } as const;
 
 export const FINANCIAL_DIFF_TYPES = [
@@ -60,6 +65,8 @@ export function isChargeableQuoteLine(line: Pick<
   }
   if (line.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE') return false;
   if (line.pricingSource === 'INSUFFICIENT_MARKET_SAMPLE') return false;
+  if (line.pricingStatus === 'UNCONFIGURED') return false;
+  if (line.pricingSource === 'UNCONFIGURED') return false;
   return Number(line.amount) > 0;
 }
 
@@ -99,6 +106,22 @@ export function deriveCanonicalWarnings(
     if (d.treatment === 'PENDIENTE') {
       warnings.add(CANONICAL_QUOTE_WARNINGS.PENDING_TREATMENT);
     }
+    if (
+      isMolduraPieza(d.pieceCode) &&
+      isMolduraNonPaintableFinish(d.finishType) &&
+      d.treatment !== 'SUSTITUIR'
+    ) {
+      warnings.add(
+        CANONICAL_QUOTE_WARNINGS.MOLDURA_NO_PINTABLE_REQUIERE_REVISION,
+      );
+    }
+    if (
+      isMolduraPieza(d.pieceCode) &&
+      isMolduraNonPaintableFinish(d.finishType) &&
+      d.treatment === 'SUSTITUIR'
+    ) {
+      warnings.add(CANONICAL_QUOTE_WARNINGS.MOLDURA_MONTAJE_PENDIENTE);
+    }
   }
   return [...warnings];
 }
@@ -115,6 +138,7 @@ export function deriveIsPartial(lines: readonly QuoteLine[]): boolean {
       return true;
     }
     if (line.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE') return true;
+    if (line.pricingStatus === 'UNCONFIGURED') return true;
     if (line.pricingSource === 'UNCONFIGURED') return true;
     return false;
   });

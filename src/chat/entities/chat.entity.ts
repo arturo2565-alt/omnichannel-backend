@@ -21,6 +21,18 @@ export interface DetectedDamageItem {
   severidad: string;
   descripcionTecnica: string;
   urls_origen: string[];
+  /** Familia MOLDURA: posición. Si falta → UNKNOWN en parser. No inferir del texto. */
+  moldingPosition?:
+    | 'ARCO_DELANTERO_IZQUIERDO'
+    | 'ARCO_DELANTERO_DERECHO'
+    | 'ARCO_TRASERO_IZQUIERDO'
+    | 'ARCO_TRASERO_DERECHO'
+    | 'PUERTA'
+    | 'FASCIA'
+    | 'OTRA'
+    | 'UNKNOWN';
+  /** Familia MOLDURA: acabado. Si falta → UNKNOWN en parser. No inferir del texto. */
+  finishType?: 'PINTADA_CARROCERIA' | 'NEGRA_TEXTURIZADA' | 'UNKNOWN';
   /** Marca/modelo/año inferidos por visión multimodal (raíz JSON o cruce BPC). */
   vehiculoDetectado?: string;
   /** Copia del inventario antes de colapsar a BPC (solo en fila BPC). */

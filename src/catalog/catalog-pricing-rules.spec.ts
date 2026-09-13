@@ -23,8 +23,9 @@ describe('catalog-pricing-rules', () => {
       { id: '1', servicio: 'Fascia', severidad: 'DL', precio: 2900, diasEntrega: 4 },
       { id: '2', servicio: 'Fascia', severidad: 'DM', precio: 3600, diasEntrega: 4 },
     ]);
-    expect(bases).toHaveLength(1);
-    expect(bases[0]!.basePrice).toBe(2900);
+    const fascia = bases.find((b) => b.servicio === 'Fascia');
+    expect(fascia?.basePrice).toBe(2900);
+    expect(bases.some((b) => b.servicio === 'MOLDURA_PINTADA')).toBe(true);
   });
 
   it('computeCatalogPiecePrice aplica tamaño y premium', () => {

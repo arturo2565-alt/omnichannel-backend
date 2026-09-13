@@ -1,3 +1,21 @@
+import {
+  MOLDURA_LEGACY_CODE,
+  MOLDURA_PINTADA_CATALOG,
+  PANEL_PIEZA_MOLDURA_CODE,
+  humanizeMolduraPieceLabel,
+  isHistoricalBareMoldura,
+  isMolduraPieza,
+  physicalPanelKeyForMolduraItem,
+} from './moldura';
+
+export {
+  PANEL_PIEZA_MOLDURA_CODE,
+  MOLDURA_PINTADA_CATALOG,
+  isMolduraPieza,
+  humanizeMolduraPieceLabel,
+  molduraFinishClientLine,
+} from './moldura';
+
 /** Código panel: posibles daños internos (no confundir con PDI = puerta delantera izquierda). */
 export const PANEL_PIEZA_INTERNAL_DAMAGES_CODE = 'PDI_INT';
 
@@ -74,7 +92,11 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
   { code: 'ESI', fullName: 'Espejo izquierdo', catalogPieza: 'Espejo' },
   { code: 'ESD', fullName: 'Espejo derecho', catalogPieza: 'Espejo' },
   { code: 'Espejo', fullName: 'Espejo', catalogPieza: 'Espejo' },
-  { code: 'Moldura', fullName: 'Moldura', catalogPieza: 'Estetica Exterior' },
+  {
+    code: PANEL_PIEZA_MOLDURA_CODE,
+    fullName: 'Moldura',
+    catalogPieza: MOLDURA_PINTADA_CATALOG,
+  },
   {
     code: 'Estetica Exterior',
     fullName: 'Estética exterior',
@@ -172,6 +194,8 @@ const EXPLICIT_PIEZA_ALIASES: Readonly<Record<string, string>> = {
   'bigote cofre': 'BiCO',
   bico: 'BiCO',
   parilla: 'Parilla',
+  moldura: PANEL_PIEZA_MOLDURA_CODE,
+  [MOLDURA_LEGACY_CODE.toLowerCase()]: PANEL_PIEZA_MOLDURA_CODE,
 };
 
 const catalogPiezaCodeCounts = new Map<string, number>();
@@ -342,6 +366,8 @@ export function findPanelPiezaOption(raw: string): PanelPiezaOption | null {
 const CLIENT_PIECE_LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   ED: 'Estribo derecho',
   EI: 'Estribo izquierdo',
+  MOLDURA: 'Moldura',
+  Moldura: 'Moldura',
 };
 
 /**
@@ -352,6 +378,10 @@ const CLIENT_PIECE_LABEL_OVERRIDES: Readonly<Record<string, string>> = {
 export function humanizeClientPieceLabel(raw: string): string {
   const t = String(raw ?? '').trim();
   if (!t) return t;
+  if (isMolduraPieza(t) && /::/.test(t)) {
+    const pos = t.slice(t.indexOf('::') + 2);
+    return humanizeMolduraPieceLabel(pos);
+  }
   const opt = findPanelPiezaOption(t);
   if (!opt) return t;
   const override = CLIENT_PIECE_LABEL_OVERRIDES[opt.code];
@@ -445,9 +475,30 @@ export function isSpecialPanelPieza(raw: string): boolean {
  */
 export function resolveCatalogPiezaForMatrixLookup(raw: string): string | null {
   if (isSpecialPanelPieza(raw) || isIntegralPanelPieza(raw)) return null;
+  if (isMolduraPieza(raw)) return MOLDURA_PINTADA_CATALOG;
   const opt = findPanelPiezaOption(raw);
+  if (opt?.catalogPieza === 'Estetica Exterior' && isMolduraPieza(raw)) {
+    return MOLDURA_PINTADA_CATALOG;
+  }
   if (opt?.catalogPieza) return opt.catalogPieza;
   return matchCatalogPiezaFromFreeText(raw);
+}
+
+/** Identidad física: moldura incorpora posición; otras piezas no cambian. */
+export function physicalPanelKeyForPiece(item: {
+  pieza: string;
+  moldingPosition?: string | null;
+  physicalPanelKey?: string | null;
+}): string {
+  const stored = String(item.physicalPanelKey ?? '').trim();
+  if (stored === MOLDURA_LEGACY_CODE) return stored;
+  if (isMolduraPieza(item.pieza) || isMolduraPieza(stored)) {
+    return physicalPanelKeyForMolduraItem(item);
+  }
+  if (isHistoricalBareMoldura(item.pieza, item.moldingPosition)) {
+    return MOLDURA_LEGACY_CODE;
+  }
+  return canonicalizePanelCode(item.pieza) || String(item.pieza ?? '').trim();
 }
 
 /** Texto enviado a `matchServicio` antes de buscar en la matriz. */

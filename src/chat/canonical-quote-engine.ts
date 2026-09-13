@@ -259,7 +259,9 @@ function rowToQuoteLine(row: QuoteRowInput): QuoteLine {
     'REPARACION_PINTURA') as QuoteServiceType;
   const insufficient =
     row.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE' ||
-    row.priceSource === 'INSUFFICIENT_MARKET_SAMPLE';
+    row.priceSource === 'INSUFFICIENT_MARKET_SAMPLE' ||
+    row.pricingStatus === 'UNCONFIGURED' ||
+    row.priceSource === 'UNCONFIGURED';
   const nonChargeableType =
     serviceType === 'PENDIENTE' || serviceType === 'ADVERTENCIA';
   const billable =

@@ -386,4 +386,30 @@ describe('PEG_CANONICAL_TRACE', () => {
     );
     restore();
   });
+
+  it('DAMAGE_ITEM de MOLDURA incluye position y finish', () => {
+    enableTrace();
+    const { logs, restore } = capturePegLogs();
+    runWithCanonicalTraceContext({ conversationId: 'conv_mold' }, () => {
+      buildVisionShadowSafe({
+        conversationId: 'conv_mold',
+        incomingInventory: [
+          item({
+            pieza: 'MOLDURA',
+            moldingPosition: 'ARCO_DELANTERO_IZQUIERDO',
+            finishType: 'NEGRA_TEXTURIZADA',
+            tratamiento: 'INCIERTO',
+            treatmentSource: 'vision',
+          }),
+        ],
+        visionVehicleLabel: 'Toyota Avanza 2020',
+      });
+    });
+    const joined = logs.join('\n');
+    expect(joined).toContain('"pieceCode":"MOLDURA"');
+    expect(joined).toContain('ARCO_DELANTERO_IZQUIERDO');
+    expect(joined).toContain('NEGRA_TEXTURIZADA');
+    expect(joined).toContain('MOLDURA::ARCO_DELANTERO_IZQUIERDO');
+    restore();
+  });
 });

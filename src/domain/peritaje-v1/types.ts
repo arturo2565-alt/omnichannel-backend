@@ -75,7 +75,11 @@ export const PRICING_SOURCES = [
 
 export type PricingSource = (typeof PRICING_SOURCES)[number];
 
-export const PRICING_STATUSES = ['OK', 'INSUFFICIENT_MARKET_SAMPLE'] as const;
+export const PRICING_STATUSES = [
+  'OK',
+  'INSUFFICIENT_MARKET_SAMPLE',
+  'UNCONFIGURED',
+] as const;
 export type PricingStatus = (typeof PRICING_STATUSES)[number];
 
 export const PRICING_TYPES = ['RANGE', 'NONE'] as const;
@@ -138,6 +142,18 @@ export interface DamageItem {
   pieceCode: string;
   pieceLabel: string;
   physicalPanelKey: string;
+  /** Solo familia MOLDURA. Ausente en otras piezas. */
+  moldingPosition?:
+    | 'ARCO_DELANTERO_IZQUIERDO'
+    | 'ARCO_DELANTERO_DERECHO'
+    | 'ARCO_TRASERO_IZQUIERDO'
+    | 'ARCO_TRASERO_DERECHO'
+    | 'PUERTA'
+    | 'FASCIA'
+    | 'OTRA'
+    | 'UNKNOWN';
+  /** Solo familia MOLDURA. Ausente en otras piezas. */
+  finishType?: 'PINTADA_CARROCERIA' | 'NEGRA_TEXTURIZADA' | 'UNKNOWN';
   severity: string;
   damageType?: string;
   descriptionTechnical: string;

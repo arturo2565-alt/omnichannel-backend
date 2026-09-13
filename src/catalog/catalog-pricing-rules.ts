@@ -1,3 +1,4 @@
+import { MOLDURA_PINTADA_CATALOG } from './moldura';
 import type { VehicleSizeTier } from './vehicle-pricing-profile';
 import {
   DEFAULT_PREMIUM_FACTOR,
@@ -255,9 +256,30 @@ export function aggregatePieceBaseRows(
     }
   }
 
-  return [...byServicio.values()]
-    .filter((p) => p.basePrice > 0)
-    .sort((a, b) => a.servicio.localeCompare(b.servicio, 'es'));
+  return ensureMolduraPintadaPieceSlot(
+    [...byServicio.values()]
+      .filter((p) => p.basePrice > 0 || p.servicio === MOLDURA_PINTADA_CATALOG)
+      .sort((a, b) => a.servicio.localeCompare(b.servicio, 'es')),
+  );
+}
+
+/** Expone MOLDURA_PINTADA en el panel aunque no tenga tarifa. Sin precio inventado. */
+export function ensureMolduraPintadaPieceSlot(
+  bases: readonly PieceBaseRow[],
+): PieceBaseRow[] {
+  if (bases.some((p) => p.servicio === MOLDURA_PINTADA_CATALOG)) {
+    return [...bases];
+  }
+  return [
+    ...bases,
+    {
+      servicio: MOLDURA_PINTADA_CATALOG,
+      basePrice: 0,
+      diasEntrega: 4,
+      matrixRowId: null,
+      legacyRowId: null,
+    },
+  ].sort((a, b) => a.servicio.localeCompare(b.servicio, 'es'));
 }
 
 export type IntegralBaseRow = {

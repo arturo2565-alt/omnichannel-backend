@@ -15,11 +15,22 @@ import {
   findPanelPiezaOption,
   isInternalDamageRangePieza,
   isIntegralPanelPieza,
+  isMolduraPieza,
   isRefaccionPieza,
   isSpecialPanelPieza,
   resolveCatalogPiezaForMatrixLookup,
   resolveMatrixServicioRaw,
 } from '../catalog/panel-pieza-catalog';
+import {
+  MOLDURA_MONTAJE_PENDIENTE,
+  MOLDURA_NO_PINTABLE_REQUIERE_REVISION,
+  MOLDURA_PINTADA_CATALOG,
+  PANEL_PIEZA_MOLDURA_CODE,
+  humanizeMolduraPieceLabel,
+  isMolduraNonPaintableFinish,
+  isMolduraPaintedRepair,
+  parseMoldingFinishType,
+} from '../catalog/moldura';
 import {
   applyXorTreatmentsToInventory,
   canonicalPhysicalPanelKey,
@@ -63,7 +74,7 @@ export interface QuoteRowInput {
   vehicleId?: string;
   billable?: boolean;
   priceSource?: RefaccionPriceSource;
-  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE';
+  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE' | 'UNCONFIGURED';
   pricingType?: 'RANGE' | 'NONE';
   precioMinEstimado?: number;
   precioMaxEstimado?: number;
@@ -500,10 +511,12 @@ export function quoteRowsFromDamageInventory(
   for (const raw of collapsed) {
     const it = ensureDamageIdentity(raw);
     const panelCode =
-      canonicalPhysicalPanelKey(it.pieza) || String(it.pieza ?? '').trim();
+      canonicalPhysicalPanelKey(it.pieza, it) || String(it.pieza ?? '').trim();
     if (!panelCode) continue;
     const tratamiento = resolveInventoryTreatment(it, collapsed).treatment;
-    const display = displayPiezaName(panelCode, snap);
+    const display = isMolduraPieza(it.pieza)
+      ? humanizeMolduraPieceLabel(it.moldingPosition)
+      : displayPiezaName(panelCode, snap);
 
     if (isInternalDamageRangePieza(panelCode)) {
       rows.push(
@@ -555,6 +568,162 @@ export function quoteRowsFromDamageInventory(
             : { priceSource: 'AUTOFIX_CATALOG' as const }),
         }),
       );
+      continue;
+    }
+
+    if (isMolduraPieza(it.pieza) || isMolduraPieza(panelCode)) {
+      const finish = parseMoldingFinishType(it.finishType);
+      if (tratamiento === 'PENDIENTE') {
+        rows.push(
+          stampRowFromDamage(it, {
+            pieza: PANEL_PIEZA_MOLDURA_CODE,
+            severidad: coerceDamageLevelCode(String(it.severidad ?? '').trim()),
+            precioMx: 0,
+            tratamiento: 'PENDIENTE',
+            serviceType: 'PENDIENTE',
+            physicalPanelKey: panelCode,
+            billable: false,
+            description: `${display} — pendiente de revisión/cotización`,
+            descripcionServicio: `${display} — pendiente de revisión/cotización`,
+          }),
+        );
+        continue;
+      }
+
+      if (tratamiento === 'SUSTITUIR') {
+        const rawPart = Number(it.precioMx);
+        const catalogManual =
+          it.priceSource === 'AUTOFIX_CATALOG' || it.priceSource === 'FALLBACK';
+        const hasValidPart =
+          !catalogManual && Number.isFinite(rawPart) && rawPart > 0;
+        const insufficient =
+          catalogManual ||
+          it.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE' ||
+          it.priceSource === 'INSUFFICIENT_MARKET_SAMPLE' ||
+          !hasValidPart;
+        const partPrice = hasValidPart ? Math.round(rawPart) : 0;
+        const priceSource = catalogManual
+          ? 'INSUFFICIENT_MARKET_SAMPLE'
+          : (it.priceSource ??
+            (hasValidPart ? 'WEB_MARKET_ESTIMATE' : 'INSUFFICIENT_MARKET_SAMPLE'));
+        const negraMontajePendiente = isMolduraNonPaintableFinish(finish);
+        rows.push(
+          stampRowFromDamage(it, {
+            pieza: `REFACCION:${PANEL_PIEZA_MOLDURA_CODE}`,
+            severidad: 'N/A',
+            precioMx: partPrice,
+            detallesRefaccion: it.detallesRefaccion || display,
+            tratamiento: 'SUSTITUIR',
+            serviceType: 'REFACCION',
+            physicalPanelKey: panelCode,
+            billable: partPrice > 0 && !insufficient,
+            priceSource,
+            pricingStatus: insufficient
+              ? 'INSUFFICIENT_MARKET_SAMPLE'
+              : it.pricingStatus ?? 'OK',
+            pricingType: it.pricingType ?? (hasValidPart ? 'RANGE' : 'NONE'),
+            precioMinEstimado: it.precioMinEstimado,
+            precioMaxEstimado: it.precioMaxEstimado,
+            precioCentral: it.precioCentral,
+            cantidadMuestras: it.cantidadMuestras,
+            cantidadDominios: it.cantidadDominios,
+            providersUsed: it.providersUsed,
+            partTypeGroup: it.partTypeGroup,
+            disclaimer: negraMontajePendiente
+              ? `${MOLDURA_MONTAJE_PENDIENTE}. Refacción de ${display}: montaje sin pintura no tiene serviceType todavía.`
+              : insufficient
+                ? `Refacción de ${display}: precio pendiente de estimación. El montaje/pintura no cubre la pieza de reemplazo.`
+                : undefined,
+            description: insufficient
+              ? `Refacción de ${display}: precio pendiente de estimación`
+              : `Refacción de ${display}`,
+            descripcionServicio: insufficient
+              ? `Refacción de ${display}: precio pendiente de estimación`
+              : `Refacción de ${display}`,
+          }),
+        );
+        if (isMolduraPaintedRepair(finish) && needsMontajePinturaComponent(PANEL_PIEZA_MOLDURA_CODE)) {
+          const montaje = resolveMontajePinturaPrice(
+            snap,
+            MOLDURA_PINTADA_CATALOG,
+            vehicleProfile,
+            pricingRules,
+          );
+          const montajeUnconfigured =
+            montaje.mountPaintPriceSource === 'UNCONFIGURED';
+          rows.push(
+            stampRowFromDamage(it, {
+              pieza: PANEL_PIEZA_MOLDURA_CODE,
+              severidad: 'MONTAJE_PINTURA',
+              precioMx: Math.max(0, Math.round(montaje.precio)),
+              tratamiento: 'SUSTITUIR',
+              serviceType: 'MONTAJE_PINTURA',
+              physicalPanelKey: panelCode,
+              billable: montaje.precio > 0 && !montajeUnconfigured,
+              priceSource: montaje.priceSource,
+              description: `Montar y pintar ${display}`,
+              descripcionServicio: `Montar y pintar ${display}`,
+            }),
+          );
+        }
+        continue;
+      }
+
+      if (tratamiento === 'REPARAR' || tratamiento === 'INCIERTO') {
+        if (isMolduraNonPaintableFinish(finish)) {
+          rows.push(
+            stampRowFromDamage(it, {
+              pieza: PANEL_PIEZA_MOLDURA_CODE,
+              severidad: coerceDamageLevelCode(String(it.severidad ?? '').trim()),
+              precioMx: 0,
+              tratamiento,
+              serviceType: 'PENDIENTE',
+              physicalPanelKey: panelCode,
+              billable: false,
+              priceSource: 'UNCONFIGURED',
+              pricingStatus: 'UNCONFIGURED',
+              disclaimer: MOLDURA_NO_PINTABLE_REQUIERE_REVISION,
+              description: `${display} — ${MOLDURA_NO_PINTABLE_REQUIERE_REVISION}`,
+              descripcionServicio: `${display} — ${MOLDURA_NO_PINTABLE_REQUIERE_REVISION}`,
+            }),
+          );
+          continue;
+        }
+        const paintedItem = { ...it, pieza: MOLDURA_PINTADA_CATALOG };
+        const { precio, storedSev } = matrixRepairPrice(
+          paintedItem,
+          MOLDURA_PINTADA_CATALOG,
+          snap,
+          vehicleProfile,
+          pricingRules,
+        );
+        const unconfigured = precio <= 0;
+        const desc = unconfigured
+          ? `${display} — tarifa MOLDURA_PINTADA sin configurar`
+          : tratamiento === 'INCIERTO'
+            ? `Reparación y pintura estimada de ${display}`
+            : `Reparar y pintar ${display}`;
+        rows.push(
+          stampRowFromDamage(it, {
+            pieza: PANEL_PIEZA_MOLDURA_CODE,
+            severidad: storedSev,
+            precioMx: Math.max(0, Math.round(precio)),
+            tratamiento,
+            serviceType: 'REPARACION_PINTURA',
+            physicalPanelKey: panelCode,
+            billable: precio > 0 && !unconfigured,
+            priceSource: unconfigured ? 'UNCONFIGURED' : 'AUTOFIX_CATALOG',
+            ...(unconfigured
+              ? { pricingStatus: 'UNCONFIGURED' as const }
+              : {}),
+            description: desc,
+            descripcionServicio: desc,
+            ...(tratamiento === 'INCIERTO' || it.posibleReemplazoRefaccion
+              ? { disclaimer: INCIERTO_SUBSTITUTION_DISCLAIMER }
+              : {}),
+          }),
+        );
+      }
       continue;
     }
 

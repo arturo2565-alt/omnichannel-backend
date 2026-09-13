@@ -47,8 +47,11 @@ function pickWorstDamageLevel(levels: string[]): DamageLevel {
 }
 
 /** Clave estable por pieza física (Cofre y REFACCION:Cofre → Cofre). */
-export function inventoryLineKey(pieza: string): string {
-  return canonicalPhysicalPanelKey(pieza);
+export function inventoryLineKey(
+  pieza: string,
+  attrs?: { moldingPosition?: string | null },
+): string {
+  return canonicalPhysicalPanelKey(pieza, attrs);
 }
 
 export function parseDraftImageUrls(imageUrl: string): string[] {
@@ -112,10 +115,12 @@ export function mergeCartInventoryItem(
   inventory: readonly DetectedDamageItem[],
   incoming: DetectedDamageItem,
 ): DetectedDamageItem[] {
-  const key = inventoryLineKey(incoming.pieza);
+  const key = inventoryLineKey(incoming.pieza, incoming);
   if (!key) return [...inventory];
 
-  const idx = inventory.findIndex((it) => inventoryLineKey(it.pieza) === key);
+  const idx = inventory.findIndex(
+    (it) => inventoryLineKey(it.pieza, it) === key,
+  );
   if (idx < 0) {
     return [
       ...inventory,

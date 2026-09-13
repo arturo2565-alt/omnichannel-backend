@@ -32,6 +32,8 @@ export type VehiclePartIdentity = {
   pieza: string;
   piezaLabel: string;
   confirmed: boolean;
+  moldingPosition?: string | null;
+  finishType?: string | null;
 };
 
 export type RawProviderHit = {

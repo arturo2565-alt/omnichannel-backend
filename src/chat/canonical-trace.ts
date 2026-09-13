@@ -258,6 +258,14 @@ export function summarizeDamageItem(damage: DamageItem): Record<string, unknown>
     pieceCode: damage.pieceCode,
     pieceLabel: damage.pieceLabel,
     physicalPanelKey: damage.physicalPanelKey,
+    ...(damage.pieceCode === 'MOLDURA' ||
+    String(damage.physicalPanelKey ?? '').startsWith('MOLDURA') ||
+    damage.pieceCode === 'Moldura'
+      ? {
+          moldingPosition: damage.moldingPosition ?? 'UNKNOWN',
+          finishType: damage.finishType ?? 'UNKNOWN',
+        }
+      : {}),
     severity: damage.severity,
     treatment: damage.treatment,
     treatmentSource: damage.treatmentSource,

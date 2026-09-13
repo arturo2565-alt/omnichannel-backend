@@ -133,6 +133,7 @@ import {
 } from './refaccion-mercado';
 import { RefaccionMarketService } from './refaccion-market/refaccion-market.orchestrator';
 import { canonicalizePanelCode } from '../catalog/panel-pieza-catalog';
+import { MOLDURA_VISION_CONTRACT } from '../catalog/moldura';
 import { enrichInventoryWithMarketRefacciones } from './refaccion-market/enrich-inventory-with-market';
 import {
   applyXorTreatmentsToInventory,
@@ -339,6 +340,12 @@ function looksLikeConversationUuid(raw: unknown): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
     s,
   );
+}
+
+function appendMolduraVisionContract(text: string): string {
+  const t = String(text ?? '').trim();
+  if (/moldingPosition|pieza "MOLDURA"|pieza MOLDURA/i.test(t)) return t;
+  return t ? `${t}\n\n${MOLDURA_VISION_CONTRACT}` : MOLDURA_VISION_CONTRACT;
 }
 
 /** Imagen entrante: URL, data URL base64 o ya alojada en Cloudinary */
@@ -2767,19 +2774,21 @@ export class ChatService implements OnModuleDestroy {
     viability: VisionViability;
     vehiculoDetectado?: string | null;
   }> {
-    const systemPrompt =
+    const systemPrompt = appendMolduraVisionContract(
       options?.systemPrompt != null && String(options.systemPrompt).trim() !== ''
         ? String(options.systemPrompt).trim()
         : await this.aiConfigService.getValue(
             AI_CONFIG_KEYS.DEFAULT_VISION_PROMPT,
-          );
+          ),
+    );
 
-    const userSchemaHint =
+    const userSchemaHintRaw =
       options?.userSchemaHint != null && String(options.userSchemaHint).trim() !== ''
         ? String(options.userSchemaHint).trim()
         : await this.aiConfigService.getValue(
             AI_CONFIG_KEYS.VISION_JSON_USER_INSTRUCTION,
           );
+    const userSchemaHint = appendMolduraVisionContract(userSchemaHintRaw);
 
     const intro = urls
       .map((_, i) => `Imagen ${i + 1}: posición ${i + 1} en el bloque de imágenes`)

@@ -1,4 +1,9 @@
 import type { DetectedDamageItem } from './entities/chat.entity';
+import { isMolduraPieza } from '../catalog/panel-pieza-catalog';
+import {
+  parseMoldingFinishType,
+  parseMoldingPosition,
+} from '../catalog/moldura';
 import {
   deriveStableVehicleId,
   parseTreatmentDecision,
@@ -161,6 +166,16 @@ export function normalizeVisionDamageItem(
       ? { posibleReemplazoRefaccion: true }
       : {}),
     ...(possibleHiddenDamage ? { possibleHiddenDamage } : {}),
+    ...(isMolduraPieza(pieza)
+      ? {
+          moldingPosition: parseMoldingPosition(
+            r['moldingPosition'] ?? r['molding_position'],
+          ),
+          finishType: parseMoldingFinishType(
+            r['finishType'] ?? r['finish_type'],
+          ),
+        }
+      : {}),
   };
 }
 

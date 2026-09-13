@@ -7,9 +7,11 @@ import {
   canonicalizePanelCode,
   isIntegralPanelPieza,
   isInternalDamageRangePieza,
+  isMolduraPieza,
   isRefaccionPieza,
   PANEL_PIEZA_INTERNAL_DAMAGES_CODE,
   PANEL_PIEZA_REFACCION_CODE,
+  physicalPanelKeyForPiece,
   refaccionCatalogCodigoForPieza,
   resolveCatalogPiezaForMatrixLookup,
 } from '../catalog/panel-pieza-catalog';
@@ -102,9 +104,28 @@ export function stripRefaccionPrefix(raw: string): string {
 /**
  * Identidad de la pieza física. `Cofre` y `REFACCION:Cofre` resuelven al mismo key.
  */
-export function canonicalPhysicalPanelKey(raw: string): string {
+export function canonicalPhysicalPanelKey(
+  raw: string,
+  attrs?: {
+    moldingPosition?: string | null;
+    physicalPanelKey?: string | null;
+    pieza?: string;
+  },
+): string {
   const t = String(raw ?? '').trim();
   if (!t) return '';
+  const piece = String(attrs?.pieza ?? t).trim();
+  if (
+    isMolduraPieza(t) ||
+    isMolduraPieza(piece) ||
+    isMolduraPieza(String(attrs?.physicalPanelKey ?? ''))
+  ) {
+    return physicalPanelKeyForPiece({
+      pieza: piece || t,
+      moldingPosition: attrs?.moldingPosition,
+      physicalPanelKey: attrs?.physicalPanelKey,
+    });
+  }
   if (isInternalDamageRangePieza(t)) return PANEL_PIEZA_INTERNAL_DAMAGES_CODE;
   if (isIntegralPanelPieza(t) && !isRefaccionPieza(t)) {
     return canonicalizePanelCode(t) || t;
@@ -168,7 +189,7 @@ export function deriveStableVehicleId(
  * Fallback legacy (sin vehicleId): solo physicalPanelKey — ver collapseInventoryByPhysicalPanel.
  */
 export function physicalInventoryMergeKey(item: DetectedDamageItem): string {
-  const panel = canonicalPhysicalPanelKey(item.pieza);
+  const panel = canonicalPhysicalPanelKey(item.pieza, item);
   const vid = deriveStableVehicleId(item);
   return vid ? `${vid}::${panel}` : panel;
 }
@@ -206,7 +227,7 @@ export function ensureDamageIdentity(
   }
 
   const panel =
-    canonicalPhysicalPanelKey(it.pieza) ||
+    canonicalPhysicalPanelKey(it.pieza, it) ||
     String(it.pieza ?? '').trim() ||
     'unknown';
 
@@ -449,6 +470,12 @@ export function mergePhysicalPanelItems(
             b.possibleHiddenDamage ?? a.possibleHiddenDamage,
         }
       : {}),
+    ...(a.moldingPosition || b.moldingPosition
+      ? { moldingPosition: b.moldingPosition || a.moldingPosition }
+      : {}),
+    ...(a.finishType || b.finishType
+      ? { finishType: b.finishType || a.finishType }
+      : {}),
     ...(a.posibleReemplazoRefaccion || b.posibleReemplazoRefaccion
       ? { posibleReemplazoRefaccion: true }
       : {}),
@@ -486,6 +513,10 @@ export function copyDetectedDamageSemantics(
     ...(it.posibleReemplazoRefaccion
       ? { posibleReemplazoRefaccion: true }
       : {}),
+    ...(it.moldingPosition
+      ? { moldingPosition: it.moldingPosition }
+      : {}),
+    ...(it.finishType ? { finishType: it.finishType } : {}),
     ...(it.possibleHiddenDamage
       ? {
           possibleHiddenDamage: {
@@ -595,11 +626,19 @@ export function isBillableQuoteRow(row: {
   billable?: boolean;
   serviceType?: QuoteServiceType;
   precioMx?: number;
+  priceSource?: string;
+  pricingStatus?: string;
 }): boolean {
   if (row.billable === false) return false;
   if (
     row.serviceType === 'PENDIENTE' ||
     row.serviceType === 'ADVERTENCIA'
+  ) {
+    return false;
+  }
+  if (
+    row.pricingStatus === 'UNCONFIGURED' ||
+    row.priceSource === 'UNCONFIGURED'
   ) {
     return false;
   }

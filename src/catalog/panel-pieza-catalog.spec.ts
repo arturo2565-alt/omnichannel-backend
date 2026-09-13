@@ -89,6 +89,15 @@ describe('panel-pieza-catalog', () => {
     expect(refaccionCatalogCodigoForPieza('SI')).toBe('SALPICADERA');
   });
 
+  it('Moldura ya no resuelve a Estetica Exterior', () => {
+    expect(canonicalizePanelCode('Moldura')).toBe('MOLDURA');
+    expect(resolveCatalogPiezaForMatrixLookup('Moldura')).toBe('MOLDURA_PINTADA');
+    expect(resolveCatalogPiezaForMatrixLookup('MOLDURA')).toBe('MOLDURA_PINTADA');
+    expect(resolveCatalogPiezaForMatrixLookup('Estetica Exterior')).toBe(
+      'Estetica Exterior',
+    );
+  });
+
   it('resolveMatrixServicioRaw conserva texto libre si no hay mapeo', () => {
     expect(resolveMatrixServicioRaw('Puerta delantera izquierda')).toBe('Puerta');
     expect(resolveMatrixServicioRaw('Pieza rara XYZ')).toBe('Pieza rara XYZ');

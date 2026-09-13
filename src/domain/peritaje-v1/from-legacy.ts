@@ -7,7 +7,18 @@ import {
   UNKNOWN_VEHICLE_ID,
 } from './ids';
 import { parseStructuredTreatment, treatmentImpliesReplacement } from './treatment';
-import { humanizeClientPieceLabel } from '../../catalog/panel-pieza-catalog';
+import {
+  humanizeClientPieceLabel,
+  physicalPanelKeyForPiece,
+} from '../../catalog/panel-pieza-catalog';
+import {
+  PANEL_PIEZA_MOLDURA_CODE,
+  humanizeMolduraPieceLabel,
+  isHistoricalBareMoldura,
+  isMolduraPieza,
+  parseMoldingFinishType,
+  parseMoldingPosition,
+} from '../../catalog/moldura';
 import {
   PERITAJE_SCHEMA_VERSION,
   type CanonicalPeritajeV1,
@@ -32,6 +43,8 @@ export type LegacyDetectedDamageShape = {
   urls_asociadas?: string[];
   vehiculoDetectado?: string;
   tratamiento?: string;
+  moldingPosition?: string;
+  finishType?: string;
   posibleReemplazoRefaccion?: boolean;
   possibleHiddenDamage?: {
     detected: boolean;
@@ -119,11 +132,33 @@ export function damageItemFromLegacy(
     sourceMessageId?: string;
   },
 ): DamageItem {
-  const pieceCode = trim(item.pieza);
+  const rawPiece = trim(item.pieza);
   const panelRaw = ctx.canonicalizePanel
-    ? ctx.canonicalizePanel(pieceCode)
-    : normalizePhysicalPanelKey(pieceCode);
-  const physicalPanelKey = panelRaw || pieceCode;
+    ? ctx.canonicalizePanel(rawPiece)
+    : normalizePhysicalPanelKey(rawPiece);
+  const moldura = isMolduraPieza(rawPiece) || isMolduraPieza(panelRaw);
+  const historical = isHistoricalBareMoldura(rawPiece, item.moldingPosition);
+  const moldingPosition = moldura
+    ? historical
+      ? undefined
+      : parseMoldingPosition(item.moldingPosition)
+    : undefined;
+  const finishType = moldura
+    ? historical && item.finishType == null
+      ? undefined
+      : parseMoldingFinishType(item.finishType)
+    : undefined;
+  const pieceCode = historical
+    ? rawPiece
+    : moldura
+      ? PANEL_PIEZA_MOLDURA_CODE
+      : rawPiece;
+  const physicalPanelKey = moldura
+    ? physicalPanelKeyForPiece({
+        pieza: rawPiece,
+        moldingPosition,
+      })
+    : panelRaw || rawPiece;
   const descriptionTechnical =
     trim(item.descripcionTecnica) ||
     trim(item.descripcion) ||
@@ -142,8 +177,12 @@ export function damageItemFromLegacy(
     }),
     vehicleId: ctx.vehicleId,
     pieceCode,
-    pieceLabel: humanizeClientPieceLabel(pieceCode) || pieceCode,
+    pieceLabel: moldura
+      ? humanizeMolduraPieceLabel(moldingPosition)
+      : humanizeClientPieceLabel(pieceCode) || pieceCode,
     physicalPanelKey,
+    ...(moldingPosition ? { moldingPosition } : {}),
+    ...(finishType ? { finishType } : {}),
     severity: trim(item.severidad),
     descriptionTechnical,
     treatment: locked ?? 'PENDIENTE',

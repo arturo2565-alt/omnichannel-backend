@@ -82,6 +82,8 @@ export async function enrichInventoryWithMarketRefacciones(
     const identity = parseVehiclePartIdentity({
       vehiculoText,
       pieza: it.pieza,
+      moldingPosition: it.moldingPosition,
+      finishType: it.finishType,
     });
     emit(REFACCION_MARKET_EVENTS.SEARCH_STARTED, {
       pieza: identity.piezaLabel,
