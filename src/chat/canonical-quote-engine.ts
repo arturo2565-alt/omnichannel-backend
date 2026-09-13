@@ -56,6 +56,7 @@ import {
   canonicalPhysicalPanelKey,
   deriveStableVehicleId,
   ensureDamageIdentity,
+  inventoryPhysicalPanelKey,
 } from './piece-treatment';
 import { isBanioPinturaCompletoVisionInventory } from './vision-bpc-inventory';
 import {
@@ -105,7 +106,7 @@ function damageToPricedItem(
   priced: DetectedDamageItem | undefined,
 ): DetectedDamageItem {
   const base: DetectedDamageItem = {
-    pieza: priced?.pieza || damage.pieceCode,
+    pieza: damage.pieceCode || priced?.pieza || '',
     severidad: priced?.severidad || damage.severity,
     descripcionTecnica: damage.descriptionTechnical,
     urls_origen:
@@ -117,6 +118,11 @@ function damageToPricedItem(
     treatmentReason: damage.treatmentReason,
     vehicleId: damage.vehicleId,
     damageItemId: damage.damageItemId,
+    physicalPanelKey: damage.physicalPanelKey,
+    ...(damage.moldingPosition
+      ? { moldingPosition: damage.moldingPosition }
+      : {}),
+    ...(damage.finishType ? { finishType: damage.finishType } : {}),
     ...(damage.possibleReplacement ? { posibleReemplazoRefaccion: true } : {}),
     ...(damage.possibleHiddenDamage
       ? { possibleHiddenDamage: damage.possibleHiddenDamage }
@@ -151,7 +157,7 @@ function mergeInventoryForEngine(
   return peritaje.damages.map((d) => {
     const byIdentity = byId.get(d.damageItemId);
     const panelMatches = identified.filter(
-      (it) => canonicalPhysicalPanelKey(it.pieza) === d.physicalPanelKey,
+      (it) => inventoryPhysicalPanelKey(it) === d.physicalPanelKey,
     );
     const byVehicle = panelMatches.find(
       (it) => deriveStableVehicleId(it) === d.vehicleId,

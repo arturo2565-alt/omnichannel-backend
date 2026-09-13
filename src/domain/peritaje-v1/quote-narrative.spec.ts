@@ -195,8 +195,13 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
     expect(block.isPartial).toBe(true);
     expect(block.text).toMatch(/precio pendiente de estimación/);
     expect(block.totalText).toMatch(/Subtotal parcial/);
+    expect(block.totalText).toMatch(
+      /La refacci[oó]n est[aá] pendiente de estimaci[oó]n de mercado/,
+    );
     expect(block.totalText).toContain('$3,400');
     expect(block.text).not.toMatch(/Inversión Total Estimada/);
+    expect(block.totalText).not.toMatch(/falta el precio de refacci[oó]n/i);
+    expect(block.totalText).not.toMatch(/montaje\/pintura no cubre/i);
   });
 
   it('10. billable=false amount positivo: no aparece como cargo', () => {
@@ -391,5 +396,116 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
     expect(block.text).not.toMatch(/Reparación y pintura STD\b/);
     expect(block.text).not.toMatch(/Reparación y pintura ED\b/);
     expect(block.text).toContain('$9,750');
+  });
+
+  it('moldura negra pendiente NO menciona falta de precio de refacción', () => {
+    const q = quote({
+      lines: [
+        line({
+          serviceType: 'REPARACION_PINTURA',
+          amount: 4650,
+          description: 'salpicadera izquierda',
+        }),
+        line({
+          quoteLineId: 'ql_moldura',
+          damageItemId: 'dmg_moldura',
+          serviceType: 'PENDIENTE',
+          amount: 0,
+          billable: false,
+          description: 'Moldura arco delantero izquierdo',
+        }),
+      ],
+      isPartial: true,
+      warnings: [
+        'PENDING_TREATMENT',
+        'MOLDURA_NO_PINTABLE_REQUIERE_REVISION',
+      ],
+      total: 4650,
+      subtotal: 4650,
+    });
+    const block = renderCanonicalQuoteFinancialBlock(q, {
+      schemaVersion: 'peritaje.v1',
+      peritajeId: 'per_m',
+      conversationId: 'c1',
+      tallerId: null,
+      vehicles: [],
+      viability: { viable: true },
+      createdAt: '2026-09-13T00:00:00.000Z',
+      updatedAt: '2026-09-13T00:00:00.000Z',
+      damages: [
+        {
+          damageItemId: 'dmg_moldura',
+          vehicleId: 'veh_1',
+          pieceCode: 'MOLDURA',
+          pieceLabel: 'Moldura arco delantero izquierdo',
+          physicalPanelKey: 'MOLDURA::ARCO_DELANTERO_IZQUIERDO',
+          moldingPosition: 'ARCO_DELANTERO_IZQUIERDO',
+          finishType: 'NEGRA_TEXTURIZADA',
+          severity: 'DF',
+          descriptionTechnical: 'moldura negra desprendida',
+          treatment: 'INCIERTO',
+          treatmentConfidence: 'MEDIUM',
+          treatmentSource: 'vision',
+          treatmentReason: 'vision_structured',
+          requiresReplacement: false,
+          possibleReplacement: false,
+          evidence: [],
+          source: 'vision',
+        },
+      ],
+    });
+    expect(block.totalText).toMatch(/pendiente de valoraci[oó]n/);
+    expect(block.totalText).toMatch(/reinstalaci[oó]n, reparaci[oó]n o sustituci[oó]n/);
+    expect(block.totalText).not.toMatch(/falta el precio de refacci[oó]n/i);
+    expect(block.totalText).not.toMatch(/montaje\/pintura no cubre/i);
+    expect(block.totalText).not.toMatch(/estimaci[oó]n de mercado/);
+  });
+
+  it('MOLDURA_PINTADA UNCONFIGURED explica tarifa no configurada', () => {
+    const q = quote({
+      lines: [
+        line({
+          quoteLineId: 'ql_mp',
+          damageItemId: 'dmg_mp',
+          serviceType: 'REPARACION_PINTURA',
+          amount: 0,
+          billable: false,
+          pricingStatus: 'UNCONFIGURED',
+          pricingSource: 'UNCONFIGURED',
+          description: 'Moldura puerta',
+        }),
+      ],
+      isPartial: true,
+      total: 0,
+      subtotal: 0,
+    });
+    const block = renderCanonicalQuoteFinancialBlock(q);
+    expect(block.totalText).toMatch(
+      /tarifa de reparaci[oó]n\/pintura de la moldura est[aá] pendiente de configuraci[oó]n/i,
+    );
+    expect(block.totalText).not.toMatch(/falta el precio de refacci[oó]n/i);
+  });
+
+  it('PENDING_TREATMENT genérico no inventa refacción', () => {
+    const q = quote({
+      lines: [
+        line({
+          quoteLineId: 'ql_pend',
+          serviceType: 'PENDIENTE',
+          amount: 0,
+          billable: false,
+          description: 'puerta',
+        }),
+      ],
+      isPartial: true,
+      warnings: ['PENDING_TREATMENT'],
+      total: 0,
+      subtotal: 0,
+    });
+    const block = renderCanonicalQuoteFinancialBlock(q);
+    expect(block.totalText).toMatch(
+      /tratamiento de esta pieza debe confirmarse antes de cotizarla/i,
+    );
+    expect(block.totalText).not.toMatch(/refacci[oó]n/i);
   });
 });

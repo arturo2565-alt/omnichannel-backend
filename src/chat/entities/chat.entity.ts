@@ -49,6 +49,11 @@ export interface DetectedDamageItem {
   vehicleId?: string;
   /** Identidad estable del daño (vehicleId + physicalPanelKey). */
   damageItemId?: string;
+  /**
+   * Identidad física proyectada desde CanonicalPeritaje.
+   * En CANONICAL no recalcular Moldura desde attrs legacy incompletos.
+   */
+  physicalPanelKey?: string;
   /** Origen del tratamiento: lock vs inferencia legacy. */
   treatmentSource?:
     | 'vision'

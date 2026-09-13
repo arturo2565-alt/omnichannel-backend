@@ -7,7 +7,10 @@ import {
   mergeCommercialLinesIntoQuote,
 } from '../../chat/canonical-commercial-quote';
 import { composeModernClientQuoteMessage } from '../../chat/canonical-quote-narrative';
-import { canonicalPhysicalPanelKey } from '../../chat/piece-treatment';
+import {
+  canonicalPhysicalPanelKey,
+  inventoryPhysicalPanelKey,
+} from '../../chat/piece-treatment';
 import {
   composeAggregateClientQuoteMessage,
   quotesMixVehicles,
@@ -302,7 +305,7 @@ export async function runDeterministicAutonomyCase(
     const src =
       rawItems.find(
         (it) =>
-          (canonicalPhysicalPanelKey(it.pieza) || it.pieza) === d.physicalPanelKey &&
+          (inventoryPhysicalPanelKey(it) || it.pieza) === d.physicalPanelKey &&
           (!it.vehicleId || it.vehicleId === d.vehicleId),
       ) ?? rawItems[0];
     return {
@@ -315,6 +318,9 @@ export async function runDeterministicAutonomyCase(
       treatmentReason: d.treatmentReason,
       vehicleId: d.vehicleId,
       damageItemId: d.damageItemId,
+      physicalPanelKey: d.physicalPanelKey,
+      ...(d.moldingPosition ? { moldingPosition: d.moldingPosition } : {}),
+      ...(d.finishType ? { finishType: d.finishType } : {}),
       vehiculoDetectado: certCase.input.vehicleContext,
       ...(d.possibleHiddenDamage
         ? { possibleHiddenDamage: d.possibleHiddenDamage }

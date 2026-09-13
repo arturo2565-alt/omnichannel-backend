@@ -10,9 +10,9 @@ import {
   pegCanonicalTrace,
 } from './canonical-trace';
 import {
-  canonicalPhysicalPanelKey,
   cloneDetectedDamageItem,
   deriveStableVehicleId,
+  inventoryPhysicalPanelKey,
 } from './piece-treatment';
 
 export function inventoryItemFromCanonicalDamage(
@@ -25,6 +25,7 @@ export function inventoryItemFromCanonicalDamage(
     urls_origen: (damage.evidence ?? []).map((e) => e.url).filter(Boolean),
     vehicleId: damage.vehicleId,
     damageItemId: damage.damageItemId,
+    physicalPanelKey: damage.physicalPanelKey,
     tratamiento: damage.treatment,
     treatmentSource: damage.treatmentSource,
     treatmentReason: damage.treatmentReason,
@@ -32,11 +33,52 @@ export function inventoryItemFromCanonicalDamage(
     ...(damage.possibleHiddenDamage
       ? { possibleHiddenDamage: damage.possibleHiddenDamage }
       : {}),
+    ...(damage.moldingPosition
+      ? { moldingPosition: damage.moldingPosition }
+      : {}),
+    ...(damage.finishType ? { finishType: damage.finishType } : {}),
   };
 }
 
 function panelOf(item: DetectedDamageItem): string {
-  return canonicalPhysicalPanelKey(item.pieza) || String(item.pieza ?? '').trim();
+  return inventoryPhysicalPanelKey(item);
+}
+
+function projectCanonicalIdentity(
+  item: DetectedDamageItem,
+  match: DamageItem,
+): DetectedDamageItem {
+  const inventoryPanel = inventoryPhysicalPanelKey(item);
+  const canonicalPanel = String(match.physicalPanelKey ?? '').trim();
+  const existingId = String(item.damageItemId ?? '').trim();
+  if (
+    existingId &&
+    existingId === match.damageItemId &&
+    inventoryPanel &&
+    canonicalPanel &&
+    inventoryPanel !== canonicalPanel
+  ) {
+    pegCanonicalTrace(
+      CANONICAL_TRACE_EVENTS.CANONICAL_IDENTITY_PROJECTION_MISMATCH,
+      {
+        damageItemId: match.damageItemId,
+        pieceCode: match.pieceCode,
+        inventoryPhysicalPanelKey: inventoryPanel,
+        canonicalPhysicalPanelKey: canonicalPanel,
+      },
+    );
+  }
+  return {
+    ...item,
+    vehicleId: match.vehicleId,
+    damageItemId: match.damageItemId,
+    pieza: match.pieceCode || item.pieza,
+    physicalPanelKey: match.physicalPanelKey,
+    ...(match.moldingPosition
+      ? { moldingPosition: match.moldingPosition }
+      : {}),
+    ...(match.finishType ? { finishType: match.finishType } : {}),
+  };
 }
 
 function resolveStampVehicleId(
@@ -93,15 +135,14 @@ export function stampInventoryFromCanonicalPeritaje(
     const match = matchCanonicalDamage(it, peritaje);
     if (!match) return it;
     pegCanonicalTrace(CANONICAL_TRACE_EVENTS.CANONICAL_IDENTITY_STAMPED, {
-      pieceCode: it.pieza,
+      pieceCode: match.pieceCode,
       vehicleId: match.vehicleId,
       damageItemId: match.damageItemId,
+      physicalPanelKey: match.physicalPanelKey,
+      moldingPosition: match.moldingPosition ?? null,
+      finishType: match.finishType ?? null,
     });
-    return {
-      ...it,
-      vehicleId: match.vehicleId,
-      damageItemId: match.damageItemId,
-    };
+    return projectCanonicalIdentity(it, match);
   });
 }
 

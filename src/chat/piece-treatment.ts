@@ -140,6 +140,40 @@ export function canonicalPhysicalPanelKey(
   return canonicalizePanelCode(stripped) || stripped;
 }
 
+/**
+ * Identidad física persistida en inventory.
+ * Si Canonical ya proyectó `physicalPanelKey`, esa clave gana:
+ * no se recalcula Moldura desde attrs legacy incompletos.
+ */
+export function inventoryPhysicalPanelKey(item: {
+  pieza?: string | null;
+  moldingPosition?: string | null;
+  physicalPanelKey?: string | null;
+}): string {
+  const stored = String(item.physicalPanelKey ?? '').trim();
+  if (stored) return stored;
+  const pieza = String(item.pieza ?? '').trim();
+  return (
+    canonicalPhysicalPanelKey(pieza, {
+      pieza: pieza || undefined,
+      moldingPosition: item.moldingPosition,
+      physicalPanelKey: item.physicalPanelKey,
+    }) || pieza
+  );
+}
+
+function preferStoredPhysicalPanelKey(
+  primary?: string | null,
+  fallback?: string | null,
+): string {
+  const a = String(primary ?? '').trim();
+  const b = String(fallback ?? '').trim();
+  const unknown = /::UNKNOWN$/i;
+  if (a && !unknown.test(a)) return a;
+  if (b && !unknown.test(b)) return b;
+  return a || b;
+}
+
 export function parseTreatmentDecision(
   raw: unknown,
 ): TreatmentDecision | undefined {
@@ -476,6 +510,14 @@ export function mergePhysicalPanelItems(
     ...(a.finishType || b.finishType
       ? { finishType: b.finishType || a.finishType }
       : {}),
+    ...(a.physicalPanelKey || b.physicalPanelKey
+      ? {
+          physicalPanelKey: preferStoredPhysicalPanelKey(
+            b.physicalPanelKey,
+            a.physicalPanelKey,
+          ),
+        }
+      : {}),
     ...(a.posibleReemplazoRefaccion || b.posibleReemplazoRefaccion
       ? { posibleReemplazoRefaccion: true }
       : {}),
@@ -517,6 +559,9 @@ export function copyDetectedDamageSemantics(
       ? { moldingPosition: it.moldingPosition }
       : {}),
     ...(it.finishType ? { finishType: it.finishType } : {}),
+    ...(String(it.physicalPanelKey ?? '').trim()
+      ? { physicalPanelKey: String(it.physicalPanelKey).trim() }
+      : {}),
     ...(it.possibleHiddenDamage
       ? {
           possibleHiddenDamage: {

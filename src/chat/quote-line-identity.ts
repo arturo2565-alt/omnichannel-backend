@@ -40,6 +40,7 @@ import {
   canonicalPhysicalPanelKey,
   deriveStableVehicleId,
   ensureDamageIdentity,
+  inventoryPhysicalPanelKey,
   mergePhysicalPanelItems,
   type QuoteServiceType as LegacyQuoteServiceType,
 } from './piece-treatment';
@@ -167,7 +168,7 @@ export function logPersistIdentityAudit(input: {
           vehicleId: it.vehicleId ?? deriveStableVehicleId(raw) ?? null,
           damageItemId: it.damageItemId ?? null,
           rawDamageItemId: String(raw.damageItemId ?? '').trim() || null,
-          physicalPanelKey: canonicalPhysicalPanelKey(raw.pieza) || raw.pieza,
+          physicalPanelKey: inventoryPhysicalPanelKey(raw) || raw.pieza,
           urlsOrigenCount: Array.isArray(raw.urls_origen)
             ? raw.urls_origen.length
             : 0,
@@ -201,6 +202,7 @@ export function logPersistIdentityAudit(input: {
         pieceCode: d.pieceCode,
         vehicleId: d.vehicleId,
         damageItemId: d.damageItemId,
+        physicalPanelKey: d.physicalPanelKey,
         evidenceCount: d.evidence?.length ?? 0,
       })),
     ),

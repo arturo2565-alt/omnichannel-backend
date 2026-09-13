@@ -380,4 +380,78 @@ describe('identidad canónica — stamp y persistencia', () => {
     expect(rows[0]?.precioMx).toBe(3350);
     expect(rows[0]?.damageItemId).toBe(peritaje.damages[0]?.damageItemId);
   });
+
+  it('CANONICAL moldura: stamp conserva physicalPanelKey, posición y finishType', () => {
+    const inv = [
+      item({
+        pieza: 'MOLDURA',
+        moldingPosition: 'ARCO_DELANTERO_IZQUIERDO',
+        finishType: 'NEGRA_TEXTURIZADA',
+        tratamiento: 'INCIERTO',
+        vehiculoDetectado: 'Toyota Avanza',
+      }),
+    ];
+    const peritaje = peritajeFromLegacyAnalysis({
+      conversationId: 'c_mold',
+      canonicalizePanel: canonicalPhysicalPanelKey,
+      analysis: { vehiculoDetectado: 'Toyota Avanza', inventory: inv },
+    });
+    const damage = peritaje.damages.find((d) => d.pieceCode === 'MOLDURA')!;
+    expect(damage.physicalPanelKey).toBe('MOLDURA::ARCO_DELANTERO_IZQUIERDO');
+    const stamped = stampInventoryFromCanonicalPeritaje(inv, peritaje);
+    expect(stamped[0]?.damageItemId).toBe(damage.damageItemId);
+    expect(stamped[0]?.physicalPanelKey).toBe(
+      'MOLDURA::ARCO_DELANTERO_IZQUIERDO',
+    );
+    expect(stamped[0]?.moldingPosition).toBe('ARCO_DELANTERO_IZQUIERDO');
+    expect(stamped[0]?.finishType).toBe('NEGRA_TEXTURIZADA');
+    expect(stamped[0]?.vehicleId).toBe(damage.vehicleId);
+  });
+
+  it('no recalcula MOLDURA::UNKNOWN si el damageItemId canónico ya existe', () => {
+    const inv = [
+      item({
+        pieza: 'MOLDURA',
+        moldingPosition: 'ARCO_DELANTERO_IZQUIERDO',
+        finishType: 'NEGRA_TEXTURIZADA',
+        vehiculoDetectado: 'Toyota Avanza',
+      }),
+    ];
+    const peritaje = peritajeFromLegacyAnalysis({
+      conversationId: 'c_mold2',
+      canonicalizePanel: canonicalPhysicalPanelKey,
+      analysis: { vehiculoDetectado: 'Toyota Avanza', inventory: inv },
+    });
+    const damage = peritaje.damages[0]!;
+    const incomplete = item({
+      pieza: 'MOLDURA',
+      damageItemId: damage.damageItemId,
+      vehicleId: damage.vehicleId,
+      vehiculoDetectado: 'Toyota Avanza',
+    });
+    const stamped = stampInventoryFromCanonicalPeritaje([incomplete], peritaje);
+    expect(stamped[0]?.physicalPanelKey).toBe(damage.physicalPanelKey);
+    expect(stamped[0]?.physicalPanelKey).not.toBe('MOLDURA::UNKNOWN');
+    expect(stamped[0]?.moldingPosition).toBe('ARCO_DELANTERO_IZQUIERDO');
+    expect(stamped[0]?.finishType).toBe('NEGRA_TEXTURIZADA');
+    expect(stamped[0]?.damageItemId).toBe(damage.damageItemId);
+  });
+
+  it('legacy Moldura sin attrs sigue legible tras stamp', () => {
+    const inv = [
+      item({
+        pieza: 'Moldura',
+        vehiculoDetectado: 'Toyota Avanza',
+      }),
+    ];
+    const peritaje = peritajeFromLegacyAnalysis({
+      conversationId: 'c_hist',
+      canonicalizePanel: canonicalPhysicalPanelKey,
+      analysis: { vehiculoDetectado: 'Toyota Avanza', inventory: inv },
+    });
+    expect(peritaje.damages[0]?.physicalPanelKey).toBe('Moldura');
+    const stamped = stampInventoryFromCanonicalPeritaje(inv, peritaje);
+    expect(stamped[0]?.physicalPanelKey).toBe('Moldura');
+    expect(stamped[0]?.pieza).toBe('Moldura');
+  });
 });

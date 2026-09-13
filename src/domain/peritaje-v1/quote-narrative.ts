@@ -2,7 +2,11 @@
  * Fase 6 — presentación y conciliación del mensaje al cliente.
  * No calcula precios. CanonicalQuoteV1 es la única autoridad financiera.
  */
-import { humanizeClientPieceLabel } from '../../catalog/panel-pieza-catalog';
+import { isMolduraNonPaintableFinish } from '../../catalog/moldura';
+import {
+  humanizeClientPieceLabel,
+  isMolduraPieza,
+} from '../../catalog/panel-pieza-catalog';
 import { isChargeableQuoteLine } from './quote-engine';
 import { QUOTE_SCHEMA_VERSION } from './types';
 import type {
@@ -79,7 +83,138 @@ export const CANONICAL_WARNING_COPY: Record<string, string> = {
     'La refacción queda pendiente de cotizar. El total mostrado no incluye ese concepto.',
   PENDING_TREATMENT:
     'Hay piezas pendientes de peritaje; no se incluyen como cargo en este presupuesto.',
+  MOLDURA_NO_PINTABLE_REQUIERE_REVISION:
+    'La moldura queda pendiente de valoración para confirmar si requiere reinstalación, reparación o sustitución.',
+  MOLDURA_MONTAJE_PENDIENTE:
+    'El montaje de la moldura queda pendiente de confirmación en revisión física.',
 };
+
+export const PARTIAL_QUOTE_REASON = {
+  INSUFFICIENT_MARKET_SAMPLE: 'INSUFFICIENT_MARKET_SAMPLE',
+  MOLDURA_NO_PINTABLE_REQUIERE_REVISION:
+    'MOLDURA_NO_PINTABLE_REQUIERE_REVISION',
+  MOLDURA_PINTADA_UNCONFIGURED: 'MOLDURA_PINTADA_UNCONFIGURED',
+  PENDING_TREATMENT: 'PENDING_TREATMENT',
+  UNCONFIGURED: 'UNCONFIGURED',
+} as const;
+
+export type PartialQuoteReasonCode =
+  (typeof PARTIAL_QUOTE_REASON)[keyof typeof PARTIAL_QUOTE_REASON];
+
+export type PartialQuoteReason = {
+  code: PartialQuoteReasonCode;
+  text: string;
+};
+
+function isMolduraLine(
+  line: QuoteLine,
+  damage?: DamageItem,
+): boolean {
+  if (damage && isMolduraPieza(damage.pieceCode)) return true;
+  if (isMolduraPieza(line.description)) return true;
+  return /moldura/i.test(String(line.description ?? ''));
+}
+
+function molduraPendingRevisionCopy(pieceLabel?: string): string {
+  const raw = String(pieceLabel ?? '').trim();
+  const labeled = raw && /moldura/i.test(raw) ? raw : 'La moldura';
+  const subject = /^la\s/i.test(labeled)
+    ? labeled
+    : `La ${labeled.charAt(0).toLowerCase()}${labeled.slice(1)}`;
+  return `${subject} queda pendiente de valoración para confirmar si requiere reinstalación, reparación o sustitución.`;
+}
+
+/**
+ * Causa estructurada de isPartial. El LLM no inventa esta razón.
+ * Fuente: warnings + serviceType + pricingStatus de líneas no cobrables.
+ */
+export function derivePartialQuoteReasons(
+  quote: CanonicalQuoteV1,
+  peritaje?: CanonicalPeritajeV1 | null,
+): PartialQuoteReason[] {
+  const reasons: PartialQuoteReason[] = [];
+  const seen = new Set<string>();
+  const push = (code: PartialQuoteReasonCode, text: string) => {
+    if (seen.has(code)) return;
+    seen.add(code);
+    reasons.push({ code, text });
+  };
+  const damageById = new Map(
+    (peritaje?.damages ?? []).map((d) => [d.damageItemId, d]),
+  );
+  const warnings = new Set(quote.warnings ?? []);
+
+  for (const line of quote.lines) {
+    if (line.serviceType === 'ADVERTENCIA') continue;
+    if (isChargeableQuoteLine(line)) continue;
+    const damage = damageById.get(line.damageItemId);
+    const pieceLabel =
+      damage?.pieceLabel?.trim() || inferPieceLabelFromQuoteLine(line);
+    const moldura = isMolduraLine(line, damage);
+    const unconfigured =
+      line.pricingStatus === 'UNCONFIGURED' ||
+      line.pricingSource === 'UNCONFIGURED';
+
+    if (line.serviceType === 'REFACCION') {
+      push(
+        PARTIAL_QUOTE_REASON.INSUFFICIENT_MARKET_SAMPLE,
+        'La refacción está pendiente de estimación de mercado.',
+      );
+      continue;
+    }
+
+    if (
+      unconfigured &&
+      moldura &&
+      line.serviceType === 'REPARACION_PINTURA'
+    ) {
+      push(
+        PARTIAL_QUOTE_REASON.MOLDURA_PINTADA_UNCONFIGURED,
+        'La tarifa de reparación/pintura de la moldura está pendiente de configuración.',
+      );
+      continue;
+    }
+
+    if (
+      moldura &&
+      (warnings.has('MOLDURA_NO_PINTABLE_REQUIERE_REVISION') ||
+        line.serviceType === 'PENDIENTE' ||
+        isMolduraNonPaintableFinish(damage?.finishType))
+    ) {
+      push(
+        PARTIAL_QUOTE_REASON.MOLDURA_NO_PINTABLE_REQUIERE_REVISION,
+        molduraPendingRevisionCopy(pieceLabel),
+      );
+      continue;
+    }
+
+    if (unconfigured) {
+      push(
+        PARTIAL_QUOTE_REASON.UNCONFIGURED,
+        'Hay una tarifa pendiente de configuración.',
+      );
+      continue;
+    }
+
+    if (line.serviceType === 'PENDIENTE' || warnings.has('PENDING_TREATMENT')) {
+      push(
+        PARTIAL_QUOTE_REASON.PENDING_TREATMENT,
+        'El tratamiento de esta pieza debe confirmarse antes de cotizarla.',
+      );
+    }
+  }
+
+  return reasons;
+}
+
+export function formatPartialQuoteDisclosure(
+  reasons: readonly PartialQuoteReason[],
+): string {
+  if (!reasons.length) {
+    return 'Hay conceptos pendientes de confirmación.';
+  }
+  return reasons.map((r) => r.text).join(' ');
+}
 
 const SERVICE_LABEL: Record<QuoteServiceType, string> = {
   REPARACION_PINTURA: 'Reparación y pintura',
@@ -199,8 +334,11 @@ export function renderCanonicalQuoteFinancialBlock(
   const totalAmt = Math.round(canonicalQuote.total);
   displayedAmounts.push(totalAmt);
   const isPartial = canonicalQuote.isPartial === true;
+  const partialDisclosure = formatPartialQuoteDisclosure(
+    derivePartialQuoteReasons(canonicalQuote, peritaje),
+  );
   const totalText = isPartial
-    ? `💰 **Subtotal parcial / servicios cotizados: ${formatQuoteMoney(totalAmt)} MXN** *(cotización incompleta: falta el precio de refacción. El montaje/pintura no cubre la pieza de reemplazo).*`
+    ? `💰 **Subtotal parcial / servicios cotizados: ${formatQuoteMoney(totalAmt)} MXN** *(cotización incompleta: ${partialDisclosure})*`
     : `💰 **Inversión Total Estimada: ${formatQuoteMoney(totalAmt)} MXN** *(Sujeto a revisión física. Incluye materiales premium Sikkens y garantía).*`;
 
   const text = [...lineTexts, '', totalText].filter(Boolean).join('\n');
@@ -396,7 +534,7 @@ export function validateFinalClientQuoteMessage(input: {
 
   if (quote.isPartial) {
     if (
-      !/parcial|incompleta|pendiente de cotizar|pendiente de estimaci/i.test(
+      !/parcial|incompleta|pendiente de cotizar|pendiente de estimaci|pendiente de valoraci|pendiente de configuraci|debe confirmarse/i.test(
         message,
       )
     ) {
@@ -567,6 +705,9 @@ export function renderDeterministicClientQuoteFallback(input: {
 
   const financial = renderCanonicalQuoteFinancialBlock(
     input.canonicalQuote,
+    input.damages?.length
+      ? ({ damages: input.damages } as CanonicalPeritajeV1)
+      : null,
   );
   const warnings = renderCanonicalQuoteWarningsBlock(input.canonicalQuote);
 

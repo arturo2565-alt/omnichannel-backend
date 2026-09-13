@@ -132,6 +132,9 @@ export {
   NARRATIVE_FLOW,
   NARRATIVE_EVENTS,
   CANONICAL_WARNING_COPY,
+  PARTIAL_QUOTE_REASON,
+  derivePartialQuoteReasons,
+  formatPartialQuoteDisclosure,
   isCanonicalNarrativeEligible,
   formatQuoteMoney,
   formatQuoteMoneyRange,
@@ -160,6 +163,8 @@ export type {
   FinalMessageValidation,
   MonetaryHit,
   NarrativeSendSnapshotFields,
+  PartialQuoteReason,
+  PartialQuoteReasonCode,
 } from './quote-narrative';
 
 export {
