@@ -35,6 +35,7 @@ import { RefaccionMarketModule } from './refaccion-market/refaccion-market.modul
     CatalogModule,
     TallerModule,
     AuthModule,
+    RefaccionMarketModule,
     forwardRef(() => MessagingQueueModule),
     TypeOrmModule.forFeature([
       Message,
@@ -57,7 +58,6 @@ import { RefaccionMarketModule } from './refaccion-market/refaccion-market.modul
   ],
   providers: [
     ChatService,
-    RefaccionMarketService,
     ChatGateway,
     AiConfigService,
     TwilioService,

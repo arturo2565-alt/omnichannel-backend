@@ -1,3 +1,4 @@
+import { Injectable } from '@nestjs/common';
 import { extractMxnPricesFromText } from '../refaccion-web-search';
 import { buildShoppingDiscoveryQueries } from './resolved-market-part';
 import {
@@ -76,6 +77,7 @@ export async function searchSerperShopping(
   return json.shopping ?? [];
 }
 
+@Injectable()
 export class SerperShoppingProvider implements RefaccionPriceProvider {
   readonly id = 'SERPER_SHOPPING' as const;
   readonly coverageStageId = 'SERPER_SHOPPING';
