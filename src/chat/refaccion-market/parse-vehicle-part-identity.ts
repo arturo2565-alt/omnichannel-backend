@@ -141,7 +141,16 @@ export function parseVehiclePartIdentity(input: {
   };
 }
 
-export function marketCacheKey(identity: VehiclePartIdentity): string {
+/**
+ * Cambia cuando cambia la semántica de retrieval:
+ * aliases, query plan, side parser, validator, part classification
+ * o extracción de precio relevante.
+ * Sin timestamps ni aleatorios.
+ */
+export const MARKET_STRATEGY_VERSION = 'v4';
+
+/** Identidad vehicular+pieza, sin estrategia. */
+export function marketIdentityKey(identity: VehiclePartIdentity): string {
   return [
     identity.marca,
     identity.modelo,
@@ -152,4 +161,9 @@ export function marketCacheKey(identity: VehiclePartIdentity): string {
   ]
     .map((s) => String(s).toLowerCase().replace(/\s+/g, ''))
     .join('|');
+}
+
+/** Cache / idempotencia: strategy version + identidad. */
+export function marketCacheKey(identity: VehiclePartIdentity): string {
+  return `${MARKET_STRATEGY_VERSION}|${marketIdentityKey(identity)}`;
 }

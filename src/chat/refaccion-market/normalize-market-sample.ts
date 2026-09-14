@@ -11,6 +11,8 @@ import {
 } from './validate-market-sample';
 import type { VehiclePartIdentity } from './refaccion-market.types';
 import type { MarketRejectionReason } from './market-audit';
+import { extractPrimaryPartNumber } from './part-number';
+import { inferLampType } from './variant-cluster';
 
 const USED_RE =
   /\b(usado|usada|seminuevo|seminueva|yonke|deshueso|desarmadora|segunda\s+mano)\b/i;
@@ -102,6 +104,10 @@ export function classifyRawHit(
     };
   }
   const condition = inferCondition(hit);
+  const merchant = hit.merchant || hit.seller;
+  const partNumber =
+    hit.partNumber ?? extractPrimaryPartNumber(hit.title, hit.snippet)?.normalized;
+  const lampType = hit.lampType ?? inferLampType(hit.title, hit.snippet);
   return {
     ok: true,
     compatible: true,
@@ -118,6 +124,11 @@ export function classifyRawHit(
       query: hit.query,
       retrievedAt: hit.retrievedAt,
       externalId: hit.externalId,
+      ...(hit.seller ? { seller: hit.seller } : {}),
+      ...(merchant ? { merchant } : {}),
+      ...(hit.productId ? { productId: hit.productId } : {}),
+      ...(partNumber ? { partNumber } : {}),
+      ...(lampType !== 'UNKNOWN' ? { lampType } : {}),
     },
   };
 }

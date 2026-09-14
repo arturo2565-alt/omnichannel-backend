@@ -39,6 +39,29 @@ export const CANONICAL_TRACE_EVENTS = {
   REFACCION_MARKET_COMPATIBILITY_REJECTED:
     'REFACCION_MARKET_COMPATIBILITY_REJECTED',
   REFACCION_MARKET_AUDIT: 'REFACCION_MARKET_AUDIT',
+  MARKET_LOOKUP_EXECUTED: 'MARKET_LOOKUP_EXECUTED',
+  MARKET_CACHE_REUSED: 'MARKET_CACHE_REUSED',
+  REFACCION_SEARCH_STARTED: 'REFACCION_SEARCH_STARTED',
+  REFACCION_QUERIES_GENERATED: 'REFACCION_QUERIES_GENERATED',
+  REFACCION_CACHE_DECISION: 'REFACCION_CACHE_DECISION',
+  REFACCION_PROVIDER_REQUEST: 'REFACCION_PROVIDER_REQUEST',
+  REFACCION_PROVIDER_RESPONSE: 'REFACCION_PROVIDER_RESPONSE',
+  REFACCION_RAW_SAMPLE: 'REFACCION_RAW_SAMPLE',
+  REFACCION_SAMPLE_EVALUATED: 'REFACCION_SAMPLE_EVALUATED',
+  REFACCION_SEARCH_FUNNEL: 'REFACCION_SEARCH_FUNNEL',
+  REFACCION_PART_TYPE_SELECTION: 'REFACCION_PART_TYPE_SELECTION',
+  REFACCION_ACCEPTED_SAMPLE: 'REFACCION_ACCEPTED_SAMPLE',
+  REFACCION_PRICING_DECISION: 'REFACCION_PRICING_DECISION',
+  REFACCION_SEARCH_FINISHED: 'REFACCION_SEARCH_FINISHED',
+  PART_DISCOVERY_STARTED: 'PART_DISCOVERY_STARTED',
+  PART_NUMBER_DISCOVERED: 'PART_NUMBER_DISCOVERED',
+  SHOPPING_LOOKUP_STARTED: 'SHOPPING_LOOKUP_STARTED',
+  SHOPPING_LOOKUP_RESULT: 'SHOPPING_LOOKUP_RESULT',
+  PART_NUMBER_PIVOT_STARTED: 'PART_NUMBER_PIVOT_STARTED',
+  PART_NUMBER_PIVOT_RESULT: 'PART_NUMBER_PIVOT_RESULT',
+  VARIANT_CLUSTER_CREATED: 'VARIANT_CLUSTER_CREATED',
+  CROSS_QUERY_DEDUPE: 'CROSS_QUERY_DEDUPE',
+  MARKET_SAMPLE_SELECTED: 'MARKET_SAMPLE_SELECTED',
   QUOTE_LINE: 'QUOTE_LINE',
   CANONICAL_QUOTE: 'CANONICAL_QUOTE',
   QUOTE_FLOW_MODE: 'QUOTE_FLOW_MODE',
@@ -592,13 +615,26 @@ export function traceRefaccionMarketEvent(
     });
     return;
   }
-  if (event === CANONICAL_TRACE_EVENTS.REFACCION_MARKET_AUDIT) {
+  if (
+    event === CANONICAL_TRACE_EVENTS.REFACCION_MARKET_AUDIT ||
+    event === CANONICAL_TRACE_EVENTS.MARKET_LOOKUP_EXECUTED ||
+    event === CANONICAL_TRACE_EVENTS.MARKET_CACHE_REUSED
+  ) {
     pegCanonicalTrace(event, {
       damageItemId: asString(payload.damageItemId),
       pieceCode,
       family: asString(payload.family),
       marketIdentityKey: asString(payload.marketIdentityKey),
+      marketStrategyVersion: asString(payload.marketStrategyVersion),
+      cacheHit: payload.cacheHit,
+      cacheKey: asString(payload.cacheKey),
+      lookupPath: asString(payload.lookupPath),
+      insufficientCause: asString(payload.insufficientCause),
+      cachedPricingStatus: asString(payload.cachedPricingStatus),
+      cacheAgeMs: asNumber(payload.cacheAgeMs),
+      cacheCreatedAt: asString(payload.cacheCreatedAt),
       queries: payload.queries,
+      executedQueries: payload.executedQueries,
       providersUsed: payload.providersUsed,
       rawResultCount: asNumber(payload.rawResultCount),
       compatibleSampleCount: asNumber(payload.compatibleSampleCount),
@@ -609,6 +645,18 @@ export function traceRefaccionMarketEvent(
       acceptedDomains: payload.acceptedDomains,
       sampleCount: asNumber(payload.sampleCount),
       pricingStatus: asString(payload.pricingStatus),
+      searchRunId: asString(payload.searchRunId),
+      queryCount: asNumber(payload.queryCount),
+      providerCounts: payload.providerCounts,
+      funnel: payload.funnel,
+      bestAvailablePartType: asString(payload.bestAvailablePartType),
+      bestAvailableSampleCount: asNumber(payload.bestAvailableSampleCount),
+      samplesMissingToThreshold: asNumber(payload.samplesMissingToThreshold),
+      providerContribution: payload.providerContribution,
+      uniqueSamplesAfterCrossProviderDedupe: asNumber(
+        payload.uniqueSamplesAfterCrossProviderDedupe,
+      ),
+      independenceCounts: payload.independenceCounts,
     });
     return;
   }

@@ -135,7 +135,7 @@ function organicsFromRows(
     .filter((r) => r.title || r.snippet);
 }
 
-async function searchSerperOrganics(query: string): Promise<WebOrganicHit[]> {
+export async function searchSerperOrganics(query: string): Promise<WebOrganicHit[]> {
   const key = String(process.env.SERPER_API_KEY ?? '').trim();
   if (!key) return [];
   const res = await fetch('https://google.serper.dev/search', {
@@ -178,7 +178,7 @@ async function searchSerper(query: string): Promise<WebPriceHit[]> {
   );
 }
 
-async function searchTavilyOrganics(query: string): Promise<WebOrganicHit[]> {
+export async function searchTavilyOrganics(query: string): Promise<WebOrganicHit[]> {
   const key = String(process.env.TAVILY_API_KEY ?? '').trim();
   if (!key) return [];
   const res = await fetch('https://api.tavily.com/search', {
@@ -220,7 +220,7 @@ async function searchTavily(query: string): Promise<WebPriceHit[]> {
   );
 }
 
-async function searchOpenAiWeb(query: string): Promise<WebPriceHit[]> {
+export async function searchOpenAiWeb(query: string): Promise<WebPriceHit[]> {
   const key = String(process.env.OPENAI_API_KEY ?? '').trim();
   if (!key) return [];
   const openai = new OpenAI({ apiKey: key });
@@ -280,34 +280,50 @@ export async function searchRefaccionWebPrices(
   return all;
 }
 
-/** Orgánicos con título/url para el provider de web search. */
+export type WebSearchBackend = 'serper' | 'tavily' | 'openai';
+
+/** Un backend a la vez. La orquestación de cobertura decide el fallback. */
+export async function searchWebOrganicsBackend(
+  backend: WebSearchBackend,
+  queries: readonly string[],
+): Promise<WebOrganicHit[]> {
+  if (webSearchDisabled()) return [];
+  const q = queries.filter(Boolean);
+  if (backend === 'serper') {
+    return (
+      await Promise.all(
+        q.map((query) => searchSerperOrganics(query).catch(() => [])),
+      )
+    ).flat();
+  }
+  if (backend === 'tavily') {
+    return (
+      await Promise.all(
+        q.map((query) => searchTavilyOrganics(query).catch(() => [])),
+      )
+    ).flat();
+  }
+  const openaiHits = await searchOpenAiWeb(q[0] ?? '').catch(() => []);
+  return openaiHits.map((h) => ({
+    source: 'openai' as const,
+    title: h.title || h.snippet || '',
+    snippet: h.snippet ?? '',
+    url: h.url,
+    prices: [h.price],
+  }));
+}
+
+/** Orgánicos con título/url. Cascada legacy: Serper → Tavily → OpenAI. */
 export async function searchRefaccionWebOrganics(
   queries: readonly string[],
 ): Promise<WebOrganicHit[]> {
   if (webSearchDisabled()) return [];
   const q = queries.filter(Boolean).slice(0, 2);
-  const serper = (
-    await Promise.all(q.map((query) => searchSerperOrganics(query).catch(() => [])))
-  ).flat();
+  const serper = await searchWebOrganicsBackend('serper', q);
   if (serper.length >= 3) return serper;
-  const tavily = (
-    await Promise.all(q.map((query) => searchTavilyOrganics(query).catch(() => [])))
-  ).flat();
+  const tavily = await searchWebOrganicsBackend('tavily', q);
   const merged = [...serper, ...tavily];
   if (merged.length >= 3) return merged;
-  try {
-    const openaiHits = await searchOpenAiWeb(q[0] ?? '');
-    for (const h of openaiHits) {
-      merged.push({
-        source: 'openai',
-        title: h.title || h.snippet || '',
-        snippet: h.snippet ?? '',
-        url: h.url,
-        prices: [h.price],
-      });
-    }
-  } catch {
-    /* sin OpenAI */
-  }
-  return merged;
+  const openai = await searchWebOrganicsBackend('openai', q);
+  return [...merged, ...openai];
 }

@@ -38,6 +38,8 @@ const CALAVERA_LEFT_ALIASES = [
   'stop izquierdo',
   'stop trasero izquierdo',
   'lampara trasera izquierda',
+  'left tail light',
+  'left tail lamp',
 ] as const;
 
 const CALAVERA_RIGHT_ALIASES = [
@@ -46,6 +48,8 @@ const CALAVERA_RIGHT_ALIASES = [
   'stop derecho',
   'stop trasero derecho',
   'lampara trasera derecha',
+  'right tail light',
+  'right tail lamp',
 ] as const;
 
 const CALAVERA_FAMILY_ALIASES = [
@@ -54,12 +58,16 @@ const CALAVERA_FAMILY_ALIASES = [
   'calavera trasera',
   'stop trasero',
   'lampara trasera',
+  'tail light',
+  'tail lamp',
+  'rear lamp',
 ] as const;
 
 function isCalaveraToken(n: string): boolean {
   return (
     /\bcalavera\b/.test(n) ||
     /\bstop\b/.test(n) ||
+    /\btail\s+l(ight|amp)\b/.test(n) ||
     n === 'cal izq' ||
     n === 'cal der' ||
     n.startsWith('cal_')
@@ -129,13 +137,21 @@ export function listingMentionsPieceFamily(
   snippet: string | undefined,
   taxonomy: MarketPieceTaxonomy,
 ): boolean {
+  return Boolean(findMatchedPieceAlias(title, snippet, taxonomy));
+}
+
+export function findMatchedPieceAlias(
+  title: string,
+  snippet: string | undefined,
+  taxonomy: MarketPieceTaxonomy,
+): string | undefined {
   const blob = norm(`${title} ${snippet ?? ''}`);
   const compact = blob.replace(/\s+/g, '');
   const aliases =
     taxonomy.family === 'CALAVERA'
       ? [...CALAVERA_FAMILY_ALIASES, ...taxonomy.searchAliases]
       : taxonomy.searchAliases;
-  return aliases.some((alias) => {
+  return aliases.find((alias) => {
     const a = norm(alias);
     if (!a) return false;
     return blob.includes(a) || compact.includes(a.replace(/\s+/g, ''));

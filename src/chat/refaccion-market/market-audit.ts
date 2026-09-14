@@ -19,12 +19,29 @@ export type MarketRejectionReason =
  * Metadata interna de un lookup de mercado.
  * Vive en inventory / quotePayload. No se narra al cliente.
  */
+export const MARKET_LOOKUP_PATHS = [
+  'MARKET_LOOKUP_EXECUTED',
+  'MARKET_CACHE_REUSED',
+] as const;
+export type MarketLookupPath = (typeof MARKET_LOOKUP_PATHS)[number];
+
+export const MARKET_INSUFFICIENT_CAUSES = [
+  'FILTER_FAILURE',
+  'PRICE_PARSE_FAILURE',
+  'PART_TYPE_SAMPLE_SHORTAGE',
+  'PROVIDER_EMPTY',
+] as const;
+export type MarketInsufficientCause =
+  (typeof MARKET_INSUFFICIENT_CAUSES)[number];
+
 export type RefaccionMarketAudit = {
   damageItemId?: string;
   pieceCode: string;
   family: string;
   marketIdentityKey: string;
+  marketStrategyVersion?: string;
   queries: string[];
+  executedQueries?: string[];
   providersUsed: MarketProviderId[];
   rawResultCount: number;
   compatibleSampleCount: number;
@@ -35,7 +52,76 @@ export type RefaccionMarketAudit = {
   acceptedDomains: string[];
   sampleCount: number;
   pricingStatus: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE' | 'AWAITING_VEHICLE_DATA';
+  lookupPath?: MarketLookupPath;
+  insufficientCause?: MarketInsufficientCause;
+  searchRunId?: string;
+  cacheHit?: boolean;
+  cacheKey?: string;
+  queryCount?: number;
+  providerCounts?: Partial<Record<MarketProviderId, number>>;
+  funnel?: import('./market-search-trace').MarketSearchFunnel;
+  bestAvailablePartType?: PartType | null;
+  bestAvailableSampleCount?: number;
+  samplesMissingToThreshold?: number;
+  providerContribution?: import('./provider-coverage').ProviderContribution;
+  uniqueSamplesAfterCrossProviderDedupe?: number;
+  independenceCounts?: {
+    UNIQUE: number;
+    DUPLICATE: number;
+    AMBIGUOUS: number;
+  };
+  shoppingRecall?: number;
+  shoppingUniqueListings?: number;
+  partNumbersDiscovered?: number;
+  pivotUniqueListings?: number;
+  marketUniqueMerchants?: number;
+  uniqueSamplesPerVariant?: Record<string, number>;
+  selectedVariantKey?: string | null;
+  variantUncertainty?: boolean;
+  shoppingFunnel?: {
+    shoppingRaw: number;
+    shoppingUnique: number;
+    partNumbersDiscovered: number;
+    pivotRaw: number;
+    crossQueryUnique: number;
+    compatible: number;
+    byVariant?: Record<string, number>;
+    byPartType?: Partial<Record<PartType, number>>;
+    finalSamples?: number;
+  };
+  resolvedMarketPart?: {
+    oemPartNumbers: string[];
+    aftermarketPartNumbers: string[];
+    commercialAliases: string[];
+    side: string | null;
+  };
 };
+
+export function resolveInsufficientCause(
+  audit: Pick<
+    RefaccionMarketAudit,
+    | 'pricingStatus'
+    | 'rawResultCount'
+    | 'acceptedSampleCount'
+    | 'sampleCount'
+    | 'rejectedByReason'
+  >,
+  minValidSamples = 4,
+): MarketInsufficientCause | undefined {
+  if (audit.pricingStatus !== 'INSUFFICIENT_MARKET_SAMPLE') return undefined;
+  if (
+    audit.acceptedSampleCount >= minValidSamples &&
+    audit.sampleCount < minValidSamples
+  ) {
+    return 'PART_TYPE_SAMPLE_SHORTAGE';
+  }
+  const parseFails = audit.rejectedByReason.PRICE_PARSE_FAILED ?? 0;
+  if (audit.acceptedSampleCount === 0 && parseFails > 0) {
+    return 'PRICE_PARSE_FAILURE';
+  }
+  if (audit.rawResultCount === 0) return 'PROVIDER_EMPTY';
+  return 'FILTER_FAILURE';
+}
 
 export type MarketRecallMetrics = {
   family: string;

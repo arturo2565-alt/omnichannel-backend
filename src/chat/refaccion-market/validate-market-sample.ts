@@ -43,6 +43,16 @@ export function listingMentionsPieza(
   );
 }
 
+export function listingMentionsMake(
+  title: string,
+  snippet: string | undefined,
+  identity: VehiclePartIdentity,
+): boolean {
+  const blob = norm(`${title} ${snippet ?? ''}`);
+  const marca = norm(identity.marca);
+  return Boolean(marca && blob.includes(marca));
+}
+
 export function listingMentionsVehicle(
   title: string,
   snippet: string | undefined,
@@ -100,6 +110,18 @@ export function listingYearCompatible(
   return exact.test(blob);
 }
 
+export function extractListingYearRange(
+  title: string,
+  snippet?: string,
+): { lo: number; hi: number } | undefined {
+  const blob = `${title} ${snippet ?? ''}`;
+  const m = /((?:19|20)\d{2})\s*(?:[-–]|a|al|\/)\s*((?:19|20)\d{2})/i.exec(blob);
+  if (!m) return undefined;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  return { lo: Math.min(a, b), hi: Math.max(a, b) };
+}
+
 function expandYearToken(raw: string, vehicleYear: number): number | null {
   const t = String(raw ?? '').replace(/\D/g, '');
   if (t.length === 4 && /^(19|20)\d{2}$/.test(t)) return Number(t);
@@ -122,7 +144,9 @@ export function validateListingAgainstIdentity(
   snippet: string | undefined,
   identity: VehiclePartIdentity,
 ): ListingValidation {
-  const taxonomy = resolveMarketPieceTaxonomy(identity.pieza || identity.piezaLabel);
+  const taxonomy = resolveMarketPieceTaxonomy(
+    identity.piezaLabel || identity.pieza,
+  );
   if (listingLooksLikeAccessory(title, snippet)) {
     return { ok: false, confidence: 'LOW', reason: 'ACCESSORY', compatible: false };
   }

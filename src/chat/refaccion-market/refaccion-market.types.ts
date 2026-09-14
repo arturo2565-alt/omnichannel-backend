@@ -5,6 +5,7 @@ export const MARKET_PROVIDER_IDS = [
   'GOOGLE_WEB',
   'TAVILY',
   'OPENAI_WEB',
+  'SERPER_SHOPPING',
 ] as const;
 
 export type MarketProviderId = (typeof MARKET_PROVIDER_IDS)[number];
@@ -38,6 +39,8 @@ export type VehiclePartIdentity = {
   finishType?: string | null;
 };
 
+export type LampType = 'LED' | 'NON_LED' | 'UNKNOWN';
+
 export type RawProviderHit = {
   provider: MarketProviderId;
   title: string;
@@ -46,6 +49,11 @@ export type RawProviderHit = {
   condition?: SampleCondition;
   snippet?: string;
   externalId?: string;
+  seller?: string;
+  merchant?: string;
+  productId?: string;
+  partNumber?: string;
+  lampType?: LampType;
   query: string;
   retrievedAt: string;
 };
@@ -63,6 +71,12 @@ export type MarketSample = {
   query: string;
   retrievedAt: string;
   externalId?: string;
+  seller?: string;
+  merchant?: string;
+  productId?: string;
+  partNumber?: string;
+  lampType?: LampType;
+  variantKey?: string;
 };
 
 export type PriceRange = {
@@ -105,5 +119,9 @@ export type RefaccionMarketEstimate = {
 
 export interface RefaccionPriceProvider {
   id: MarketProviderId;
+  /** Identidad de etapa de cobertura (puede distinguir site: vs general). */
+  coverageStageId?: string;
+  lastError?: string;
+  isConfigured?: () => boolean;
   search(identity: VehiclePartIdentity): Promise<RawProviderHit[]>;
 }

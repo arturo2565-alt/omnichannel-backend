@@ -162,7 +162,16 @@ export async function enrichInventoryWithMarketRefacciones(
       pieceCode: it.pieza,
       preferredPartTypes: DEFAULT_REFACCION_MARKET_POLICY.preferredPartTypes,
     });
-    const estimate = await marketService.estimate(identity);
+    const estimate = await marketService.estimate(identity, {
+      damageItemId: it.damageItemId,
+      vehicleId: it.vehicleId ?? vehicle?.vehicleId,
+      confirmedVehicleFields: [
+        identity.marca ? 'make' : '',
+        identity.modelo ? 'model' : '',
+        identity.anio ? 'year' : '',
+        identity.version ? 'version' : '',
+      ].filter(Boolean),
+    });
     emitEstimateOutcome(estimate, emit, it);
     next.push(
       applyMarketEstimateToItem(
