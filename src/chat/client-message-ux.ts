@@ -16,14 +16,13 @@ import type {
 } from '../domain/peritaje-v1';
 import {
   PRESENTATION_HIDDEN_DAMAGE_COPY,
-  PRESENTATION_PENDING_CONCEPTS_COPY,
   REFACCION_AVAILABILITY_DISCLAIMER,
   buildControlledQuoteLineLabel,
-  derivePartialQuoteReasons,
-  formatPartialQuoteDisclosure,
   extractMonetaryAmounts,
+  formatPartialQuoteFooter,
   formatQuoteMoney,
   formatQuoteMoneyRange,
+  isPendingReviewDamage,
   renderCanonicalQuoteFinancialBlock,
   resolveQuoteLinePieceLabel,
   type ClientQuoteMessage,
@@ -731,7 +730,6 @@ export function presentClientWarnings(codes: readonly string[]): {
     shown.push(...cluster);
   }
   if (pending.length || rest.length) {
-    lines.push(`⚠️ ${PRESENTATION_PENDING_CONCEPTS_COPY}`);
     shown.push(...pending, ...rest);
   }
 
@@ -751,7 +749,10 @@ function isMarketRefaccionLine(line: QuoteLine): boolean {
   );
 }
 
-function lineAmountText(line: QuoteLine): string {
+function lineAmountText(
+  line: QuoteLine,
+  peritaje?: CanonicalPeritajeV1 | null,
+): string {
   if (
     line.priceRange &&
     line.priceRange.min >= 0 &&
@@ -768,6 +769,12 @@ function lineAmountText(line: QuoteLine): string {
       return 'tarifa pendiente';
     }
     if (line.serviceType === 'PENDIENTE' || line.serviceType === 'ADVERTENCIA') {
+      return 'pendiente de revisión';
+    }
+    const damage = peritaje?.damages.find(
+      (d) => d.damageItemId === line.damageItemId,
+    );
+    if (isPendingReviewDamage(damage)) {
       return 'pendiente de revisión';
     }
     return 'precio pendiente de estimación';
@@ -843,7 +850,10 @@ export function renderQuoteDeltaFinancialBlock(
 
   for (const group of grouped.values()) {
     const piece = resolveQuoteLinePieceLabel(group[0]!, peritaje);
-    if (isPendingReviewPiece(group)) {
+    if (isPendingReviewPiece(group) || group.some((line) => {
+      const damage = peritaje?.damages.find((d) => d.damageItemId === line.damageItemId);
+      return isPendingReviewDamage(damage);
+    })) {
       chunks.push(`🟡 *${piece}:* pendiente de revisión`);
       continue;
     }
@@ -851,7 +861,7 @@ export function renderQuoteDeltaFinancialBlock(
       group.find((line) => line.serviceType === 'REFACCION') ?? group[0]!;
     chunks.push(`${serviceEmoji(headerLine.serviceType)} *${piece}*`);
     for (const line of group) {
-      const amountText = lineAmountText(line);
+      const amountText = lineAmountText(line, peritaje);
       if (line.serviceType === 'MONTAJE' || line.serviceType === 'MONTAJE_PINTURA') {
         chunks.push(
           `${serviceEmoji(line.serviceType)} ${serviceShortLabel(line.serviceType)}: *${amountText}*`,
@@ -877,14 +887,14 @@ export function renderQuoteDeltaFinancialBlock(
   displayedAmounts.push(roundMoney(quote.total));
   const totalFmt = formatQuoteMoney(quote.total);
   const totalLine = quote.isPartial
-    ? `💰 *Total actualizado: ${totalFmt} MXN* *(cotización incompleta: ${formatPartialQuoteDisclosure(derivePartialQuoteReasons(quote, peritaje))})*`
+    ? `💰 *Total actualizado: ${totalFmt} MXN*`
     : `💰 *Total actualizado: ${totalFmt} MXN*`;
   chunks.push('', totalLine);
+  const footer = formatPartialQuoteFooter(quote, peritaje);
+  if (footer) chunks.push(footer);
 
   if (delta.becameComplete) {
     chunks.push('Con esta información ya pudimos completar la cotización. ✅');
-  } else if (delta.isPartialAfter) {
-    chunks.push('Los conceptos pendientes no están incluidos en el total.');
   }
   if (delta.unchangedLineIds.length > 0) {
     chunks.push('El resto de los conceptos permanece sin cambios.');
@@ -898,31 +908,43 @@ export function renderQuoteDeltaFinancialBlock(
 
 export function renderIdentifiedDamages(
   peritaje?: CanonicalPeritajeV1 | null,
+  quote?: CanonicalQuoteV1 | null,
 ): string {
   const damages = peritaje?.damages ?? [];
   if (!damages.length) return '';
-  const lines = damages.map((damage) => {
+  const lines = quote?.lines ?? [];
+  const rows = damages.map((damage) => {
     const label =
       getClientPieceLabel(damage.pieceCode, damage) ||
       damage.pieceLabel ||
       'pieza';
     const emoji = treatmentEmoji(damage.treatment);
-    return `${emoji} ${label} (${treatmentWord(damage.treatment)})`;
+    const status = identifiedDamageStatus(damage, lines);
+    return `${emoji} ${label} — ${status}`;
   });
-  return `🔎 *Daños identificados*\n\n${lines.join('\n')}`;
+  return `🔎 *Daños identificados*\n\n${rows.join('\n')}`;
+}
+
+function identifiedDamageStatus(
+  damage: DamageItem,
+  lines: readonly QuoteLine[],
+): string {
+  const related = lines.filter((line) => line.damageItemId === damage.damageItemId);
+  const billablePaint = related.some(
+    (line) => line.serviceType === 'REPARACION_PINTURA' && line.billable,
+  );
+  if (billablePaint) return 'reparación y pintura';
+  if (isPendingReviewDamage(damage)) return 'pendiente de revisión';
+  if (damage.treatment === 'SUSTITUIR') return 'sustitución';
+  if (damage.treatment === 'REPARAR') return 'reparación y pintura';
+  if (damage.treatment === 'INCIERTO') return 'requiere confirmación en revisión';
+  return 'pendiente de revisión';
 }
 
 function treatmentEmoji(treatment: TreatmentDecision): string {
   if (treatment === 'SUSTITUIR') return '🔴';
   if (treatment === 'REPARAR' || treatment === 'INCIERTO') return '🟠';
   return '🟡';
-}
-
-function treatmentWord(treatment: TreatmentDecision): string {
-  if (treatment === 'SUSTITUIR') return 'sustitución';
-  if (treatment === 'REPARAR') return 'reparación';
-  if (treatment === 'INCIERTO') return 'por confirmar';
-  return 'pendiente';
 }
 
 export function stripForbiddenResumePhrases(text: string): string {
@@ -970,7 +992,7 @@ export function isCleanLlmTransitionPhrase(text?: string | null): boolean {
   if (extractMonetaryAmounts(raw).length > 0) return false;
   if (/🛠️|🔧|🔩|💰|inversi[oó]n total|total actualizado/i.test(raw)) return false;
   if (/refacci[oó]n|montaje|priceRange|MXN/i.test(raw)) return false;
-  if (/¿quieres (?:que )?agendar/i.test(raw)) return false;
+  if (/gracias por confirmar|se puede continuar la actualizaci|con ese dato se puede/i.test(raw)) return false;
   return true;
 }
 
@@ -990,12 +1012,14 @@ export function deterministicAcknowledge(ctx: ClientQuoteMessageContext): string
     ? ctx.customerName
     : '';
   if (ctx.mode === 'QUOTE_CORRECTION') {
-    return `Perfecto, corregimos el vehículo a *${vehicle}*.`;
+    return name
+      ? `Perfecto, ${name}. Corregí el vehículo a *${vehicle}* y recalculé la cotización.`
+      : `Perfecto. Corregí el vehículo a *${vehicle}* y recalculé la cotización.`;
   }
   if (ctx.mode === 'QUOTE_RESUME') {
     return name
-      ? `Perfecto, ${name}. Ya confirmamos tu *${vehicle}*.`
-      : `Perfecto, ya confirmamos tu vehículo como *${vehicle}*.`;
+      ? `Perfecto, ${name}. Ya actualicé la cotización con tu *${vehicle}*.`
+      : `Perfecto. Ya actualicé la cotización con tu *${vehicle}*.`;
   }
   if (ctx.mode === 'QUOTE_UPDATE') {
     return 'Actualicé la cotización con el cambio solicitado.';
@@ -1088,7 +1112,10 @@ export function buildModeAwareNarrativeAppendix(
 - PROHIBIDO decir que revisaste o analizaste las fotografías.
 - PROHIBIDO repetir el análisis visual ("Se observa", "Se aprecia", "El daño visible").
 - technicalExplanation DEBE ser "".
-- intro: 1-2 oraciones reconociendo el dato recibido. SIN listar piezas sin cambios.`
+- intro: 1-2 oraciones reconociendo el dato. Tono natural, no burocrático.
+- Preferido resume: "Perfecto, {nombre}. Ya actualicé la cotización con tu {vehículo}."
+- Preferido corrección: "Perfecto, {nombre}. Corregí el vehículo a {vehículo} y recalculé la cotización."
+- PROHIBIDO: "gracias por confirmar", "con ese dato se puede continuar", "se puede continuar la actualización".`
     : `
 - intro: saludo breve y contexto. Máximo 1–2 párrafos cortos. SIN precios.
 - technicalExplanation: breve, no financiera. PROHIBIDO listar líneas de cotización.`;
@@ -1237,7 +1264,7 @@ export function assembleModeAwareClientQuoteParts(input: {
   intro = ensureHeader(intro, modeHeader(ctx.mode));
 
   if (ctx.presentation === 'FULL') {
-    const damages = renderIdentifiedDamages(input.peritaje);
+    const damages = renderIdentifiedDamages(input.peritaje, ctx.quote);
     const estimateLabel = '💰 *Estimación*';
     technicalExplanation = [damages, technicalExplanation, estimateLabel]
       .map((s) => s.trim())
@@ -1277,10 +1304,9 @@ function deterministicInitialIntro(
 ): string {
   const name = ctx.customerName || 'Estimado cliente';
   const vehicle = ctx.vehicleLabel ? ` de tu ${ctx.vehicleLabel}` : '';
-  const intro =
-    String(damageIntro ?? '').trim() ||
-    `Ya analizamos las fotos${vehicle}.`;
-  return `¡Listo, ${name}! ${intro}`.replace(/\s+/g, ' ').trim();
+  const fallback = `Ya revisamos las fotos${vehicle} y preparamos una valoración inicial.`;
+  const intro = String(damageIntro ?? '').trim() || fallback;
+  return `Hola, ${name}. ${intro}`.replace(/\s+/g, ' ').trim();
 }
 
 export function traceClientMessageRendered(input: {

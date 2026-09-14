@@ -36,6 +36,7 @@ export type PegazuzContext = {
   caseId?: string;
   quoteFlowModeLogged?: boolean;
   visionInputLogged?: boolean;
+  treatmentLogged?: boolean;
   turnSummary?: TurnSummary;
 };
 
@@ -66,6 +67,13 @@ function mergeTraceContext(
   parent: PegazuzContext | undefined,
   next: PegazuzContext,
 ): PegazuzContext {
+  const turnSummary = parent?.turnSummary ?? next.turnSummary ?? {};
+  if (next.turnSummary && next.turnSummary !== turnSummary) {
+    Object.assign(turnSummary, next.turnSummary);
+    if (next.turnSummary.ux) {
+      turnSummary.ux = { ...turnSummary.ux, ...next.turnSummary.ux };
+    }
+  }
   return {
     ...parent,
     ...compactIds({
@@ -82,10 +90,8 @@ function mergeTraceContext(
     quoteFlowModeLogged:
       next.quoteFlowModeLogged ?? parent?.quoteFlowModeLogged,
     visionInputLogged: next.visionInputLogged ?? parent?.visionInputLogged,
-    turnSummary: {
-      ...parent?.turnSummary,
-      ...next.turnSummary,
-    },
+    treatmentLogged: next.treatmentLogged ?? parent?.treatmentLogged,
+    turnSummary,
   };
 }
 
@@ -114,7 +120,12 @@ export function mergePegazuzContext(patch: PegazuzContext): void {
 export function patchTurnSummary(patch: TurnSummary): void {
   const store = als.getStore();
   if (!store) return;
-  store.turnSummary = { ...store.turnSummary, ...patch };
+  if (!store.turnSummary) store.turnSummary = {};
+  const ux = patch.ux
+    ? { ...store.turnSummary.ux, ...patch.ux }
+    : store.turnSummary.ux;
+  Object.assign(store.turnSummary, patch);
+  if (ux) store.turnSummary.ux = ux;
 }
 
 export function createTurnId(): string {

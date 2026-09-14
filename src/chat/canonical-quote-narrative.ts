@@ -41,6 +41,7 @@ export type ComposedClientQuote = {
   financialBlock: string;
   warningsBlock: string;
   shownWarnings: string[];
+  warningsRenderedCount?: number;
   llmUsed: boolean;
   fallbackUsed: boolean;
   events: NarrativeObservabilityEvent[];
@@ -313,7 +314,7 @@ export async function composeModernClientQuoteMessage(
       technicalExplanationRendered: Boolean(
         composed.parts.technicalExplanation && ux.technicalExplanation === 'allowed',
       ),
-      warningsRenderedCount: composed.shownWarnings.length,
+      warningsRenderedCount: composed.warningsRenderedCount ?? 0,
       ctaType: ux.ctaType,
     });
     traceFinalClientMessageSummary({
@@ -347,6 +348,7 @@ export async function composeModernClientQuoteMessage(
         financialBlock: packed.financialBlock,
         warningsBlock: packed.warningsBlock,
         shownWarnings: packed.shownWarnings,
+        warningsRenderedCount: packed.warningsRenderedCount,
         llmUsed: false,
         fallbackUsed: true,
         events,
@@ -425,6 +427,7 @@ export async function composeModernClientQuoteMessage(
       financialBlock: packed.financialBlock,
       warningsBlock: packed.warningsBlock,
       shownWarnings: packed.shownWarnings,
+      warningsRenderedCount: packed.warningsRenderedCount,
       llmUsed: true,
       fallbackUsed: false,
       events,

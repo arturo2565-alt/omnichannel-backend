@@ -144,9 +144,10 @@ describe('CANONICAL — parcial moldura + proyección de identidad', () => {
     );
 
     const block = renderCanonicalQuoteFinancialBlock(quote, peritaje);
-    expect(block.totalText).toMatch(/Subtotal parcial/);
+    expect(block.totalText).toMatch(/Subtotal actual/);
     expect(block.totalText).toContain('$8,550');
-    expect(block.totalText).toMatch(/pendiente de valoraci[oó]n/);
+    expect(block.totalText).toMatch(/Cotización parcial/);
+    expect(block.text).toMatch(/pendiente de revisi[oó]n/);
     expect(block.totalText).not.toMatch(/falta el precio de refacci[oó]n/i);
     expect(block.totalText).not.toMatch(/montaje\/pintura no cubre/i);
 
@@ -258,7 +259,9 @@ describe('CANONICAL — parcial moldura + proyección de identidad', () => {
       ],
     };
     const block = renderCanonicalQuoteFinancialBlock(refaccionQuote);
-    expect(block.totalText).toMatch(/estimaci[oó]n de mercado/);
+    expect(block.text).toMatch(/precio pendiente de estimaci[oó]n/);
+    expect(block.totalText).toMatch(/Cotización parcial/);
+    expect(block.totalText).not.toMatch(/moldura/);
   });
 
   it('CANONICAL_IDENTITY_PROJECTION_MISMATCH se registra sin bloquear', () => {

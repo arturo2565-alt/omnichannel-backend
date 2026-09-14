@@ -121,6 +121,18 @@ export function getPegLogFormat(): PegLogFormat {
   return parsePegLogFormat();
 }
 
+export function nestFactoryLoggerLevels(): Array<
+  'log' | 'error' | 'warn' | 'debug' | 'verbose'
+> {
+  const level = getLogLevel();
+  if (level === 'error') return ['error'];
+  if (level === 'warn') return ['error', 'warn'];
+  if (level === 'debug' || level === 'trace') {
+    return ['log', 'error', 'warn', 'debug', 'verbose'];
+  }
+  return ['log', 'error', 'warn'];
+}
+
 export function isUserTextLoggingEnabled(): boolean {
   return flagOn(process.env.PEG_LOG_USER_TEXT);
 }

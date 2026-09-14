@@ -10,6 +10,7 @@ import {
   logStablePromptPrefixAudit,
   reportLlmUsage,
 } from './llm-audit-context';
+import { pegLogger } from '../observability/pegazuz-logger';
 
 /** Presupuesto de salida para visión (reasoning + JSON). Override: OPENAI_VISION_MAX_OUTPUT_TOKENS */
 export function resolveOpenAiVisionMaxOutputTokens(): number {
@@ -164,21 +165,14 @@ export async function createVisionDamageAnalysisCompletion(
       durationMs,
     });
 
-    console.log(
-      '[Vision] Intento OpenAI',
-      JSON.stringify({
-        attempt: i + 1,
-        model: lastMeta.model,
-        reasoningEffort: effort,
-        maxOutputTokens,
-        finishReason,
-        contentChars: content.length,
-        completionTokens: usage.completionTokens,
-        reasoningTokens: usage.reasoningTokens,
-        promptTokens: usage.promptTokens,
-        durationMs,
-      }),
-    );
+    pegLogger.debug('VISION', {
+      event: 'OPENAI_ATTEMPT',
+      attempt: i + 1,
+      model: lastMeta.model,
+      finishReason,
+      contentChars: content.length,
+      durationMs,
+    });
 
     if (content.length > 0) {
       return lastMeta;

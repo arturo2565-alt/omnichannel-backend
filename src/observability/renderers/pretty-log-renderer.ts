@@ -107,7 +107,7 @@ function rejectionRows(value: unknown): string[] {
 function inboundType(data: Record<string, unknown>): string {
   const t = String(data.type ?? '').toLowerCase();
   if (t === 'image' || t === 'imagen') {
-    const count = data.count != null ? ` · ${data.count} foto(s)` : '';
+    const count = data.count != null ? ` · ${data.count} fotos` : '';
     return `imagen${count}`;
   }
   if (t === 'postback') return 'postback';
@@ -203,17 +203,17 @@ function renderMarket(record: PegazuzLogRecord): string {
 }
 
 function renderQuote(record: PegazuzLogRecord): string {
-  const partial =
+  const estado =
     record.data.partial === true
-      ? 'Parcial: sí'
+      ? 'Estado: parcial'
       : record.data.partial === false
-        ? 'Parcial: no'
+        ? `Estado: ${EMOJI.success} completa`
         : undefined;
   return indentLines(`${EMOJI.quote} Cotización`, [
     formatMoney(record.data.total) ? `Total: ${formatMoney(record.data.total)}` : undefined,
     record.data.billable != null ? `Cobrables: ${record.data.billable}` : undefined,
     record.data.pending != null ? `Pendientes: ${record.data.pending}` : undefined,
-    partial,
+    estado,
   ]);
 }
 
@@ -300,7 +300,9 @@ function renderTurnComplete(record: PegazuzLogRecord): string {
 
 function renderWebhook(record: PegazuzLogRecord): string {
   if (record.data.echo) {
-    const mid = record.data.mid ? ` · mid=${record.data.mid}` : '';
+    const mid = record.data.mid
+      ? ` · mid=${shortId(String(record.data.mid), 8)}`
+      : '';
     return `${EMOJI.inbound} Webhook · echo ignorado${mid}`;
   }
   return `${EMOJI.inbound} Webhook`;
@@ -324,10 +326,23 @@ function renderError(record: PegazuzLogRecord): string {
 }
 
 function renderVision(record: PegazuzLogRecord): string {
+  const complete = record.data.phase === 'COMPLETE';
   return indentLines(`${EMOJI.vision} Visión`, [
     record.data.input != null ? `Fotos: ${record.data.input}` : undefined,
+    record.data.vehicle
+      ? `Vehículo detectado: ${record.data.vehicle}`
+      : undefined,
     record.data.items != null ? `Piezas: ${record.data.items}` : undefined,
-    record.data.phase === 'COMPLETE' ? 'Estado: completa' : undefined,
+    complete
+      ? `Estado: ${EMOJI.success} completa`
+      : record.data.phase === 'PARTIAL'
+        ? 'Estado: parcial'
+        : record.data.phase
+          ? `Estado: ${record.data.phase}`
+          : undefined,
+    formatDuration(record.data.durationMs)
+      ? `⏱ ${formatDuration(record.data.durationMs)}`
+      : undefined,
   ]);
 }
 

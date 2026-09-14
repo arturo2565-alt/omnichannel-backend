@@ -1,13 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pegLogger } from './pegazuz-logger';
-import { resetPegazuzLogEnvForTests } from './pegazuz-log-level';
+import { resetPegazuzLogEnvForTests, nestFactoryLoggerLevels } from './pegazuz-log-level';
 import { runWithPegazuzContext } from './pegazuz-context';
-import { emitTurnComplete, markOutboundEnqueued } from './turn-log';
+import { emitTurnComplete, emitVisionSummary, markOutboundEnqueued } from './turn-log';
 import { logInboundReceived, logWebhookPayloadTrace } from './webhook-log';
 import {
   CANONICAL_TRACE_EVENTS,
   pegCanonicalTrace,
+  traceVisionInput,
 } from '../chat/canonical-trace';
 import { logRefaccionMarketEvent } from '../chat/refaccion-market/refaccion-market-events';
 import {
@@ -305,7 +306,7 @@ describe('Production Logging v1.1 pretty', () => {
     expect(joined).toContain('$6,700 MXN');
     expect(joined).toContain('Cobrables: 2');
     expect(joined).toContain('Pendientes: 3');
-    expect(joined).toContain('Parcial: sí');
+    expect(joined).toContain('Estado: parcial');
     expect(joined).not.toContain('"billable":true');
     cap.restore();
   });
@@ -392,5 +393,94 @@ describe('Production Logging v1.1 pretty', () => {
     expect(joined).toContain('MODEL_MISMATCH');
     expect(joined).toContain('payload-meta');
     cap.restore();
+  });
+
+  it('TURN START es el primer hito INFO', () => {
+    process.env.LOG_LEVEL = 'info';
+    process.env.PEG_LOG_FORMAT = 'pretty';
+    const cap = captureStd();
+    runWithPegazuzContext(
+      {
+        turnId: 'turn_2f6adb',
+        conversationId: '10da48c3-aaaa-bbbb-cccc-ddddeeeeffff',
+      },
+      () => {
+        traceVisionInput({ inputImageCount: 4, itemCount: 4 });
+        logInboundReceived({
+          channel: 'messenger',
+          type: 'image',
+          count: 4,
+          conversationId: '10da48c3-aaaa-bbbb-cccc-ddddeeeeffff',
+        });
+        emitVisionSummary({
+          photos: 4,
+          items: 4,
+          vehicle: 'Nissan Altima',
+          durationMs: 44190,
+          complete: true,
+        });
+      },
+    );
+    const joined = cap.logs.join('\n');
+    const startAt = joined.indexOf('TURN START');
+    const visionAt = joined.indexOf('👁️ Visión');
+    expect(startAt).toBeGreaterThanOrEqual(0);
+    expect(visionAt).toBeGreaterThan(startAt);
+    expect(joined).toContain('Fotos: 4');
+    expect(joined).toContain('Vehículo detectado: Nissan Altima');
+    expect(joined).toContain('4 fotos');
+    cap.restore();
+  });
+
+  it('Vision raw y Cloudinary no aparecen INFO', () => {
+    const vision = readFileSync(
+      join(__dirname, '../chat/openai-vision-completion.ts'),
+      'utf8',
+    );
+    const chatService = readFileSync(
+      join(__dirname, '../chat/chat.service.ts'),
+      'utf8',
+    );
+    expect(vision).not.toContain('[Vision] Intento OpenAI');
+    expect(chatService).not.toContain('[Vision] Respuesta cruda');
+    expect(chatService).not.toContain('urls_origen crudas');
+    expect(chatService).not.toMatch(/Subida exitosa:.*secure_url/);
+  });
+
+  it('Nest DEBUG no aparece con LOG_LEVEL=info', () => {
+    process.env.LOG_LEVEL = 'info';
+    expect(nestFactoryLoggerLevels()).toEqual(['log', 'error', 'warn']);
+    expect(nestFactoryLoggerLevels()).not.toContain('debug');
+  });
+
+  it('TURN outbound ENQUEUED sobrevive contexto anidado', () => {
+    process.env.LOG_LEVEL = 'info';
+    process.env.PEG_LOG_FORMAT = 'pretty';
+    const cap = captureStd();
+    runWithPegazuzContext({ turnId: 'turn_114c9b' }, () => {
+      runWithPegazuzContext({ conversationId: '10da48c3-aaaa' }, () => {
+        markOutboundEnqueued();
+      });
+      emitTurnComplete(Date.now() - 16870);
+    });
+    const joined = cap.logs.join('\n');
+    expect(joined).toContain('TURN COMPLETE');
+    expect(joined).toContain('encolado');
+    expect(joined).not.toMatch(/Outbound: ninguno/);
+    cap.restore();
+  });
+
+  it('un LLM call no genera log legacy duplicado', () => {
+    const vision = readFileSync(
+      join(__dirname, '../chat/openai-vision-completion.ts'),
+      'utf8',
+    );
+    const llm = readFileSync(
+      join(__dirname, '../chat/llm-audit-context.ts'),
+      'utf8',
+    );
+    expect(vision).not.toContain('[Vision] Intento OpenAI');
+    expect(vision).not.toContain('this.logger.log');
+    expect((llm.match(/pegLogger\.info\('LLM'/g) ?? []).length).toBe(1);
   });
 });

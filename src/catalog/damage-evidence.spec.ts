@@ -290,7 +290,7 @@ describe('damageEvidenceStatus — confirmación vs tratamiento', () => {
 
     const block = renderCanonicalQuoteFinancialBlock(built.quote, peritaje);
     expect(block.text).toContain('$8,250');
-    expect(block.text).toMatch(/Pieza pendiente de revisión: Cofre/i);
+    expect(block.text).toMatch(/Cofre — pendiente de revisi[oó]n/i);
     expect(block.text).not.toMatch(/Cofre: \$/);
     expect(block.totalText).not.toMatch(/falta el precio de refacci/i);
     const reasons = derivePartialQuoteReasons(built.quote, peritaje);

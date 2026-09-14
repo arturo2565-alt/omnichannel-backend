@@ -10,6 +10,7 @@ import {
   isPlaceholderBañoVehicleLabel,
 } from './instant-quote-from-text';
 import type { VehicleSizeTier } from '../catalog/vehicle-pricing-profile';
+import { pegLogger } from '../observability/pegazuz-logger';
 
 /** Default de colapso (baño exterior). Legacy BPC se trata como BPE. */
 export const VISION_BPC_PIEZA_CODE = 'BPE';
@@ -307,10 +308,13 @@ export function collapseVisionItemsToBpcIfNeeded(
 
   const banioCode = resolveVisionBanioCode(contextText, items, visionRoot);
 
-  console.log(
-    `[VisionBPC] Colapsando ${items.length} ítem(s) → ${banioCode} (${tierSeveridad}); piezas sueltas omitidas del presupuesto.`,
-    vehiculoDetectado ? `vehículo visión: ${vehiculoDetectado}` : '',
-  );
+  pegLogger.debug('VISION', {
+    event: 'BPC_COLLAPSE',
+    items: items.length,
+    banioCode,
+    tier: tierSeveridad,
+    vehicle: vehiculoDetectado || undefined,
+  });
 
   const inventarioVisualPrevio = items.map((it) => ({
     pieza: it.pieza,

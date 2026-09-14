@@ -438,12 +438,13 @@ describe('Conversation UX / Client Message Composer v2', () => {
       'POSSIBLE_SUBSTITUTION',
       'AWAITING_VEHICLE_DATA',
     ]);
-    expect(presented.warningsRenderedCount).toBe(2);
-    expect(presented.text.match(/⚠️/g)?.length).toBe(2);
+    expect(presented.warningsRenderedCount).toBe(1);
+    expect(presented.text.match(/⚠️/g)?.length).toBe(1);
     expect(presented.shownWarnings).toEqual(
       expect.arrayContaining(['HIDDEN_DAMAGE', 'POSSIBLE_SUBSTITUTION', 'AWAITING_VEHICLE_DATA']),
     );
     expect(presented.text).toContain('Pueden existir daños internos');
+    expect(presented.text).not.toMatch(/conceptos pendientes no están incluidos/);
     expect(presented.text).not.toMatch(/Por la magnitud/);
     expect(presented.text).not.toMatch(/A reserva de revisión física/);
   });
@@ -539,6 +540,112 @@ describe('Conversation UX / Client Message Composer v2', () => {
       },
     });
     expect(validation.ok).toBe(true);
-    expect(composed.finalMessage).toContain(formatQuoteMoney(resumedQuote.total));
+  });
+
+  it('17. resume copy natural', async () => {
+    const composed = await composeModernClientQuoteMessage({
+      canonicalQuote: resumedQuote,
+      peritaje: altimaPeritaje('2014'),
+      contactName: 'Arturo',
+      hasActiveAppointment: false,
+      previousSnapshot: snapshot,
+      messageSource: 'pending_requirement_resume',
+      userText: 'Nissan Altima 2014',
+      llmParts: {
+        intro:
+          'Arturo, gracias por confirmar que es un Nissan Altima 2014. Con ese dato se puede continuar la actualización.',
+        technicalExplanation: '',
+        cta: '',
+      },
+    });
+    expect(composed.finalMessage).toMatch(
+      /Ya actualicé la cotización con tu \*Nissan Altima 2014\*/,
+    );
+    expect(composed.finalMessage).not.toMatch(/gracias por confirmar/i);
+    expect(composed.finalMessage).not.toMatch(/se puede continuar la actualizaci/i);
+  });
+
+  it('18. PENDIENTE no se presenta como pricing issue', async () => {
+    const pendingTapa = line({
+      quoteLineId: 'ql_tapa_pend',
+      damageItemId: 'dmg_tapa',
+      serviceType: 'PENDIENTE',
+      amount: 0,
+      billable: false,
+      description: 'tapa de cajuela',
+    });
+    const q = quote({
+      lines: [fascia, pendingTapa],
+      isPartial: true,
+      warnings: ['SUSPECTED_INVOLVEMENT'],
+    });
+    const peritaje = altimaPeritaje('2014');
+    peritaje.damages = peritaje.damages.map((d) =>
+      d.damageItemId === 'dmg_tapa'
+        ? {
+            ...d,
+            treatment: 'PENDIENTE',
+            damageEvidenceStatus: 'SUSPECTED_INVOLVEMENT',
+          }
+        : d,
+    );
+    const composed = await composeModernClientQuoteMessage({
+      canonicalQuote: q,
+      peritaje,
+      contactName: 'Arturo',
+      hasActiveAppointment: false,
+      llmParts: { intro: 'Hola Arturo', technicalExplanation: '', cta: '' },
+    });
+    expect(composed.finalMessage).toMatch(/Tapa de cajuela — pendiente de revisi[oó]n/);
+    expect(composed.finalMessage).not.toMatch(/precio pendiente de estimaci/i);
+  });
+
+  it('19. billable REPARACION_PINTURA no se muestra como por confirmar', async () => {
+    const peritaje = altimaPeritaje('2014');
+    peritaje.damages = peritaje.damages.map((d) =>
+      d.damageItemId === 'dmg_fascia' ? { ...d, treatment: 'INCIERTO' } : d,
+    );
+    const composed = await composeModernClientQuoteMessage({
+      canonicalQuote: quote({
+        lines: [fascia, salpicadera],
+        isPartial: false,
+      }),
+      peritaje,
+      contactName: 'Arturo',
+      hasActiveAppointment: false,
+      llmParts: { intro: 'Hola Arturo', technicalExplanation: '', cta: '' },
+    });
+    expect(composed.finalMessage).toMatch(/Fascia delantera — reparaci[oó]n y pintura/);
+    expect(composed.finalMessage).not.toMatch(/por confirmar/i);
+  });
+
+  it('20. explicación parcial no se repite', async () => {
+    const composed = await composeModernClientQuoteMessage({
+      canonicalQuote: quote({
+        lines: [
+          fascia,
+          calaveraPending,
+          line({
+            ...calaveraMontaje,
+            amount: 0,
+            billable: false,
+            pricingStatus: 'UNCONFIGURED',
+            pricingSource: 'UNCONFIGURED',
+          }),
+        ],
+        isPartial: true,
+        warnings: ['AWAITING_VEHICLE_DATA', 'MONTAJE_TARIFA_NO_CONFIGURADA'],
+      }),
+      peritaje: altimaPeritaje(),
+      contactName: 'Arturo',
+      hasActiveAppointment: false,
+      llmParts: { intro: 'Hola Arturo', technicalExplanation: '', cta: '' },
+    });
+    const partialHits = composed.finalMessage.match(/Cotización parcial:/g) ?? [];
+    expect(partialHits.length).toBe(1);
+    expect(composed.finalMessage).not.toMatch(
+      /conceptos pendientes no están incluidos/i,
+    );
+    expect(composed.finalMessage).not.toMatch(/cotización incompleta:/i);
   });
 });

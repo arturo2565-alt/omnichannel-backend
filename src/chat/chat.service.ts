@@ -110,7 +110,6 @@ import {
 } from './vision-bpc-inventory';
 import { parseVisionDamageItems } from './vision-item-normalize';
 import {
-  auditEvidenceRefs,
   recoverVisionEvidenceForPeritaje,
 } from './vision-evidence';
 import {
@@ -185,7 +184,7 @@ import {
 } from './canonical-trace';
 import { createTurnId, patchTurnSummary } from '../observability/pegazuz-context';
 import { pegLogger } from '../observability/pegazuz-logger';
-import { emitTurnComplete, markOutboundEnqueued } from '../observability/turn-log';
+import { emitTurnComplete, emitVisionSummary, markOutboundEnqueued } from '../observability/turn-log';
 import {
   logInboundReceived,
   logWebhookDuplicate,
@@ -967,9 +966,10 @@ export class ChatService implements OnModuleDestroy {
     const recent = textOnly.slice(-ChatService.VISION_TEXT_HISTORY_LIMIT);
     const turns = this.messagesToChatCompletionTurns(recent);
     if (turns.length) {
-      console.log(
-        `[Vision] Historial textual (${turns.length} turno(s)) conv=${cid}`,
-      );
+      pegLogger.debug('VISION', {
+        event: 'TEXT_HISTORY',
+        turns: turns.length,
+      });
     }
     return turns;
   }
@@ -1436,9 +1436,11 @@ export class ChatService implements OnModuleDestroy {
     });
 
     // Logs de depuración para Railway (puedes borrarlos cuando funcione)
-    console.log('--- Cloudinary Config Check ---');
-    console.log('Cloud Name:', process.env.CLOUDINARY_CLOUD_NAME ? 'OK' : 'MISSING');
-    console.log('API Key:', process.env.CLOUDINARY_API_KEY ? 'OK' : 'MISSING');
+    pegLogger.debug('CLOUDINARY', {
+      event: 'config_check',
+      cloudName: process.env.CLOUDINARY_CLOUD_NAME ? 'OK' : 'MISSING',
+      apiKey: process.env.CLOUDINARY_API_KEY ? 'OK' : 'MISSING',
+    });
 
     return new Promise((resolve, reject) => {
       // 2. Creamos el stream de subida
@@ -1457,7 +1459,7 @@ export class ChatService implements OnModuleDestroy {
             return reject(new Error("Cloudinary no retornó un resultado válido"));
           }
           
-          console.log('Subida exitosa:', result.secure_url);
+          pegLogger.debug('CLOUDINARY', { event: 'upload_ok' });
           resolve(result.secure_url);
         }
       );
@@ -1549,11 +1551,13 @@ export class ChatService implements OnModuleDestroy {
       ) ??
       analysis.pieza ??
       '(sin modelo)';
-    console.log('--- [DEBUG BPC PRECIO] ---');
-    console.log('Vehículo detectado:', vehicleModel);
-    console.log('Código de pieza evaluado:', canonicalPiece);
-    console.log('Tier / severidad (matriz):', tier);
-    console.log('Precio obtenido de la Matrix:', precioCalculado);
+    pegLogger.debug('VISION', {
+      event: 'BPC_PRICE',
+      vehicleModel,
+      piece: canonicalPiece,
+      tier,
+      matrixPrice: precioCalculado,
+    });
   }
 
   /**
@@ -2508,9 +2512,10 @@ export class ChatService implements OnModuleDestroy {
         contentToSave,
       );
       if (dupOutbound) {
-        console.log(
-          `[saveMessage] outbound duplicado omitido (ventana 5s, p. ej. eco Meta) | conv=${conversation.id}`,
-        );
+        pegLogger.debug('OUTBOUND', {
+          event: 'duplicate_skipped',
+          conversation: conversation.id,
+        });
         return dupOutbound;
       }
     }
@@ -2521,9 +2526,10 @@ export class ChatService implements OnModuleDestroy {
         contentToSave,
       );
       if (dupSticker) {
-        console.log(
-          `[saveMessage] sticker duplicado omitido | conv=${conversation.id}`,
-        );
+        pegLogger.debug('INBOUND', {
+          event: 'sticker_duplicate',
+          conversation: conversation.id,
+        });
         return dupSticker;
       }
     }
@@ -2887,21 +2893,15 @@ export class ChatService implements OnModuleDestroy {
       () => createVisionDamageAnalysisCompletion(this.openai, visionMessages),
     );
     const visionResponse = visionMeta.content;
-    console.log(
-      '[Vision] Respuesta cruda',
-      JSON.stringify({
-        imageCount: urls.length,
-        historyTurns: historyTurns.length,
-        responseChars: visionResponse.length,
-        finishReason: visionMeta.finishReason,
-        reasoningEffort: visionMeta.reasoningEffort,
-        attempt: visionMeta.attempt,
-        maxOutputTokens: visionMeta.maxOutputTokens,
-        completionTokens: visionMeta.completionTokens,
-        reasoningTokens: visionMeta.reasoningTokens,
-        preview: visionResponse.slice(0, 1200),
-      }),
-    );
+    pegLogger.debug('VISION', {
+      event: 'RAW_RESPONSE',
+      imageCount: urls.length,
+      historyTurns: historyTurns.length,
+      responseChars: visionResponse.length,
+      finishReason: visionMeta.finishReason,
+      attempt: visionMeta.attempt,
+      completionTokens: visionMeta.completionTokens,
+    });
 
     if (!visionResponse) {
       const viability: VisionViability = {
@@ -2935,15 +2935,11 @@ export class ChatService implements OnModuleDestroy {
       conversationId: options?.conversationId ?? null,
       visionRunId,
     };
-    console.log(
-      '[Vision] urls_origen crudas (pre-recovery)',
-      JSON.stringify({
-        conversationId: evidenceCtx.conversationId,
-        visionRunId,
-        cantidadInputImages: urls.length,
-        items: auditEvidenceRefs(rawItems),
-      }),
-    );
+    pegLogger.debug('VISION', {
+      event: 'EVIDENCE_PRE_RECOVERY',
+      inputImages: urls.length,
+      items: rawItems.length,
+    });
     const batchIndex = options?.visionBatchIndex ?? 0;
     const items = rawItems.map((it) => {
       const pieceCodeRaw = it.pieza;
@@ -2975,13 +2971,11 @@ export class ChatService implements OnModuleDestroy {
           mensajeClienteAclaracion: viability.mensajeClienteAclaracion,
         }),
       };
-      console.log(
-        '[Vision] Peritaje no viable',
-        JSON.stringify({
-          motivo: inviable.motivoInviable,
-          rawItems: rawItems.length,
-        }),
-      );
+      pegLogger.debug('VISION', {
+        event: 'NOT_VIABLE',
+        motivo: inviable.motivoInviable,
+        rawItems: rawItems.length,
+      });
       return { items: [], viability: inviable };
     }
 
@@ -2990,27 +2984,20 @@ export class ChatService implements OnModuleDestroy {
       urls,
       evidenceCtx,
     );
-    console.log(
-      '[Vision] urls_origen (post-recovery)',
-      JSON.stringify({
-        conversationId: evidenceCtx.conversationId,
-        visionRunId,
-        cantidadInputImages: urls.length,
-        items: auditEvidenceRefs(recovered),
-      }),
-    );
+    pegLogger.debug('VISION', {
+      event: 'EVIDENCE_POST_RECOVERY',
+      inputImages: urls.length,
+      items: recovered.length,
+    });
     const collapsed = collapseVisionItemsToBpcIfNeeded(
       recovered,
       tierContext,
       parsed,
     );
-    console.log(
-      '[Vision] Inventario parseado',
-      JSON.stringify({
-        items: collapsed.length,
-        piezas: collapsed.map((i) => i.pieza),
-      }),
-    );
+    pegLogger.debug('VISION', {
+      event: 'INVENTORY_PARSED',
+      items: collapsed.length,
+    });
     return {
       items: collapsed,
       viability: { peritajeViable: true },
@@ -3082,15 +3069,20 @@ export class ChatService implements OnModuleDestroy {
     const viabilityParts: { viability: VisionViability; itemCount: number }[] =
       [];
 
-    console.log(
-      `[VisionChunk] Procesando ${imageUrls.length} imagen(es) en ${lotes.length} lote(s) de hasta ${VISION_MAX_CHUNK_SIZE}`,
-    );
+    pegLogger.debug('VISION', {
+      event: 'CHUNK_PLAN',
+      images: imageUrls.length,
+      batches: lotes.length,
+    });
 
     for (let idx = 0; idx < lotes.length; idx++) {
       const lote = lotes[idx]!;
-      console.log(
-        `[VisionChunk] Lote ${idx + 1}/${lotes.length} — ${lote.length} imagen(es)`,
-      );
+      pegLogger.debug('VISION', {
+        event: 'CHUNK_START',
+        batch: idx + 1,
+        total: lotes.length,
+        images: lote.length,
+      });
       const batch = await this.analyzeDamageImageDetailed(lote, {
         ...options,
         visionBatchIndex: idx,
@@ -3100,19 +3092,19 @@ export class ChatService implements OnModuleDestroy {
         itemCount: batch.items.length,
       });
 
-      console.log(
-        `[VisionChunk] Lote ${idx + 1} resultado`,
-        JSON.stringify({
-          items: batch.items.length,
-          viable: batch.viability.peritajeViable,
-          piezas: batch.items.map((i) => i.pieza),
-        }),
-      );
+      pegLogger.debug('VISION', {
+        event: 'CHUNK_RESULT',
+        batch: idx + 1,
+        items: batch.items.length,
+        viable: batch.viability.peritajeViable,
+      });
 
       if (!batch.items.length) {
-        console.warn(
-          `[VisionChunk] Lote ${idx + 1}/${lotes.length} sin ítems válidos (pieza+severidad)`,
-        );
+        pegLogger.debug('VISION', {
+          event: 'CHUNK_EMPTY',
+          batch: idx + 1,
+          total: lotes.length,
+        });
         continue;
       }
 
@@ -5595,9 +5587,11 @@ ${catalogAppend}`;
     const intencionBanioGen = visionItemsIndicateBanioCompleto(
       analysis.inventory ?? [],
     );
-    console.log('--- [DEBUG BPC NARRATIVA] (generateDraftQuote) ---');
-    console.log('¿Se detectó intención de baño completo?:', intencionBanioGen);
-    console.log('¿El inventario final colapsado es BPC?:', esInventarioBPCGen);
+    pegLogger.debug('VISION', {
+      event: 'BPC_NARRATIVE',
+      bpcIntent: intencionBanioGen,
+      bpcCollapsed: esInventarioBPCGen,
+    });
 
     const vehicleProfile = vehiclePricingProfileFromAnalysis(analysis);
 
@@ -5636,10 +5630,10 @@ ${catalogAppend}`;
         });
       }
     } else if (analysis.inventory?.length) {
-      console.log(
-        '[DEBUG BPC] generateDraftQuote → rama PIEZAS INDIVIDUALES (no BPC)',
-        (analysis.inventory ?? []).map((i) => i.pieza),
-      );
+      pegLogger.debug('VISION', {
+        event: 'DRAFT_INDIVIDUAL_PIECES',
+        items: (analysis.inventory ?? []).length,
+      });
       resolvedLevel = pickWorstDamageLevel(
         analysis.inventory.map((i) => i.severidad),
       );
@@ -5870,12 +5864,10 @@ ${catalogAppend}`;
   ): Promise<void> {
     this.consolidatedVisionInFlight.add(conversationId);
     try {
-      await runWithCanonicalTraceContext({ conversationId }, () =>
-        this.processConsolidatedInboundImagesCore(
-          conversationId,
-          attachingMessageId,
-          burstUrls,
-        ),
+      await this.processConsolidatedInboundImagesCore(
+        conversationId,
+        attachingMessageId,
+        burstUrls,
       );
     } finally {
       this.consolidatedVisionInFlight.delete(conversationId);
@@ -5941,12 +5933,22 @@ ${catalogAppend}`;
         conversationTextHistory,
       },
     );
-    patchTurnSummary({ visionMs: Date.now() - visionStartedAt });
+    const visionMs = Date.now() - visionStartedAt;
+    patchTurnSummary({ visionMs });
     const newInventory = recoverVisionEvidenceForPeritaje(
       visionResult.items,
       imageUrls,
       { conversationId },
     );
+    emitVisionSummary({
+      photos: imageUrls.length,
+      items: newInventory.length,
+      vehicle: visionResult.vehiculoDetectado || undefined,
+      durationMs: visionMs,
+      complete: Boolean(
+        visionResult.viability.peritajeViable && newInventory.length > 0,
+      ),
+    });
 
     if (!visionResult.viability.peritajeViable || newInventory.length === 0) {
       const aclaracion = resolveClienteAclaracion(visionResult.viability);
@@ -5964,22 +5966,12 @@ ${catalogAppend}`;
       return;
     }
 
-    console.log(
-      `[VisionChunk] Inventario consolidado tras lotes: ${newInventory.length} pieza(s)`,
-    );
-    console.log('--- [DEBUG BPC NARRATIVA] (post-visión, pre-borrador) ---');
-    console.log(
-      '¿Se detectó intención de baño completo?:',
-      visionItemsIndicateBanioCompleto(newInventory),
-    );
-    console.log(
-      '¿El inventario final colapsado es BPC?:',
-      isBanioPinturaCompletoVisionInventory(newInventory),
-    );
-    console.log(
-      'Piezas en inventario:',
-      newInventory.map((i) => i.pieza),
-    );
+    pegLogger.debug('VISION', {
+      event: 'INVENTORY_CONSOLIDATED',
+      items: newInventory.length,
+      bpcIntent: visionItemsIndicateBanioCompleto(newInventory),
+      bpcCollapsed: isBanioPinturaCompletoVisionInventory(newInventory),
+    });
 
     const visionMerge = await this.quoteCartService.mergeVisionInventory(
       conversationId,

@@ -107,6 +107,9 @@ export const PRESENTATION_HIDDEN_DAMAGE_COPY =
 export const PRESENTATION_PENDING_CONCEPTS_COPY =
   'Los conceptos pendientes no están incluidos en el subtotal.';
 
+export const PRESENTATION_PARTIAL_FOOTER_GENERIC =
+  'Cotización parcial: algunos conceptos continúan pendientes.';
+
 export const PARTIAL_QUOTE_REASON = {
   INSUFFICIENT_MARKET_SAMPLE: 'INSUFFICIENT_MARKET_SAMPLE',
   AWAITING_VEHICLE_DATA: 'AWAITING_VEHICLE_DATA',
@@ -296,6 +299,69 @@ export function formatPartialQuoteDisclosure(
   return reasons.map((r) => r.text).join(' ');
 }
 
+function joinSpanishList(items: string[]): string {
+  if (items.length === 1) return items[0]!;
+  if (items.length === 2) return `${items[0]} y ${items[1]}`;
+  return `${items.slice(0, -1).join(', ')} y ${items[items.length - 1]}`;
+}
+
+function withArticle(label: string): string {
+  const raw = String(label ?? '').trim();
+  if (!raw) return raw;
+  if (/^(el|la|los|las)\s/i.test(raw)) return raw;
+  if (/^tapa\b/i.test(raw)) {
+    return `la ${raw.charAt(0).toLowerCase()}${raw.slice(1)}`;
+  }
+  if (/^montaje\b/i.test(raw)) return 'el montaje';
+  return raw;
+}
+
+export function isPendingReviewDamage(damage?: DamageItem | null): boolean {
+  if (!damage) return false;
+  if (damage.treatment === 'PENDIENTE') return true;
+  return (
+    damage.damageEvidenceStatus === 'SUSPECTED_INVOLVEMENT' ||
+    damage.damageEvidenceStatus === 'NOT_ASSESSABLE'
+  );
+}
+
+export function pendingConceptLabelsForFooter(
+  quote: CanonicalQuoteV1,
+  peritaje?: CanonicalPeritajeV1 | null,
+): string[] {
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  let montaje = false;
+  for (const line of quote.lines) {
+    if (isChargeableQuoteLine(line)) continue;
+    if (line.serviceType === 'MONTAJE' || line.serviceType === 'MONTAJE_PINTURA') {
+      montaje = true;
+      continue;
+    }
+    const piece = resolveQuoteLinePieceLabel(line, peritaje);
+    const key = piece.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    labels.push(withArticle(piece));
+  }
+  const out: string[] = [];
+  if (montaje) out.push('el montaje');
+  out.push(...labels);
+  return out;
+}
+
+export function formatPartialQuoteFooter(
+  quote: CanonicalQuoteV1,
+  peritaje?: CanonicalPeritajeV1 | null,
+): string {
+  if (!quote.isPartial) return '';
+  const labels = pendingConceptLabelsForFooter(quote, peritaje);
+  if (!labels.length || labels.length > 3) {
+    return `_${PRESENTATION_PARTIAL_FOOTER_GENERIC}_`;
+  }
+  return `_Cotización parcial: ${joinSpanishList(labels)} continúan pendientes._`;
+}
+
 const SERVICE_LABEL: Record<QuoteServiceType, string> = {
   REPARACION_PINTURA: 'Reparación y pintura',
   REFACCION: 'Refacción',
@@ -406,10 +472,22 @@ export function renderCanonicalQuoteFinancialBlock(
   const lineTexts: string[] = [];
   const chargeableLabels: string[] = [];
   const displayedAmounts: number[] = [];
+  const pendingPiecesRendered = new Set<string>();
+  const damageById = new Map(
+    (peritaje?.damages ?? []).map((d) => [d.damageItemId, d]),
+  );
 
   for (const line of canonicalQuote.lines) {
     const piece = resolveQuoteLinePieceLabel(line, peritaje);
     const label = buildControlledQuoteLineLabel(line.serviceType, piece);
+    const damage = damageById.get(line.damageItemId);
+
+    if (isPendingReviewDamage(damage) || line.serviceType === 'PENDIENTE') {
+      if (pendingPiecesRendered.has(line.damageItemId)) continue;
+      pendingPiecesRendered.add(line.damageItemId);
+      lineTexts.push(`🟡 ${piece} — pendiente de revisión`);
+      continue;
+    }
 
     if (isChargeableQuoteLine(line)) {
       const amountText = lineDisplayAmount(line);
@@ -434,31 +512,31 @@ export function renderCanonicalQuoteFinancialBlock(
         line.pricingSource === 'AWAITING_VEHICLE_DATA';
       lineTexts.push(
         awaiting
-          ? `🛠️ ${label}: pendiente de datos del vehículo`
+          ? `🔧 ${piece} — refacción pendiente de datos del vehículo`
           : `🛠️ ${label}: precio pendiente de estimación`,
       );
       continue;
     }
 
     if (line.serviceType === 'MONTAJE' && !isChargeableQuoteLine(line)) {
-      lineTexts.push(`🛠️ ${label}: tarifa no configurada`);
+      lineTexts.push(`🔩 Montaje — tarifa pendiente`);
       continue;
     }
 
-    if (line.serviceType === 'PENDIENTE') {
-      lineTexts.push(`🛠️ Pieza pendiente de revisión: ${piece}`);
+    if (!isChargeableQuoteLine(line)) {
+      lineTexts.push(`🛠️ ${label}: pendiente de configuración`);
     }
   }
 
   const totalAmt = Math.round(canonicalQuote.total);
   displayedAmounts.push(totalAmt);
   const isPartial = canonicalQuote.isPartial === true;
-  const partialDisclosure = formatPartialQuoteDisclosure(
-    derivePartialQuoteReasons(canonicalQuote, peritaje),
-  );
+  const footer = formatPartialQuoteFooter(canonicalQuote, peritaje);
   const totalText = isPartial
-    ? `💰 **Subtotal parcial / servicios cotizados: ${formatQuoteMoney(totalAmt)} MXN** *(cotización incompleta: ${partialDisclosure})*`
-    : `💰 **Inversión Total Estimada: ${formatQuoteMoney(totalAmt)} MXN** *(Sujeto a revisión física. Incluye materiales premium Sikkens y garantía).*`;
+    ? [`💰 *Subtotal actual: ${formatQuoteMoney(totalAmt)} MXN*`, footer]
+        .filter(Boolean)
+        .join('\n')
+    : `💰 *Total: ${formatQuoteMoney(totalAmt)} MXN*`;
 
   const text = [...lineTexts, '', totalText].filter(Boolean).join('\n');
   return {
@@ -644,7 +722,9 @@ function warningAppearsInMessage(code: string, message: string): boolean {
   }
   if (
     PENDING_PRESENTATION_CODES.has(code) &&
-    message.includes(PRESENTATION_PENDING_CONCEPTS_COPY)
+    (/Cotización parcial:/i.test(message) ||
+      message.includes(PRESENTATION_PENDING_CONCEPTS_COPY) ||
+      message.includes(PRESENTATION_PARTIAL_FOOTER_GENERIC))
   ) {
     return true;
   }

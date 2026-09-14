@@ -7,19 +7,26 @@ import { initSentry } from './sentry/sentry.init';
 import { SentryExceptionFilter } from './sentry/sentry-exception.filter';
 import { AppModule } from './app.module';
 import { pegLogger } from './observability/pegazuz-logger';
-import { getLogLevel, getPegTraceMode } from './observability/pegazuz-log-level';
+import {
+  getLogLevel,
+  getPegLogFormat,
+  getPegTraceMode,
+  nestFactoryLoggerLevels,
+} from './observability/pegazuz-log-level';
 
 initSentry();
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     bodyParser: false,
+    logger: nestFactoryLoggerLevels(),
   });
 
   pegLogger.info('STARTUP', {
     serperConfigured: Boolean(process.env.SERPER_API_KEY?.trim()),
     logLevel: getLogLevel(),
     traceMode: getPegTraceMode(),
+    logFormat: getPegLogFormat(),
     nodeEnv: process.env.NODE_ENV ?? null,
   });
 

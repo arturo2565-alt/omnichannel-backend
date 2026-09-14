@@ -16,12 +16,31 @@ export function emitTurnComplete(startedAt: number): void {
     quoteTotal: summary.quoteTotal,
     partial: summary.partial,
     outbound: summary.outbound ?? 'NONE',
-    visionMs: summary.visionMs,
-    marketMs: summary.marketMs,
-    llmMs: summary.llmMs,
+    visionMs:
+      summary.visionMs && summary.visionMs > 0 ? summary.visionMs : undefined,
+    marketMs:
+      summary.marketMs && summary.marketMs > 0 ? summary.marketMs : undefined,
+    llmMs: summary.llmMs && summary.llmMs > 0 ? summary.llmMs : undefined,
     durationMs,
     duration: `${durationMs}ms`,
   });
+}
+
+export function emitVisionSummary(input: {
+  photos: number;
+  items?: number;
+  vehicle?: string;
+  durationMs?: number;
+  complete?: boolean;
+}): void {
+  pegLogger.info('VISION', {
+    input: input.photos,
+    items: input.items,
+    vehicle: input.vehicle,
+    durationMs: input.durationMs,
+    phase: input.complete === false ? 'PARTIAL' : 'COMPLETE',
+  });
+  if (input.vehicle) patchTurnSummary({ vehicle: input.vehicle });
 }
 
 export function markOutboundEnqueued(): void {

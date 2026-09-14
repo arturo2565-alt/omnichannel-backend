@@ -132,6 +132,18 @@ export function logFlowEvent(
   event: string,
   payload: Record<string, unknown>,
 ): void {
+  const level = String(process.env.LOG_LEVEL ?? 'info').trim().toLowerCase();
+  const mode = String(process.env.PEG_TRACE_MODE ?? 'compact')
+    .trim()
+    .toLowerCase();
+  if (
+    level !== 'debug' &&
+    level !== 'trace' &&
+    mode !== 'debug' &&
+    mode !== 'trace'
+  ) {
+    return;
+  }
   console.log(
     '[QuoteFlow]',
     JSON.stringify({

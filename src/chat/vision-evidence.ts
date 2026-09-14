@@ -3,6 +3,7 @@ import {
   mergeCanonicalTraceContext,
   traceVisionEvidenceRecovery,
 } from './canonical-trace';
+import { pegLogger } from '../observability/pegazuz-logger';
 import type { DetectedDamageItem } from './entities/chat.entity';
 
 export const EVIDENCE_EVENTS = {
@@ -58,8 +59,10 @@ export function logVisionEvidenceEvents(
   events: readonly VisionEvidenceEvent[],
 ): void {
   for (const ev of events) {
-    const { url: _omit, ...safe } = ev;
-    console.log('[VisionEvidence]', JSON.stringify(safe));
+    pegLogger.debug('VISION', {
+      event: ev.event,
+      piece: ev.pieceCode,
+    });
   }
 }
 

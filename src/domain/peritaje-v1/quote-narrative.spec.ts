@@ -226,10 +226,8 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
     const block = renderCanonicalQuoteFinancialBlock(q);
     expect(block.isPartial).toBe(true);
     expect(block.text).toMatch(/precio pendiente de estimación/);
-    expect(block.totalText).toMatch(/Subtotal parcial/);
-    expect(block.totalText).toMatch(
-      /La refacci[oó]n est[aá] pendiente de estimaci[oó]n de mercado/,
-    );
+    expect(block.totalText).toMatch(/Subtotal actual/);
+    expect(block.totalText).toMatch(/Cotización parcial/);
     expect(block.totalText).toContain('$3,400');
     expect(block.text).not.toMatch(/Inversión Total Estimada/);
     expect(block.totalText).not.toMatch(/falta el precio de refacci[oó]n/i);
@@ -529,8 +527,8 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
         },
       ],
     });
-    expect(block.totalText).toMatch(/pendiente de valoraci[oó]n/);
-    expect(block.totalText).toMatch(/reinstalaci[oó]n, reparaci[oó]n o sustituci[oó]n/);
+    expect(block.totalText).toMatch(/Cotización parcial/);
+    expect(block.text).toMatch(/pendiente de revisi[oó]n/);
     expect(block.totalText).not.toMatch(/falta el precio de refacci[oó]n/i);
     expect(block.totalText).not.toMatch(/montaje\/pintura no cubre/i);
     expect(block.totalText).not.toMatch(/estimaci[oó]n de mercado/);
@@ -555,9 +553,8 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
       subtotal: 0,
     });
     const block = renderCanonicalQuoteFinancialBlock(q);
-    expect(block.totalText).toMatch(
-      /tarifa de reparaci[oó]n\/pintura de la moldura est[aá] pendiente de configuraci[oó]n/i,
-    );
+    expect(block.totalText).toMatch(/Cotización parcial/);
+    expect(block.text).toMatch(/pendiente de configuraci[oó]n/i);
     expect(block.totalText).not.toMatch(/falta el precio de refacci[oó]n/i);
   });
 
@@ -578,9 +575,8 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
       subtotal: 0,
     });
     const block = renderCanonicalQuoteFinancialBlock(q);
-    expect(block.totalText).toMatch(
-      /tratamiento de esta pieza debe confirmarse antes de cotizarla/i,
-    );
+    expect(block.totalText).toMatch(/Cotización parcial/);
+    expect(block.text).toMatch(/pendiente de revisi[oó]n/);
     expect(block.totalText).not.toMatch(/refacci[oó]n/i);
   });
 });

@@ -235,8 +235,8 @@ function emitCanonicalCompact(
   payload: Record<string, unknown>,
 ): void {
   if (event === CANONICAL_TRACE_EVENTS.VISION_INPUT) {
-    pegLogger.info('VISION', {
-      phase: 'COMPLETE',
+    pegLogger.debug('VISION', {
+      phase: 'START',
       input: payload.inputImageCount,
       items: payload.itemCount,
     });
@@ -274,6 +274,8 @@ function emitCanonicalCompact(
     return;
   }
   if (event === CANONICAL_TRACE_EVENTS.CANONICAL_PERITAJE) {
+    if (getCanonicalTraceContext()?.treatmentLogged) return;
+    mergeCanonicalTraceContext({ treatmentLogged: true });
     const damages = Array.isArray(payload.damages) ? payload.damages : [];
     const counts = { reparar: 0, sustituir: 0, pendiente: 0, incierto: 0 };
     for (const row of damages) {
@@ -292,17 +294,20 @@ function emitCanonicalCompact(
     const lines = Array.isArray(payload.lines) ? payload.lines : [];
     const billable = lines.filter((row) => asRecord(row).billable === true)
       .length;
-    const pending = lines.length - billable;
+    const pending =
+      lines.length > 0
+        ? lines.length - billable
+        : Math.max(0, Number(payload.lineCount ?? 0) - billable);
+    const total = asNumber(payload.total) ?? asNumber(payload.subtotal) ?? 0;
     pegLogger.info('QUOTE', {
       q: payload.quoteId,
-      total: payload.total,
+      total,
       partial: payload.isPartial,
       billable,
       pending,
     });
     patchTurnSummary({
-      quoteTotal:
-        typeof payload.total === 'number' ? payload.total : undefined,
+      quoteTotal: total,
       partial:
         typeof payload.isPartial === 'boolean' ? payload.isPartial : undefined,
     });

@@ -108,7 +108,7 @@ export class ChatController {
   @Post('upload')
   @UseInterceptors(FileInterceptor('file'))
   async uploadFile(@UploadedFile() file: Express.Multer.File) {
-    console.log('Subiendo archivo a Cloudinary...');
+    pegLogger.debug('CLOUDINARY', { event: 'upload_start' });
     const url = await this.chatService.uploadImage(file);
     return { url };
   }
