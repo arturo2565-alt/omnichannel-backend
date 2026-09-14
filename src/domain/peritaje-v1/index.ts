@@ -216,6 +216,7 @@ export type {
   LlmNarrativeParts,
   RenderedFinancialBlock,
   FinalMessageValidation,
+  ClientMessageValidationScope,
   MonetaryHit,
   NarrativeSendSnapshotFields,
   PartialQuoteReason,

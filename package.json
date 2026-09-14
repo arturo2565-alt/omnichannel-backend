@@ -18,6 +18,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "cert:conversation-ux": "jest src/certification/conversation-ux/conversation-ux-certification.spec.ts --no-coverage",
     "seed:price-matrix": "ts-node --project tsconfig.scripts.json -r tsconfig-paths/register scripts/seed-price-matrix.ts",
     "seed:instant-quote-matrix": "ts-node --project tsconfig.scripts.json -r tsconfig-paths/register scripts/seed-instant-quote-matrix.ts",
     "eval:autonomy:live": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register src/certification/autonomy/live-eval.ts",

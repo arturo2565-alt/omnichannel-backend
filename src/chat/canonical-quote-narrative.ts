@@ -14,8 +14,6 @@ import {
   isCanonicalNarrativeEligible,
   logNarrativeEvents,
   renderCanonicalQuoteFinancialBlock,
-  renderCanonicalQuoteWarningsBlock,
-  renderDeterministicClientQuoteFallback,
   sanitizeLlmNarrativeParts,
   validateFinalClientQuoteMessage,
   type ClientQuoteMessage,
@@ -24,6 +22,18 @@ import {
   type NarrativeObservabilityEvent,
 } from '../domain/peritaje-v1/quote-narrative';
 import { traceFinalClientMessageSummary } from './canonical-trace';
+import type { QuoteSendSnapshot } from './autofix-config';
+import type { ClientMessageSource, ClientMessageMode, CtaType, QuoteDelta } from './client-message-ux';
+import {
+  assembleModeAwareClientQuoteParts,
+  buildModeAwareNarrativeAppendix,
+  extractLastUserText,
+  resolveClientMessageUx,
+  snapshotOfferedAppointmentCta,
+  snapshotSharedLocation,
+  traceClientMessageRendered,
+  type ResolvedClientMessageUx,
+} from './client-message-ux';
 
 export type ComposedClientQuote = {
   flow: NarrativeFlow;
@@ -35,11 +45,20 @@ export type ComposedClientQuote = {
   fallbackUsed: boolean;
   events: NarrativeObservabilityEvent[];
   parts: ClientQuoteMessage;
+  mode?: ClientMessageMode;
+  shouldGreet?: boolean;
+  quoteDelta?: QuoteDelta;
+  ctaType?: CtaType;
+  fullQuoteRendered?: boolean;
+  deltaRendered?: boolean;
+  postFilterInterventionsCount?: number;
+  preFilterClean?: boolean;
 };
 
 export type ModernComposeInput = {
   canonicalQuote: CanonicalQuoteV1;
   peritaje?: CanonicalPeritajeV1 | null;
+  previousPeritaje?: CanonicalPeritajeV1 | null;
   contactName: string;
   hasActiveAppointment: boolean;
   appointmentFormatted?: string;
@@ -51,6 +70,11 @@ export type ModernComposeInput = {
   chatAppointmentSystemPrompt?: string;
   conversationTurns?: readonly ChatCompletionMessageParam[];
   temperature?: number;
+  previousSnapshot?: QuoteSendSnapshot | null;
+  messageSource?: ClientMessageSource;
+  userText?: string;
+  appointmentCtaAlreadyOffered?: boolean;
+  locationAlreadyShared?: boolean;
   /** Inyección para tests. */
   llmParts?: LlmNarrativeParts | null;
 };
@@ -71,12 +95,15 @@ Reglas:
 - Puedes mencionar el año del vehículo, una hora de cita o "garantía de 1 año" si aplica; eso no es un importe.
 `.trim();
 
-function buildCanonicalNarrativeSystemPrompt(base: string): string {
+function buildCanonicalNarrativeSystemPrompt(
+  base: string,
+  appendix = CANONICAL_NARRATIVE_APPENDIX,
+): string {
   const prompt = String(base ?? '').trim();
   if (!prompt) {
     throw new Error('composeCanonicalLlmNarrativeParts: chatAppointmentPrompt vacío');
   }
-  return `${prompt}\n\n${CANONICAL_NARRATIVE_APPENDIX}`;
+  return `${prompt}\n\n${appendix}`;
 }
 
 function peritajeNarrativeContext(peritaje?: CanonicalPeritajeV1 | null) {
@@ -110,24 +137,37 @@ export async function composeCanonicalLlmNarrativeParts(
     | 'isComplement'
     | 'peritaje'
     | 'temperature'
-  >,
+  > & { ux?: ResolvedClientMessageUx },
   conversationTurns: readonly ChatCompletionMessageParam[] = [],
 ): Promise<LlmNarrativeParts> {
+  const omitVisualDump =
+    input.ux &&
+    (input.ux.technicalExplanation === 'omitted' || !input.ux.shouldGreet);
   const payload = {
-    reportePericial: peritajeNarrativeContext(input.peritaje),
+    reportePericial: omitVisualDump
+      ? {
+          vehiculo:
+            input.ux?.vehicleLabel ||
+            peritajeNarrativeContext(input.peritaje).vehiculo,
+        }
+      : peritajeNarrativeContext(input.peritaje),
     contextoOperativo: {
       contactName: input.contactName,
-      damageIntro: input.damageIntro ?? '',
-      vehicleModel: input.vehicleModel ?? '',
+      damageIntro: omitVisualDump ? '' : input.damageIntro ?? '',
+      vehicleModel: input.vehicleModel ?? input.ux?.vehicleLabel ?? '',
       hasActiveAppointment: input.hasActiveAppointment,
       appointmentFormatted: input.appointmentFormatted ?? '',
-      mapsUrl: input.mapsUrl ?? '',
+      mapsUrl: input.ux?.shouldShareLocation ? input.mapsUrl ?? '' : '',
       isComplement: Boolean(input.isComplement),
+      mode: input.ux?.mode,
+      shouldGreet: input.ux?.shouldGreet ?? true,
+      ctaType: input.ux?.ctaType,
     },
     restricciones: {
       noMoney: true,
       noLineItems: true,
       noTotals: true,
+      noGreeting: input.ux ? !input.ux.shouldGreet : false,
     },
   };
 
@@ -149,7 +189,12 @@ export async function composeCanonicalLlmNarrativeParts(
       messages: [
         {
           role: 'system',
-          content: buildCanonicalNarrativeSystemPrompt(chatAppointmentSystemPrompt),
+          content: buildCanonicalNarrativeSystemPrompt(
+            chatAppointmentSystemPrompt,
+            input.ux
+              ? buildModeAwareNarrativeAppendix(input.ux)
+              : CANONICAL_NARRATIVE_APPENDIX,
+          ),
         },
         ...history,
         {
@@ -221,34 +266,67 @@ export async function composeModernClientQuoteMessage(
     throw new Error('composeModernClientQuoteMessage: CanonicalQuoteV1 inválido');
   }
 
-  const financial = renderCanonicalQuoteFinancialBlock(
-    input.canonicalQuote,
-    input.peritaje,
-  );
-  const warnings = renderCanonicalQuoteWarningsBlock(input.canonicalQuote);
-  const events: NarrativeObservabilityEvent[] = [];
-  const fallbackParts = renderDeterministicClientQuoteFallback({
-    contactName: input.contactName,
-    vehicle: input.peritaje?.vehicles?.[0],
-    damages: input.peritaje?.damages,
-    canonicalQuote: input.canonicalQuote,
+  const userText =
+    input.userText ?? extractLastUserText(input.conversationTurns);
+  const ux = resolveClientMessageUx({
+    quote: input.canonicalQuote,
+    peritaje: input.peritaje,
+    previousPeritaje: input.previousPeritaje,
+    previousSnapshot: input.previousSnapshot,
+    source: input.messageSource,
+    userText,
     hasActiveAppointment: input.hasActiveAppointment,
-    appointmentFormatted: input.appointmentFormatted,
-    mapsUrl: input.mapsUrl,
-    damageIntro: input.damageIntro,
-    isComplement: input.isComplement,
+    appointmentCtaAlreadyOffered:
+      input.appointmentCtaAlreadyOffered ??
+      snapshotOfferedAppointmentCta(input.previousSnapshot),
+    locationAlreadyShared:
+      input.locationAlreadyShared ??
+      snapshotSharedLocation(input.previousSnapshot),
+    contactName: input.contactName,
   });
+
+  const events: NarrativeObservabilityEvent[] = [];
+  const packFromLlm = (llm?: LlmNarrativeParts | null) =>
+    assembleModeAwareClientQuoteParts({
+      ctx: ux,
+      peritaje: input.peritaje,
+      llmIntro: llm?.intro,
+      llmTechnicalExplanation: llm?.technicalExplanation,
+      llmCta: llm?.cta,
+      hasActiveAppointment: input.hasActiveAppointment,
+      appointmentFormatted: input.appointmentFormatted,
+      mapsUrl: input.mapsUrl,
+      damageIntro: ux.shouldGreet ? input.damageIntro : '',
+    });
 
   const finish = (
     composed: ComposedClientQuote,
     financialIntegrityValid: boolean,
   ): ComposedClientQuote => {
+    traceClientMessageRendered({
+      quoteId: input.canonicalQuote.quoteId,
+      mode: ux.mode,
+      fullQuoteRendered: Boolean(composed.fullQuoteRendered ?? ux.presentation === 'FULL'),
+      deltaRendered: Boolean(composed.deltaRendered ?? ux.presentation === 'DELTA'),
+      greetingRendered: ux.shouldGreet,
+      technicalExplanationRendered: Boolean(
+        composed.parts.technicalExplanation && ux.technicalExplanation === 'allowed',
+      ),
+      warningsRenderedCount: composed.shownWarnings.length,
+      ctaType: ux.ctaType,
+    });
     traceFinalClientMessageSummary({
       composed,
       canonicalQuote: input.canonicalQuote,
       financialIntegrityValid,
     });
-    return composed;
+    return {
+      ...composed,
+      mode: ux.mode,
+      shouldGreet: ux.shouldGreet,
+      quoteDelta: ux.quoteDelta,
+      ctaType: ux.ctaType,
+    };
   };
 
   const useFallback = (reason: string, extra?: NarrativeObservabilityEvent[]) => {
@@ -259,18 +337,23 @@ export async function composeModernClientQuoteMessage(
     });
     if (extra) events.push(...extra);
     logNarrativeEvents(events);
-    const finalMessage = assembleClientQuoteMessage(fallbackParts);
+    const packed = packFromLlm(null);
+    const finalMessage = assembleClientQuoteMessage(packed.parts);
     return finish(
       {
         flow: NARRATIVE_FLOW.CANONICAL,
         finalMessage,
-        financialBlock: financial.text,
-        warningsBlock: warnings.text,
-        shownWarnings: warnings.shownWarnings,
+        financialBlock: packed.financialBlock,
+        warningsBlock: packed.warningsBlock,
+        shownWarnings: packed.shownWarnings,
         llmUsed: false,
         fallbackUsed: true,
         events,
-        parts: fallbackParts,
+        parts: packed.parts,
+        fullQuoteRendered: packed.fullQuoteRendered,
+        deltaRendered: packed.deltaRendered,
+        postFilterInterventionsCount: packed.postFilterInterventionsCount,
+        preFilterClean: packed.preFilterClean,
       } satisfies ComposedClientQuote,
       reason !== 'reconciliation_failed',
     );
@@ -285,7 +368,7 @@ export async function composeModernClientQuoteMessage(
       llmParts = await composeCanonicalLlmNarrativeParts(
         input.openai,
         input.chatAppointmentSystemPrompt,
-        input,
+        { ...input, ux },
         input.conversationTurns ?? [],
       );
     } catch (err) {
@@ -317,20 +400,18 @@ export async function composeModernClientQuoteMessage(
     ]);
   }
 
-  const parts: ClientQuoteMessage = {
-    intro: sanitized.parts.intro,
-    technicalExplanation: sanitized.parts.technicalExplanation,
-    financialBlock: financial.text,
-    warningsBlock: warnings.text,
-    cta: sanitized.parts.cta,
-  };
-  const finalMessage = assembleClientQuoteMessage(parts);
+  const packed = packFromLlm(sanitized.parts);
+  const finalMessage = assembleClientQuoteMessage(packed.parts);
   const validation = validateFinalClientQuoteMessage({
     canonicalQuote: input.canonicalQuote,
-    renderedFinancialBlock: financial.text,
+    renderedFinancialBlock: packed.financialBlock,
     finalMessage,
-    warningsBlock: warnings.text,
+    warningsBlock: packed.warningsBlock,
     peritaje: input.peritaje,
+    scope: {
+      presentation: ux.presentation,
+      requiredQuoteLineIds: ux.requiredQuoteLineIds,
+    },
   });
   if (!validation.ok) {
     return useFallback('reconciliation_failed', validation.events);
@@ -340,13 +421,17 @@ export async function composeModernClientQuoteMessage(
     {
       flow: NARRATIVE_FLOW.CANONICAL,
       finalMessage,
-      financialBlock: financial.text,
-      warningsBlock: warnings.text,
-      shownWarnings: warnings.shownWarnings,
+      financialBlock: packed.financialBlock,
+      warningsBlock: packed.warningsBlock,
+      shownWarnings: packed.shownWarnings,
       llmUsed: true,
       fallbackUsed: false,
       events,
-      parts,
+      parts: packed.parts,
+      fullQuoteRendered: packed.fullQuoteRendered,
+      deltaRendered: packed.deltaRendered,
+      postFilterInterventionsCount: packed.postFilterInterventionsCount,
+      preFilterClean: packed.preFilterClean,
     },
     true,
   );

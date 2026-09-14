@@ -583,12 +583,18 @@ function requiredWarningCodes(quote: CanonicalQuoteV1): string[] {
   );
 }
 
+export type ClientMessageValidationScope = {
+  presentation?: 'FULL' | 'DELTA' | 'NONE';
+  requiredQuoteLineIds?: readonly string[];
+};
+
 export function validateFinalClientQuoteMessage(input: {
   canonicalQuote: CanonicalQuoteV1;
   renderedFinancialBlock: string;
   finalMessage: string;
   warningsBlock?: string;
   peritaje?: CanonicalPeritajeV1 | null;
+  scope?: ClientMessageValidationScope;
 }): FinalMessageValidation {
   const errors: string[] = [];
   const events: NarrativeObservabilityEvent[] = [];
@@ -596,11 +602,26 @@ export function validateFinalClientQuoteMessage(input: {
   const message = String(input.finalMessage ?? '');
   const block = String(input.renderedFinancialBlock ?? '');
   const quoteId = quote.quoteId;
+  const presentation = input.scope?.presentation ?? 'FULL';
+  const requiredIds = input.scope?.requiredQuoteLineIds
+    ? new Set(input.scope.requiredQuoteLineIds)
+    : null;
 
   const push = (event: NarrativeEventCode, error: string) => {
     errors.push(error);
     events.push({ event, quoteId, detail: error });
   };
+
+  if (presentation === 'NONE') {
+    const extraHits = extractMonetaryAmounts(message);
+    if (extraHits.length) {
+      push(
+        NARRATIVE_EVENTS.EXTRA_MONETARY_AMOUNT,
+        `Importes extra en respuesta sin quote: ${extraHits.map((h) => h.raw).join(', ')}`,
+      );
+    }
+    return { ok: errors.length === 0, errors, events };
+  }
 
   if (!block || !message.includes(block)) {
     push(
@@ -611,6 +632,7 @@ export function validateFinalClientQuoteMessage(input: {
 
   for (const line of quote.lines) {
     if (!isChargeableQuoteLine(line)) continue;
+    if (requiredIds && !requiredIds.has(line.quoteLineId)) continue;
     const piece = resolveQuoteLinePieceLabel(line, input.peritaje);
     const label = buildControlledQuoteLineLabel(line.serviceType, piece);
     if (!message.includes(label)) {
@@ -671,13 +693,15 @@ export function validateFinalClientQuoteMessage(input: {
       'El bloque de warnings determinista no está en el mensaje',
     );
   }
-  for (const code of requiredWarningCodes(quote)) {
-    const copy = CANONICAL_WARNING_COPY[code];
-    if (copy && !message.includes(copy)) {
-      push(
-        NARRATIVE_EVENTS.MISSING_REQUIRED_WARNING,
-        `Falta warning obligatorio ${code}`,
-      );
+  if (presentation === 'FULL') {
+    for (const code of requiredWarningCodes(quote)) {
+      const copy = CANONICAL_WARNING_COPY[code];
+      if (copy && !message.includes(copy)) {
+        push(
+          NARRATIVE_EVENTS.MISSING_REQUIRED_WARNING,
+          `Falta warning obligatorio ${code}`,
+        );
+      }
     }
   }
 

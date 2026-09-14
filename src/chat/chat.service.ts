@@ -43,6 +43,7 @@ import {
   formatAutoFixMoney,
   normalizeTextForMatch,
   type DamageLevel,
+  type QuoteSendSnapshot,
 } from './autofix-config';
 import { resolveMatrixServicioRaw, normalizePanelPiezaCode } from '../catalog/panel-pieza-catalog';
 import {
@@ -188,6 +189,10 @@ import {
   isCanonicalNarrativeEligible,
   NARRATIVE_FLOW,
 } from './canonical-quote-narrative';
+import {
+  extractLastUserText,
+  type ClientMessageSource,
+} from './client-message-ux';
 import { sanitizeToolResultForLlm } from './llm-tool-result-sanitize';
 import { composeAggregateClientQuoteMessage } from '../domain/peritaje-v1/aggregate-quote';
 import type {
@@ -3963,6 +3968,9 @@ export class ChatService implements OnModuleDestroy {
       temperature?: number;
       canonicalQuote?: CanonicalQuoteV1 | null;
       peritaje?: CanonicalPeritajeV1 | null;
+      previousSnapshot?: QuoteSendSnapshot | null;
+      messageSource?: ClientMessageSource;
+      userText?: string;
     },
   ): Promise<void> {
     const conv = await this.conversationRepository.findOne({
@@ -4047,6 +4055,11 @@ export class ChatService implements OnModuleDestroy {
         chatAppointmentSystemPrompt: chatPrompt || undefined,
         conversationTurns: dialogue,
         temperature: narrativeOptions?.temperature,
+        previousSnapshot:
+          narrativeOptions?.previousSnapshot ?? draft.lastSendSnapshot ?? null,
+        messageSource: narrativeOptions?.messageSource,
+        userText:
+          narrativeOptions?.userText ?? extractLastUserText(dialogue),
       });
       applyComposedNarrativeToDraft(draft, composed);
       draft.formalNarrative = replaceRawPiezaCodesInClientText(
@@ -4193,11 +4206,15 @@ export class ChatService implements OnModuleDestroy {
       return null;
     }
     let chatPrompt = '';
+    let dialogue: ChatCompletionMessageParam[] = [];
     try {
       chatPrompt = await this.getChatAppointmentSystemPrompt();
+      const historyRows = await this.loadRecentMessagesForLlm(conversation.id);
+      dialogue = this.messagesToChatCompletionTurns(historyRows);
     } catch {
       chatPrompt = '';
     }
+    const userText = extractLastUserText(dialogue);
     const composed = await composeModernClientQuoteMessage({
       canonicalQuote: cart!.canonicalQuoteV1!,
       peritaje: cart!.canonicalPeritajeV1,
@@ -4213,7 +4230,13 @@ export class ChatService implements OnModuleDestroy {
         '',
       openai: this.openai,
       chatAppointmentSystemPrompt: chatPrompt || undefined,
+      conversationTurns: dialogue,
+      previousSnapshot: cart?.quotePayload?.lastSendSnapshot ?? null,
+      userText,
     });
+    if (composed.mode === 'APPOINTMENT_FOLLOWUP') {
+      return null;
+    }
     return composed.finalMessage;
   }
 
@@ -4223,7 +4246,11 @@ export class ChatService implements OnModuleDestroy {
    */
   private async refreshClientNarrativeOnDraftQuote(
     row: DraftQuoteEntity,
-    narrativeOptions?: { forceRandomVariant?: boolean; temperature?: number },
+    narrativeOptions?: {
+      forceRandomVariant?: boolean;
+      temperature?: number;
+      messageSource?: ClientMessageSource;
+    },
   ): Promise<DraftQuoteEntity> {
     const draft = row.quotePayload;
     const analysis = row.damageAnalysis;
@@ -4240,6 +4267,10 @@ export class ChatService implements OnModuleDestroy {
         ...narrativeOptions,
         canonicalQuote: row.canonicalQuoteV1,
         peritaje: row.canonicalPeritajeV1,
+        previousSnapshot: draft?.lastSendSnapshot ?? null,
+        messageSource:
+          narrativeOptions?.messageSource ??
+          (draft?.lastSendSnapshot ? 'panel_refresh' : 'first_quote'),
       },
     );
 
@@ -6270,7 +6301,9 @@ ${catalogAppend}`;
       tallerId,
       body.inventoryLines,
     );
-    await this.refreshClientNarrativeOnDraftQuote(saved);
+    await this.refreshClientNarrativeOnDraftQuote(saved, {
+      messageSource: 'cart_edit',
+    });
     return this.loadDraftQuoteWithItemsOrThrow(saved.id, tallerId);
   }
 
@@ -7475,6 +7508,22 @@ ${catalogAppend}`;
       draft = attachPendingRequirementsToDraft(draft, requirements);
       draft.quoteFlowMode = 'CANONICAL';
 
+      const prevVehicle = cart.canonicalPeritajeV1?.vehicles?.[0];
+      const nextVehicle = applied.result.vehicle;
+      const identityCorrection = Boolean(
+        cart.quotePayload?.lastSendSnapshot &&
+          applied.result.identityAttrsChanged &&
+          ((prevVehicle?.year &&
+            nextVehicle.year &&
+            prevVehicle.year !== nextVehicle.year) ||
+            (prevVehicle?.model &&
+              nextVehicle.model &&
+              prevVehicle.model !== nextVehicle.model) ||
+            (prevVehicle?.make &&
+              nextVehicle.make &&
+              prevVehicle.make !== nextVehicle.make)),
+      );
+
       await this.applyClientFacingFormalNarrativeToDraft(
         draft,
         analysis,
@@ -7484,6 +7533,10 @@ ${catalogAppend}`;
         {
           canonicalQuote: quote,
           peritaje: applied.result.peritaje,
+          previousSnapshot: cart.quotePayload?.lastSendSnapshot ?? null,
+          messageSource: identityCorrection
+            ? 'vehicle_identity_correction'
+            : 'pending_requirement_resume',
         },
       );
       const draftForClient = normalizeDraftQuoteForClient(draft) ?? draft;
@@ -8423,7 +8476,7 @@ ${catalogAppend}`;
       }),
       );
 
-      if (expressQuoted) {
+      if (expressQuoted && !lastConfirmedIso) {
         const modern = await this.tryComposeModernMessageFromActiveCart(
           conversation,
         );
