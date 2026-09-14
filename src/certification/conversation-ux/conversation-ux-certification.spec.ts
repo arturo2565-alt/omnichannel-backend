@@ -53,8 +53,8 @@ describe('Conversation UX certification', () => {
     // eslint-disable-next-line no-console
     console.log(`\n${formatConversationUxReport(report, results)}\n`);
 
-    expect(results).toHaveLength(12);
-    expect(report.casesPassed).toBe(12);
+    expect(results).toHaveLength(15);
+    expect(report.casesPassed).toBe(15);
     expect(report.casesFailed).toBe(0);
     expect(greetingCount).toBe(1);
     expect(report.greetingDuplicates).toBe(0);

@@ -75,7 +75,7 @@ export function compareConversationUxCheck(
         !msg.includes(formatQuoteMoneyRange(CALAVERA_RANGE_MIN, CALAVERA_RANGE_MAX)),
       );
       push(failures, 'MISSING_REQUIRED_COPY', !msg.includes(REFACCION_AVAILABILITY_DISCLAIMER));
-      push(failures, 'MISSING_REQUIRED_COPY', !/Montaje Calavera derecha/.test(msg));
+      push(failures, 'MISSING_REQUIRED_COPY', !/Montaje:/.test(msg));
       push(failures, 'MISSING_REQUIRED_COPY', !/total actualizado/i.test(msg));
       push(failures, 'MISSING_REQUIRED_COPY', !msg.includes(formatQuoteMoney(ALTAMA_TOTAL_AFTER)));
       push(failures, 'MISSING_REQUIRED_COPY', !/permanece sin cambios/i.test(msg));
@@ -160,6 +160,52 @@ export function compareConversationUxCheck(
     case 'financial_integrity': {
       commonFinancial(actual, failures);
       push(failures, 'WRONG_TOTAL', !msg.includes(formatQuoteMoney(actual.canonicalTotal)));
+      break;
+    }
+    case 'vehicle_correction_reruns_market': {
+      push(failures, 'WRONG_MODE', actual.mode !== 'QUOTE_CORRECTION');
+      push(failures, 'MARKET_NOT_RERUN', (actual.marketLookupCount ?? 0) < 1);
+      push(
+        failures,
+        'MARKET_NOT_RERUN',
+        !actual.oldMarketIdentityKey ||
+          !actual.newMarketIdentityKey ||
+          actual.oldMarketIdentityKey === actual.newMarketIdentityKey,
+      );
+      push(failures, 'IDENTITY_NOT_PRESERVED', actual.idsPreserved !== true);
+      push(failures, 'TECHNICAL_REPEAT', actual.visionCalled === true);
+      commonFinancial(actual, failures);
+      break;
+    }
+    case 'full_refresh_emits_financial_block': {
+      push(failures, 'WRONG_MODE', actual.mode !== 'QUOTE_FULL_REFRESH');
+      push(failures, 'UNEXPECTED_GREETING', actual.shouldGreet !== false);
+      push(failures, 'FULL_QUOTE_UNEXPECTED', actual.fullQuoteRendered !== true);
+      push(
+        failures,
+        'MISSING_FINANCIAL_BLOCK',
+        actual.financialBlockPresent !== true || !actual.financialBlock,
+      );
+      push(failures, 'MISSING_REQUIRED_COPY', !/Fascia trasera/.test(msg));
+      push(failures, 'MISSING_REQUIRED_COPY', !/Calavera derecha/.test(msg));
+      push(
+        failures,
+        'MISSING_FINANCIAL_BLOCK',
+        /Claro, Arturo\. Te reenvío la cotización actualizada/.test(msg) &&
+          !actual.financialBlock,
+      );
+      commonFinancial(actual, failures);
+      break;
+    }
+    case 'no_appointment_assumption': {
+      push(failures, 'WRONG_MODE', actual.mode !== 'QUOTE_CORRECTION');
+      push(failures, 'WRONG_CTA', actual.ctaType === 'CONTINUE_APPOINTMENT');
+      push(
+        failures,
+        'WRONG_CTA',
+        /qu[eé] d[ií]a y hora te funciona/i.test(msg),
+      );
+      commonFinancial(actual, failures);
       break;
     }
     default:

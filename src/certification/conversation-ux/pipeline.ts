@@ -7,9 +7,20 @@ import {
   presentClientWarnings,
   selectWarningCodesForPresentation,
 } from '../../chat/client-message-ux';
+import { applyConfirmVehicleIdentity } from '../../chat/confirm-vehicle-identity';
+import { resumePendingQuotePricing } from '../../chat/resume-pending-quote-pricing';
+import {
+  marketCacheKey,
+  parseVehiclePartIdentity,
+} from '../../chat/refaccion-market/parse-vehicle-part-identity';
+import { applyCustomerMargin } from '../../chat/refaccion-market/compute-market-range';
+import type { VehiclePartIdentity } from '../../chat/refaccion-market/refaccion-market.types';
+import type { DetectedDamageItem } from '../../chat/entities/chat.entity';
 import { formatQuoteMoney } from '../../domain/peritaje-v1/quote-narrative';
+import { createQuoteLineId } from '../../domain/peritaje-v1';
 import type { CanonicalPeritajeV1, CanonicalQuoteV1 } from '../../domain/peritaje-v1';
 import type { QuoteSendSnapshot } from '../../chat/autofix-config';
+import type { MatrixPricingSnapshot } from '../../catalog/matrix-pricing-snapshot';
 import { remainderInventedAmounts } from './compare';
 import type { ConversationUxActual, ConversationUxCheckId } from './types';
 import {
@@ -73,6 +84,9 @@ function toActual(
     postFilterInterventions: composed.postFilterInterventionsCount ?? 0,
     preFilterClean: composed.preFilterClean !== false,
     humanLabelLeak: leak(composed.finalMessage, peritaje),
+    financialBlockPresent: Boolean(
+      financialBlock && composed.finalMessage.includes(financialBlock),
+    ),
     ...extra,
   };
 }
@@ -281,6 +295,51 @@ export async function runConversationUxCheck(
           offerRe.test(booked.finalMessage),
       });
     }
+    case 'full_refresh_emits_financial_block': {
+      const composed = await compose({
+        canonicalQuote: resumed,
+        peritaje: peritaje2014,
+        contactName: 'Arturo',
+        hasActiveAppointment: false,
+        previousSnapshot: resumedSnap,
+        userText: 'Mándame toda la cotización otra vez',
+        llmParts: {
+          intro: 'Claro, Arturo. Te reenvío la cotización actualizada...',
+          technicalExplanation: '',
+          cta: '',
+        },
+      });
+      return toActual(checkId, composed, resumed, peritaje2014);
+    }
+    case 'no_appointment_assumption': {
+      const composed = await compose({
+        canonicalQuote: corrected,
+        peritaje: peritaje2015,
+        previousPeritaje: peritaje2014,
+        contactName: 'Arturo',
+        hasActiveAppointment: false,
+        previousSnapshot: resumedSnap,
+        messageSource: 'vehicle_identity_correction',
+        userText: 'Perdón, es 2015',
+        llmParts: DIRTY_LLM,
+      });
+      return toActual(checkId, composed, corrected, peritaje2015);
+    }
+    case 'vehicle_correction_reruns_market': {
+      const runtime = await runVehicleYearCorrectionMarketCheck();
+      const composed = await compose({
+        canonicalQuote: corrected,
+        peritaje: peritaje2015,
+        previousPeritaje: peritaje2014,
+        contactName: 'Arturo',
+        hasActiveAppointment: false,
+        previousSnapshot: sendSnapshot(resumed),
+        messageSource: 'vehicle_identity_correction',
+        userText: 'Perdón, es 2015',
+        llmParts: DIRTY_LLM,
+      });
+      return toActual(checkId, composed, corrected, peritaje2015, runtime);
+    }
     default: {
       const composed = await compose({
         canonicalQuote: partial,
@@ -360,4 +419,129 @@ export function snapshotFromQuote(
   quote: CanonicalQuoteV1,
 ): QuoteSendSnapshot {
   return sendSnapshot(quote);
+}
+
+function paintSnap(): MatrixPricingSnapshot {
+  return {
+    matchServicio: (s: string) => s,
+    getPriceForCanonical: () => 0,
+    getAmount: () => 0,
+    getDiasEntregaForCanonical: () => 5,
+    listSeveridadesForCanonical: () => ['DL', 'MONTAJE_PINTURA'],
+  } as unknown as MatrixPricingSnapshot;
+}
+
+async function runVehicleYearCorrectionMarketCheck(): Promise<
+  Partial<ConversationUxActual>
+> {
+  const peritaje2014 = altimaPeritaje('2014');
+  const vehicle = peritaje2014.vehicles[0]!;
+  const identity2014 = parseVehiclePartIdentity({
+    vehiculoText: vehicle.displayLabel,
+    marca: vehicle.make,
+    modelo: vehicle.model,
+    anio: vehicle.year,
+    pieza: 'Calavera_Derecha',
+  });
+  const oldKey = marketCacheKey(identity2014);
+  const inventory: DetectedDamageItem[] = [
+    {
+      pieza: 'Calavera_Derecha',
+      tratamiento: 'SUSTITUIR',
+      damageItemId: 'dmg_cala',
+      vehicleId: 'veh_1',
+      vehiculoDetectado: 'Nissan Altima 2014',
+      pricingStatus: 'OK',
+      priceSource: 'WEB_MARKET_ESTIMATE',
+      precioMx: 3650,
+      marketIdentityKey: oldKey,
+      severidad: 'DMFuerte',
+      descripcionTecnica: 'quebrada',
+      urls_origen: ['https://cdn.example/cala.jpg'],
+    },
+  ];
+  const corrected = applyConfirmVehicleIdentity({
+    peritaje: peritaje2014,
+    inventory,
+    args: { year: '2015' },
+  });
+  if (!corrected.ok) {
+    return { marketLookupCount: 0, idsPreserved: false, visionCalled: false };
+  }
+  let marketLookupCount = 0;
+  const resumed = await resumePendingQuotePricing({
+    conversationId: 'c_ux_cert',
+    peritaje: corrected.result.peritaje,
+    inventory: corrected.result.inventory,
+    existingQuote: resumedAltimaQuote(),
+    draft: {
+      status: 'PENDING_APPROVAL',
+      currency: 'MXN',
+      reference: 'AF-UX',
+      generatedAt: '2026-09-14T00:00:00.000Z',
+      lines: [],
+      formalNarrative: '',
+      subtotal: 0,
+      total: 0,
+      analysisBasis: {
+        pieza: 'Calavera_Derecha',
+        severidad: 'DMFuerte',
+        partesAfectadas: ['Calavera_Derecha'],
+        severidadDelDano: 'DMFuerte',
+        descripcionTecnica: '',
+        justificacion: '',
+      },
+    },
+    vehicle: corrected.result.vehicle,
+    forceMarketRefresh:
+      corrected.result.marketIdentityChange.invalidateAffectedMarketPricing,
+    marketService: {
+      estimate: async (identity: VehiclePartIdentity) => {
+        marketLookupCount += 1;
+        const market = {
+          precioMinEstimado: 3500,
+          precioMaxEstimado: 4100,
+          precioCentral: 3800,
+        };
+        return {
+          pricingType: 'RANGE',
+          pricingStatus: 'OK',
+          marketPriceRange: market,
+          customerPriceRange: applyCustomerMargin(market),
+          cantidadMuestras: 5,
+          cantidadDominios: 3,
+          providersUsed: ['SERPER_SHOPPING'],
+          priceSource: 'WEB_MARKET_ESTIMATE',
+          confidence: 'MEDIUM',
+          partTypeGroup: 'AFTERMARKET_NEW',
+          samples: [],
+          identity,
+          query: `${identity.piezaLabel} ${identity.marca} ${identity.modelo} ${identity.anio}`,
+        };
+      },
+    } as never,
+    snap: paintSnap(),
+  });
+  const newKey = resumed.inventory[0]?.marketIdentityKey;
+  const refaccion = resumed.quote.lines.find((l) => l.serviceType === 'REFACCION');
+  const expectedRefId = createQuoteLineId({
+    damageItemId: 'dmg_cala',
+    serviceType: 'REFACCION',
+  });
+  const expectedMonId = createQuoteLineId({
+    damageItemId: 'dmg_cala',
+    serviceType: 'MONTAJE',
+  });
+  const montaje = resumed.quote.lines.find((l) => l.serviceType === 'MONTAJE');
+  return {
+    marketLookupCount,
+    oldMarketIdentityKey: oldKey,
+    newMarketIdentityKey: newKey,
+    visionCalled: resumed.visionCalled,
+    idsPreserved:
+      corrected.result.vehicle.vehicleId === 'veh_1' &&
+      corrected.result.inventory[0]?.damageItemId === 'dmg_cala' &&
+      refaccion?.quoteLineId === expectedRefId &&
+      (!montaje || montaje.quoteLineId === expectedMonId),
+  };
 }

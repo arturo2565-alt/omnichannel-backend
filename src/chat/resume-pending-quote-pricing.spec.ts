@@ -921,4 +921,105 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
     );
     expect(refaccion?.pricingStatus).toBe('OK');
   });
+
+  it('21. Altima year 2014→2015 relanza market y conserva IDs', async () => {
+    const { peritaje: raw, inventory } = mazdaCase({
+      year: '2014',
+      vehicleLabel: 'Nissan Altima 2014',
+    });
+    const peritaje = withConfirmedFields({
+      ...raw,
+      vehicles: raw.vehicles.map((v) => ({
+        ...v,
+        make: 'Nissan',
+        model: 'Altima',
+        year: '2014',
+        displayLabel: 'Nissan Altima 2014',
+      })),
+    });
+    const pricedInv = inventory.map((it) => ({
+      ...it,
+      pieza: 'Calavera_Derecha',
+      vehiculoDetectado: 'Nissan Altima 2014',
+    }));
+    const priced = await enrichInventoryWithMarketRefacciones(
+      {
+        pieza: 'Calavera_Derecha',
+        severidad: 'DMFuerte',
+        descripcionTecnica: '',
+        justificacion: '',
+        partesAfectadas: ['Calavera_Derecha'],
+        severidadDelDano: 'DMFuerte',
+        vehiculoDetectado: 'Nissan Altima 2014',
+        inventory: pricedInv,
+      },
+      {
+        estimate: async (identity: VehiclePartIdentity) =>
+          readyEstimate(identity, 3650),
+      } as never,
+      () => undefined,
+      { vehicles: peritaje.vehicles },
+    );
+    const initial = buildCanonicalQuoteV1({
+      peritaje,
+      pricedInventory: priced.inventory ?? [],
+      snap: paintSnap,
+      quoteId: 'quo_altima_year',
+    });
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const oldKey = priced.inventory?.[0]?.marketIdentityKey;
+    expect(oldKey).toBeTruthy();
+    const refaccionBefore = initial.quote.lines.find(
+      (l) => l.serviceType === 'REFACCION',
+    );
+    const montajeBefore = initial.quote.lines.find(
+      (l) => l.serviceType === 'MONTAJE',
+    );
+    const corrected = applyConfirmVehicleIdentity({
+      peritaje,
+      inventory: priced.inventory ?? [],
+      args: { year: '2015' },
+    });
+    expect(corrected.ok).toBe(true);
+    if (!corrected.ok) return;
+    expect(corrected.result.vehicle.vehicleId).toBe(VEH);
+    expect(corrected.result.vehicle.year).toBe('2015');
+    expect(corrected.result.vehicle.make).toBe('Nissan');
+    expect(corrected.result.vehicle.model).toBe('Altima');
+    expect(corrected.result.marketIdentityChange.changedFields).toContain('year');
+    expect(corrected.result.marketIdentityChange.invalidateAffectedMarketPricing).toBe(
+      true,
+    );
+    expect(corrected.result.inventory[0]?.pricingStatus).toBeUndefined();
+    const queries: VehiclePartIdentity[] = [];
+    const resumed = await resumePendingQuotePricing({
+      conversationId: 'conv_altima',
+      peritaje: corrected.result.peritaje,
+      inventory: corrected.result.inventory,
+      existingQuote: initial.quote,
+      draft: emptyDraft(),
+      vehicle: corrected.result.vehicle,
+      forceMarketRefresh: true,
+      marketService: {
+        estimate: async (identity: VehiclePartIdentity) => {
+          queries.push(identity);
+          return readyEstimate(identity, 3800);
+        },
+      } as never,
+      snap: paintSnap,
+    });
+    expect(resumed.visionCalled).toBe(false);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.anio).toBe('2015');
+    expect(queries[0]?.marca.toLowerCase()).toContain('nissan');
+    expect(queries[0]?.modelo.toLowerCase()).toContain('altima');
+    expect(resumed.inventory[0]?.marketIdentityKey).not.toBe(oldKey);
+    const refaccion = resumed.quote.lines.find((l) => l.serviceType === 'REFACCION');
+    const montaje = resumed.quote.lines.find((l) => l.serviceType === 'MONTAJE');
+    expect(refaccion?.damageItemId).toBe(refaccionBefore?.damageItemId);
+    expect(refaccion?.quoteLineId).toBe(refaccionBefore?.quoteLineId);
+    expect(montaje?.quoteLineId).toBe(montajeBefore?.quoteLineId);
+    expect(refaccion?.pricingStatus).toBe('OK');
+  });
 });

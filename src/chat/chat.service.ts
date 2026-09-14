@@ -191,6 +191,7 @@ import {
 } from './canonical-quote-narrative';
 import {
   extractLastUserText,
+  userRequestsFullQuote,
   type ClientMessageSource,
 } from './client-message-ux';
 import { sanitizeToolResultForLlm } from './llm-tool-result-sanitize';
@@ -3969,6 +3970,7 @@ export class ChatService implements OnModuleDestroy {
       canonicalQuote?: CanonicalQuoteV1 | null;
       peritaje?: CanonicalPeritajeV1 | null;
       previousSnapshot?: QuoteSendSnapshot | null;
+      previousPeritaje?: CanonicalPeritajeV1 | null;
       messageSource?: ClientMessageSource;
       userText?: string;
     },
@@ -4055,8 +4057,9 @@ export class ChatService implements OnModuleDestroy {
         chatAppointmentSystemPrompt: chatPrompt || undefined,
         conversationTurns: dialogue,
         temperature: narrativeOptions?.temperature,
-        previousSnapshot:
+          previousSnapshot:
           narrativeOptions?.previousSnapshot ?? draft.lastSendSnapshot ?? null,
+        previousPeritaje: narrativeOptions?.previousPeritaje,
         messageSource: narrativeOptions?.messageSource,
         userText:
           narrativeOptions?.userText ?? extractLastUserText(dialogue),
@@ -4161,6 +4164,10 @@ export class ChatService implements OnModuleDestroy {
 
   private async tryComposeModernMessageFromActiveCart(
     conversation: Conversation,
+    options?: {
+      messageSource?: ClientMessageSource;
+      userText?: string;
+    },
   ): Promise<string | null> {
     const cart = await this.quoteCartService.resolveActiveCart(
       conversation.id,
@@ -4214,7 +4221,7 @@ export class ChatService implements OnModuleDestroy {
     } catch {
       chatPrompt = '';
     }
-    const userText = extractLastUserText(dialogue);
+    const userText = options?.userText ?? extractLastUserText(dialogue);
     const composed = await composeModernClientQuoteMessage({
       canonicalQuote: cart!.canonicalQuoteV1!,
       peritaje: cart!.canonicalPeritajeV1,
@@ -4232,6 +4239,7 @@ export class ChatService implements OnModuleDestroy {
       chatAppointmentSystemPrompt: chatPrompt || undefined,
       conversationTurns: dialogue,
       previousSnapshot: cart?.quotePayload?.lastSendSnapshot ?? null,
+      messageSource: options?.messageSource,
       userText,
     });
     if (composed.mode === 'APPOINTMENT_FOLLOWUP') {
@@ -7448,9 +7456,13 @@ ${catalogAppend}`;
         it.pricingStatus === 'AWAITING_VEHICLE_DATA' &&
         identityReady,
     );
+    const marketIdentityChanged =
+      applied.result.marketIdentityChange?.invalidateAffectedMarketPricing ===
+      true;
     const shouldResume =
       applied.result.resolved.length > 0 ||
       applied.result.identityAttrsChanged ||
+      marketIdentityChanged ||
       awaitingSatisfied;
 
     const analysis: VehicleDamageAnalysis = {
@@ -7493,6 +7505,7 @@ ${catalogAppend}`;
         vehicleProfile,
         pricingRules,
         vehiculoText: applied.result.displayLabel,
+        forceMarketRefresh: marketIdentityChanged,
       });
       quote = resumedQuote.quote;
       requirements = resumedQuote.requirements;
@@ -7512,7 +7525,8 @@ ${catalogAppend}`;
       const nextVehicle = applied.result.vehicle;
       const identityCorrection = Boolean(
         cart.quotePayload?.lastSendSnapshot &&
-          applied.result.identityAttrsChanged &&
+          (marketIdentityChanged ||
+            applied.result.identityAttrsChanged) &&
           ((prevVehicle?.year &&
             nextVehicle.year &&
             prevVehicle.year !== nextVehicle.year) ||
@@ -7521,7 +7535,8 @@ ${catalogAppend}`;
               prevVehicle.model !== nextVehicle.model) ||
             (prevVehicle?.make &&
               nextVehicle.make &&
-              prevVehicle.make !== nextVehicle.make)),
+              prevVehicle.make !== nextVehicle.make) ||
+            marketIdentityChanged),
       );
 
       await this.applyClientFacingFormalNarrativeToDraft(
@@ -7533,6 +7548,7 @@ ${catalogAppend}`;
         {
           canonicalQuote: quote,
           peritaje: applied.result.peritaje,
+          previousPeritaje: cart.canonicalPeritajeV1 ?? null,
           previousSnapshot: cart.quotePayload?.lastSendSnapshot ?? null,
           messageSource: identityCorrection
             ? 'vehicle_identity_correction'
@@ -8461,7 +8477,7 @@ ${catalogAppend}`;
           if (
             name === 'confirmVehicleIdentity' &&
             payload.success &&
-            payload.quoteUpdated
+            (payload.quoteUpdated || payload.resumed)
           ) {
             expressQuoted = true;
           }
@@ -8476,9 +8492,15 @@ ${catalogAppend}`;
       }),
       );
 
-      if (expressQuoted && !lastConfirmedIso) {
+      if (!lastConfirmedIso && (expressQuoted || userRequestsFullQuote(mergedForInstant))) {
         const modern = await this.tryComposeModernMessageFromActiveCart(
           conversation,
+          {
+            userText: mergedForInstant,
+            ...(userRequestsFullQuote(mergedForInstant)
+              ? { messageSource: 'user_requested_full_quote' as const }
+              : {}),
+          },
         );
         if (modern) {
           const text = await this.finalizeAutopilotReplyWithAppointmentGuard(

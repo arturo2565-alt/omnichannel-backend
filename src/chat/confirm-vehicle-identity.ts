@@ -12,6 +12,17 @@ import {
 import { resolvePendingRequirementsForVehicle } from '../domain/peritaje-v1/pending-quote-requirement';
 import { stampDamagesOntoVehicle } from '../domain/peritaje-v1/case-vehicle-identity';
 import { invalidateMarketPricingOnItem } from './refaccion-market/apply-awaiting-vehicle-data';
+import {
+  hasMarketRelevantVehicleIdentityChange,
+  marketCacheKey,
+  parseVehiclePartIdentity,
+  type MarketRelevantVehicleIdentityChange,
+} from './refaccion-market/parse-vehicle-part-identity';
+import {
+  CANONICAL_TRACE_EVENTS,
+  pegCanonicalTrace,
+  summarizeVehicleIdentity,
+} from './canonical-trace';
 
 export type ConfirmVehicleIdentityArgs = {
   vehicleId?: string;
@@ -91,12 +102,33 @@ export type ApplyConfirmVehicleIdentityResult = {
   requirements: PendingQuoteRequirement[];
   resolved: PendingQuoteRequirement[];
   identityAttrsChanged: boolean;
+  marketIdentityChange: MarketRelevantVehicleIdentityChange;
   displayLabel: string;
 };
 
+function marketKeyForItem(
+  vehicle: VehicleIdentity,
+  item: DetectedDamageItem,
+): string {
+  return marketCacheKey(
+    parseVehiclePartIdentity({
+      vehiculoText: vehicle.displayLabel,
+      marca: vehicle.make,
+      modelo: vehicle.model,
+      anio: vehicle.year,
+      version: vehicle.version ?? vehicle.variant,
+      pieza: item.pieza,
+      moldingPosition: item.moldingPosition,
+      finishType: item.finishType,
+    }),
+  );
+}
+
+export { hasMarketRelevantVehicleIdentityChange };
+
 /**
  * Confirma/enriquece la identidad existente. No regenera vehicleId.
- * Una corrección de make/model invalida precios de mercado dependientes.
+ * Una corrección de make/model/year/version invalida precios de mercado.
  */
 export function applyConfirmVehicleIdentity(
   input: ApplyConfirmVehicleIdentityInput,
@@ -130,6 +162,10 @@ export function applyConfirmVehicleIdentity(
     confirmedFields,
   };
   const enriched = enrichVehicleIdentity(vehicle, patch);
+  const marketIdentityChange = hasMarketRelevantVehicleIdentityChange(
+    vehicle,
+    enriched.vehicle,
+  );
   const now = input.now ?? new Date().toISOString();
   const knownVehicles = input.peritaje.vehicles.filter(
     (v) => v.vehicleId && v.vehicleId !== 'veh_unknown',
@@ -139,17 +175,21 @@ export function applyConfirmVehicleIdentity(
   if (unifySingle) {
     damages = stampDamagesOntoVehicle(damages, vehicle.vehicleId);
   }
+  const nextVehicle: VehicleIdentity = {
+    ...enriched.vehicle,
+    vehicleId: vehicle.vehicleId,
+  };
   const peritaje: CanonicalPeritajeV1 = {
     ...input.peritaje,
     vehicles: input.peritaje.vehicles.map((v) =>
-      v.vehicleId === vehicle.vehicleId ? enriched.vehicle : v,
+      v.vehicleId === vehicle.vehicleId ? nextVehicle : v,
     ),
     damages,
     updatedAt: now,
   };
   const resolvedReqs = resolvePendingRequirementsForVehicle(
     input.requirements,
-    enriched.vehicle,
+    nextVehicle,
     now,
   );
   let inventory = input.inventory.map((it) => {
@@ -158,16 +198,35 @@ export function applyConfirmVehicleIdentity(
     }
     return {
       ...it,
-      vehiculoDetectado: enriched.vehicle.displayLabel,
+      vehiculoDetectado: nextVehicle.displayLabel,
       vehicleId: vehicle.vehicleId,
     };
   });
-  if (enriched.identityAttrsChanged) {
+  if (marketIdentityChange.invalidateAffectedMarketPricing) {
+    pegCanonicalTrace(CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY_CORRECTED, {
+      vehicleId: vehicle.vehicleId,
+      before: summarizeVehicleIdentity(vehicle),
+      after: summarizeVehicleIdentity(nextVehicle),
+      changedFields: marketIdentityChange.changedFields,
+    });
     inventory = inventory.map((it) => {
       if (it.vehicleId && it.vehicleId !== vehicle.vehicleId) return it;
       if (String(it.tratamiento ?? '').toUpperCase() !== 'SUSTITUIR') {
         return it;
       }
+      const oldMarketIdentityKey =
+        it.marketIdentityKey || marketKeyForItem(vehicle, it);
+      const newMarketIdentityKey = marketKeyForItem(nextVehicle, it);
+      pegCanonicalTrace(
+        CANONICAL_TRACE_EVENTS.MARKET_INVALIDATED_BY_VEHICLE_CORRECTION,
+        {
+          vehicleId: vehicle.vehicleId,
+          damageItemId: it.damageItemId,
+          oldMarketIdentityKey,
+          newMarketIdentityKey,
+          changedFields: marketIdentityChange.changedFields,
+        },
+      );
       return invalidateMarketPricingOnItem(it);
     });
   }
@@ -176,11 +235,13 @@ export function applyConfirmVehicleIdentity(
     result: {
       peritaje,
       inventory,
-      vehicle: enriched.vehicle,
+      vehicle: nextVehicle,
       requirements: resolvedReqs.next,
       resolved: resolvedReqs.resolved,
-      identityAttrsChanged: enriched.identityAttrsChanged,
-      displayLabel: enriched.vehicle.displayLabel,
+      identityAttrsChanged:
+        enriched.identityAttrsChanged || marketIdentityChange.changed,
+      marketIdentityChange,
+      displayLabel: nextVehicle.displayLabel,
     },
   };
 }

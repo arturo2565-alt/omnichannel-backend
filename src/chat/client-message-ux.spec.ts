@@ -374,6 +374,12 @@ describe('Conversation UX / Client Message Composer v2', () => {
     });
     expect(composed.finalMessage).toContain('$3,400–$3,800');
     expect(composed.finalMessage).not.toMatch(/fascia/i);
+    expect(composed.finalMessage).toMatch(/🔧 \*Calavera derecha\*/);
+    expect(composed.finalMessage).toMatch(/Refacción:/);
+    expect(composed.finalMessage).not.toMatch(/Refacción Calavera derecha/);
+    expect(composed.finalMessage).not.toMatch(/No cambiaremos ni ocultaremos/);
+    expect(composed.finalMessage).not.toMatch(/qu[eé] d[ií]a y hora te funciona/i);
+    expect(composed.ctaType).not.toBe('CONTINUE_APPOINTMENT');
   });
 
   it('8. full refresh sí puede mostrar quote completa', async () => {
@@ -395,6 +401,9 @@ describe('Conversation UX / Client Message Composer v2', () => {
   it('9. usuario pide cotización completa → full refresh', () => {
     expect(userRequestsFullQuote('mándame la cotización completa')).toBe(true);
     expect(userRequestsFullQuote('cuánto sería todo')).toBe(true);
+    expect(userRequestsFullQuote('Mándame toda la cotización otra vez')).toBe(
+      true,
+    );
     expect(
       resolveClientMessageMode({
         quote: resumedQuote,
@@ -434,6 +443,9 @@ describe('Conversation UX / Client Message Composer v2', () => {
     expect(presented.shownWarnings).toEqual(
       expect.arrayContaining(['HIDDEN_DAMAGE', 'POSSIBLE_SUBSTITUTION', 'AWAITING_VEHICLE_DATA']),
     );
+    expect(presented.text).toContain('Pueden existir daños internos');
+    expect(presented.text).not.toMatch(/Por la magnitud/);
+    expect(presented.text).not.toMatch(/A reserva de revisión física/);
   });
 
   it('12. labels humanos', async () => {
@@ -477,8 +489,8 @@ describe('Conversation UX / Client Message Composer v2', () => {
       userText: 'Nissan Altima 2014',
       llmParts: { intro: 'ok', technicalExplanation: '', cta: '' },
     });
-    const refIdx = composed.finalMessage.indexOf('Refacción Calavera derecha');
-    const monIdx = composed.finalMessage.indexOf('Montaje Calavera derecha');
+    const refIdx = composed.finalMessage.indexOf('Refacción:');
+    const monIdx = composed.finalMessage.indexOf('Montaje:');
     expect(refIdx).toBeGreaterThan(-1);
     expect(monIdx).toBeGreaterThan(refIdx);
   });

@@ -167,3 +167,68 @@ export function marketIdentityKey(identity: VehiclePartIdentity): string {
 export function marketCacheKey(identity: VehiclePartIdentity): string {
   return `${MARKET_STRATEGY_VERSION}|${marketIdentityKey(identity)}`;
 }
+
+export type MarketRelevantVehicleIdentity = {
+  make?: string | null;
+  model?: string | null;
+  year?: string | null;
+  version?: string | null;
+  variant?: string | null;
+  generation?: string | null;
+};
+
+export type MarketRelevantVehicleIdentityChange = {
+  changed: boolean;
+  changedFields: string[];
+  invalidateAffectedMarketPricing: boolean;
+};
+
+function normMarketIdentityField(raw: unknown): string {
+  return String(raw ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, '');
+}
+
+/**
+ * Campos que participan en marketIdentityKey / cache v4.
+ * No regenera vehicleId.
+ */
+export function hasMarketRelevantVehicleIdentityChange(
+  before?: MarketRelevantVehicleIdentity | null,
+  after?: MarketRelevantVehicleIdentity | null,
+): MarketRelevantVehicleIdentityChange {
+  const changedFields: string[] = [];
+  const pushIfChanged = (
+    field: string,
+    prev: unknown,
+    next: unknown,
+  ) => {
+    if (normMarketIdentityField(prev) !== normMarketIdentityField(next)) {
+      changedFields.push(field);
+    }
+  };
+  pushIfChanged('make', before?.make, after?.make);
+  pushIfChanged('model', before?.model, after?.model);
+  pushIfChanged('year', before?.year, after?.year);
+  pushIfChanged(
+    'version',
+    before?.version ?? before?.variant,
+    after?.version ?? after?.variant,
+  );
+  if (
+    !changedFields.includes('version') &&
+    normMarketIdentityField(before?.variant) !==
+      normMarketIdentityField(after?.variant)
+  ) {
+    changedFields.push('variant');
+  }
+  pushIfChanged('generation', before?.generation, after?.generation);
+  const changed = changedFields.length > 0;
+  return {
+    changed,
+    changedFields,
+    invalidateAffectedMarketPricing: changed,
+  };
+}

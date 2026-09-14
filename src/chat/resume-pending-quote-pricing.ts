@@ -8,7 +8,10 @@ import type {
   VehicleIdentity,
 } from '../domain/peritaje-v1';
 import { vehicleIdentityVersion } from '../domain/peritaje-v1/vehicle-identity-enrich';
-import { refaccionIdentityGaps } from '../domain/peritaje-v1/pending-quote-requirement';
+import {
+  missingRefaccionVehicleFields,
+  refaccionIdentityGaps,
+} from '../domain/peritaje-v1/pending-quote-requirement';
 import { syncPendingQuoteRequirements } from '../domain/peritaje-v1/pending-quote-requirement';
 import type { DraftQuote } from './autofix-config';
 import {
@@ -46,6 +49,7 @@ export type ResumePendingQuotePricingInput = {
   vehicleProfile?: VehiclePricingProfile | null;
   pricingRules?: CatalogPricingRules | null;
   vehiculoText?: string;
+  forceMarketRefresh?: boolean;
 };
 
 export type ResumePendingQuotePricingResult = {
@@ -70,7 +74,9 @@ function marketLockKey(
 function shouldSkipMarket(
   item: DetectedDamageItem,
   identity: VehiclePartIdentity,
+  forceMarketRefresh?: boolean,
 ): boolean {
+  if (forceMarketRefresh) return false;
   const key = marketCacheKey(identity);
   if (item.marketIdentityKey !== key) return false;
   return (
@@ -181,7 +187,15 @@ async function runResume(
       confirmedFields: itemVehicle?.confirmedFields,
       source: itemVehicle?.source ?? 'vision',
     });
-    if (!gaps.readyForMarket) {
+    const missing = missingRefaccionVehicleFields({
+      make: itemVehicle?.make ?? identity.marca,
+      model: itemVehicle?.model ?? identity.modelo,
+      year: itemVehicle?.year ?? identity.anio,
+    });
+    const readyForMarket =
+      gaps.readyForMarket ||
+      (Boolean(input.forceMarketRefresh) && missing.length === 0);
+    if (!readyForMarket) {
       next.push(
         applyAwaitingVehicleDataToItem(
           { ...it, tratamiento: 'SUSTITUIR' },
@@ -190,7 +204,7 @@ async function runResume(
       );
       continue;
     }
-    if (shouldSkipMarket(it, identity)) {
+    if (shouldSkipMarket(it, identity, input.forceMarketRefresh)) {
       next.push({ ...it, tratamiento: 'SUSTITUIR' });
       continue;
     }

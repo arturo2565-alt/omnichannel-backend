@@ -15,7 +15,8 @@ import type {
   TreatmentDecision,
 } from '../domain/peritaje-v1';
 import {
-  CANONICAL_WARNING_COPY,
+  PRESENTATION_HIDDEN_DAMAGE_COPY,
+  PRESENTATION_PENDING_CONCEPTS_COPY,
   REFACCION_AVAILABILITY_DISCLAIMER,
   buildControlledQuoteLineLabel,
   derivePartialQuoteReasons,
@@ -125,13 +126,16 @@ export type ResolvedClientMessageUx = ClientQuoteMessageContext & {
 };
 
 const FULL_QUOTE_REQUEST_RE =
-  /cotizaci[oó]n completa|presupuesto completo|desglose completo|m[aá]ndame (?:la |el )?(?:cotizaci[oó]n|desglose|presupuesto)|cu[aá]nto (?:ser[ií]a|sale|cuesta) todo|el total de todo/i;
+  /cotizaci[oó]n completa|presupuesto completo|desglose completo|m[aá]ndame (?:la |el |toda (?:la |el )?)?(?:cotizaci[oó]n|desglose|presupuesto)|(?:reenv[ií]a|vuelve a (?:mandar|enviar)|otra vez).{0,40}cotizaci[oó]n|cotizaci[oó]n.{0,40}(?:otra vez|completa)|cu[aá]nto (?:ser[ií]a|sale|cuesta) todo|el total de todo/i;
 
 const IDENTITY_CORRECTION_RE =
   /\b(?:perd[oó]n|correg(?:[ií]|ir)|me equivoqu|en realidad|no es(?: el)?)\b|\bes\s+(?:el\s+)?(?:19|20)\d{2}\b.+\bno\b|\bno\s+(?:es\s+)?(?:el\s+)?(?:19|20)\d{2}/i;
 
 const APPOINTMENT_TURN_RE =
   /\b(?:ma[nñ]ana|hoy|pasado ma[nñ]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b|\b(?:a las?|a la)\s+\d{1,2}(?:\s*:\s*\d{2})?\b|\b\d{1,2}\s*(?::\s*\d{2})?\s*(?:am|pm)\b|\bquiero\s+(?:agendar|cita|ir)\b/i;
+
+const APPOINTMENT_ACCEPT_RE =
+  /\b(?:s[ií](?:\s+\w+){0,6}\s+)?(?:quiero\s+)?(?:agendar|agenda(?:r|mos)?|cita)\b|\bvamos a agendar\b|\bdale(?:\s+\w+){0,3}\s+agend/i;
 
 const APPOINTMENT_CTA_ALREADY_RE =
   /agendemos|qu[eé] d[ií]a te queda|valoraci[oó]n en taller|ingresar tu unidad/i;
@@ -179,6 +183,11 @@ export function userLooksLikeIdentityCorrection(text?: string | null): boolean {
 
 export function userLooksLikeAppointmentTurn(text?: string | null): boolean {
   return APPOINTMENT_TURN_RE.test(String(text ?? ''));
+}
+
+export function userLooksLikeAppointmentIntent(text?: string | null): boolean {
+  const raw = String(text ?? '');
+  return APPOINTMENT_TURN_RE.test(raw) || APPOINTMENT_ACCEPT_RE.test(raw);
 }
 
 export function snapshotOfferedAppointmentCta(
@@ -478,7 +487,7 @@ export function resolveCtaType(input: {
   quote: CanonicalQuoteV1;
   peritaje?: CanonicalPeritajeV1 | null;
   hasActiveAppointment?: boolean;
-  appointmentCtaAlreadyOffered?: boolean;
+  appointmentIntent?: boolean;
 }): { ctaType: CtaType; missingVehicleFields: string[] } {
   const vehicle = input.peritaje?.vehicles?.[0];
   const gaps = refaccionIdentityGaps(vehicle);
@@ -490,14 +499,11 @@ export function resolveCtaType(input: {
   if (input.mode === 'APPOINTMENT_FOLLOWUP' || input.hasActiveAppointment) {
     return { ctaType: 'CONTINUE_APPOINTMENT', missingVehicleFields };
   }
-  if (input.appointmentCtaAlreadyOffered) {
-    return { ctaType: 'CONTINUE_APPOINTMENT', missingVehicleFields };
-  }
   if (input.quote.isPartial && awaiting && missingVehicleFields.length) {
     return { ctaType: 'ASK_MISSING_VEHICLE_DATA', missingVehicleFields };
   }
-  if (!input.quote.isPartial) {
-    return { ctaType: 'OFFER_APPOINTMENT', missingVehicleFields };
+  if (input.appointmentIntent && !input.quote.isPartial) {
+    return { ctaType: 'CONTINUE_APPOINTMENT', missingVehicleFields };
   }
   return { ctaType: 'OFFER_APPOINTMENT', missingVehicleFields };
 }
@@ -610,9 +616,6 @@ export function resolveClientMessageUx(
   const mode = resolved.mode;
   const shouldGreet = shouldGreetForMode(mode);
   const vehicleLabel = vehicleLabelFromPeritaje(input.peritaje);
-  const appointmentCtaAlreadyOffered =
-    input.appointmentCtaAlreadyOffered ??
-    snapshotOfferedAppointmentCta(input.previousSnapshot);
   const locationAlreadyShared =
     input.locationAlreadyShared ?? snapshotSharedLocation(input.previousSnapshot);
   const cta = resolveCtaType({
@@ -620,7 +623,7 @@ export function resolveClientMessageUx(
     quote: input.quote,
     peritaje: input.peritaje,
     hasActiveAppointment: input.hasActiveAppointment,
-    appointmentCtaAlreadyOffered,
+    appointmentIntent: userLooksLikeAppointmentIntent(input.userText),
   });
   const presentation = presentationForMode(mode);
   const requiredQuoteLineIds =
@@ -707,6 +710,7 @@ export function selectWarningCodesForPresentation(input: {
 
 /**
  * Dedupe semántico de presentación. No muta quote.warnings.
+ * Máximo 2 warnings visuales: cluster de daños ocultos + conceptos pendientes.
  */
 export function presentClientWarnings(codes: readonly string[]): {
   text: string;
@@ -715,31 +719,27 @@ export function presentClientWarnings(codes: readonly string[]): {
 } {
   const unique = [...new Set(codes.filter(Boolean))];
   const cluster = unique.filter((code) => HIDDEN_DAMAGE_CLUSTER.has(code));
-  const rest = unique.filter((code) => !HIDDEN_DAMAGE_CLUSTER.has(code));
+  const pending = unique.filter((code) => CRITICAL_PENDING_WARNINGS.has(code));
+  const rest = unique.filter(
+    (code) => !HIDDEN_DAMAGE_CLUSTER.has(code) && !CRITICAL_PENDING_WARNINGS.has(code),
+  );
   const lines: string[] = [];
   const shown: string[] = [];
 
   if (cluster.length) {
-    const copies = cluster
-      .map((code) => CANONICAL_WARNING_COPY[code])
-      .filter(Boolean);
-    const merged = [...new Set(copies)].join(' ');
-    if (merged) {
-      lines.push(`⚠️ ${merged}`);
-      shown.push(...cluster);
-    }
+    lines.push(`⚠️ ${PRESENTATION_HIDDEN_DAMAGE_COPY}`);
+    shown.push(...cluster);
   }
-  for (const code of rest) {
-    const copy =
-      CANONICAL_WARNING_COPY[code] ??
-      'Hay una condición adicional sujeta a revisión en taller.';
-    lines.push(`⚠️ ${copy}`);
-    shown.push(code);
+  if (pending.length || rest.length) {
+    lines.push(`⚠️ ${PRESENTATION_PENDING_CONCEPTS_COPY}`);
+    shown.push(...pending, ...rest);
   }
+
+  const visual = lines.slice(0, 2);
   return {
-    text: lines.join('\n'),
+    text: visual.join('\n'),
     shownWarnings: shown,
-    warningsRenderedCount: lines.length,
+    warningsRenderedCount: visual.length,
   };
 }
 
@@ -755,7 +755,8 @@ function lineAmountText(line: QuoteLine): string {
   if (
     line.priceRange &&
     line.priceRange.min >= 0 &&
-    line.priceRange.max >= line.priceRange.min
+    line.priceRange.max >= line.priceRange.min &&
+    isChargeableQuoteLine(line)
   ) {
     return `${formatQuoteMoneyRange(line.priceRange.min, line.priceRange.max)} MXN`;
   }
@@ -763,12 +764,37 @@ function lineAmountText(line: QuoteLine): string {
     if (line.pricingStatus === 'AWAITING_VEHICLE_DATA') {
       return 'pendiente de datos del vehículo';
     }
-    if (line.serviceType === 'MONTAJE' && line.pricingStatus === 'UNCONFIGURED') {
-      return 'tarifa no configurada';
+    if (line.serviceType === 'MONTAJE' || line.serviceType === 'MONTAJE_PINTURA') {
+      return 'tarifa pendiente';
+    }
+    if (line.serviceType === 'PENDIENTE' || line.serviceType === 'ADVERTENCIA') {
+      return 'pendiente de revisión';
     }
     return 'precio pendiente de estimación';
   }
   return `${formatQuoteMoney(line.amount)} MXN`;
+}
+
+function serviceShortLabel(serviceType: QuoteServiceType): string {
+  if (serviceType === 'REFACCION') return 'Refacción';
+  if (serviceType === 'MONTAJE') return 'Montaje';
+  if (serviceType === 'MONTAJE_PINTURA') return 'Montaje y pintura';
+  if (serviceType === 'REPARACION_PINTURA') return 'Reparación y pintura';
+  if (serviceType === 'PENDIENTE') return 'Pendiente';
+  return 'Concepto';
+}
+
+function isPendingReviewPiece(lines: readonly QuoteLine[]): boolean {
+  return lines.every(
+    (line) =>
+      line.serviceType === 'PENDIENTE' ||
+      line.serviceType === 'ADVERTENCIA' ||
+      (line.serviceType !== 'REFACCION' &&
+        line.serviceType !== 'MONTAJE' &&
+        line.serviceType !== 'MONTAJE_PINTURA' &&
+        line.serviceType !== 'REPARACION_PINTURA' &&
+        !isChargeableQuoteLine(line)),
+  );
 }
 
 function serviceEmoji(serviceType: QuoteServiceType): string {
@@ -806,29 +832,44 @@ export function renderQuoteDeltaFinancialBlock(
   const lines = sortLinesForDelta(
     quote.lines.filter((line) => ids.has(line.quoteLineId)),
   );
+  const grouped = new Map<string, QuoteLine[]>();
+  for (const line of lines) {
+    const list = grouped.get(line.damageItemId) ?? [];
+    list.push(line);
+    grouped.set(line.damageItemId, list);
+  }
   const chunks: string[] = [];
   const displayedAmounts: number[] = [];
-  let lastDamage = '';
 
-  for (const line of lines) {
-    const piece = resolveQuoteLinePieceLabel(line, peritaje);
-    if (line.damageItemId !== lastDamage) {
-      lastDamage = line.damageItemId;
-      chunks.push(`${serviceEmoji(line.serviceType)} *${piece}*`);
+  for (const group of grouped.values()) {
+    const piece = resolveQuoteLinePieceLabel(group[0]!, peritaje);
+    if (isPendingReviewPiece(group)) {
+      chunks.push(`🟡 *${piece}:* pendiente de revisión`);
+      continue;
     }
-    const label = buildControlledQuoteLineLabel(line.serviceType, piece);
-    const amountText = lineAmountText(line);
-    chunks.push(`${serviceEmoji(line.serviceType)} *${label}*: *${amountText}*`);
-    if (isMarketRefaccionLine(line) && isChargeableQuoteLine(line)) {
-      chunks.push(`_${REFACCION_AVAILABILITY_DISCLAIMER}_`);
-    }
-    if (isChargeableQuoteLine(line)) {
-      displayedAmounts.push(roundMoney(line.amount));
-      if (line.priceRange) {
-        displayedAmounts.push(
-          roundMoney(line.priceRange.min),
-          roundMoney(line.priceRange.max),
+    const headerLine =
+      group.find((line) => line.serviceType === 'REFACCION') ?? group[0]!;
+    chunks.push(`${serviceEmoji(headerLine.serviceType)} *${piece}*`);
+    for (const line of group) {
+      const amountText = lineAmountText(line);
+      if (line.serviceType === 'MONTAJE' || line.serviceType === 'MONTAJE_PINTURA') {
+        chunks.push(
+          `${serviceEmoji(line.serviceType)} ${serviceShortLabel(line.serviceType)}: *${amountText}*`,
         );
+      } else {
+        chunks.push(`${serviceShortLabel(line.serviceType)}: *${amountText}*`);
+      }
+      if (isMarketRefaccionLine(line) && isChargeableQuoteLine(line)) {
+        chunks.push(`_${REFACCION_AVAILABILITY_DISCLAIMER}_`);
+      }
+      if (isChargeableQuoteLine(line)) {
+        displayedAmounts.push(roundMoney(line.amount));
+        if (line.priceRange) {
+          displayedAmounts.push(
+            roundMoney(line.priceRange.min),
+            roundMoney(line.priceRange.max),
+          );
+        }
       }
     }
   }
@@ -843,7 +884,7 @@ export function renderQuoteDeltaFinancialBlock(
   if (delta.becameComplete) {
     chunks.push('Con esta información ya pudimos completar la cotización. ✅');
   } else if (delta.isPartialAfter) {
-    chunks.push('No cambiaremos ni ocultaremos los conceptos pendientes.');
+    chunks.push('Los conceptos pendientes no están incluidos en el total.');
   }
   if (delta.unchangedLineIds.length > 0) {
     chunks.push('El resto de los conceptos permanece sin cambios.');
@@ -945,11 +986,16 @@ export function traceClientMessagePostFilterIntervention(input: {
 
 export function deterministicAcknowledge(ctx: ClientQuoteMessageContext): string {
   const vehicle = ctx.vehicleLabel || 'tu vehículo';
+  const name = ctx.customerName && ctx.customerName !== 'Estimado cliente'
+    ? ctx.customerName
+    : '';
   if (ctx.mode === 'QUOTE_CORRECTION') {
-    return `Perfecto, corregí el vehículo a *${vehicle}* y actualicé la cotización.`;
+    return `Perfecto, corregimos el vehículo a *${vehicle}*.`;
   }
   if (ctx.mode === 'QUOTE_RESUME') {
-    return `Perfecto, ya confirmamos tu vehículo como *${vehicle}*.`;
+    return name
+      ? `Perfecto, ${name}. Ya confirmamos tu *${vehicle}*.`
+      : `Perfecto, ya confirmamos tu vehículo como *${vehicle}*.`;
   }
   if (ctx.mode === 'QUOTE_UPDATE') {
     return 'Actualicé la cotización con el cambio solicitado.';

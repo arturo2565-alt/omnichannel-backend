@@ -16,6 +16,9 @@ export const CONVERSATION_UX_CHECK_IDS = [
   'cta_state',
   'human_labels',
   'financial_integrity',
+  'vehicle_correction_reruns_market',
+  'full_refresh_emits_financial_block',
+  'no_appointment_assumption',
 ] as const;
 
 export type ConversationUxCheckId = (typeof CONVERSATION_UX_CHECK_IDS)[number];
@@ -32,7 +35,10 @@ export type ConversationUxCheckTitle =
   | '9. Warning UX'
   | '10. CTA state'
   | '11. Human labels'
-  | '12. Financial integrity';
+  | '12. Financial integrity'
+  | '13. Vehicle correction reruns market'
+  | '14. Full refresh emits financial block'
+  | '15. No appointment assumption';
 
 export const CONVERSATION_UX_CHECK_TITLES: Record<
   ConversationUxCheckId,
@@ -50,6 +56,9 @@ export const CONVERSATION_UX_CHECK_TITLES: Record<
   cta_state: '10. CTA state',
   human_labels: '11. Human labels',
   financial_integrity: '12. Financial integrity',
+  vehicle_correction_reruns_market: '13. Vehicle correction reruns market',
+  full_refresh_emits_financial_block: '14. Full refresh emits financial block',
+  no_appointment_assumption: '15. No appointment assumption',
 };
 
 export type ConversationUxFailureCode =
@@ -66,7 +75,10 @@ export type ConversationUxFailureCode =
   | 'INTERNAL_LABEL'
   | 'INVENTED_MONEY'
   | 'WRONG_TOTAL'
-  | 'POST_FILTER_REQUIRED';
+  | 'POST_FILTER_REQUIRED'
+  | 'MARKET_NOT_RERUN'
+  | 'MISSING_FINANCIAL_BLOCK'
+  | 'IDENTITY_NOT_PRESERVED';
 
 export type ConversationUxActual = {
   checkId: ConversationUxCheckId;
@@ -90,6 +102,12 @@ export type ConversationUxActual = {
   ctaSequence?: CtaType[];
   resumeWarningsRepeated?: boolean;
   appointmentCtaRepeated?: boolean;
+  marketLookupCount?: number;
+  idsPreserved?: boolean;
+  oldMarketIdentityKey?: string;
+  newMarketIdentityKey?: string;
+  visionCalled?: boolean;
+  financialBlockPresent?: boolean;
 };
 
 export type ConversationUxCompareResult = {

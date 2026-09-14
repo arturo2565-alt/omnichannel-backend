@@ -99,6 +99,13 @@ export const CANONICAL_WARNING_COPY: Record<string, string> = {
     'Hay piezas que no pueden valorarse con las imágenes actuales; se requiere revisión o evidencia adicional.',
 };
 
+/** Copy comprimido de presentación. No altera CanonicalQuote.warnings. */
+export const PRESENTATION_HIDDEN_DAMAGE_COPY =
+  'Pueden existir daños internos o fijaciones comprometidas que solo podrán confirmarse al desmontar y revisar físicamente el vehículo.';
+
+export const PRESENTATION_PENDING_CONCEPTS_COPY =
+  'Los conceptos pendientes no están incluidos en el subtotal.';
+
 export const PARTIAL_QUOTE_REASON = {
   INSUFFICIENT_MARKET_SAMPLE: 'INSUFFICIENT_MARKET_SAMPLE',
   AWAITING_VEHICLE_DATA: 'AWAITING_VEHICLE_DATA',
@@ -577,6 +584,72 @@ export function sanitizeLlmNarrativeParts(
   return { ok: true, parts };
 }
 
+function serviceShortLabelForValidation(serviceType: QuoteServiceType): string {
+  if (serviceType === 'REFACCION') return 'Refacción';
+  if (serviceType === 'MONTAJE') return 'Montaje';
+  if (serviceType === 'MONTAJE_PINTURA') return 'Montaje y pintura';
+  if (serviceType === 'REPARACION_PINTURA') return 'Reparación y pintura';
+  if (serviceType === 'PENDIENTE') return 'Pendiente';
+  return String(serviceType);
+}
+
+function quoteLineLabelAppearsInMessage(
+  message: string,
+  line: QuoteLine,
+  piece: string,
+): boolean {
+  const full = buildControlledQuoteLineLabel(line.serviceType, piece);
+  if (message.includes(full)) return true;
+  const short = serviceShortLabelForValidation(line.serviceType);
+  const piecePresent =
+    message.includes(`*${piece}*`) ||
+    message.includes(piece) ||
+    message.includes(`*${piece}:*`);
+  if (piecePresent && message.includes(`${short}:`)) return true;
+  if (
+    (line.serviceType === 'PENDIENTE' || line.serviceType === 'ADVERTENCIA') &&
+    piecePresent &&
+    /pendiente de revisi[oó]n/i.test(message)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+const HIDDEN_DAMAGE_PRESENTATION_CODES = new Set([
+  'HIDDEN_DAMAGE',
+  'POSSIBLE_SUBSTITUTION',
+  'SUSPECTED_INVOLVEMENT',
+]);
+
+const PENDING_PRESENTATION_CODES = new Set([
+  'AWAITING_VEHICLE_DATA',
+  'REFACCION_PENDIENTE_DE_COTIZAR',
+  'MONTAJE_TARIFA_NO_CONFIGURADA',
+  'PENDING_TREATMENT',
+  'NOT_ASSESSABLE',
+  'MOLDURA_NO_PINTABLE_REQUIERE_REVISION',
+  'MOLDURA_MONTAJE_PENDIENTE',
+]);
+
+function warningAppearsInMessage(code: string, message: string): boolean {
+  const canonical = CANONICAL_WARNING_COPY[code];
+  if (canonical && message.includes(canonical)) return true;
+  if (
+    HIDDEN_DAMAGE_PRESENTATION_CODES.has(code) &&
+    message.includes(PRESENTATION_HIDDEN_DAMAGE_COPY)
+  ) {
+    return true;
+  }
+  if (
+    PENDING_PRESENTATION_CODES.has(code) &&
+    message.includes(PRESENTATION_PENDING_CONCEPTS_COPY)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function requiredWarningCodes(quote: CanonicalQuoteV1): string[] {
   return (quote.warnings ?? []).filter((w) =>
     Boolean(CANONICAL_WARNING_COPY[w] || w === 'REFACCION_PENDIENTE_DE_COTIZAR'),
@@ -634,11 +707,10 @@ export function validateFinalClientQuoteMessage(input: {
     if (!isChargeableQuoteLine(line)) continue;
     if (requiredIds && !requiredIds.has(line.quoteLineId)) continue;
     const piece = resolveQuoteLinePieceLabel(line, input.peritaje);
-    const label = buildControlledQuoteLineLabel(line.serviceType, piece);
-    if (!message.includes(label)) {
+    if (!quoteLineLabelAppearsInMessage(message, line, piece)) {
       push(
         NARRATIVE_EVENTS.MISSING_REQUIRED_LINE,
-        `Falta línea requerida: ${label}`,
+        `Falta línea requerida: ${buildControlledQuoteLineLabel(line.serviceType, piece)}`,
       );
     }
     if (line.priceRange) {
@@ -695,8 +767,7 @@ export function validateFinalClientQuoteMessage(input: {
   }
   if (presentation === 'FULL') {
     for (const code of requiredWarningCodes(quote)) {
-      const copy = CANONICAL_WARNING_COPY[code];
-      if (copy && !message.includes(copy)) {
+      if (!warningAppearsInMessage(code, message)) {
         push(
           NARRATIVE_EVENTS.MISSING_REQUIRED_WARNING,
           `Falta warning obligatorio ${code}`,
