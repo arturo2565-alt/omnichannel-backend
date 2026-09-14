@@ -241,7 +241,7 @@ export class QuoteCartService {
       };
     }
     const saved = await this.draftQuoteRepository.save(approved);
-    this.logger.log(
+    this.logger.debug(
       `[CARRITO] legacy APPROVED reactivado como editable conversation=${conversationId} id=${saved.id}`,
     );
     saved.items?.sort((a, b) => a.sortOrder - b.sortOrder);
@@ -323,7 +323,7 @@ export class QuoteCartService {
     };
     cart.status = ACTIVE_CART_STATUS;
     await this.draftQuoteRepository.save(cart);
-    this.logger.log(
+    this.logger.debug(
       `[CARRITO] snapshot envío conversation=${conversationId} total=${snapshot.total} sendCount=${sendCount}`,
     );
   }
@@ -425,7 +425,7 @@ export class QuoteCartService {
       newPiezas: complementMeta?.newPiezas,
     });
 
-    this.logger.log(
+    this.logger.debug(
       `[CARRITO] mergeVision conversation=${conversationId} prior=${priorInventory.length} new=${newInventory.length} merged=${mergedInventory.length}`,
     );
 
@@ -784,7 +784,7 @@ export class QuoteCartService {
 
     const removed = inventory[idx]!.pieza;
     const nextInventory = inventory.filter((_, i) => i !== idx);
-    this.logger.log(
+    this.logger.debug(
       `[CARRITO] quitarDelCarrito conversation=${conversationId} pieza=${removed}`,
     );
     await this.rebuildAndPersist(cart, nextInventory, tallerId);

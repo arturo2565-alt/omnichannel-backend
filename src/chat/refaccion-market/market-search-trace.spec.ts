@@ -175,6 +175,7 @@ function observation(searchRunId = 'mrs_test') {
 }
 
 function setTraceFlags(opts: { trace?: boolean; verbose?: boolean }) {
+  process.env.PEG_LOG_FORMAT = 'compact';
   if (opts.verbose) {
     process.env[PEG_MARKET_TRACE_ENV] = 'true';
     process.env[PEG_MARKET_TRACE_VERBOSE_ENV] = 'true';
@@ -200,6 +201,11 @@ afterEach(() => {
   delete process.env[PEG_MARKET_TRACE_VERBOSE_ENV];
   delete process.env.PEG_TRACE_MODE;
   delete process.env.LOG_LEVEL;
+  delete process.env.PEG_LOG_FORMAT;
+});
+
+beforeEach(() => {
+  process.env.PEG_LOG_FORMAT = 'compact';
 });
 
 describe('observabilidad profunda — invariante de resultado', () => {

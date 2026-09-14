@@ -381,6 +381,7 @@ describe('REFACCION_MARKET_AUDIT compacto', () => {
   afterEach(() => {
     delete process.env.PEG_TRACE_MODE;
     delete process.env.LOG_LEVEL;
+    delete process.env.PEG_LOG_FORMAT;
     delete process.env[PEG_CANONICAL_TRACE_ENV];
     jest.restoreAllMocks();
   });
@@ -388,6 +389,7 @@ describe('REFACCION_MARKET_AUDIT compacto', () => {
   it('emite counts/reasons, no listings raw ni JSON canónico', () => {
     process.env.PEG_TRACE_MODE = 'compact';
     process.env.LOG_LEVEL = 'info';
+    process.env.PEG_LOG_FORMAT = 'compact';
     const logs: string[] = [];
     const spy = jest.spyOn(console, 'log').mockImplementation((...args) => {
       logs.push(args.map((a) => String(a)).join(' '));
@@ -406,8 +408,9 @@ describe('REFACCION_MARKET_AUDIT compacto', () => {
       emit: logRefaccionMarketEvent,
     });
     const joined = logs.join('\n');
-    expect(joined).toContain('[MARKET]');
-    expect(joined).toContain('accepted=');
+    expect(joined).not.toContain('audit=');
+    expect(joined).not.toContain('accepted=');
+    expect(joined).not.toContain('[MARKET]');
     expect(joined).not.toContain(PEG_CANONICAL_TRACE_PREFIX);
     expect(joined).not.toContain(CANONICAL_TRACE_EVENTS.REFACCION_MARKET_AUDIT);
     expect(joined).not.toContain('listing-xyz');

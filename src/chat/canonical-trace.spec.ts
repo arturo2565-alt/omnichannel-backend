@@ -30,12 +30,14 @@ function enableTrace() {
   process.env[PEG_CANONICAL_TRACE_ENV] = 'true';
   process.env.PEG_TRACE_MODE = 'debug';
   process.env.LOG_LEVEL = 'debug';
+  process.env.PEG_LOG_FORMAT = 'compact';
 }
 
 function disableTrace() {
   delete process.env[PEG_CANONICAL_TRACE_ENV];
   delete process.env.PEG_TRACE_MODE;
   delete process.env.LOG_LEVEL;
+  delete process.env.PEG_LOG_FORMAT;
 }
 
 function captureAllLogs(): { logs: string[]; restore: () => void } {
@@ -145,6 +147,7 @@ describe('PEG_CANONICAL_TRACE', () => {
     else process.env[PEG_CANONICAL_TRACE_ENV] = prev;
     delete process.env.PEG_TRACE_MODE;
     delete process.env.LOG_LEVEL;
+    delete process.env.PEG_LOG_FORMAT;
     jest.restoreAllMocks();
   });
 

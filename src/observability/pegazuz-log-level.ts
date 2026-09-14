@@ -1,10 +1,15 @@
 /**
  * Niveles Pegazuz y flags de Railway.
  *
- * Producción:
+ * Producción (Railway):
  *   LOG_LEVEL=info
  *   PEG_TRACE_MODE=compact
- *   LLM_CACHE_DEBUG  (omitir o false)
+ *   PEG_LOG_FORMAT=pretty
+ *   LLM_CACHE_DEBUG=false
+ *   PEG_CANONICAL_TRACE=false
+ *   PEG_MARKET_TRACE=false
+ *   PEG_MARKET_TRACE_VERBOSE=false
+ *   PEG_LOG_USER_TEXT=false
  *
  * Diagnóstico temporal:
  *   LOG_LEVEL=trace
@@ -19,6 +24,9 @@ export type PegLogLevel = (typeof PEG_LOG_LEVELS)[number];
 
 export const PEG_TRACE_MODES = ['compact', 'debug', 'trace'] as const;
 export type PegTraceMode = (typeof PEG_TRACE_MODES)[number];
+
+export const PEG_LOG_FORMATS = ['pretty', 'compact', 'json'] as const;
+export type PegLogFormat = (typeof PEG_LOG_FORMATS)[number];
 
 const LEVEL_RANK: Record<PegLogLevel, number> = {
   error: 0,
@@ -99,8 +107,28 @@ export function isLlmCacheDebugEnabled(): boolean {
   return flagOn(process.env.LLM_CACHE_DEBUG);
 }
 
+export function parsePegLogFormat(raw?: string): PegLogFormat {
+  const v = String(raw ?? process.env.PEG_LOG_FORMAT ?? 'pretty')
+    .trim()
+    .toLowerCase();
+  if ((PEG_LOG_FORMATS as readonly string[]).includes(v)) {
+    return v as PegLogFormat;
+  }
+  return 'pretty';
+}
+
+export function getPegLogFormat(): PegLogFormat {
+  return parsePegLogFormat();
+}
+
+export function isUserTextLoggingEnabled(): boolean {
+  return flagOn(process.env.PEG_LOG_USER_TEXT);
+}
+
 export function resetPegazuzLogEnvForTests(): void {
   delete process.env.LOG_LEVEL;
   delete process.env.PEG_TRACE_MODE;
+  delete process.env.PEG_LOG_FORMAT;
   delete process.env.LLM_CACHE_DEBUG;
+  delete process.env.PEG_LOG_USER_TEXT;
 }

@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { applySentryAlsTags } from '../sentry/sentry-als';
 import { isLlmCacheDebugEnabled } from '../observability/pegazuz-log-level';
 import { pegLogger } from '../observability/pegazuz-logger';
+import { addTurnDuration } from '../observability/turn-log';
 
 export { isLlmCacheDebugEnabled } from '../observability/pegazuz-log-level';
 
@@ -125,8 +126,12 @@ export function reportLlmUsage(input: LlmUsageReportInput): void {
     cached: cachedTokens,
     output: input.completionTokens ?? 0,
     cachePct,
+    latencyMs: input.durationMs ?? 0,
     latency: `${input.durationMs ?? 0}ms`,
   });
+  if (input.durationMs && input.durationMs > 0) {
+    addTurnDuration('llmMs', input.durationMs);
+  }
   if (!reporter) return;
   try {
     reporter({

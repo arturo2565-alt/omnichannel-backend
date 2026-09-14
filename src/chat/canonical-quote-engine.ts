@@ -465,7 +465,7 @@ export function logFinancialDifferences(
   ctx: { conversationId?: string; peritajeId?: string },
 ): void {
   if (!diffs.length) return;
-  logger.log(
+  logger.debug(
     JSON.stringify({
       compare: 'canonical_vs_legacy_finance',
       conversationId: ctx.conversationId,

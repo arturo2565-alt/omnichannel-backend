@@ -1,5 +1,5 @@
 const SENSITIVE_KEY =
-  /^(phone|telefono|tel|mobile|whatsapp|waid|waId|fullName|nombre|nombreCompleto|customerName|contactName|displayName|jwt|authorization|token|apiKey|apikey|api_key|access_token|accessToken|pageAccessToken|appSecret|app_secret|verify_token|verifyToken|cookie|password|secret|prompt|systemPrompt|conversationTurns|messages|history|rawHits|samples|pages)$/i;
+  /^(phone|telefono|tel|mobile|whatsapp|waid|waId|psid|senderId|recipientId|fullName|nombre|nombreCompleto|customerName|contactName|displayName|jwt|authorization|token|apiKey|apikey|api_key|access_token|accessToken|pageAccessToken|appSecret|app_secret|verify_token|verifyToken|cookie|password|secret|prompt|systemPrompt|conversationTurns|messages|history|rawHits|samples|pages)$/i;
 
 const MAX_STRING = 240;
 const MAX_ARRAY = 40;

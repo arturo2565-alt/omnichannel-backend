@@ -183,9 +183,9 @@ import {
   tracePendingQuoteLifecycle,
   traceVisionInput,
 } from './canonical-trace';
-import { createTurnId } from '../observability/pegazuz-context';
+import { createTurnId, patchTurnSummary } from '../observability/pegazuz-context';
 import { pegLogger } from '../observability/pegazuz-logger';
-import { emitTurnComplete } from '../observability/turn-log';
+import { emitTurnComplete, markOutboundEnqueued } from '../observability/turn-log';
 import {
   logInboundReceived,
   logWebhookDuplicate,
@@ -1240,16 +1240,13 @@ export class ChatService implements OnModuleDestroy {
       lines,
       canonicalPeritaje,
     });
-    console.log(
-      '[DraftQuoteItems] buildDraftQuoteLineRowsForPersist',
-      JSON.stringify({
-        invCount: inv.length,
-        lineCount: lines.length,
-        analysisPieza: analysis.pieza,
-        fallbackUrlCount: fallbackUrls.length,
-        invPiezas: inv.map((i) => i.pieza),
-      }),
-    );
+    pegLogger.debug('QUOTE', {
+      event: 'DRAFT_QUOTE_ITEMS',
+      invCount: inv.length,
+      lineCount: lines.length,
+      analysisPieza: analysis.pieza,
+      fallbackUrlCount: fallbackUrls.length,
+    });
 
     if (shouldUseLegacyPositionalPersist(lines, inv)) {
       return buildLegacyPositionalPersistRows({ lines, inventory: inv });
@@ -1666,13 +1663,18 @@ export class ChatService implements OnModuleDestroy {
 
     if (!channel || !metaPayload) return;
 
+    markOutboundEnqueued();
+    pegLogger.info('OUTBOUND', { status: 'enqueued', channel });
+
     void this.outgoingMessageProducer
       .enqueueOutboundMessage(tallerId, conversationId, channel, metaPayload)
       .catch((err) =>
-        console.error(
-          `enqueueOutboundMessage (${channel}) conversation=${conversationId}:`,
+        pegLogger.error('OUTBOUND', {
+          message: 'enqueueOutboundMessage failed',
+          channel,
+          conversationId,
           err,
-        ),
+        }),
       );
   }
 
@@ -3865,17 +3867,15 @@ export class ChatService implements OnModuleDestroy {
     narrativeOptions?: { temperature?: number };
   }): Promise<string | null> {
     const started = Date.now();
-    console.log(
-      '[DraftClientNarrative] Inicio compositor',
-      JSON.stringify({
-        conversationId: input.conversationId,
-        pricingMode: this.resolvePricingModeForClientNarrative(input.analysis),
-        lineRows: input.lineRows.length,
-        total: input.total,
-        imageCount: input.imageCount,
-        invCount: input.analysis.inventory?.length ?? 0,
-      }),
-    );
+    pegLogger.debug('NARRATIVE', {
+      event: 'COMPOSER_START',
+      conversationId: input.conversationId,
+      pricingMode: this.resolvePricingModeForClientNarrative(input.analysis),
+      lineRows: input.lineRows.length,
+      total: input.total,
+      imageCount: input.imageCount,
+      invCount: input.analysis.inventory?.length ?? 0,
+    });
     try {
       const chatPrompt = await this.getChatAppointmentSystemPrompt();
       const historyRows = await this.loadRecentMessagesForLlm(
@@ -3916,22 +3916,18 @@ export class ChatService implements OnModuleDestroy {
         dialogue,
         { temperature: input.narrativeOptions?.temperature },
       );
-      console.log(
-        '[DraftClientNarrative] OK',
-        JSON.stringify({
-          ms: Date.now() - started,
-          chars: text.length,
-        }),
-      );
+      pegLogger.debug('NARRATIVE', {
+        event: 'COMPOSER_OK',
+        ms: Date.now() - started,
+        chars: text.length,
+      });
       return text;
     } catch (err) {
-      console.error(
-        '[DraftClientNarrative] Falló LLM; se usará plantilla fallback',
-        JSON.stringify({
-          ms: Date.now() - started,
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
+      pegLogger.debug('NARRATIVE', {
+        event: 'COMPOSER_FALLBACK',
+        ms: Date.now() - started,
+        error: err instanceof Error ? err.message : String(err),
+      });
       return null;
     }
   }
@@ -4019,10 +4015,10 @@ export class ChatService implements OnModuleDestroy {
         const historyRows = await this.loadRecentMessagesForLlm(conversationId);
         dialogue = this.messagesToChatCompletionTurns(historyRows);
       } catch (err) {
-        console.warn(
-          '[DraftClientNarrative] historial/prompt canónico no disponible',
-          err instanceof Error ? err.message : String(err),
-        );
+        pegLogger.debug('NARRATIVE', {
+          event: 'CANONICAL_HISTORY_UNAVAILABLE',
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
       const composed = await composeModernClientQuoteMessage({
         canonicalQuote,
@@ -4054,17 +4050,15 @@ export class ChatService implements OnModuleDestroy {
       );
       draft.generatedMessage = draft.formalNarrative;
       draft.clientMessage = draft.formalNarrative;
-      console.log(
-        '[DraftClientNarrative] applyClientFacingFormalNarrativeToDraft',
-        JSON.stringify({
-          conversationId,
-          narrativeFlow: NARRATIVE_FLOW.CANONICAL,
-          usedLlm: composed.llmUsed,
-          usedFallback: composed.fallbackUsed,
-          chars: draft.formalNarrative.length,
-          quoteId: canonicalQuote.quoteId,
-        }),
-      );
+      pegLogger.debug('NARRATIVE', {
+        event: 'APPLY_FORMAL',
+        conversationId,
+        narrativeFlow: NARRATIVE_FLOW.CANONICAL,
+        usedLlm: composed.llmUsed,
+        usedFallback: composed.fallbackUsed,
+        chars: draft.formalNarrative.length,
+        quoteId: canonicalQuote.quoteId,
+      });
       const normalizedCanonical = normalizeDraftQuoteForClient(draft);
       if (normalizedCanonical) {
         Object.assign(draft, normalizedCanonical);
@@ -4129,17 +4123,15 @@ export class ChatService implements OnModuleDestroy {
     draft.narrativeFlow = NARRATIVE_FLOW.LEGACY;
     draft.renderedFinancialBlock = undefined;
     draft.shownWarnings = undefined;
-    console.log(
-      '[DraftClientNarrative] applyClientFacingFormalNarrativeToDraft',
-      JSON.stringify({
-        conversationId,
-        narrativeFlow: NARRATIVE_FLOW.LEGACY,
-        usedLlm: Boolean(llmNarrative),
-        usedFallback: !llmNarrative,
-        chars: draft.formalNarrative.length,
-        lineRows: lineRows.length,
-      }),
-    );
+    pegLogger.debug('NARRATIVE', {
+      event: 'APPLY_FORMAL',
+      conversationId,
+      narrativeFlow: NARRATIVE_FLOW.LEGACY,
+      usedLlm: Boolean(llmNarrative),
+      usedFallback: !llmNarrative,
+      chars: draft.formalNarrative.length,
+      lineRows: lineRows.length,
+    });
     const normalized = normalizeDraftQuoteForClient(draft);
     if (normalized) {
       Object.assign(draft, normalized);
@@ -4328,23 +4320,11 @@ export class ChatService implements OnModuleDestroy {
       );
     }
 
-    console.log(
-      '[DraftClientNarrative] preview-narrative request',
-      JSON.stringify({
-        conversationId: String(body.conversationId ?? '').trim(),
-        pieceCount: pieces.length,
-        piezas: pieces.map((p) => p.pieza),
-        total: sumQuoteRowsSubtotal(
-          pieces.map((p) => ({
-            pieza: p.pieza,
-            severidad: 'N/A',
-            precioMx: p.precioMx,
-            precioMaximo: p.precioMaximo,
-            detallesRefaccion: p.detallesRefaccion,
-          })),
-        ),
-      }),
-    );
+    pegLogger.debug('NARRATIVE', {
+      event: 'PREVIEW_REQUEST',
+      conversationId: String(body.conversationId ?? '').trim(),
+      pieceCount: pieces.length,
+    });
 
     const lineRows = pieces.map((p) => ({
       pieza: p.pieza,
@@ -4407,10 +4387,10 @@ export class ChatService implements OnModuleDestroy {
           dialogue = this.messagesToChatCompletionTurns(historyRows);
         }
       } catch (err) {
-        console.warn(
-          '[DraftClientNarrative] preview canónico sin historial/prompt',
-          err instanceof Error ? err.message : String(err),
-        );
+        pegLogger.debug('NARRATIVE', {
+          event: 'PREVIEW_HISTORY_UNAVAILABLE',
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
       const composed = await composeModernClientQuoteMessage({
         canonicalQuote,
@@ -5952,6 +5932,7 @@ ${catalogAppend}`;
     mergeCanonicalTraceContext({ conversationId });
     traceVisionInput({ inputImageCount: imageUrls.length });
 
+    const visionStartedAt = Date.now();
     const visionResult = await this.analyzeDamageImageInSequentialChunks(
       imageUrls,
       {
@@ -5960,6 +5941,7 @@ ${catalogAppend}`;
         conversationTextHistory,
       },
     );
+    patchTurnSummary({ visionMs: Date.now() - visionStartedAt });
     const newInventory = recoverVisionEvidenceForPeritaje(
       visionResult.items,
       imageUrls,
@@ -6202,23 +6184,20 @@ ${catalogAppend}`;
     draftQuoteForClient =
       normalizeDraftQuoteForClient(draftQuoteForClient) ?? draftQuoteForClient;
 
-    console.log(
-      '[VisionPipeline] Borrador listo para panel',
-      JSON.stringify({
-        conversationId,
-        imageCount: imageUrls.length,
-        invCount: mergedInventory.length,
-        lineCount: draftQuoteDoc.lines?.length ?? 0,
-        total: draftQuoteDoc.total,
-        clientMessageChars: String(
-          draftQuoteForClient.clientMessage ?? '',
-        ).length,
-        formalIsLegalDoc:
-          String(draftQuoteForClient.formalNarrative ?? '').includes(
-            'PROPUESTA DE COTIZACIÓN',
-          ),
-      }),
-    );
+    pegLogger.debug('VISION', {
+      event: 'DRAFT_READY',
+      conversationId,
+      imageCount: imageUrls.length,
+      invCount: mergedInventory.length,
+      lineCount: draftQuoteDoc.lines?.length ?? 0,
+      total: draftQuoteDoc.total,
+      clientMessageChars: String(
+        draftQuoteForClient.clientMessage ?? '',
+      ).length,
+      formalIsLegalDoc: String(
+        draftQuoteForClient.formalNarrative ?? '',
+      ).includes('PROPUESTA DE COTIZACIÓN'),
+    });
 
     const messageId = attachingMessageId;
 
@@ -8389,7 +8368,12 @@ ${catalogAppend}`;
       const skipInstantQuoteInterceptors =
         instantDecision.skipInstantInterceptor;
       if (skipInstantQuoteInterceptors) {
-        console.log('[AutopilotAgent]', JSON.stringify(instantDecision));
+        pegLogger.debug('AUTOPILOT', {
+          skipInstantInterceptor: instantDecision.skipInstantInterceptor,
+          lastAssistantHadCatalogPrice: instantDecision.lastAssistantHadCatalogPrice,
+          userSchedulingOrInterest: instantDecision.userSchedulingOrInterest,
+          userExplicitNewCatalogQuote: instantDecision.userExplicitNewCatalogQuote,
+        });
       }
 
       const dialogue = this.messagesToChatCompletionTurns(historySansBatch);

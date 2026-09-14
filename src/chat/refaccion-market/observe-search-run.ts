@@ -196,12 +196,17 @@ export function emitCachedSearchFinished(input: {
     pricingStatus: input.estimate.pricingStatus,
     totalDurationMs: input.totalDurationMs,
     providerDurationMs: 0,
-    rawResultCount: audit?.rawResultCount ?? 0,
-    uniqueSamples:
+    rawResults: audit?.rawResultCount ?? 0,
+    afterDedupe:
       audit?.uniqueSamplesAfterCrossProviderDedupe ??
       audit?.funnel?.afterDedupe ??
       0,
-    acceptedSampleCount: audit?.acceptedSampleCount ?? (input.estimate.samples ?? []).length,
+    independentSamples:
+      audit?.independenceCounts?.UNIQUE ??
+      audit?.acceptedSampleCount ??
+      (input.estimate.samples ?? []).length,
+    selectedGroupSamples: input.estimate.cantidadMuestras ?? 0,
+    selectedSampleCount: input.estimate.cantidadMuestras ?? 0,
     requiredSamples: policy.minValidSamples,
     selectedPartType: input.estimate.partTypeGroup,
     providerPath: providerPathOf(input.estimate, 'CACHE'),
@@ -262,9 +267,11 @@ export function observeSearchRun(input: {
     pricingStatus: input.estimate.pricingStatus,
     totalDurationMs: input.totalDurationMs,
     providerDurationMs: input.providerDurationMs,
-    rawResultCount: input.rawHits.length,
-    uniqueSamples: funnel.afterDedupe,
-    acceptedSampleCount: input.uniqueAccepted.length,
+    rawResults: input.rawHits.length,
+    afterDedupe: funnel.afterDedupe,
+    independentSamples: input.uniqueAccepted.length,
+    selectedGroupSamples: input.estimate.cantidadMuestras ?? 0,
+    selectedSampleCount: input.estimate.cantidadMuestras ?? 0,
     requiredSamples: policy.minValidSamples,
     selectedPartType: input.estimate.partTypeGroup,
     vehicleLabel: vehicleLabelOf(input.identity),

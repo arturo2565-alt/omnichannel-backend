@@ -33,6 +33,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import * as Sentry from '@sentry/node';
 import { captureExceptionWithAls } from '../sentry/sentry-als';
+import { pegLogger } from '../observability/pegazuz-logger';
 
 @Controller(['webhook', 'chat'])
 export class ChatController {
@@ -117,7 +118,6 @@ export class ChatController {
   @Post()
   receiveMessage(@Req() req: Request, @Res() res: Response) {
     const body = req.body;
-    console.log('--- NUEVO WEBHOOK ---', JSON.stringify(body, null, 2));
 
     void Sentry.withScope(async (scope) => {
       scope.setTag('source', 'meta_webhook');
@@ -132,10 +132,15 @@ export class ChatController {
 
       try {
         const result = await this.chatService.ingestWebhookPayload(body ?? {});
-        console.log('[webhook] procesamiento terminado:', result);
+        pegLogger.debug('WEBHOOK', {
+          processed: result.processed,
+        });
       } catch (err) {
         captureExceptionWithAls(err, { source: 'meta_webhook' });
-        console.error('[webhook] error en ingestWebhookPayload:', err);
+        pegLogger.error('WEBHOOK', {
+          message: 'ingestWebhookPayload failed',
+          err,
+        });
       }
     });
 

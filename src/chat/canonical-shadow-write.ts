@@ -208,7 +208,7 @@ export function commitVisionShadowToDraft(input: {
     if (decision.status === 'CANONICAL_INVALID') {
       logger.warn(payload);
     } else if (comparison.differences.length) {
-      logger.log(payload);
+      logger.debug(payload);
     }
     return comparison;
   } catch (err) {

@@ -1,72 +1,36 @@
 import {
   getEffectiveLogLevel,
+  getPegLogFormat,
   shouldLog,
   type PegLogLevel,
 } from './pegazuz-log-level';
-import {
-  getPegazuzContext,
-  shortConvId,
-  shortTurnId,
-} from './pegazuz-context';
-import { dropEmpty, sanitizeTracePayload } from './sanitize-log';
+import { getPegazuzContext } from './pegazuz-context';
+import { dropEmpty } from './sanitize-log';
+import { buildPegazuzLogRecord } from './pegazuz-log-record';
+import { renderCompactLog } from './renderers/compact-log-renderer';
+import { renderJsonLog } from './renderers/json-log-renderer';
+import { renderPrettyLog } from './renderers/pretty-log-renderer';
 
 export type PegazuzLogData = Record<string, unknown>;
-
-function formatValue(value: unknown): string {
-  if (typeof value === 'boolean' || typeof value === 'number') {
-    return String(value);
-  }
-  if (typeof value === 'string') {
-    if (/[\s=]/.test(value) || value.includes('"')) {
-      return JSON.stringify(value);
-    }
-    return value;
-  }
-  const json = JSON.stringify(value);
-  if (!json) return 'null';
-  if (json.length > 180) return `${json.slice(0, 160)}…`;
-  return json;
-}
-
-function correlationFields(): PegazuzLogData {
-  const ctx = getPegazuzContext();
-  if (!ctx) return {};
-  return dropEmpty({
-    turn: shortTurnId(ctx.turnId),
-    conv: shortConvId(ctx.conversationId),
-    q: ctx.quoteId ?? ctx.draftQuoteId,
-    vehicleId: ctx.vehicleId,
-    visionRunId: ctx.visionRunId,
-    run: ctx.searchRunId,
-  });
-}
 
 export function formatPegazuzLine(
   event: string,
   data: PegazuzLogData = {},
 ): string {
-  const sanitized = sanitizeTracePayload(dropEmpty(data)) as PegazuzLogData;
-  const merged = dropEmpty({
-    ...correlationFields(),
-    ...sanitized,
-  });
-  const tag = String(event ?? 'LOG').replace(/^\[|\]$/g, '');
-  const parts = [`[${tag}]`];
-  let phase: string | undefined;
-  for (const [key, value] of Object.entries(merged)) {
-    if (key === 'phase' && typeof value === 'string') {
-      phase = value;
-      continue;
-    }
-    parts.push(`${key}=${formatValue(value)}`);
-  }
-  if (phase) parts.push(phase);
-  return parts.join(' ');
+  return renderCompactLog(buildPegazuzLogRecord('info', event, data));
+}
+
+function render(level: PegLogLevel, event: string, data: PegazuzLogData): string {
+  const record = buildPegazuzLogRecord(level, event, data);
+  const format = getPegLogFormat();
+  if (format === 'json') return renderJsonLog(record);
+  if (format === 'compact') return renderCompactLog(record);
+  return renderPrettyLog(record);
 }
 
 function write(level: PegLogLevel, event: string, data: PegazuzLogData): void {
   if (!shouldLog(level)) return;
-  const line = formatPegazuzLine(event, data);
+  const line = render(level, event, data);
   if (level === 'error') {
     console.error(line);
     return;
@@ -83,12 +47,7 @@ function errorFields(
   data: PegazuzLogData,
 ): PegazuzLogData {
   const err = data.err ?? data.error;
-  const error =
-    err instanceof Error
-      ? err
-      : typeof data.message === 'string'
-        ? null
-        : null;
+  const error = err instanceof Error ? err : null;
   const message =
     (typeof data.message === 'string' && data.message) ||
     (error ? error.message : undefined) ||
@@ -97,9 +56,7 @@ function errorFields(
     (typeof data.errorType === 'string' && data.errorType) ||
     (error ? error.name : err != null ? typeof err : undefined);
   const stack =
-    typeof data.stack === 'string'
-      ? data.stack
-      : error?.stack;
+    typeof data.stack === 'string' ? data.stack : error?.stack;
   const ctx = getPegazuzContext();
   return dropEmpty({
     event,

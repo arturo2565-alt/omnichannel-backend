@@ -244,8 +244,16 @@ function emitCanonicalCompact(
   }
   if (event === CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY) {
     const vehicle = vehicleLabelOf(payload);
-    pegLogger.info('VEHICLE', { vehicle });
-    if (vehicle) patchTurnSummary({ vehicle });
+    const confirmed =
+      payload.confirmedByUser === true
+        ? true
+        : payload.confirmedByUser === false
+          ? false
+          : undefined;
+    pegLogger.info('VEHICLE', { vehicle, confirmed });
+    if (vehicle) {
+      patchTurnSummary({ vehicle, vehicleConfirmed: confirmed });
+    }
     return;
   }
   if (event === CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY_CORRECTED) {
@@ -305,17 +313,23 @@ function emitCanonicalCompact(
     return;
   }
   if (event === CANONICAL_TRACE_EVENTS.CLIENT_MESSAGE_RENDERED) {
-    pegLogger.info('UX', {
-      mode: payload.mode,
-      delta: payload.deltaCount ?? (payload.deltaRendered ? 1 : 0),
-      greet: payload.greetingRendered,
-      technical: payload.technicalExplanationRendered,
-      warnings: payload.warningsRenderedCount,
-      cta: payload.ctaType,
+    const ux = {
+      mode: typeof payload.mode === 'string' ? payload.mode : undefined,
+      delta: Number(payload.deltaCount ?? (payload.deltaRendered ? 1 : 0)),
+      greet: payload.greetingRendered === true,
+      technical: payload.technicalExplanationRendered === true,
+      warnings: Number(payload.warningsRenderedCount ?? 0),
+      cta: typeof payload.ctaType === 'string' ? payload.ctaType : undefined,
+    };
+    patchTurnSummary({
+      mode: ux.mode,
+      ux,
     });
-    if (typeof payload.mode === 'string') {
-      patchTurnSummary({ mode: payload.mode });
+    if (getCanonicalTraceContext()?.turnId) {
+      pegLogger.debug('UX', ux);
+      return;
     }
+    pegLogger.info('UX', ux);
   }
 }
 

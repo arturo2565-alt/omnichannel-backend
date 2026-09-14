@@ -65,7 +65,10 @@ describe('market cache + strategy version', () => {
     const origLog = console.log;
     console.log = (...args: unknown[]) => {
       const line = args.map(String).join(' ');
-      if (line.includes('[MARKET]') && line.includes('audit=')) {
+      if (
+        line.includes('[MARKET]') &&
+        line.includes('event=REFACCION_MARKET_AUDIT')
+      ) {
         events.push('REFACCION_MARKET_AUDIT');
       }
       if (line.includes('event=MARKET_LOOKUP_EXECUTED')) {
@@ -77,8 +80,10 @@ describe('market cache + strategy version', () => {
     };
     const prevLevel = process.env.LOG_LEVEL;
     const prevMode = process.env.PEG_TRACE_MODE;
+    const prevFormat = process.env.PEG_LOG_FORMAT;
     process.env.LOG_LEVEL = 'debug';
     process.env.PEG_TRACE_MODE = 'debug';
+    process.env.PEG_LOG_FORMAT = 'compact';
     const market = createRefaccionMarketService({ providers: [provider] });
     const first = await market.estimate(altimaRight);
     const second = await market.estimate(altimaRight);
@@ -87,6 +92,8 @@ describe('market cache + strategy version', () => {
     else process.env.LOG_LEVEL = prevLevel;
     if (prevMode == null) delete process.env.PEG_TRACE_MODE;
     else process.env.PEG_TRACE_MODE = prevMode;
+    if (prevFormat == null) delete process.env.PEG_LOG_FORMAT;
+    else process.env.PEG_LOG_FORMAT = prevFormat;
     expect(searches).toBe(1);
     expect(first.pricingStatus).toBe('INSUFFICIENT_MARKET_SAMPLE');
     expect(second.pricingStatus).toBe('INSUFFICIENT_MARKET_SAMPLE');

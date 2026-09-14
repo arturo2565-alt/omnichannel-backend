@@ -17,6 +17,7 @@ import {
 } from '../../observability/pegazuz-log-level';
 import { pegLogger } from '../../observability/pegazuz-logger';
 import { patchTurnSummary } from '../../observability/pegazuz-context';
+import { addTurnDuration } from '../../observability/turn-log';
 import { sanitizeTracePayload } from '../../observability/sanitize-log';
 import type { MarketProviderId, PartType, RawProviderHit } from './refaccion-market.types';
 import type { MarketRejectionReason } from './market-audit';
@@ -167,7 +168,7 @@ export function compactMarketStatus(status: unknown): string {
 export function topRejectionReasons(
   rejected: unknown,
   limit = 3,
-): string[] {
+): { reason: string; count: number }[] {
   if (!rejected || typeof rejected !== 'object') return [];
   return Object.entries(rejected as Record<string, unknown>)
     .map(([reason, count]) => ({
@@ -176,8 +177,7 @@ export function topRejectionReasons(
     }))
     .filter((row) => row.count > 0)
     .sort((a, b) => b.count - a.count)
-    .slice(0, limit)
-    .map((row) => `${row.reason}:${row.count}`);
+    .slice(0, limit);
 }
 
 function requiredSamplesOf(payload: Record<string, unknown>): number {
@@ -216,19 +216,25 @@ export function emitMarketTrace(
 
   if (event === MARKET_TRACE_EVENTS.SEARCH_FINISHED) {
     const status = compactMarketStatus(payload.pricingStatus);
-    const accepted = Number(payload.acceptedSampleCount ?? 0);
+    const selectedGroupSamples = Number(
+      payload.selectedGroupSamples ?? payload.selectedSampleCount ?? 0,
+    );
     const required = requiredSamplesOf(payload);
+    const durationMs = Number(payload.totalDurationMs ?? 0);
     const compact = {
       run: ids.searchRunId,
       piece: ids.pieceCode,
       vehicle: payload.vehicleLabel,
       providerPath: payload.providerPath ?? payload.source,
-      raw: payload.rawResultCount,
-      unique: payload.uniqueSamples,
-      samples: `${accepted}/${required}`,
+      rawResults: payload.rawResults ?? payload.rawResultCount,
+      afterDedupe: payload.afterDedupe,
+      independentSamples: payload.independentSamples ?? payload.uniqueSamples,
+      selectedGroupSamples,
+      requiredSamples: required,
       selectedPartType: payload.selectedPartType,
       status,
-      duration: `${Number(payload.totalDurationMs ?? 0)}ms`,
+      durationMs,
+      duration: `${durationMs}ms`,
       ...(status === 'INSUFFICIENT'
         ? { topRejectionReasons: topRejectionReasons(payload.rejectedByReason) }
         : {}),
@@ -241,6 +247,9 @@ export function emitMarketTrace(
       });
     }
     patchTurnSummary({ market: status });
+    if (Number.isFinite(durationMs) && durationMs > 0) {
+      addTurnDuration('marketMs', durationMs);
+    }
   }
 
   const sampleLike = SAMPLE_EVENTS.has(event);

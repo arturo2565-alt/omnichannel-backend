@@ -54,6 +54,10 @@ function captureStd(): {
 }
 
 describe('PegazuzLogger production compact', () => {
+  beforeEach(() => {
+    process.env.PEG_LOG_FORMAT = 'compact';
+  });
+
   afterEach(() => {
     resetPegazuzLogEnvForTests();
     delete process.env.PEG_CANONICAL_TRACE;
@@ -88,9 +92,10 @@ describe('PegazuzLogger production compact', () => {
     });
     emitMarketTrace(MARKET_TRACE_EVENTS.SEARCH_FINISHED, MARKET_IDS, {
       pricingStatus: 'INSUFFICIENT_MARKET_SAMPLE',
-      rawResultCount: 83,
-      uniqueSamples: 5,
-      acceptedSampleCount: 2,
+      rawResults: 83,
+      afterDedupe: 37,
+      independentSamples: 5,
+      selectedGroupSamples: 2,
       requiredSamples: 4,
       selectedPartType: 'AFTERMARKET_NEW',
       totalDurationMs: 2800,
@@ -102,10 +107,15 @@ describe('PegazuzLogger production compact', () => {
     expect(joined).toContain('[MARKET]');
     expect(joined).toContain('piece=Calavera_Derecha');
     expect(joined).toContain('START');
-    expect(joined).toContain('raw=83');
-    expect(joined).toContain('unique=5');
-    expect(joined).toContain('samples=2/4');
+    expect(joined).toContain('rawResults=83');
+    expect(joined).toContain('afterDedupe=37');
+    expect(joined).toContain('independentSamples=5');
+    expect(joined).toContain('selectedGroupSamples=2');
+    expect(joined).toContain('requiredSamples=4');
     expect(joined).toContain('status=INSUFFICIENT');
+    expect(joined).not.toContain('accepted=');
+    expect(joined).not.toContain('samples=');
+    expect(joined).not.toMatch(/(^|\s)raw=/);
     expect(joined).not.toContain(PEG_MARKET_TRACE_PREFIX);
     expect(joined).not.toContain('REFACCION_RAW_SAMPLE');
     cap.restore();

@@ -4,10 +4,24 @@ import { randomBytes } from 'node:crypto';
 export type TurnSummary = {
   mode?: string;
   vehicle?: string;
+  vehicleConfirmed?: boolean;
   market?: string;
   quoteTotal?: number;
   partial?: boolean;
   outbound?: string;
+  channel?: string;
+  inboundType?: string;
+  visionMs?: number;
+  marketMs?: number;
+  llmMs?: number;
+  ux?: {
+    mode?: string;
+    delta?: number;
+    greet?: boolean;
+    technical?: boolean;
+    warnings?: number;
+    cta?: string;
+  };
 };
 
 export type PegazuzContext = {
