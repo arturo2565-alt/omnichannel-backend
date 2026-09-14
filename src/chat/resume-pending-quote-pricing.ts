@@ -107,9 +107,9 @@ function vehicleForItem(
     return preferred;
   }
   if (item.vehicleId) {
-    return peritaje.vehicles.find((v) => v.vehicleId === item.vehicleId);
+    return peritaje.vehicles?.find((v) => v.vehicleId === item.vehicleId);
   }
-  return preferred ?? peritaje.vehicles[0];
+  return preferred ?? peritaje.vehicles?.[0];
 }
 
 /**

@@ -199,7 +199,7 @@ export function syncPendingQuoteRequirements(input: {
 } {
   const now = input.now ?? new Date().toISOString();
   const vehicles = new Map(
-    input.peritaje.vehicles.map((v) => [v.vehicleId, v]),
+    (input.peritaje.vehicles ?? []).map((v) => [v.vehicleId, v]),
   );
   let list = [...(input.existing ?? [])];
   const created: PendingQuoteRequirement[] = [];

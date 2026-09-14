@@ -170,7 +170,7 @@ export function derivePartialQuoteReasons(
         line.pricingStatus === 'AWAITING_VEHICLE_DATA' ||
         line.pricingSource === 'AWAITING_VEHICLE_DATA';
       if (awaiting) {
-        const vehicle = peritaje?.vehicles.find(
+        const vehicle = peritaje?.vehicles?.find(
           (v) => v.vehicleId === line.vehicleId,
         );
         const missing = missingRefaccionVehicleFields({

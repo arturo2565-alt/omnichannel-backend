@@ -204,6 +204,49 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
     expect(block.totalText).not.toMatch(/montaje\/pintura no cubre/i);
   });
 
+  it('9b. AWAITING_VEHICLE_DATA no truena si el peritaje no trae vehicles', () => {
+    const q = quote({
+      lines: [
+        line({
+          ...refaccion6500,
+          amount: 0,
+          billable: false,
+          pricingStatus: 'AWAITING_VEHICLE_DATA',
+          pricingSource: 'AWAITING_VEHICLE_DATA',
+        }),
+      ],
+      isPartial: true,
+      warnings: ['AWAITING_VEHICLE_DATA'],
+    });
+    const block = renderCanonicalQuoteFinancialBlock(q);
+    expect(block.text).toMatch(/pendiente de datos del veh[ií]culo/);
+    const fallback = renderDeterministicClientQuoteFallback({
+      contactName: 'Cliente',
+      canonicalQuote: q,
+      hasActiveAppointment: false,
+      damages: [
+        {
+          damageItemId: 'dmg_fascia',
+          vehicleId: 'veh_1',
+          pieceCode: 'FD',
+          pieceLabel: 'Fascia delantera',
+          physicalPanelKey: 'FD',
+          severity: 'DMFuerte',
+          descriptionTechnical: 'quebrada',
+          treatment: 'SUSTITUIR',
+          treatmentConfidence: 'HIGH',
+          treatmentSource: 'vision',
+          treatmentReason: 'vision',
+          requiresReplacement: true,
+          possibleReplacement: false,
+          evidence: [],
+          source: 'vision',
+        },
+      ],
+    });
+    expect(fallback.financialBlock).toMatch(/pendiente de datos del veh[ií]culo/);
+  });
+
   it('10. billable=false amount positivo: no aparece como cargo', () => {
     const q = quote({
       lines: [
