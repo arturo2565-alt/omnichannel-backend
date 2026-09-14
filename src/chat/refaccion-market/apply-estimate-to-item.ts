@@ -1,5 +1,6 @@
 import type { DetectedDamageItem } from '../entities/chat.entity';
 import type { RefaccionMarketEstimate } from './refaccion-market.types';
+import { marketCacheKey } from './parse-vehicle-part-identity';
 
 export function applyMarketEstimateToItem(
   item: DetectedDamageItem,
@@ -27,5 +28,6 @@ export function applyMarketEstimateToItem(
     cantidadDominios: estimate.cantidadDominios,
     providersUsed: estimate.providersUsed,
     partTypeGroup: estimate.partTypeGroup ?? undefined,
+    marketIdentityKey: marketCacheKey(estimate.identity),
   };
 }

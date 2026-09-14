@@ -232,7 +232,9 @@ function applyOverridesAndFreezes(
         precioMx: amount,
         billable: row.serviceType === 'PENDIENTE' || row.serviceType === 'ADVERTENCIA'
           ? false
-          : amount > 0 && row.pricingStatus !== 'INSUFFICIENT_MARKET_SAMPLE',
+          : amount > 0 &&
+            row.pricingStatus !== 'INSUFFICIENT_MARKET_SAMPLE' &&
+            row.pricingStatus !== 'AWAITING_VEHICLE_DATA',
       };
     }
     const manualHit = (manual ?? []).find((m) => {
@@ -269,6 +271,8 @@ function rowToQuoteLine(row: QuoteRowInput): QuoteLine {
   const insufficient =
     row.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE' ||
     row.priceSource === 'INSUFFICIENT_MARKET_SAMPLE' ||
+    row.pricingStatus === 'AWAITING_VEHICLE_DATA' ||
+    row.priceSource === 'AWAITING_VEHICLE_DATA' ||
     row.pricingStatus === 'UNCONFIGURED' ||
     row.priceSource === 'UNCONFIGURED';
   const nonChargeableType =

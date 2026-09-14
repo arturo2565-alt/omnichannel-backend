@@ -455,7 +455,9 @@ export class QuoteCartService {
 
     if (input.existingCart) {
       const priorMessageId = input.existingCart.messageId;
-      input.existingCart.messageId = input.messageId;
+      if (input.messageId) {
+        input.existingCart.messageId = input.messageId;
+      }
       input.existingCart.imageUrl = persistedImageUrl;
       input.existingCart.damageAnalysis = input.analysis;
       input.existingCart.estimateAmount = input.estimateAmount;

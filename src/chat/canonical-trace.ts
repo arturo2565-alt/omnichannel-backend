@@ -48,6 +48,13 @@ export const CANONICAL_TRACE_EVENTS = {
   PRICING_ELIGIBILITY: 'PRICING_ELIGIBILITY',
   PERSIST_DAMAGE_RESOLUTION: 'PERSIST_DAMAGE_RESOLUTION',
   MISSING_CANONICAL_DAMAGE_ID: 'MISSING_CANONICAL_DAMAGE_ID',
+  PENDING_REQUIREMENT_CREATED: 'PENDING_REQUIREMENT_CREATED',
+  VEHICLE_IDENTITY_CONFIRMED: 'VEHICLE_IDENTITY_CONFIRMED',
+  PENDING_REQUIREMENT_RESOLVED: 'PENDING_REQUIREMENT_RESOLVED',
+  QUOTE_RESUME_STARTED: 'QUOTE_RESUME_STARTED',
+  REFACCION_REPRICE_STARTED: 'REFACCION_REPRICE_STARTED',
+  REFACCION_REPRICE_RESULT: 'REFACCION_REPRICE_RESULT',
+  CANONICAL_QUOTE_RESUMED: 'CANONICAL_QUOTE_RESUMED',
 } as const;
 
 export type CanonicalTraceEvent =
@@ -586,6 +593,36 @@ export function traceRefaccionMarketEvent(
     sampleCount: asNumber(payload.sampleCount) ?? asNumber(payload.cantidadMuestras),
     confirmed: payload.confirmed,
     rawHits: undefined,
+  });
+}
+
+export function tracePendingQuoteLifecycle(
+  event:
+    | typeof CANONICAL_TRACE_EVENTS.PENDING_REQUIREMENT_CREATED
+    | typeof CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY_CONFIRMED
+    | typeof CANONICAL_TRACE_EVENTS.PENDING_REQUIREMENT_RESOLVED
+    | typeof CANONICAL_TRACE_EVENTS.QUOTE_RESUME_STARTED
+    | typeof CANONICAL_TRACE_EVENTS.REFACCION_REPRICE_STARTED
+    | typeof CANONICAL_TRACE_EVENTS.REFACCION_REPRICE_RESULT
+    | typeof CANONICAL_TRACE_EVENTS.CANONICAL_QUOTE_RESUMED,
+  payload: {
+    conversationId?: string;
+    quoteId?: string;
+    vehicleId?: string;
+    damageItemId?: string;
+    requiredFields?: readonly string[];
+    pricingStatus?: string;
+  } = {},
+): void {
+  pegCanonicalTrace(event, {
+    conversationId: asString(payload.conversationId),
+    quoteId: asString(payload.quoteId),
+    vehicleId: asString(payload.vehicleId),
+    damageItemId: asString(payload.damageItemId),
+    requiredFields: payload.requiredFields
+      ? [...payload.requiredFields]
+      : undefined,
+    pricingStatus: asString(payload.pricingStatus),
   });
 }
 

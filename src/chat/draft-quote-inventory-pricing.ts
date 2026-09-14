@@ -82,7 +82,11 @@ export interface QuoteRowInput {
   vehicleId?: string;
   billable?: boolean;
   priceSource?: RefaccionPriceSource;
-  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE' | 'UNCONFIGURED';
+  pricingStatus?:
+    | 'OK'
+    | 'INSUFFICIENT_MARKET_SAMPLE'
+    | 'AWAITING_VEHICLE_DATA'
+    | 'UNCONFIGURED';
   pricingType?: 'RANGE' | 'NONE';
   precioMinEstimado?: number;
   precioMaxEstimado?: number;
@@ -93,6 +97,66 @@ export interface QuoteRowInput {
   partTypeGroup?: string;
   marketQuery?: string;
   disclaimer?: string;
+}
+
+function resolveSustituirRefaccionPricing(
+  it: DetectedDamageItem,
+  display: string,
+): {
+  partPrice: number;
+  billable: boolean;
+  priceSource: RefaccionPriceSource;
+  pricingStatus:
+    | 'OK'
+    | 'INSUFFICIENT_MARKET_SAMPLE'
+    | 'AWAITING_VEHICLE_DATA';
+  awaiting: boolean;
+  insufficient: boolean;
+  pendingDisclaimer: string;
+  pendingDescription: string;
+} {
+  const awaiting =
+    it.pricingStatus === 'AWAITING_VEHICLE_DATA' ||
+    it.priceSource === 'AWAITING_VEHICLE_DATA';
+  const rawPart = Number(it.precioMx);
+  const catalogManual =
+    it.priceSource === 'AUTOFIX_CATALOG' || it.priceSource === 'FALLBACK';
+  const hasValidPart =
+    !catalogManual && Number.isFinite(rawPart) && rawPart > 0;
+  const insufficient =
+    !awaiting &&
+    (catalogManual ||
+      it.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE' ||
+      it.priceSource === 'INSUFFICIENT_MARKET_SAMPLE' ||
+      !hasValidPart);
+  const partPrice = hasValidPart && !awaiting ? Math.round(rawPart) : 0;
+  const priceSource: RefaccionPriceSource = awaiting
+    ? 'AWAITING_VEHICLE_DATA'
+    : catalogManual
+      ? 'INSUFFICIENT_MARKET_SAMPLE'
+      : (it.priceSource ??
+        (hasValidPart ? 'WEB_MARKET_ESTIMATE' : 'INSUFFICIENT_MARKET_SAMPLE'));
+  const pricingStatus = awaiting
+    ? 'AWAITING_VEHICLE_DATA'
+    : insufficient
+      ? 'INSUFFICIENT_MARKET_SAMPLE'
+      : it.pricingStatus === 'OK'
+        ? 'OK'
+        : 'OK';
+  return {
+    partPrice,
+    billable: partPrice > 0 && !insufficient && !awaiting,
+    priceSource,
+    pricingStatus,
+    awaiting,
+    insufficient,
+    pendingDisclaimer: awaiting
+      ? `Refacción de ${display}: falta información del vehículo para cotizar el reemplazo.`
+      : `Refacción de ${display}: precio pendiente de estimación. El montaje/pintura no cubre la pieza de reemplazo.`,
+    pendingDescription: awaiting
+      ? `Refacción de ${display}: pendiente de datos del vehículo`
+      : `Refacción de ${display}: precio pendiente de estimación`,
+  };
 }
 
 /** Proyecta rango y evidencia de mercado a QuoteLine. No recalcula importe. */
@@ -632,37 +696,23 @@ export function quoteRowsFromDamageInventory(
       }
 
       if (tratamiento === 'SUSTITUIR') {
-        const rawPart = Number(it.precioMx);
-        const catalogManual =
-          it.priceSource === 'AUTOFIX_CATALOG' || it.priceSource === 'FALLBACK';
-        const hasValidPart =
-          !catalogManual && Number.isFinite(rawPart) && rawPart > 0;
-        const insufficient =
-          catalogManual ||
-          it.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE' ||
-          it.priceSource === 'INSUFFICIENT_MARKET_SAMPLE' ||
-          !hasValidPart;
-        const partPrice = hasValidPart ? Math.round(rawPart) : 0;
-        const priceSource = catalogManual
-          ? 'INSUFFICIENT_MARKET_SAMPLE'
-          : (it.priceSource ??
-            (hasValidPart ? 'WEB_MARKET_ESTIMATE' : 'INSUFFICIENT_MARKET_SAMPLE'));
+        const refaccion = resolveSustituirRefaccionPricing(it, display);
         const negraMontajePendiente = isMolduraNonPaintableFinish(finish);
         rows.push(
           stampRowFromDamage(it, {
             pieza: `REFACCION:${PANEL_PIEZA_MOLDURA_CODE}`,
             severidad: 'N/A',
-            precioMx: partPrice,
+            precioMx: refaccion.partPrice,
             detallesRefaccion: it.detallesRefaccion || display,
             tratamiento: 'SUSTITUIR',
             serviceType: 'REFACCION',
             physicalPanelKey: panelCode,
-            billable: partPrice > 0 && !insufficient,
-            priceSource,
-            pricingStatus: insufficient
-              ? 'INSUFFICIENT_MARKET_SAMPLE'
-              : it.pricingStatus ?? 'OK',
-            pricingType: it.pricingType ?? (hasValidPart ? 'RANGE' : 'NONE'),
+            billable: refaccion.billable,
+            priceSource: refaccion.priceSource,
+            pricingStatus: refaccion.pricingStatus,
+            pricingType:
+              it.pricingType ??
+              (refaccion.partPrice > 0 ? 'RANGE' : 'NONE'),
             precioMinEstimado: it.precioMinEstimado,
             precioMaxEstimado: it.precioMaxEstimado,
             precioCentral: it.precioCentral,
@@ -672,15 +722,17 @@ export function quoteRowsFromDamageInventory(
             partTypeGroup: it.partTypeGroup,
             disclaimer: negraMontajePendiente
               ? `${MOLDURA_MONTAJE_PENDIENTE}. Refacción de ${display}: montaje sin pintura no tiene serviceType todavía.`
-              : insufficient
-                ? `Refacción de ${display}: precio pendiente de estimación. El montaje/pintura no cubre la pieza de reemplazo.`
+              : refaccion.awaiting || refaccion.insufficient
+                ? refaccion.pendingDisclaimer
                 : undefined,
-            description: insufficient
-              ? `Refacción de ${display}: precio pendiente de estimación`
-              : `Refacción de ${display}`,
-            descripcionServicio: insufficient
-              ? `Refacción de ${display}: precio pendiente de estimación`
-              : `Refacción de ${display}`,
+            description:
+              refaccion.awaiting || refaccion.insufficient
+                ? refaccion.pendingDescription
+                : `Refacción de ${display}`,
+            descripcionServicio:
+              refaccion.awaiting || refaccion.insufficient
+                ? refaccion.pendingDescription
+                : `Refacción de ${display}`,
           }),
         );
         if (isMolduraPaintedRepair(finish) && needsMontajePinturaComponent(PANEL_PIEZA_MOLDURA_CODE)) {
@@ -786,36 +838,21 @@ export function quoteRowsFromDamageInventory(
     }
 
     if (tratamiento === 'SUSTITUIR') {
-      const rawPart = Number(it.precioMx);
-      const catalogManual =
-        it.priceSource === 'AUTOFIX_CATALOG' || it.priceSource === 'FALLBACK';
-      const hasValidPart =
-        !catalogManual && Number.isFinite(rawPart) && rawPart > 0;
-      const insufficient =
-        catalogManual ||
-        it.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE' ||
-        it.priceSource === 'INSUFFICIENT_MARKET_SAMPLE' ||
-        !hasValidPart;
-      const partPrice = hasValidPart ? Math.round(rawPart) : 0;
-      const priceSource = catalogManual
-        ? 'INSUFFICIENT_MARKET_SAMPLE'
-        : (it.priceSource ??
-          (hasValidPart ? 'WEB_MARKET_ESTIMATE' : 'INSUFFICIENT_MARKET_SAMPLE'));
+      const refaccion = resolveSustituirRefaccionPricing(it, display);
       rows.push(
         stampRowFromDamage(it, {
         pieza: `REFACCION:${panelCode}`,
         severidad: 'N/A',
-        precioMx: partPrice,
+        precioMx: refaccion.partPrice,
         detallesRefaccion: it.detallesRefaccion || display,
         tratamiento: 'SUSTITUIR',
         serviceType: 'REFACCION',
         physicalPanelKey: panelCode,
-        billable: partPrice > 0 && !insufficient,
-        priceSource,
-        pricingStatus: insufficient
-          ? 'INSUFFICIENT_MARKET_SAMPLE'
-          : it.pricingStatus ?? 'OK',
-        pricingType: it.pricingType ?? (hasValidPart ? 'RANGE' : 'NONE'),
+        billable: refaccion.billable,
+        priceSource: refaccion.priceSource,
+        pricingStatus: refaccion.pricingStatus,
+        pricingType:
+          it.pricingType ?? (refaccion.partPrice > 0 ? 'RANGE' : 'NONE'),
         precioMinEstimado: it.precioMinEstimado,
         precioMaxEstimado: it.precioMaxEstimado,
         precioCentral: it.precioCentral,
@@ -823,15 +860,18 @@ export function quoteRowsFromDamageInventory(
         cantidadDominios: it.cantidadDominios,
         providersUsed: it.providersUsed,
         partTypeGroup: it.partTypeGroup,
-        disclaimer: insufficient
-          ? `Refacción de ${display}: precio pendiente de estimación. El montaje/pintura no cubre la pieza de reemplazo.`
-          : undefined,
-        description: insufficient
-          ? `Refacción de ${display}: precio pendiente de estimación`
-          : `Refacción de ${display}`,
-        descripcionServicio: insufficient
-          ? `Refacción de ${display}: precio pendiente de estimación`
-          : `Refacción de ${display}`,
+        disclaimer:
+          refaccion.awaiting || refaccion.insufficient
+            ? refaccion.pendingDisclaimer
+            : undefined,
+        description:
+          refaccion.awaiting || refaccion.insufficient
+            ? refaccion.pendingDescription
+            : `Refacción de ${display}`,
+        descripcionServicio:
+          refaccion.awaiting || refaccion.insufficient
+            ? refaccion.pendingDescription
+            : `Refacción de ${display}`,
         }),
       );
       if (needsMontajePinturaComponent(panelCode)) {

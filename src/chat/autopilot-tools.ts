@@ -173,6 +173,42 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
   },
   {
     type: 'function',
+    name: 'confirmVehicleIdentity',
+    description:
+      'Confirma o enriquece la identidad del vehículo (marca, modelo, año, versión/variante) cuando el cliente la proporciona. Úsala INMEDIATAMENTE si hay un PENDING_CANONICAL_REQUIREMENT y el cliente da el dato que faltaba. No inventes campos que el cliente no dijo. El backend reanuda sola la cotización pendiente: NO llames estimarRefaccionMercado después. No agradezcas el dato sin ejecutar esta tool.',
+    parameters: {
+      type: 'object',
+      properties: {
+        vehicleId: {
+          type: 'string',
+          description: 'vehicleId canónico si ya lo conoces. Si omites, se usa el vehículo activo.',
+        },
+        make: {
+          type: 'string',
+          description: 'Marca solo si el cliente la mencionó (ej. Mazda).',
+        },
+        model: {
+          type: 'string',
+          description: 'Modelo solo si el cliente lo mencionó (ej. 2).',
+        },
+        year: {
+          type: 'number',
+          description: 'Año de 4 dígitos solo si el cliente lo mencionó (ej. 2020).',
+        },
+        version: {
+          type: 'string',
+          description: 'Versión solo si el cliente la mencionó.',
+        },
+        variant: {
+          type: 'string',
+          description: 'Variante o carrocería solo si el cliente la mencionó (ej. HB).',
+        },
+      },
+    },
+    strict: false,
+  },
+  {
+    type: 'function',
     name: 'estimarRefaccionMercado',
     description:
       'Estima el costo de una refacción (pieza de reemplazo) con rangos de mercado México (MercadoLibre / refaccionarias) y aplica +30% de margen logístico. Úsala cuando el daño sea DF o DMFuerte con rotura evidente, o el cliente pregunte por cambiar la pieza. Inserta la línea REFACCION en el carrito.',

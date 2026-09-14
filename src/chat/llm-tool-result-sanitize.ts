@@ -68,6 +68,10 @@ const KEEP_KEYS = new Set([
   'vehicleids',
   'cartpersisted',
   'preview',
+  'vehicleconfirmed',
+  'quotealreadysent',
+  'resumed',
+  'pendingresolved',
 ]);
 
 function normKey(key: string): string {

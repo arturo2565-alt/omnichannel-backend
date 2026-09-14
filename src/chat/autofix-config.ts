@@ -212,8 +212,13 @@ export interface DraftQuoteLine {
     | 'UNCONFIGURED'
     | 'WEB_MARKET_ESTIMATE'
     | 'INSUFFICIENT_MARKET_SAMPLE'
+    | 'AWAITING_VEHICLE_DATA'
     | 'MANUAL';
-  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE' | 'UNCONFIGURED';
+  pricingStatus?:
+    | 'OK'
+    | 'INSUFFICIENT_MARKET_SAMPLE'
+    | 'AWAITING_VEHICLE_DATA'
+    | 'UNCONFIGURED';
   pricingType?: 'RANGE' | 'NONE';
   precioMinEstimado?: number;
   precioMaxEstimado?: number;
@@ -280,6 +285,8 @@ export interface DraftQuote {
   total: number;
   /** True si hay REFACCION sin precio de mercado; el total es parcial. */
   pricingIncomplete?: boolean;
+  /** Requisitos persistentes de una cotización canónica parcial. */
+  pendingRequirements?: import('../domain/peritaje-v1').PendingQuoteRequirement[];
   /** Última versión enviada al cliente por WhatsApp/panel. */
   lastSendSnapshot?: QuoteSendSnapshot;
   /** Historial reciente de envíos (máx. ~20 en backend). */

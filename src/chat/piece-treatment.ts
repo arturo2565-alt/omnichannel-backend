@@ -54,6 +54,7 @@ export const REFACCION_PRICE_SOURCES = [
   'LEGACY_REPAIR_MATRIX_FALLBACK',
   'WEB_MARKET_ESTIMATE',
   'INSUFFICIENT_MARKET_SAMPLE',
+  'AWAITING_VEHICLE_DATA',
   'MANUAL',
   'UNCONFIGURED',
 ] as const;
@@ -533,6 +534,9 @@ export function mergePhysicalPanelItems(
     ...(b.pricingStatus || a.pricingStatus
       ? { pricingStatus: b.pricingStatus || a.pricingStatus }
       : {}),
+    ...(b.marketIdentityKey || a.marketIdentityKey
+      ? { marketIdentityKey: b.marketIdentityKey || a.marketIdentityKey }
+      : {}),
     ...(a.damageItemId && a.damageItemId === b.damageItemId
       ? { damageItemId: a.damageItemId }
       : {}),
@@ -621,6 +625,9 @@ export function copyDetectedDamageSemantics(
       : {}),
     ...(it.providersUsed ? { providersUsed: [...it.providersUsed] } : {}),
     ...(it.partTypeGroup ? { partTypeGroup: it.partTypeGroup } : {}),
+    ...(it.marketIdentityKey
+      ? { marketIdentityKey: it.marketIdentityKey }
+      : {}),
   };
 }
 

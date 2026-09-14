@@ -82,8 +82,15 @@ export interface DetectedDamageItem {
     | 'LEGACY_REPAIR_MATRIX_FALLBACK'
     | 'WEB_MARKET_ESTIMATE'
     | 'INSUFFICIENT_MARKET_SAMPLE'
+    | 'AWAITING_VEHICLE_DATA'
     | 'UNCONFIGURED';
-  pricingStatus?: 'OK' | 'INSUFFICIENT_MARKET_SAMPLE' | 'UNCONFIGURED';
+  pricingStatus?:
+    | 'OK'
+    | 'INSUFFICIENT_MARKET_SAMPLE'
+    | 'AWAITING_VEHICLE_DATA'
+    | 'UNCONFIGURED';
+  /** Identidad vehicular usada en la última búsqueda de mercado (idempotencia). */
+  marketIdentityKey?: string;
   pricingType?: 'RANGE' | 'NONE';
   precioMinEstimado?: number;
   precioMaxEstimado?: number;

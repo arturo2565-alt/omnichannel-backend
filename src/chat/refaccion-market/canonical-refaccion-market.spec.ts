@@ -134,6 +134,36 @@ describe('CANONICAL REFACCION = solo mercado', () => {
     expect(events).toContain(REFACCION_MARKET_EVENTS.SEARCH_STARTED);
   });
 
+  it('1b. SUSTITUIR sin año no ejecuta market research final', async () => {
+    const identities: VehiclePartIdentity[] = [];
+    const events: string[] = [];
+    const service = {
+      estimate: async (identity: VehiclePartIdentity) => {
+        identities.push(identity);
+        return insufficientEstimate(identity);
+      },
+    };
+    const enriched = await enrichInventoryWithMarketRefacciones(
+      {
+        pieza: 'Calavera_Izquierda',
+        severidad: 'DMFuerte',
+        descripcionTecnica: '',
+        justificacion: '',
+        partesAfectadas: ['Calavera_Izquierda'],
+        severidadDelDano: 'DMFuerte',
+        vehiculoDetectado: 'Mazda 2',
+        inventory: [item({ pieza: 'Calavera_Izquierda', precioMx: 1 })],
+      },
+      service as never,
+      (event) => events.push(event),
+    );
+    expect(identities).toHaveLength(0);
+    expect(events).not.toContain(REFACCION_MARKET_EVENTS.SEARCH_STARTED);
+    expect(events).toContain(REFACCION_MARKET_EVENTS.AWAITING_VEHICLE_DATA);
+    expect(enriched.inventory?.[0]?.pricingStatus).toBe('AWAITING_VEHICLE_DATA');
+    expect(enriched.inventory?.[0]?.precioMx).toBe(0);
+  });
+
   it('2. precio manual en refaccion_catalog no afecta quote CANONICAL', async () => {
     const catalogManual = 4940;
     const service = {

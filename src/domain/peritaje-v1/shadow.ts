@@ -12,6 +12,10 @@ import {
   type LegacyDetectedDamageShape,
   type LegacyViabilityShape,
 } from './from-legacy';
+import {
+  reusePriorVehicleIdentity,
+  singleNonUnknownVehicle,
+} from './vehicle-identity-enrich';
 import { parseStructuredTreatment, resolveLockedTreatment } from './treatment';
 import { mergeDamageEvidenceStatus } from '../../catalog/damage-evidence';
 import { validateCanonicalPeritajeV1 } from './invariants';
@@ -388,7 +392,7 @@ export function buildVisionCanonicalShadow(input: {
   viability?: LegacyViabilityShape;
 }): CanonicalPeritajeV1 {
   const now = input.now ?? new Date().toISOString();
-  const rootVehicle = resolveShadowVehicleIdentity({
+  const computedRoot = resolveShadowVehicleIdentity({
     userConfirmedLabel: input.userConfirmedVehicleLabel,
     cartStructuredLabel: input.cartVehicleLabel,
     cartTierSource: input.cartVehicleSource,
@@ -396,6 +400,10 @@ export function buildVisionCanonicalShadow(input: {
       input.visionVehicleLabel || input.analysisVehicleLabel,
     pricingProfileLabel: input.pricingProfileLabel,
   });
+  const priorVehicle = singleNonUnknownVehicle(input.priorCanonical?.vehicles);
+  const rootVehicle = priorVehicle
+    ? reusePriorVehicleIdentity(priorVehicle, computedRoot)
+    : computedRoot;
 
   const adapt = (
     items: readonly LegacyDetectedDamageShape[],
@@ -408,8 +416,11 @@ export function buildVisionCanonicalShadow(input: {
             confirmedByUser: false,
           })
         : rootVehicle;
+      const vehicleId = priorVehicle
+        ? rootVehicle.vehicleId
+        : itemVehicle.vehicleId;
       const adapted = damageItemFromLegacy(item, {
-        vehicleId: itemVehicle.vehicleId,
+        vehicleId,
         source,
         treatmentSource: source === 'vision' ? 'vision' : 'legacy',
         canonicalizePanel: input.canonicalizePanel ?? normalizePhysicalPanelKey,

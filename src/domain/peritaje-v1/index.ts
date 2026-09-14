@@ -78,6 +78,44 @@ export {
 } from './invariants';
 
 export {
+  PENDING_QUOTE_REQUIREMENT_TYPES,
+  PENDING_QUOTE_REQUIREMENT_REASONS,
+  PENDING_QUOTE_REQUIREMENT_STATUSES,
+  REFACCION_REQUIRED_VEHICLE_FIELDS,
+  isValidVehicleYear,
+  missingRefaccionVehicleFields,
+  vehicleHasRefaccionIdentity,
+  createPendingRequirementId,
+  upsertOpenVehicleDataRequirement,
+  resolvePendingRequirementsForVehicle,
+  syncPendingQuoteRequirements,
+  openPendingQuoteRequirements,
+  formatPendingCanonicalRequirementsContext,
+} from './pending-quote-requirement';
+
+export type {
+  PendingQuoteRequirement,
+  PendingQuoteRequirementType,
+  PendingQuoteRequirementReason,
+  PendingQuoteRequirementStatus,
+  RefaccionRequiredVehicleField,
+} from './pending-quote-requirement';
+
+export {
+  validateVehicleYear,
+  buildVehicleDisplayLabel,
+  vehicleIdentityVersion,
+  enrichVehicleIdentity,
+  reusePriorVehicleIdentity,
+  singleNonUnknownVehicle,
+} from './vehicle-identity-enrich';
+
+export type {
+  VehicleIdentityPatch,
+  EnrichVehicleIdentityResult,
+} from './vehicle-identity-enrich';
+
+export {
   vehicleIdentityFromLegacyLabel,
   resolveModernVehicleIdentity,
   damageItemFromLegacy,

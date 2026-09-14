@@ -20,6 +20,7 @@ import {
 
 export const CANONICAL_QUOTE_WARNINGS = {
   REFACCION_PENDIENTE_DE_COTIZAR: 'REFACCION_PENDIENTE_DE_COTIZAR',
+  AWAITING_VEHICLE_DATA: 'AWAITING_VEHICLE_DATA',
   HIDDEN_DAMAGE: 'HIDDEN_DAMAGE',
   POSSIBLE_SUBSTITUTION: 'POSSIBLE_SUBSTITUTION',
   PENDING_TREATMENT: 'PENDING_TREATMENT',
@@ -67,6 +68,8 @@ export function isChargeableQuoteLine(line: Pick<
   }
   if (line.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE') return false;
   if (line.pricingSource === 'INSUFFICIENT_MARKET_SAMPLE') return false;
+  if (line.pricingStatus === 'AWAITING_VEHICLE_DATA') return false;
+  if (line.pricingSource === 'AWAITING_VEHICLE_DATA') return false;
   if (line.pricingStatus === 'UNCONFIGURED') return false;
   if (line.pricingSource === 'UNCONFIGURED') return false;
   return Number(line.amount) > 0;
@@ -89,7 +92,14 @@ export function deriveCanonicalWarnings(
       line.serviceType === 'REFACCION' &&
       !isChargeableQuoteLine(line)
     ) {
-      warnings.add(CANONICAL_QUOTE_WARNINGS.REFACCION_PENDIENTE_DE_COTIZAR);
+      if (
+        line.pricingStatus === 'AWAITING_VEHICLE_DATA' ||
+        line.pricingSource === 'AWAITING_VEHICLE_DATA'
+      ) {
+        warnings.add(CANONICAL_QUOTE_WARNINGS.AWAITING_VEHICLE_DATA);
+      } else {
+        warnings.add(CANONICAL_QUOTE_WARNINGS.REFACCION_PENDIENTE_DE_COTIZAR);
+      }
     }
     if (line.serviceType === 'PENDIENTE') {
       warnings.add(CANONICAL_QUOTE_WARNINGS.PENDING_TREATMENT);
@@ -146,6 +156,7 @@ export function deriveIsPartial(lines: readonly QuoteLine[]): boolean {
       return true;
     }
     if (line.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE') return true;
+    if (line.pricingStatus === 'AWAITING_VEHICLE_DATA') return true;
     if (line.pricingStatus === 'UNCONFIGURED') return true;
     if (line.pricingSource === 'UNCONFIGURED') return true;
     return false;

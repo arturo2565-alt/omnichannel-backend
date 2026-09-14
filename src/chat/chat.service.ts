@@ -137,6 +137,17 @@ import { MOLDURA_VISION_CONTRACT } from '../catalog/moldura';
 import { DAMAGE_EVIDENCE_VISION_CONTRACT } from '../catalog/damage-evidence';
 import { enrichInventoryWithMarketRefacciones } from './refaccion-market/enrich-inventory-with-market';
 import {
+  parseConfirmVehicleIdentityArgs,
+  applyConfirmVehicleIdentity,
+} from './confirm-vehicle-identity';
+import {
+  resumePendingQuotePricing,
+  stampPendingRequirementsAfterQuote,
+  attachPendingRequirementsToDraft,
+} from './resume-pending-quote-pricing';
+import { vehicleHasRefaccionIdentity } from '../domain/peritaje-v1/pending-quote-requirement';
+import { formatPendingCanonicalRequirementsContext } from '../domain/peritaje-v1';
+import {
   applyXorTreatmentsToInventory,
   canonicalPhysicalPanelKey,
   cloneDetectedDamageItem,
@@ -158,10 +169,15 @@ import {
   commitVisionShadowToDraft,
 } from './canonical-shadow-write';
 import { stampAnalysisFromCanonicalPeritaje } from './canonical-identity';
-import { resolveAuthoritativeDraftFinance } from './canonical-quote-engine';
 import {
+  projectCanonicalQuoteOntoDraft,
+  resolveAuthoritativeDraftFinance,
+} from './canonical-quote-engine';
+import {
+  CANONICAL_TRACE_EVENTS,
   mergeCanonicalTraceContext,
   runWithCanonicalTraceContext,
+  tracePendingQuoteLifecycle,
   traceVisionInput,
 } from './canonical-trace';
 import {
@@ -1578,10 +1594,13 @@ export class ChatService implements OnModuleDestroy {
   private async enrichInventoryWithMarketRefacciones(
     analysis: VehicleDamageAnalysis,
     _tallerId?: string | null,
+    opts?: { vehicles?: CanonicalPeritajeV1['vehicles'] },
   ): Promise<VehicleDamageAnalysis> {
     return enrichInventoryWithMarketRefacciones(
       analysis,
       this.refaccionMarketService,
+      undefined,
+      opts,
     );
   }
 
@@ -3665,6 +3684,22 @@ export class ChatService implements OnModuleDestroy {
       vehicle,
     );
     return true;
+  }
+
+  private async buildPendingCanonicalRequirementsAppend(
+    conversationId: string,
+    tallerId?: string | null,
+  ): Promise<string> {
+    const cart = await this.quoteCartService.resolveActiveCart(
+      conversationId,
+      tallerId,
+    );
+    const requirements = cart?.quotePayload?.pendingRequirements;
+    if (!requirements?.length) return '';
+    return formatPendingCanonicalRequirementsContext({
+      requirements,
+      peritaje: cart?.canonicalPeritajeV1,
+    });
   }
 
   private async buildBanioSolicitarModeloAutopilotAppend(
@@ -5972,6 +6007,7 @@ ${catalogAppend}`;
     analysisForQuote = await this.enrichInventoryWithMarketRefacciones(
       analysisForQuote,
       visionTallerId,
+      { vehicles: shadowPeritaje?.vehicles },
     );
 
     let estimateAmount = await this.computePrimaryMatrixEstimate(
@@ -6039,6 +6075,28 @@ ${catalogAppend}`;
       draftQuoteForClient = finance.draft;
       estimateAmount = finance.estimateAmount;
       authoritativeQuote = finance.quote;
+      if (authoritativeQuote && shadowPeritaje) {
+        const stamped = stampPendingRequirementsAfterQuote({
+          draft: draftQuoteForClient,
+          peritaje: shadowPeritaje,
+          quote: authoritativeQuote,
+          conversationId,
+        });
+        draftQuoteForClient = stamped.draft;
+        for (const req of stamped.created) {
+          tracePendingQuoteLifecycle(
+            CANONICAL_TRACE_EVENTS.PENDING_REQUIREMENT_CREATED,
+            {
+              conversationId,
+              quoteId: authoritativeQuote.quoteId,
+              vehicleId: req.vehicleId,
+              damageItemId: req.damageItemId,
+              requiredFields: req.requiredFields,
+              pricingStatus: 'AWAITING_VEHICLE_DATA',
+            },
+          );
+        }
+      }
     } else if (finance.mode === 'canonical_blocked') {
       draftQuoteForClient = finance.draft;
       estimateAmount = finance.estimateAmount;
@@ -6318,6 +6376,14 @@ ${catalogAppend}`;
         quotePayloadForClient = panelFinance.draft;
         row.canonicalQuoteV1 = panelFinance.quote;
         row.estimateAmount = panelFinance.estimateAmount;
+        if (row.canonicalPeritajeV1 && panelFinance.quote) {
+          quotePayloadForClient = stampPendingRequirementsAfterQuote({
+            draft: quotePayloadForClient,
+            peritaje: row.canonicalPeritajeV1,
+            quote: panelFinance.quote,
+            conversationId: row.conversationId,
+          }).draft;
+        }
       } else if (panelFinance.mode === 'canonical_blocked') {
         quotePayloadForClient = panelFinance.draft;
         row.estimateAmount = panelFinance.estimateAmount;
@@ -6877,6 +6943,9 @@ ${catalogAppend}`;
       if (name === 'obtenerResumenCarrito') {
         return await this.executeObtainCarritoResumenTool(conversation);
       }
+      if (name === 'confirmVehicleIdentity') {
+        return await this.executeConfirmVehicleIdentityTool(args, conversation);
+      }
       if (name === 'estimarRefaccionMercado') {
         return await this.executeEstimarRefaccionMercadoTool(args, conversation);
       }
@@ -7205,6 +7274,216 @@ ${catalogAppend}`;
     };
   }
 
+  private async executeConfirmVehicleIdentityTool(
+    argsJson: string,
+    conversation: Conversation,
+  ): Promise<Record<string, unknown>> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+    } catch {
+      return { success: false, error: 'Argumentos inválidos (JSON).' };
+    }
+    const parsed = parseConfirmVehicleIdentityArgs(raw);
+    if (!parsed.ok) {
+      return { success: false, error: parsed.error };
+    }
+
+    const cart = await this.quoteCartService.resolveActiveCart(
+      conversation.id,
+      conversation.tallerId,
+    );
+    if (!cart) {
+      return {
+        success: false,
+        error: 'No hay una cotización activa para confirmar el vehículo.',
+      };
+    }
+
+    const legacyMode =
+      String(cart.quotePayload?.quoteFlowMode ?? '').toUpperCase() === 'LEGACY';
+    if (legacyMode || !cart.canonicalPeritajeV1) {
+      if (cart.damageAnalysis && parsed.args.year) {
+        const label = [
+          parsed.args.make,
+          parsed.args.model,
+          parsed.args.year,
+          parsed.args.variant ?? parsed.args.version,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+        if (label) {
+          cart.damageAnalysis = {
+            ...cart.damageAnalysis,
+            vehiculoDetectado: label,
+          };
+          await this.draftQuoteRepository.save(cart);
+        }
+      }
+      return {
+        success: true,
+        quoteUpdated: false,
+        quoteFlowMode: legacyMode ? 'LEGACY' : 'CANONICAL',
+        vehicleConfirmed: true,
+      };
+    }
+
+    const applied = applyConfirmVehicleIdentity({
+      peritaje: cart.canonicalPeritajeV1,
+      inventory: cart.damageAnalysis?.inventory ?? [],
+      requirements: cart.quotePayload?.pendingRequirements,
+      args: parsed.args,
+    });
+    if (!applied.ok) {
+      return { success: false, error: applied.error };
+    }
+
+    tracePendingQuoteLifecycle(
+      CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY_CONFIRMED,
+      {
+        conversationId: conversation.id,
+        quoteId: cart.canonicalQuoteV1?.quoteId,
+        vehicleId: applied.result.vehicle.vehicleId,
+      },
+    );
+    for (const req of applied.result.resolved) {
+      tracePendingQuoteLifecycle(
+        CANONICAL_TRACE_EVENTS.PENDING_REQUIREMENT_RESOLVED,
+        {
+          conversationId: conversation.id,
+          quoteId: cart.canonicalQuoteV1?.quoteId,
+          vehicleId: req.vehicleId,
+          damageItemId: req.damageItemId,
+          requiredFields: req.requiredFields,
+        },
+      );
+    }
+
+    const identityReady = vehicleHasRefaccionIdentity(applied.result.vehicle);
+    const awaitingSatisfied = applied.result.inventory.some(
+      (it) =>
+        String(it.tratamiento ?? '').toUpperCase() === 'SUSTITUIR' &&
+        it.pricingStatus === 'AWAITING_VEHICLE_DATA' &&
+        identityReady,
+    );
+    const shouldResume =
+      applied.result.resolved.length > 0 ||
+      applied.result.identityAttrsChanged ||
+      awaitingSatisfied;
+
+    const analysis: VehicleDamageAnalysis = {
+      ...(cart.damageAnalysis ??
+        inventoryItemsToVehicleAnalysis(applied.result.inventory, [])),
+      vehiculoDetectado: applied.result.displayLabel,
+      inventory: applied.result.inventory,
+    };
+
+    let quote = cart.canonicalQuoteV1;
+    let requirements = applied.result.requirements;
+    let quoteUpdated = false;
+    let resumed = false;
+
+    if (shouldResume && quote) {
+      const snap = await this.catalogService.getMatrixPricingSnapshot(
+        conversation.tallerId,
+      );
+      const pricingRules = await this.catalogService.getPricingRules(
+        conversation.tallerId,
+      );
+      const vehicleProfile =
+        vehiclePricingProfileFromAnalysis(analysis) ??
+        (applied.result.displayLabel
+          ? resolveVehiclePricingProfile({
+              modeloVehiculo: applied.result.displayLabel,
+              tierSource: 'cliente',
+            })
+          : null);
+      const resumedQuote = await resumePendingQuotePricing({
+        conversationId: conversation.id,
+        peritaje: applied.result.peritaje,
+        inventory: applied.result.inventory,
+        existingQuote: quote,
+        draft: cart.quotePayload,
+        requirements,
+        vehicle: applied.result.vehicle,
+        marketService: this.refaccionMarketService,
+        snap,
+        vehicleProfile,
+        pricingRules,
+        vehiculoText: applied.result.displayLabel,
+      });
+      quote = resumedQuote.quote;
+      requirements = resumedQuote.requirements;
+      analysis.inventory = resumedQuote.inventory;
+      resumed = true;
+      quoteUpdated = resumedQuote.quoteChanged;
+
+      let draft = projectCanonicalQuoteOntoDraft(
+        cart.quotePayload,
+        resumedQuote.quote,
+        snap,
+      );
+      draft = attachPendingRequirementsToDraft(draft, requirements);
+      draft.quoteFlowMode = 'CANONICAL';
+
+      await this.applyClientFacingFormalNarrativeToDraft(
+        draft,
+        analysis,
+        conversation.id,
+        Math.max(1, analysis.inventory?.length ?? 1),
+        null,
+        {
+          canonicalQuote: quote,
+          peritaje: applied.result.peritaje,
+        },
+      );
+      const draftForClient = normalizeDraftQuoteForClient(draft) ?? draft;
+
+      await this.quoteCartService.persistVisionQuote({
+        conversationId: conversation.id,
+        tallerId: conversation.tallerId,
+        messageId: cart.messageId ?? '',
+        analysis,
+        draftQuoteDoc: draftForClient,
+        estimateAmount: quote.total,
+        allImageUrls: parseDraftImageUrls(cart.imageUrl ?? ''),
+        existingCart: cart,
+        canonicalPeritajeV1: applied.result.peritaje,
+        canonicalQuoteV1: quote,
+      });
+
+      return {
+        success: true,
+        quoteUpdated,
+        quoteFlowMode: 'CANONICAL',
+        requiresCanonicalComposition: true,
+        vehicleConfirmed: true,
+        resumed,
+        pendingResolved: applied.result.resolved.length > 0,
+        quoteAlreadySent: false,
+      };
+    }
+
+    cart.canonicalPeritajeV1 = applied.result.peritaje;
+    cart.damageAnalysis = analysis;
+    if (cart.quotePayload) {
+      cart.quotePayload = attachPendingRequirementsToDraft(
+        cart.quotePayload,
+        requirements,
+      );
+    }
+    await this.draftQuoteRepository.save(cart);
+    return {
+      success: true,
+      quoteUpdated: false,
+      quoteFlowMode: 'CANONICAL',
+      vehicleConfirmed: true,
+      resumed: false,
+      pendingResolved: applied.result.resolved.length > 0,
+    };
+  }
+
   private async executeEstimarRefaccionMercadoTool(
     argsJson: string,
     conversation: Conversation,
@@ -7436,6 +7715,11 @@ ${catalogAppend}`;
           payload = await this.executeObtainCarritoResumenTool(
             { status: 'nuevo' } as Conversation,
           );
+        } else if (name === 'confirmVehicleIdentity') {
+          payload = {
+            success: false,
+            error: 'confirmVehicleIdentity no está disponible en playground.',
+          };
         } else if (name === 'estimarRefaccionMercado') {
           payload = await this.executeEstimarRefaccionMercadoToolPlayground(
             argsJson,
@@ -7759,6 +8043,14 @@ ${catalogAppend}`;
     if (banioModelAppend.trim()) {
       dynamicParts.push(banioModelAppend.trim());
     }
+    const pendingCanonicalAppend =
+      await this.buildPendingCanonicalRequirementsAppend(
+        conversation.id,
+        conversation.tallerId,
+      );
+    if (pendingCanonicalAppend.trim()) {
+      dynamicParts.push(pendingCanonicalAppend.trim());
+    }
     if (conversation.status === 'agendado') {
       dynamicParts.push(
         '[Estado del lead: AGENDADO — El cliente ya tiene cita confirmada. Prioriza responder sus dudas sobre la visita, el taller o el vehículo. Cualquier pieza o servicio extra que cotices con obtenerCotizacionExpress debe presentarse como complemento de su orden para el día acordado; no presiones nueva agenda, no envíes ubicación del taller ni cierres de venta genéricos salvo que lo pida. Si solo agradece o saluda sin pregunta nueva, responde una frase cordial y cierra.]',
@@ -8063,6 +8355,13 @@ ${catalogAppend}`;
             lastConfirmedIso = String(payload.scheduledAt);
           }
           if (name === 'obtenerCotizacionExpress' && payload.success) {
+            expressQuoted = true;
+          }
+          if (
+            name === 'confirmVehicleIdentity' &&
+            payload.success &&
+            payload.quoteUpdated
+          ) {
             expressQuoted = true;
           }
           const enriched = this.enrichAutopilotToolPayloadForMultiVehicleExpress(

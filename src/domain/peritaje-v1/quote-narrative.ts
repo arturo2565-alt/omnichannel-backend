@@ -8,6 +8,7 @@ import {
   isMolduraPieza,
 } from '../../catalog/panel-pieza-catalog';
 import { isChargeableQuoteLine } from './quote-engine';
+import { missingRefaccionVehicleFields } from './pending-quote-requirement';
 import { QUOTE_SCHEMA_VERSION } from './types';
 import type {
   CanonicalPeritajeV1,
@@ -81,6 +82,8 @@ export const CANONICAL_WARNING_COPY: Record<string, string> = {
     'A reserva de revisión física. Si los anclajes o la estructura de la pieza están comprometidos, podría requerirse sustitución y el precio se actualizará.',
   REFACCION_PENDIENTE_DE_COTIZAR:
     'La refacción queda pendiente de cotizar. El total mostrado no incluye ese concepto.',
+  AWAITING_VEHICLE_DATA:
+    'Para cotizar la refacción falta información del vehículo (marca, modelo o año).',
   PENDING_TREATMENT:
     'Hay piezas pendientes de peritaje; no se incluyen como cargo en este presupuesto.',
   MOLDURA_NO_PINTABLE_REQUIERE_REVISION:
@@ -95,6 +98,7 @@ export const CANONICAL_WARNING_COPY: Record<string, string> = {
 
 export const PARTIAL_QUOTE_REASON = {
   INSUFFICIENT_MARKET_SAMPLE: 'INSUFFICIENT_MARKET_SAMPLE',
+  AWAITING_VEHICLE_DATA: 'AWAITING_VEHICLE_DATA',
   MOLDURA_NO_PINTABLE_REQUIERE_REVISION:
     'MOLDURA_NO_PINTABLE_REQUIERE_REVISION',
   MOLDURA_PINTADA_UNCONFIGURED: 'MOLDURA_PINTADA_UNCONFIGURED',
@@ -162,6 +166,25 @@ export function derivePartialQuoteReasons(
       line.pricingSource === 'UNCONFIGURED';
 
     if (line.serviceType === 'REFACCION') {
+      const awaiting =
+        line.pricingStatus === 'AWAITING_VEHICLE_DATA' ||
+        line.pricingSource === 'AWAITING_VEHICLE_DATA';
+      if (awaiting) {
+        const vehicle = peritaje?.vehicles.find(
+          (v) => v.vehicleId === line.vehicleId,
+        );
+        const missing = missingRefaccionVehicleFields({
+          make: vehicle?.make,
+          model: vehicle?.model,
+          year: vehicle?.year,
+        });
+        const text =
+          missing.length === 1 && missing[0] === 'year'
+            ? 'Para cotizar la refacción falta el año del vehículo.'
+            : 'Para cotizar la refacción falta información del vehículo (marca, modelo o año).';
+        push(PARTIAL_QUOTE_REASON.AWAITING_VEHICLE_DATA, text);
+        continue;
+      }
       push(
         PARTIAL_QUOTE_REASON.INSUFFICIENT_MARKET_SAMPLE,
         'La refacción está pendiente de estimación de mercado.',
@@ -350,13 +373,15 @@ export function renderCanonicalQuoteFinancialBlock(
       continue;
     }
 
-    if (
-      line.serviceType === 'REFACCION' &&
-      (line.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE' ||
-        line.pricingSource === 'INSUFFICIENT_MARKET_SAMPLE' ||
-        !line.billable)
-    ) {
-      lineTexts.push(`🛠️ ${label}: precio pendiente de estimación`);
+    if (line.serviceType === 'REFACCION' && !isChargeableQuoteLine(line)) {
+      const awaiting =
+        line.pricingStatus === 'AWAITING_VEHICLE_DATA' ||
+        line.pricingSource === 'AWAITING_VEHICLE_DATA';
+      lineTexts.push(
+        awaiting
+          ? `🛠️ ${label}: pendiente de datos del vehículo`
+          : `🛠️ ${label}: precio pendiente de estimación`,
+      );
       continue;
     }
 

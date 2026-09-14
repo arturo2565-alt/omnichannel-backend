@@ -69,6 +69,7 @@ export const PRICING_SOURCES = [
   'LEGACY_REPAIR_MATRIX_FALLBACK',
   'WEB_MARKET_ESTIMATE',
   'INSUFFICIENT_MARKET_SAMPLE',
+  'AWAITING_VEHICLE_DATA',
   'MANUAL',
   'UNCONFIGURED',
 ] as const;
@@ -78,6 +79,7 @@ export type PricingSource = (typeof PRICING_SOURCES)[number];
 export const PRICING_STATUSES = [
   'OK',
   'INSUFFICIENT_MARKET_SAMPLE',
+  'AWAITING_VEHICLE_DATA',
   'UNCONFIGURED',
 ] as const;
 export type PricingStatus = (typeof PRICING_STATUSES)[number];
@@ -101,6 +103,8 @@ export interface VehicleIdentity {
   model?: string;
   year?: string;
   version?: string;
+  /** Estilo de carrocería u otro discriminador (ej. HB). No regenera vehicleId. */
+  variant?: string;
   generation?: string;
   displayLabel: string;
   confidence: ConfidenceLevel;
