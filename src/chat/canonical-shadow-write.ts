@@ -89,6 +89,7 @@ export function buildVisionShadowSafe(
       viability: input.viability,
       explicitMultiVehicle,
     });
+    if (!built) return null;
     const policy = resolveVisionBurstVehiclePolicy({
       priorVehicles: priorCanonical?.vehicles,
       rootLabel:
