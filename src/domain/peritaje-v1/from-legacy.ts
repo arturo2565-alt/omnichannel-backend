@@ -53,6 +53,10 @@ export type LegacyDetectedDamageShape = {
     areas: string[];
     requiresDisassembly: boolean;
   };
+  visionBatchIndex?: number;
+  visionBatchIndexes?: number[];
+  pieceCodeRaw?: string;
+  pieceCodeCanonical?: string;
 };
 
 export type LegacyAnalysisShape = {
@@ -211,6 +215,18 @@ export function damageItemFromLegacy(
       createImageEvidence(url, { messageId: ctx.sourceMessageId }),
     ),
     source: ctx.source ?? 'legacy',
+    ...(item.visionBatchIndex != null
+      ? { visionBatchIndex: item.visionBatchIndex }
+      : {}),
+    ...(item.visionBatchIndexes?.length
+      ? { visionBatchIndexes: [...item.visionBatchIndexes] }
+      : item.visionBatchIndex != null
+        ? { visionBatchIndexes: [item.visionBatchIndex] }
+        : {}),
+    ...(item.pieceCodeRaw ? { pieceCodeRaw: item.pieceCodeRaw } : {}),
+    ...(item.pieceCodeCanonical || physicalPanelKey
+      ? { pieceCodeCanonical: item.pieceCodeCanonical || physicalPanelKey }
+      : {}),
   };
 }
 

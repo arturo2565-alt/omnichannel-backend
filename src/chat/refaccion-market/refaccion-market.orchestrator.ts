@@ -3,10 +3,12 @@ import { buildMarketEstimate, insufficientEstimate } from './compute-market-rang
 import { dedupeMarketSamples } from './dedupe-market-samples';
 import { GoogleWebSearchProvider } from './google-web-search.provider';
 import { MercadoLibreProvider } from './mercado-libre.provider';
-import { normalizeRawHit } from './normalize-market-sample';
+import { classifyRawHit } from './normalize-market-sample';
+import { canonicalizeUrl } from './normalize-market-sample';
 import { RefaccionMarketCache } from './refaccion-market.cache';
 import type {
   MarketProviderId,
+  MarketSample,
   RawProviderHit,
   RefaccionMarketEstimate,
   RefaccionMarketPolicy,
@@ -19,6 +21,37 @@ import {
   REFACCION_MARKET_EVENTS,
   type RefaccionMarketEventSink,
 } from './refaccion-market-events';
+import {
+  bumpRejection,
+  emptyRejectedByReason,
+  type RefaccionMarketAudit,
+} from './market-audit';
+import { resolveMarketPieceTaxonomy } from './market-piece-taxonomy';
+import { buildMarketSearchQueryPlan } from './market-search-queries';
+import { marketCacheKey } from './parse-vehicle-part-identity';
+
+function emitMarketAudit(
+  emit: RefaccionMarketEventSink,
+  audit: RefaccionMarketAudit,
+): void {
+  emit(REFACCION_MARKET_EVENTS.AUDIT, {
+    damageItemId: audit.damageItemId,
+    pieceCode: audit.pieceCode,
+    family: audit.family,
+    marketIdentityKey: audit.marketIdentityKey,
+    queries: audit.queries,
+    providersUsed: audit.providersUsed,
+    rawResultCount: audit.rawResultCount,
+    compatibleSampleCount: audit.compatibleSampleCount,
+    acceptedSampleCount: audit.acceptedSampleCount,
+    rejectedResultCount: audit.rejectedResultCount,
+    rejectedByReason: audit.rejectedByReason,
+    selectedPartType: audit.selectedPartType,
+    acceptedDomains: audit.acceptedDomains,
+    sampleCount: audit.sampleCount,
+    pricingStatus: audit.pricingStatus,
+  });
+}
 
 export function runRefaccionMarketPipeline(input: {
   identity: VehiclePartIdentity;
@@ -26,18 +59,66 @@ export function runRefaccionMarketPipeline(input: {
   providersUsed: MarketProviderId[];
   policy?: RefaccionMarketPolicy;
   emit?: RefaccionMarketEventSink;
+  queries?: string[];
+  damageItemId?: string;
 }): RefaccionMarketEstimate {
   const emit = input.emit ?? logRefaccionMarketEvent;
-  const query = input.rawHits[0]?.query ?? input.identity.piezaLabel;
+  const plan = buildMarketSearchQueryPlan(input.identity);
+  const queries = input.queries?.length ? input.queries : plan.queries;
+  const query = queries[0] ?? input.rawHits[0]?.query ?? input.identity.piezaLabel;
+  const taxonomy = resolveMarketPieceTaxonomy(
+    input.identity.pieza || input.identity.piezaLabel,
+  );
+  const rejectedByReason = emptyRejectedByReason();
+  let compatibleSampleCount = 0;
+
   if (!input.identity.confirmed) {
-    return insufficientEstimate(input.identity, query, {
+    const empty = insufficientEstimate(input.identity, query, {
       providersUsed: input.providersUsed,
     });
+    empty.audit = {
+      damageItemId: input.damageItemId,
+      pieceCode: taxonomy.pieceCode,
+      family: taxonomy.family,
+      marketIdentityKey: marketCacheKey(input.identity),
+      queries,
+      providersUsed: input.providersUsed,
+      rawResultCount: 0,
+      compatibleSampleCount: 0,
+      acceptedSampleCount: 0,
+      rejectedResultCount: 0,
+      rejectedByReason,
+      selectedPartType: null,
+      acceptedDomains: [],
+      sampleCount: 0,
+      pricingStatus: 'INSUFFICIENT_MARKET_SAMPLE',
+    };
+    emitMarketAudit(emit, empty.audit);
+    return empty;
   }
-  const normalized = input.rawHits
-    .map((h) => normalizeRawHit(h, input.identity))
-    .filter((s): s is NonNullable<typeof s> => s != null);
-  if (input.rawHits.length > 0 && normalized.length === 0) {
+
+  const accepted: MarketSample[] = [];
+  const seenUrl = new Set<string>();
+  const seenExt = new Set<string>();
+  for (const hit of input.rawHits) {
+    const classified = classifyRawHit(hit, input.identity);
+    if (classified.compatible) compatibleSampleCount += 1;
+    if (!classified.ok) {
+      bumpRejection(rejectedByReason, classified.reason);
+      continue;
+    }
+    const url = canonicalizeUrl(classified.sample.url);
+    const ext = String(classified.sample.externalId ?? '').trim().toUpperCase();
+    if ((url && seenUrl.has(url)) || (ext && seenExt.has(ext))) {
+      bumpRejection(rejectedByReason, 'DUPLICATE');
+      continue;
+    }
+    if (url) seenUrl.add(url);
+    if (ext) seenExt.add(ext);
+    accepted.push(classified.sample);
+  }
+
+  if (input.rawHits.length > 0 && accepted.length === 0) {
     emit(REFACCION_MARKET_EVENTS.COMPATIBILITY_REJECTED, {
       pieza: input.identity.piezaLabel,
       marca: input.identity.marca,
@@ -46,14 +127,45 @@ export function runRefaccionMarketPipeline(input: {
       rawHits: input.rawHits.length,
     });
   }
-  const unique = dedupeMarketSamples(normalized);
-  return buildMarketEstimate({
+
+  const unique = dedupeMarketSamples(accepted);
+  const estimate = buildMarketEstimate({
     identity: input.identity,
     query,
     samples: unique,
     providersUsed: input.providersUsed,
     policy: input.policy,
   });
+  const domains = [
+    ...new Set(
+      (estimate.samples ?? [])
+        .map((s) => s.domain)
+        .filter((d) => d && d !== 'unknown'),
+    ),
+  ];
+  const rejectedResultCount = Object.values(rejectedByReason).reduce(
+    (s, n) => s + (n ?? 0),
+    0,
+  );
+  estimate.audit = {
+    damageItemId: input.damageItemId,
+    pieceCode: taxonomy.pieceCode,
+    family: taxonomy.family,
+    marketIdentityKey: marketCacheKey(input.identity),
+    queries,
+    providersUsed: input.providersUsed,
+    rawResultCount: input.rawHits.length,
+    compatibleSampleCount,
+    acceptedSampleCount: unique.length,
+    rejectedResultCount,
+    rejectedByReason,
+    selectedPartType: estimate.partTypeGroup,
+    acceptedDomains: domains,
+    sampleCount: estimate.cantidadMuestras,
+    pricingStatus: estimate.pricingStatus,
+  };
+  emitMarketAudit(emit, estimate.audit);
+  return estimate;
 }
 
 type RefaccionMarketServiceOpts = {
@@ -86,8 +198,15 @@ export class RefaccionMarketService {
   async estimate(identity: VehiclePartIdentity): Promise<RefaccionMarketEstimate> {
     const cached = this.cache.get(identity);
     if (cached) return cached;
+    const plan = buildMarketSearchQueryPlan(identity);
     if (!identity.confirmed) {
-      const empty = insufficientEstimate(identity, identity.piezaLabel);
+      const empty = runRefaccionMarketPipeline({
+        identity,
+        rawHits: [],
+        providersUsed: [],
+        queries: plan.queries,
+        policy: this.policy,
+      });
       this.cache.set(identity, empty);
       return empty;
     }
@@ -108,6 +227,7 @@ export class RefaccionMarketService {
       identity,
       rawHits,
       providersUsed,
+      queries: plan.queries,
       policy: this.policy,
     });
     this.cache.set(identity, estimate);

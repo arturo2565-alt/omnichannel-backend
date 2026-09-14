@@ -287,6 +287,8 @@ export interface DraftQuote {
   pricingIncomplete?: boolean;
   /** Requisitos persistentes de una cotización canónica parcial. */
   pendingRequirements?: import('../domain/peritaje-v1').PendingQuoteRequirement[];
+  /** Lookups de mercado. Interno; no se narra al cliente. */
+  marketAudits?: import('./refaccion-market/market-audit').RefaccionMarketAudit[];
   /** Última versión enviada al cliente por WhatsApp/panel. */
   lastSendSnapshot?: QuoteSendSnapshot;
   /** Historial reciente de envíos (máx. ~20 en backend). */

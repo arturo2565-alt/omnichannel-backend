@@ -29,5 +29,14 @@ export function applyMarketEstimateToItem(
     providersUsed: estimate.providersUsed,
     partTypeGroup: estimate.partTypeGroup ?? undefined,
     marketIdentityKey: marketCacheKey(estimate.identity),
+    ...(estimate.audit
+      ? {
+          marketAudit: {
+            ...estimate.audit,
+            damageItemId: item.damageItemId ?? estimate.audit.damageItemId,
+            pieceCode: item.pieza || estimate.audit.pieceCode,
+          },
+        }
+      : {}),
   };
 }

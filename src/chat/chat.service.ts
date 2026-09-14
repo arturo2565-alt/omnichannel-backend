@@ -136,6 +136,7 @@ import { canonicalizePanelCode } from '../catalog/panel-pieza-catalog';
 import { MOLDURA_VISION_CONTRACT } from '../catalog/moldura';
 import { DAMAGE_EVIDENCE_VISION_CONTRACT } from '../catalog/damage-evidence';
 import { enrichInventoryWithMarketRefacciones } from './refaccion-market/enrich-inventory-with-market';
+import { collectMarketAuditsFromInventory } from './refaccion-market/market-audit';
 import {
   parseConfirmVehicleIdentityArgs,
   applyConfirmVehicleIdentity,
@@ -2729,6 +2730,7 @@ export class ChatService implements OnModuleDestroy {
       conversationTextHistory?: ChatCompletionMessageParam[];
       tallerId?: string | null;
       conversationId?: string | null;
+      visionBatchIndex?: number;
     },
   ): Promise<DetectedDamageItem[]> {
     const urls = [
@@ -2759,6 +2761,7 @@ export class ChatService implements OnModuleDestroy {
       conversationTextHistory?: ChatCompletionMessageParam[];
       tallerId?: string | null;
       conversationId?: string | null;
+      visionBatchIndex?: number;
     },
   ): Promise<{
     items: DetectedDamageItem[];
@@ -2801,6 +2804,7 @@ export class ChatService implements OnModuleDestroy {
       conversationTextHistory?: ChatCompletionMessageParam[];
       tallerId?: string | null;
       conversationId?: string | null;
+      visionBatchIndex?: number;
     },
   ): Promise<{
     items: DetectedDamageItem[];
@@ -2948,13 +2952,22 @@ export class ChatService implements OnModuleDestroy {
         items: auditEvidenceRefs(rawItems),
       }),
     );
-    const items = rawItems.map((it) => ({
-      ...it,
-      pieza: canonicalizePanelCode(it.pieza) || it.pieza,
-      ...(rootVehicle && !it.vehiculoDetectado
-        ? { vehiculoDetectado: rootVehicle }
-        : {}),
-    }));
+    const batchIndex = options?.visionBatchIndex ?? 0;
+    const items = rawItems.map((it) => {
+      const pieceCodeRaw = it.pieza;
+      const pieceCodeCanonical = canonicalizePanelCode(it.pieza) || it.pieza;
+      return {
+        ...it,
+        pieceCodeRaw,
+        pieza: pieceCodeCanonical,
+        pieceCodeCanonical,
+        visionBatchIndex: batchIndex,
+        visionBatchIndexes: [batchIndex],
+        ...(rootVehicle && !it.vehiculoDetectado
+          ? { vehiculoDetectado: rootVehicle }
+          : {}),
+      };
+    });
 
     if (!viability.peritajeViable || items.length === 0) {
       const inviable: VisionViability = {
@@ -3042,6 +3055,7 @@ export class ChatService implements OnModuleDestroy {
       conversationTextHistory?: ChatCompletionMessageParam[];
       tallerId?: string | null;
       conversationId?: string | null;
+      visionBatchIndex?: number;
     },
   ): Promise<{
     items: DetectedDamageItem[];
@@ -3085,7 +3099,10 @@ export class ChatService implements OnModuleDestroy {
       console.log(
         `[VisionChunk] Lote ${idx + 1}/${lotes.length} — ${lote.length} imagen(es)`,
       );
-      const batch = await this.analyzeDamageImageDetailed(lote, options);
+      const batch = await this.analyzeDamageImageDetailed(lote, {
+        ...options,
+        visionBatchIndex: idx,
+      });
       viabilityParts.push({
         viability: batch.viability,
         itemCount: batch.items.length,
@@ -5707,6 +5724,10 @@ ${catalogAppend}`;
             `- Justificación del perito: ${analysis.justificacion}`,
           ];
 
+    const marketAudits = collectMarketAuditsFromInventory(
+      analysis.inventory ?? [],
+    );
+
     const formalNarrative = [
       'Estimado cliente,',
       '',
@@ -5752,6 +5773,7 @@ ${catalogAppend}`;
           ? { inventory: analysis.inventory }
           : {}),
       },
+      ...(marketAudits.length ? { marketAudits } : {}),
     };
   }
 

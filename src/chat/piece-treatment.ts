@@ -540,8 +540,41 @@ export function mergePhysicalPanelItems(
     ...(a.damageItemId && a.damageItemId === b.damageItemId
       ? { damageItemId: a.damageItemId }
       : {}),
+    ...mergeVisionProvenance(a, b),
+    ...(b.marketAudit || a.marketAudit
+      ? { marketAudit: b.marketAudit || a.marketAudit }
+      : {}),
   };
   return ensureDamageIdentity(merged);
+}
+
+function mergeVisionProvenance(
+  a: DetectedDamageItem,
+  b: DetectedDamageItem,
+): Pick<
+  DetectedDamageItem,
+  'visionBatchIndex' | 'visionBatchIndexes' | 'pieceCodeRaw' | 'pieceCodeCanonical'
+> {
+  const indexes = [
+    ...new Set(
+      [
+        ...(a.visionBatchIndexes ?? []),
+        ...(b.visionBatchIndexes ?? []),
+        a.visionBatchIndex,
+        b.visionBatchIndex,
+      ].filter((n): n is number => n != null),
+    ),
+  ].sort((x, y) => x - y);
+  const raw = b.pieceCodeRaw || a.pieceCodeRaw;
+  const canonical =
+    b.pieceCodeCanonical ||
+    a.pieceCodeCanonical ||
+    canonicalPhysicalPanelKey(b.pieza || a.pieza);
+  return {
+    ...(indexes.length ? { visionBatchIndex: indexes[0], visionBatchIndexes: indexes } : {}),
+    ...(raw ? { pieceCodeRaw: raw } : {}),
+    ...(canonical ? { pieceCodeCanonical: canonical } : {}),
+  };
 }
 
 /** Copia semántica técnica (+ extras comerciales ya presentes). Un solo listado. */
@@ -627,6 +660,17 @@ export function copyDetectedDamageSemantics(
     ...(it.partTypeGroup ? { partTypeGroup: it.partTypeGroup } : {}),
     ...(it.marketIdentityKey
       ? { marketIdentityKey: it.marketIdentityKey }
+      : {}),
+    ...(it.marketAudit ? { marketAudit: it.marketAudit } : {}),
+    ...(it.visionBatchIndex != null
+      ? { visionBatchIndex: it.visionBatchIndex }
+      : {}),
+    ...(it.visionBatchIndexes?.length
+      ? { visionBatchIndexes: [...it.visionBatchIndexes] }
+      : {}),
+    ...(it.pieceCodeRaw ? { pieceCodeRaw: it.pieceCodeRaw } : {}),
+    ...(it.pieceCodeCanonical
+      ? { pieceCodeCanonical: it.pieceCodeCanonical }
       : {}),
   };
 }

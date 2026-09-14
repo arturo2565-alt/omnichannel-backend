@@ -1,7 +1,5 @@
-import {
-  buildRefaccionWebQueries,
-  searchRefaccionWebOrganics,
-} from '../refaccion-web-search';
+import { searchRefaccionWebOrganics } from '../refaccion-web-search';
+import { buildMarketSearchQueryPlan } from './market-search-queries';
 import type {
   MarketProviderId,
   RawProviderHit,
@@ -21,25 +19,19 @@ export class GoogleWebSearchProvider implements RefaccionPriceProvider {
   readonly id = 'GOOGLE_WEB' as const;
 
   async search(identity: VehiclePartIdentity): Promise<RawProviderHit[]> {
-    const queries = buildRefaccionWebQueries({
-      pieza: identity.piezaLabel,
-      marca: identity.marca,
-      modelo: identity.modelo,
-      anio: identity.anio,
-    });
-    const organics = await searchRefaccionWebOrganics(queries);
+    const plan = buildMarketSearchQueryPlan(identity);
+    const organics = await searchRefaccionWebOrganics(plan.googleQueries);
     const retrievedAt = new Date().toISOString();
     const hits: RawProviderHit[] = [];
     for (const o of organics) {
       const price = o.prices[0];
-      if (price == null || price <= 0) continue;
       hits.push({
         provider: mapOrganicSource(o.source),
         title: o.title,
-        price,
+        ...(price != null && price > 0 ? { price } : {}),
         url: o.url,
         snippet: o.snippet,
-        query: queries[0] ?? identity.piezaLabel,
+        query: plan.googleQueries[0] ?? identity.piezaLabel,
         retrievedAt,
       });
     }

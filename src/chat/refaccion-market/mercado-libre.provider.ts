@@ -1,3 +1,4 @@
+import { buildMarketSearchQueryPlan } from './market-search-queries';
 import type {
   RawProviderHit,
   RefaccionPriceProvider,
@@ -17,12 +18,45 @@ function mapCondition(raw: unknown): SampleCondition {
 }
 
 export function buildMercadoLibreQuery(identity: VehiclePartIdentity): string {
-  return [identity.piezaLabel, identity.marca, identity.modelo, identity.anio, 'nuevo']
-    .map((s) => String(s ?? '').trim())
-    .filter(Boolean)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return buildMarketSearchQueryPlan(identity).mlQueries[0] ?? '';
+}
+
+async function searchMlQuery(
+  query: string,
+  retrievedAt: string,
+): Promise<RawProviderHit[]> {
+  if (!query) return [];
+  const url = `https://api.mercadolibre.com/sites/MLM/search?q=${encodeURIComponent(query)}&limit=20`;
+  const res = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) return [];
+  const json = (await res.json()) as {
+    results?: Array<{
+      id?: string;
+      title?: string;
+      price?: number;
+      permalink?: string;
+      condition?: string;
+    }>;
+  };
+  const hits: RawProviderHit[] = [];
+  for (const r of json.results ?? []) {
+    const price = Number(r.price);
+    hits.push({
+      provider: 'MERCADO_LIBRE',
+      title: String(r.title ?? '').trim(),
+      ...(Number.isFinite(price) && price > 0 ? { price: Math.round(price) } : {}),
+      url: String(r.permalink ?? '').trim(),
+      condition: mapCondition(r.condition),
+      snippet: String(r.title ?? '').trim(),
+      externalId: String(r.id ?? '').trim() || undefined,
+      query,
+      retrievedAt,
+    });
+  }
+  return hits;
 }
 
 export class MercadoLibreProvider implements RefaccionPriceProvider {
@@ -30,42 +64,13 @@ export class MercadoLibreProvider implements RefaccionPriceProvider {
 
   async search(identity: VehiclePartIdentity): Promise<RawProviderHit[]> {
     if (mlSearchDisabled()) return [];
-    const query = buildMercadoLibreQuery(identity);
-    if (!query) return [];
-    const url = `https://api.mercadolibre.com/sites/MLM/search?q=${encodeURIComponent(query)}&limit=20`;
+    const plan = buildMarketSearchQueryPlan(identity);
     const retrievedAt = new Date().toISOString();
     try {
-      const res = await fetch(url, {
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!res.ok) return [];
-      const json = (await res.json()) as {
-        results?: Array<{
-          id?: string;
-          title?: string;
-          price?: number;
-          permalink?: string;
-          condition?: string;
-        }>;
-      };
-      const hits: RawProviderHit[] = [];
-      for (const r of json.results ?? []) {
-        const price = Number(r.price);
-        if (!Number.isFinite(price) || price <= 0) continue;
-        hits.push({
-          provider: this.id,
-          title: String(r.title ?? '').trim(),
-          price: Math.round(price),
-          url: String(r.permalink ?? '').trim(),
-          condition: mapCondition(r.condition),
-          snippet: String(r.title ?? '').trim(),
-          externalId: String(r.id ?? '').trim() || undefined,
-          query,
-          retrievedAt,
-        });
-      }
-      return hits;
+      const first = await searchMlQuery(plan.mlQueries[0] ?? '', retrievedAt);
+      if (first.length >= 8 || plan.mlQueries.length < 2) return first;
+      const second = await searchMlQuery(plan.mlQueries[1] ?? '', retrievedAt);
+      return [...first, ...second];
     } catch {
       return [];
     }

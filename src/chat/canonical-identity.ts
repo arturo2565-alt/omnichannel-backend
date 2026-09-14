@@ -40,6 +40,15 @@ export function inventoryItemFromCanonicalDamage(
     ...(damage.damageEvidenceStatus
       ? { damageEvidenceStatus: damage.damageEvidenceStatus }
       : {}),
+    ...(damage.visionBatchIndex != null
+      ? { visionBatchIndex: damage.visionBatchIndex }
+      : {}),
+    ...(damage.visionBatchIndexes?.length
+      ? { visionBatchIndexes: [...damage.visionBatchIndexes] }
+      : {}),
+    ...(damage.pieceCodeRaw
+      ? { pieceCodeRaw: damage.pieceCodeRaw, pieceCodeCanonical: damage.physicalPanelKey }
+      : {}),
   };
 }
 

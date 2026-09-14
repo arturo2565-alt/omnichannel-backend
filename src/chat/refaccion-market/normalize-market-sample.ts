@@ -5,8 +5,12 @@ import type {
   RawProviderHit,
   SampleCondition,
 } from './refaccion-market.types';
-import { validateListingAgainstIdentity } from './validate-market-sample';
+import {
+  listingLooksCommercial,
+  validateListingAgainstIdentity,
+} from './validate-market-sample';
 import type { VehiclePartIdentity } from './refaccion-market.types';
+import type { MarketRejectionReason } from './market-audit';
 
 const USED_RE =
   /\b(usado|usada|seminuevo|seminueva|yonke|deshueso|desarmadora|segunda\s+mano)\b/i;
@@ -62,32 +66,66 @@ export function canonicalizeUrl(url?: string): string {
   }
 }
 
-export function normalizeRawHit(
+export type ClassifiedRawHit =
+  | { ok: true; sample: MarketSample; compatible: true }
+  | {
+      ok: false;
+      reason: MarketRejectionReason;
+      compatible: boolean;
+    };
+
+export function classifyRawHit(
   hit: RawProviderHit,
   identity: VehiclePartIdentity,
-): MarketSample | null {
-  const price = Number(hit.price);
-  if (!Number.isFinite(price) || price <= 0) return null;
+): ClassifiedRawHit {
   const check = validateListingAgainstIdentity(
     hit.title,
     hit.snippet,
     identity,
   );
-  if (!check.ok) return null;
+  const price = Number(hit.price);
+  const hasPrice = Number.isFinite(price) && price > 0;
+  if (!check.ok) {
+    return {
+      ok: false,
+      reason: check.reason ?? 'PIEZA_MISMATCH',
+      compatible: false,
+    };
+  }
+  if (!hasPrice) {
+    return {
+      ok: false,
+      reason: listingLooksCommercial(hit.title, hit.snippet)
+        ? 'PRICE_PARSE_FAILED'
+        : 'INVALID_PRICE',
+      compatible: true,
+    };
+  }
   const condition = inferCondition(hit);
-  const source: MarketProviderId = hit.provider;
   return {
-    source,
-    domain: domainFromUrl(hit.url),
-    title: String(hit.title ?? '').trim(),
-    price: Math.round(price),
-    currency: 'MXN',
-    condition,
-    partType: inferPartType(hit, condition),
-    url: canonicalizeUrl(hit.url) || hit.url || '',
-    compatibilityConfidence: check.confidence,
-    query: hit.query,
-    retrievedAt: hit.retrievedAt,
-    externalId: hit.externalId,
+    ok: true,
+    compatible: true,
+    sample: {
+      source: hit.provider,
+      domain: domainFromUrl(hit.url),
+      title: String(hit.title ?? '').trim(),
+      price: Math.round(price),
+      currency: 'MXN',
+      condition,
+      partType: inferPartType(hit, condition),
+      url: canonicalizeUrl(hit.url) || hit.url || '',
+      compatibilityConfidence: check.confidence,
+      query: hit.query,
+      retrievedAt: hit.retrievedAt,
+      externalId: hit.externalId,
+    },
   };
+}
+
+export function normalizeRawHit(
+  hit: RawProviderHit,
+  identity: VehiclePartIdentity,
+): MarketSample | null {
+  const classified = classifyRawHit(hit, identity);
+  return classified.ok ? classified.sample : null;
 }

@@ -1,4 +1,10 @@
 import type { VehiclePartIdentity } from './refaccion-market.types';
+import {
+  listingMentionsPieceFamily,
+  resolveMarketPieceTaxonomy,
+} from './market-piece-taxonomy';
+import { parseMarketSide } from './market-side';
+import type { MarketRejectionReason } from './market-audit';
 
 function norm(raw: string): string {
   return String(raw ?? '')
@@ -10,32 +16,19 @@ function norm(raw: string): string {
     .trim();
 }
 
-const PIEZA_ALIASES: Record<string, string[]> = {
-  cofre: ['cofre', 'hood', 'capo', 'bonnet'],
-  fascia: ['fascia', 'defensa', 'bumper', 'fascia delantera', 'fascia trasera'],
-  puerta: ['puerta', 'door'],
-  salpicadera: ['salpicadera', 'guardafango', 'fender'],
-  'tapa cajuela': ['tapa cajuela', 'tapa de cajuela', 'cajuela', 'baul', 'porton'],
-  toldo: ['toldo', 'techo'],
-  estribo: ['estribo', 'side step'],
-  espejo: ['espejo', 'mirror'],
-  poste: ['poste', 'pilar'],
-};
+export function piezaTokensForLabel(piezaLabel: string): string[] {
+  return resolveMarketPieceTaxonomy(piezaLabel).searchAliases;
+}
 
 const ACCESSORY_RE =
   /\b(bisagra|cubre\s*cofre|cubre\s*fascia|protector|bra\b|emblema|cerradura|varilla|soporte|tope de cofre|aislante|moldura de|guia de|clips?|tornillos?|empaque|hule|reten)\b/i;
 
-export function piezaTokensForLabel(piezaLabel: string): string[] {
-  const n = norm(piezaLabel);
-  if (PIEZA_ALIASES[n]) return PIEZA_ALIASES[n]!;
-  for (const [key, aliases] of Object.entries(PIEZA_ALIASES)) {
-    if (n.includes(key) || aliases.some((a) => n.includes(a))) return aliases;
-  }
-  return n ? [n] : [];
-}
-
 export function listingLooksLikeAccessory(title: string, snippet?: string): boolean {
   return ACCESSORY_RE.test(`${title} ${snippet ?? ''}`);
+}
+
+export function listingLooksCommercial(title: string, snippet?: string): boolean {
+  return /\$|mxn|pesos|precio|comprar|venta/i.test(`${title} ${snippet ?? ''}`);
 }
 
 export function listingMentionsPieza(
@@ -43,8 +36,11 @@ export function listingMentionsPieza(
   snippet: string | undefined,
   piezaLabel: string,
 ): boolean {
-  const blob = norm(`${title} ${snippet ?? ''}`);
-  return piezaTokensForLabel(piezaLabel).some((t) => blob.includes(norm(t)));
+  return listingMentionsPieceFamily(
+    title,
+    snippet,
+    resolveMarketPieceTaxonomy(piezaLabel),
+  );
 }
 
 export function listingMentionsVehicle(
@@ -68,6 +64,7 @@ export function listingMentionsVehicle(
 /**
  * Año compatible solo si el listado trae el año exacto o un rango explícito
  * que lo contiene. Un año vecino suelto (2019 vs 2020) NO basta.
+ * Generación (L33) no implica año.
  */
 export function listingYearCompatible(
   title: string,
@@ -113,26 +110,47 @@ function expandYearToken(raw: string, vehicleYear: number): number | null {
   return null;
 }
 
+export type ListingValidation = {
+  ok: boolean;
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+  reason?: MarketRejectionReason;
+  compatible: boolean;
+};
+
 export function validateListingAgainstIdentity(
   title: string,
   snippet: string | undefined,
   identity: VehiclePartIdentity,
-): { ok: boolean; confidence: 'HIGH' | 'MEDIUM' | 'LOW'; reason?: string } {
+): ListingValidation {
+  const taxonomy = resolveMarketPieceTaxonomy(identity.pieza || identity.piezaLabel);
   if (listingLooksLikeAccessory(title, snippet)) {
-    return { ok: false, confidence: 'LOW', reason: 'accessory' };
+    return { ok: false, confidence: 'LOW', reason: 'ACCESSORY', compatible: false };
   }
-  if (!listingMentionsPieza(title, snippet, identity.piezaLabel)) {
-    return { ok: false, confidence: 'LOW', reason: 'pieza' };
+  if (!listingMentionsPieceFamily(title, snippet, taxonomy)) {
+    return { ok: false, confidence: 'LOW', reason: 'PIEZA_MISMATCH', compatible: false };
+  }
+  if (taxonomy.requiredSide) {
+    const listingSide = parseMarketSide(`${title} ${snippet ?? ''}`);
+    if (!listingSide) {
+      return { ok: false, confidence: 'LOW', reason: 'SIDE_MISSING', compatible: false };
+    }
+    if (listingSide !== taxonomy.requiredSide) {
+      return { ok: false, confidence: 'LOW', reason: 'SIDE_MISMATCH', compatible: false };
+    }
   }
   if (!listingMentionsVehicle(title, snippet, identity)) {
-    return { ok: false, confidence: 'LOW', reason: 'vehicle' };
+    return { ok: false, confidence: 'LOW', reason: 'MODEL_MISMATCH', compatible: false };
   }
   if (!listingYearCompatible(title, snippet, identity.anio)) {
-    return { ok: false, confidence: 'LOW', reason: 'year' };
+    return { ok: false, confidence: 'LOW', reason: 'YEAR_MISMATCH', compatible: false };
   }
   const blob = `${title} ${snippet ?? ''}`;
   const hasRange = /((?:19|20)\d{2})\s*(?:[-–]|a|al|\/)\s*((?:19|20)\d{2})/i.test(
     blob,
   );
-  return { ok: true, confidence: hasRange ? 'MEDIUM' : 'HIGH' };
+  return {
+    ok: true,
+    confidence: hasRange ? 'MEDIUM' : 'HIGH',
+    compatible: true,
+  };
 }

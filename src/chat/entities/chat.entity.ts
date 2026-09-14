@@ -102,6 +102,13 @@ export interface DetectedDamageItem {
   cantidadDominios?: number;
   providersUsed?: string[];
   partTypeGroup?: string;
+  /** Lookup de mercado. Interno; no se narra al cliente. */
+  marketAudit?: import('../refaccion-market/market-audit').RefaccionMarketAudit;
+  /** Lote Vision (0-based). Observabilidad side-drift; no es identidad. */
+  visionBatchIndex?: number;
+  visionBatchIndexes?: number[];
+  pieceCodeRaw?: string;
+  pieceCodeCanonical?: string;
   /** Advertencia visual; no suma al total. */
   possibleHiddenDamage?: {
     detected: boolean;

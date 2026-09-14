@@ -180,6 +180,11 @@ export interface DamageItem {
   possibleHiddenDamage?: PossibleHiddenDamage;
   evidence: DamageEvidence[];
   source: DamageItemSource;
+  /** Observabilidad side-drift. No entra al hash de identidad. */
+  visionBatchIndex?: number;
+  visionBatchIndexes?: number[];
+  pieceCodeRaw?: string;
+  pieceCodeCanonical?: string;
 }
 
 /** Identidad física para merges futuros: nunca solo `physicalPanelKey`. */

@@ -1,3 +1,5 @@
+import type { RefaccionMarketAudit } from './market-audit';
+
 export const MARKET_PROVIDER_IDS = [
   'MERCADO_LIBRE',
   'GOOGLE_WEB',
@@ -98,6 +100,7 @@ export type RefaccionMarketEstimate = {
   samples: MarketSample[];
   identity: VehiclePartIdentity;
   query: string;
+  audit?: RefaccionMarketAudit;
 };
 
 export interface RefaccionPriceProvider {

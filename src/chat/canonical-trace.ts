@@ -38,6 +38,7 @@ export const CANONICAL_TRACE_EVENTS = {
   REFACCION_MARKET_INSUFFICIENT: 'REFACCION_MARKET_INSUFFICIENT',
   REFACCION_MARKET_COMPATIBILITY_REJECTED:
     'REFACCION_MARKET_COMPATIBILITY_REJECTED',
+  REFACCION_MARKET_AUDIT: 'REFACCION_MARKET_AUDIT',
   QUOTE_LINE: 'QUOTE_LINE',
   CANONICAL_QUOTE: 'CANONICAL_QUOTE',
   QUOTE_FLOW_MODE: 'QUOTE_FLOW_MODE',
@@ -588,6 +589,26 @@ export function traceRefaccionMarketEvent(
       priceRange: range,
       amount: asNumber(payload.amount) ?? asNumber(payload.precioCentral),
       confidence: asString(payload.confidence),
+    });
+    return;
+  }
+  if (event === CANONICAL_TRACE_EVENTS.REFACCION_MARKET_AUDIT) {
+    pegCanonicalTrace(event, {
+      damageItemId: asString(payload.damageItemId),
+      pieceCode,
+      family: asString(payload.family),
+      marketIdentityKey: asString(payload.marketIdentityKey),
+      queries: payload.queries,
+      providersUsed: payload.providersUsed,
+      rawResultCount: asNumber(payload.rawResultCount),
+      compatibleSampleCount: asNumber(payload.compatibleSampleCount),
+      acceptedSampleCount: asNumber(payload.acceptedSampleCount),
+      rejectedResultCount: asNumber(payload.rejectedResultCount),
+      rejectedByReason: payload.rejectedByReason,
+      selectedPartType: asString(payload.selectedPartType),
+      acceptedDomains: payload.acceptedDomains,
+      sampleCount: asNumber(payload.sampleCount),
+      pricingStatus: asString(payload.pricingStatus),
     });
     return;
   }
