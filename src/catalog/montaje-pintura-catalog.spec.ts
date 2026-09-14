@@ -1,4 +1,4 @@
-import { aggregateMontajePinturaRows } from './montaje-pintura-catalog';
+import { aggregateMontajePinturaRows, aggregateMontajeRows } from './montaje-pintura-catalog';
 
 describe('montaje-pintura-catalog', () => {
   it('agrega celdas dedicadas y marca hasDedicatedRate', () => {
@@ -24,5 +24,27 @@ describe('montaje-pintura-catalog', () => {
     expect(cofre?.precio).toBe(6900);
     expect(fascia?.hasDedicatedRate).toBe(false);
     expect(fascia?.precio).toBe(0);
+  });
+
+  it('agrega celdas MONTAJE sin mezclarlas con pintura', () => {
+    const rows = aggregateMontajeRows([
+      {
+        id: '1',
+        servicio: 'Calavera',
+        severidad: 'MONTAJE',
+        precio: 800,
+        diasEntrega: 2,
+      },
+      {
+        id: '2',
+        servicio: 'Calavera',
+        severidad: 'MONTAJE_PINTURA',
+        precio: 2000,
+        diasEntrega: 4,
+      },
+    ]);
+    const calavera = rows.find((r) => r.servicio === 'Calavera');
+    expect(calavera?.hasDedicatedRate).toBe(true);
+    expect(calavera?.precio).toBe(800);
   });
 });

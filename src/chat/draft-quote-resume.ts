@@ -2,7 +2,7 @@ import type { DraftQuoteLine } from './autofix-config';
 import { coerceDamageLevelCode } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import { WORKSHOP_TIMEZONE } from './appointment-intent';
-import { findPanelPiezaOption } from '../catalog/panel-pieza-catalog';
+import { findPanelPiezaOption, getClientPieceLabel } from '../catalog/panel-pieza-catalog';
 import { piezaMatchesQuery } from './quote-cart-analysis';
 import {
   canonicalPhysicalPanelKey,
@@ -152,6 +152,8 @@ export function resolvePiezaDisplayLabel(codeOrLabel: string): string {
   const raw = String(codeOrLabel ?? '').trim();
   if (!raw) return 'Servicio';
   const withoutRefPrefix = raw.replace(/^REFACCION\s*:\s*/i, '').trim();
+  const client = getClientPieceLabel(withoutRefPrefix);
+  if (client && client !== withoutRefPrefix) return client;
   const fromCatalog = findPanelPiezaOption(withoutRefPrefix)?.fullName;
   if (fromCatalog && fromCatalog.toLowerCase() !== 'refacción') {
     return fromCatalog;

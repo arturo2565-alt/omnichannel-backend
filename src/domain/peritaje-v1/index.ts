@@ -195,6 +195,7 @@ export {
   inferPieceLabelFromQuoteLine,
   resolveQuoteLinePieceLabel,
   buildControlledQuoteLineLabel,
+  REFACCION_AVAILABILITY_DISCLAIMER,
   renderCanonicalQuoteFinancialBlock,
   renderCanonicalQuoteWarningsBlock,
   assembleClientQuoteMessage,

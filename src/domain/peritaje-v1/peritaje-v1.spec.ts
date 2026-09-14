@@ -199,7 +199,7 @@ describe('Contrato Canónico de Peritaje v1', () => {
   describe('invariante 3 — treatment ≠ serviceType', () => {
     it('SUSTITUIR produce servicios económicos distintos al tratamiento', () => {
       const services = expectedServiceTypesForTreatment('SUSTITUIR');
-      expect(services).toEqual(['REFACCION', 'MONTAJE_PINTURA']);
+      expect(services).toEqual(['REFACCION', 'MONTAJE', 'MONTAJE_PINTURA']);
       expect(services).not.toContain('SUSTITUIR');
     });
 

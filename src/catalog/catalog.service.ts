@@ -23,7 +23,9 @@ import {
 import { CatalogPricingRulesEntity } from './entities/catalog-pricing-rules.entity';
 import {
   aggregateMontajePinturaRows,
+  aggregateMontajeRows,
   MONTAJE_PINTURA_SEVERIDAD,
+  MONTAJE_SEVERIDAD,
 } from './montaje-pintura-catalog';
 import { ensureBanioIntegralSlots } from './banio-service-identity';
 
@@ -129,7 +131,8 @@ export class CatalogService {
       })),
     );
     const montajePinturaBases = aggregateMontajePinturaRows(rows);
-    return { rules, pieceBases, integralBases, montajePinturaBases };
+    const montajeBases = aggregateMontajeRows(rows);
+    return { rules, pieceBases, integralBases, montajePinturaBases, montajeBases };
   }
 
   async upsertIntegralBase(
@@ -294,19 +297,53 @@ export class CatalogService {
       return this.priceMatrixRepository.save(byDedicated);
     }
 
-    const byAlias = await this.priceMatrixRepository.findOne({
-      where: { tallerId: tid, servicio, severidad: 'MONTAJE' },
-    });
-    if (byAlias) {
-      byAlias.precio = precio;
-      byAlias.diasEntrega = diasEntrega;
-      byAlias.severidad = MONTAJE_PINTURA_SEVERIDAD;
-      return this.priceMatrixRepository.save(byAlias);
-    }
-
     return this.createRow(tid, {
       servicio,
       severidad: MONTAJE_PINTURA_SEVERIDAD,
+      precio,
+      diasEntrega,
+      isInstantService: false,
+    });
+  }
+
+  async upsertMontaje(
+    tallerId: string,
+    dto: {
+      servicio: string;
+      precio: number;
+      diasEntrega: number;
+      matrixRowId?: string | null;
+    },
+  ): Promise<PriceMatrix> {
+    const tid = await this.resolveTallerId(tallerId);
+    const servicio = String(dto.servicio ?? '').trim().slice(0, 120);
+    if (!servicio) throw new BadRequestException('servicio obligatorio');
+    const precio = Math.max(0, Math.round(Number(dto.precio) || 0));
+    const diasEntrega = Math.max(0, Math.round(Number(dto.diasEntrega) || 0));
+    const rowId = String(dto.matrixRowId ?? '').trim();
+    if (rowId) {
+      const existing = await this.priceMatrixRepository.findOne({
+        where: { id: rowId, tallerId: tid },
+      });
+      if (existing) {
+        existing.precio = precio;
+        existing.diasEntrega = diasEntrega;
+        existing.severidad = MONTAJE_SEVERIDAD;
+        existing.isInstantService = false;
+        return this.priceMatrixRepository.save(existing);
+      }
+    }
+    const byDedicated = await this.priceMatrixRepository.findOne({
+      where: { tallerId: tid, servicio, severidad: MONTAJE_SEVERIDAD },
+    });
+    if (byDedicated) {
+      byDedicated.precio = precio;
+      byDedicated.diasEntrega = diasEntrega;
+      return this.priceMatrixRepository.save(byDedicated);
+    }
+    return this.createRow(tid, {
+      servicio,
+      severidad: MONTAJE_SEVERIDAD,
       precio,
       diasEntrega,
       isInstantService: false,

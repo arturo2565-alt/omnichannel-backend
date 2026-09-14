@@ -22,8 +22,18 @@ export const MONTAJE_PINTURA_CATALOG_SERVICIOS = [
   'Espejo',
   'Estribo',
   'BiCO',
-  'Parilla',
   'Poste',
+] as const;
+
+/** Severidad de desmontaje/instalación sin pintura. */
+export const MONTAJE_SEVERIDAD = 'MONTAJE';
+
+export const MONTAJE_CATALOG_SERVICIOS = [
+  'Calavera',
+  'Faro',
+  'Faro niebla',
+  'Parilla',
+  'MOLDURA',
 ] as const;
 
 export type MontajePinturaBaseRow = {
@@ -39,7 +49,59 @@ export function isMontajePinturaSeveridad(severidad: string): boolean {
     .trim()
     .toUpperCase()
     .replace(/\s+/g, '_');
-  return k === 'MONTAJE_PINTURA' || k === 'MONTAJE';
+  return k === 'MONTAJE_PINTURA';
+}
+
+export function isMontajeSeveridad(severidad: string): boolean {
+  const k = String(severidad ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '_');
+  return k === 'MONTAJE';
+}
+
+export function aggregateMontajeRows(
+  rows: ReadonlyArray<{
+    id: string;
+    servicio: string;
+    severidad: string;
+    precio: number;
+    diasEntrega: number;
+  }>,
+): MontajePinturaBaseRow[] {
+  const byServicio = new Map<
+    string,
+    { precio: number; diasEntrega: number; id: string }
+  >();
+  for (const row of rows) {
+    if (!isMontajeSeveridad(row.severidad)) continue;
+    const servicio = String(row.servicio ?? '').trim();
+    if (!servicio) continue;
+    if (!byServicio.has(servicio)) {
+      byServicio.set(servicio, {
+        precio: Math.max(0, Math.round(Number(row.precio) || 0)),
+        diasEntrega: Math.max(0, Math.round(Number(row.diasEntrega) || 0)),
+        id: row.id,
+      });
+    }
+  }
+  const servicios = new Set<string>([
+    ...MONTAJE_CATALOG_SERVICIOS,
+    ...byServicio.keys(),
+  ]);
+  return [...servicios]
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .map((servicio) => {
+      const hit = byServicio.get(servicio);
+      const precio = hit?.precio ?? 0;
+      return {
+        servicio,
+        precio,
+        diasEntrega: hit?.diasEntrega ?? 4,
+        matrixRowId: hit?.id ?? null,
+        hasDedicatedRate: Boolean(hit && precio > 0),
+      };
+    });
 }
 
 export function aggregateMontajePinturaRows(

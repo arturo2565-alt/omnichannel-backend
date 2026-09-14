@@ -28,7 +28,7 @@ export function expectedServiceTypesForTreatment(
   treatment: TreatmentDecision,
 ): QuoteServiceType[] {
   if (treatment === 'SUSTITUIR') {
-    return ['REFACCION', 'MONTAJE_PINTURA'];
+    return ['REFACCION', 'MONTAJE', 'MONTAJE_PINTURA'];
   }
   if (treatment === 'PENDIENTE') return ['PENDIENTE'];
   if (treatment === 'REPARAR' || treatment === 'INCIERTO') {

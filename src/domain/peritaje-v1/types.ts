@@ -24,6 +24,7 @@ export const QUOTE_SERVICE_TYPES = [
   'REPARACION_PINTURA',
   'REFACCION',
   'MONTAJE_PINTURA',
+  'MONTAJE',
   'PENDIENTE',
   'ADVERTENCIA',
 ] as const;
@@ -229,7 +230,7 @@ export interface MarketEvidence {
 
 /**
  * Línea económica. `treatment` no vive aquí: el servicio es `serviceType`.
- * Una pieza SUSTITUIR puede emitir REFACCION + MONTAJE_PINTURA.
+ * Una pieza SUSTITUIR puede emitir REFACCION + MONTAJE o MONTAJE_PINTURA.
  */
 export interface QuoteLine {
   quoteLineId: string;

@@ -370,26 +370,133 @@ const CLIENT_PIECE_LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   Moldura: 'Moldura',
 };
 
+const CLIENT_PIECE_LABELS: Readonly<Record<string, string>> = {
+  Calavera_Izquierda: 'Calavera izquierda',
+  Calavera_Derecha: 'Calavera derecha',
+  Faro_Izquierdo: 'Faro izquierdo',
+  Faro_Derecho: 'Faro derecho',
+  Faro_Niebla_Izquierdo: 'Faro de niebla izquierdo',
+  Faro_Niebla_Derecho: 'Faro de niebla derecho',
+  CAL_IZQ: 'Calavera izquierda',
+  CAL_DER: 'Calavera derecha',
+  FARO_IZQ: 'Faro izquierdo',
+  FARO_DER: 'Faro derecho',
+  FARO_NIEBLA_IZQ: 'Faro de niebla izquierdo',
+  FARO_NIEBLA_DER: 'Faro de niebla derecho',
+  FD: 'Fascia delantera',
+  FT: 'Fascia trasera',
+  SI: 'Salpicadera delantera izquierda',
+  SD: 'Salpicadera delantera derecha',
+  STI: 'Salpicadera trasera izquierda',
+  STD: 'Salpicadera trasera derecha',
+  PDI: 'Puerta delantera izquierda',
+  PDD: 'Puerta delantera derecha',
+  PTI: 'Puerta trasera izquierda',
+  PTD: 'Puerta trasera derecha',
+  EI: 'Estribo izquierdo',
+  ED: 'Estribo derecho',
+  POI: 'Poste izquierdo',
+  POD: 'Poste derecho',
+  Cofre: 'Cofre',
+  'Tapa Cajuela': 'Tapa de cajuela',
+  Toldo: 'Toldo',
+  Parilla: 'Parrilla',
+  Parrilla: 'Parrilla',
+};
+
+function lookupClientPieceLabel(raw: string): string | undefined {
+  const t = String(raw ?? '').trim();
+  if (!t) return undefined;
+  if (CLIENT_PIECE_LABELS[t]) return CLIENT_PIECE_LABELS[t];
+  const compact = t.replace(/\s+/g, '_');
+  if (CLIENT_PIECE_LABELS[compact]) return CLIENT_PIECE_LABELS[compact];
+  const upper = t.toUpperCase();
+  for (const [code, label] of Object.entries(CLIENT_PIECE_LABELS)) {
+    if (code.toUpperCase() === upper) return label;
+  }
+  return undefined;
+}
+
+function humanizeUnderscorePieceToken(token: string): string {
+  const parts = token.split(/[_-]+/).filter(Boolean);
+  if (!parts.length) return token.replace(/[_-]+/g, ' ');
+  const SIDE: Record<string, string> = {
+    IZQUIERDA: 'izquierda',
+    IZQUIERDO: 'izquierdo',
+    DERECHA: 'derecha',
+    DERECHO: 'derecho',
+    TI: 'trasera izquierda',
+    TD: 'trasera derecha',
+    DI: 'delantera izquierda',
+    DD: 'delantera derecha',
+    I: 'izquierda',
+    D: 'derecha',
+  };
+  const last = parts[parts.length - 1]!.toUpperCase();
+  const side = SIDE[last];
+  const head = parts
+    .slice(0, side ? -1 : parts.length)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ')
+    .replace(/\bNiebla\b/i, 'de niebla');
+  if (!head) return token.replace(/[_-]+/g, ' ');
+  return side ? `${head} ${side}` : head;
+}
+
+/**
+ * Única función de presentación de pieza. No muta pieceCode.
+ */
+export function getClientPieceLabel(
+  pieceCode: string,
+  attrs?: {
+    moldingPosition?: string | null;
+    finishType?: string | null;
+    physicalPanelKey?: string | null;
+  },
+): string {
+  const raw = String(pieceCode ?? '').trim();
+  if (!raw) return raw;
+  const stripped = raw.replace(/^REFACCION\s*:\s*/i, '').trim();
+  if (
+    isMolduraPieza(stripped) ||
+    isMolduraPieza(String(attrs?.physicalPanelKey ?? ''))
+  ) {
+    return humanizeMolduraPieceLabel(
+      attrs?.moldingPosition ??
+        (stripped.includes('::')
+          ? stripped.slice(stripped.indexOf('::') + 2)
+          : null),
+    );
+  }
+  const mapped = lookupClientPieceLabel(stripped);
+  if (mapped) return mapped;
+  // Códigos compactos (FD, Calavera_Derecha). No reescribir frases ya humanas.
+  if (!/\s/.test(stripped)) {
+    const code = canonicalizePanelCode(stripped);
+    const fromCode = lookupClientPieceLabel(code);
+    if (fromCode) return fromCode;
+    const override =
+      CLIENT_PIECE_LABEL_OVERRIDES[code] ??
+      CLIENT_PIECE_LABEL_OVERRIDES[stripped];
+    if (override) return override;
+    const opt = findPanelPiezaOption(stripped);
+    if (opt?.code && opt.code.toLowerCase() === stripped.toLowerCase()) {
+      return lookupClientPieceLabel(opt.code) ?? opt.fullName;
+    }
+    if (/[_-]/.test(stripped)) return humanizeUnderscorePieceToken(stripped);
+    return opt?.fullName ?? stripped;
+  }
+  return stripped;
+}
+
 /**
  * Código interno de panel → nombre humano para el mensaje al cliente.
- * No sustituye frases ya humanas ("fascia delantera") para no alterar
- * etiquetas derivadas de QuoteLine.description.
+ * Delega a getClientPieceLabel. No sustituye frases ya humanas.
  */
 export function humanizeClientPieceLabel(raw: string): string {
   const t = String(raw ?? '').trim();
   if (!t) return t;
-  if (isMolduraPieza(t) && /::/.test(t)) {
-    const pos = t.slice(t.indexOf('::') + 2);
-    return humanizeMolduraPieceLabel(pos);
-  }
-  const opt = findPanelPiezaOption(t);
-  if (!opt) return t;
-  const override = CLIENT_PIECE_LABEL_OVERRIDES[opt.code];
-  const isCode = opt.code.toLowerCase() === t.toLowerCase();
-  const isCatalogName = opt.fullName.toLowerCase() === t.toLowerCase();
-  if (override && (isCode || isCatalogName)) return override;
-  if (isCode) return opt.fullName;
-  return t;
+  return getClientPieceLabel(t);
 }
 
 /** Normaliza texto/sigla de visión o inventario al código del panel (FD, SI, …). */

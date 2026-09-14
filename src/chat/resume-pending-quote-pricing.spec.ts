@@ -217,6 +217,7 @@ const paintSnap = snap({
   Salpicadera: 2800,
   SI: 2800,
   'SI|DL': 2800,
+  'Calavera|MONTAJE': 800,
 });
 
 describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
@@ -553,8 +554,17 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
     expect(paintAfter?.amount).toBe(paintBefore?.amount);
     expect(paintAfter?.quoteLineId).toBe(paintBefore?.quoteLineId);
     const refaccion = resumed.quote.lines.find((l) => l.serviceType === 'REFACCION');
+    const montaje = resumed.quote.lines.find((l) => l.serviceType === 'MONTAJE');
     expect(resumed.quote.total).toBe(
-      (refaccion?.amount ?? 0) + (paintAfter?.amount ?? 0),
+      (refaccion?.amount ?? 0) +
+        (paintAfter?.amount ?? 0) +
+        (montaje?.amount ?? 0),
+    );
+    expect(resumed.quote.lines.filter((l) => l.serviceType === 'MONTAJE')).toHaveLength(
+      1,
+    );
+    expect(montaje?.quoteLineId).toBe(
+      initial.quote.lines.find((l) => l.serviceType === 'MONTAJE')?.quoteLineId,
     );
     expect(resumed.quote.isPartial).toBe(false);
     expect(confirmed.result.vehicle.displayLabel).toMatch(/HB/);

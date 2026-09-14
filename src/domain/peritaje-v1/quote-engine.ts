@@ -3,7 +3,7 @@
  * financieras. No calcula precios de catálogo/mercado.
  */
 import { isMolduraPieza } from '../../catalog/panel-pieza-catalog';
-import { isMolduraNonPaintableFinish } from '../../catalog/moldura';
+import { isMolduraNonPaintableFinish, parseMoldingFinishType } from '../../catalog/moldura';
 import { createQuoteId } from './ids';
 import {
   validateCanonicalPeritajeV1,
@@ -27,6 +27,7 @@ export const CANONICAL_QUOTE_WARNINGS = {
   MOLDURA_NO_PINTABLE_REQUIERE_REVISION:
     'MOLDURA_NO_PINTABLE_REQUIERE_REVISION',
   MOLDURA_MONTAJE_PENDIENTE: 'MOLDURA_MONTAJE_PENDIENTE',
+  MONTAJE_TARIFA_NO_CONFIGURADA: 'MONTAJE_TARIFA_NO_CONFIGURADA',
   SUSPECTED_INVOLVEMENT: 'SUSPECTED_INVOLVEMENT',
   NOT_ASSESSABLE: 'NOT_ASSESSABLE',
 } as const;
@@ -101,6 +102,12 @@ export function deriveCanonicalWarnings(
         warnings.add(CANONICAL_QUOTE_WARNINGS.REFACCION_PENDIENTE_DE_COTIZAR);
       }
     }
+    if (
+      line.serviceType === 'MONTAJE' &&
+      !isChargeableQuoteLine(line)
+    ) {
+      warnings.add(CANONICAL_QUOTE_WARNINGS.MONTAJE_TARIFA_NO_CONFIGURADA);
+    }
     if (line.serviceType === 'PENDIENTE') {
       warnings.add(CANONICAL_QUOTE_WARNINGS.PENDING_TREATMENT);
     }
@@ -135,7 +142,7 @@ export function deriveCanonicalWarnings(
     }
     if (
       isMolduraPieza(d.pieceCode) &&
-      isMolduraNonPaintableFinish(d.finishType) &&
+      parseMoldingFinishType(d.finishType) === 'UNKNOWN' &&
       d.treatment === 'SUSTITUIR'
     ) {
       warnings.add(CANONICAL_QUOTE_WARNINGS.MOLDURA_MONTAJE_PENDIENTE);

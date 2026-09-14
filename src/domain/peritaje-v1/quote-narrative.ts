@@ -4,6 +4,7 @@
  */
 import { isMolduraNonPaintableFinish } from '../../catalog/moldura';
 import {
+  getClientPieceLabel,
   humanizeClientPieceLabel,
   isMolduraPieza,
 } from '../../catalog/panel-pieza-catalog';
@@ -90,6 +91,8 @@ export const CANONICAL_WARNING_COPY: Record<string, string> = {
     'La moldura queda pendiente de valoración para confirmar si requiere reinstalación, reparación o sustitución.',
   MOLDURA_MONTAJE_PENDIENTE:
     'El montaje de la moldura queda pendiente de confirmación en revisión física.',
+  MONTAJE_TARIFA_NO_CONFIGURADA:
+    'El montaje queda pendiente: el taller no tiene tarifa configurada para esa instalación.',
   SUSPECTED_INVOLVEMENT:
     'Hay piezas con posible involucramiento (desalineación o transferencia del golpe) que deben revisarse en taller antes de cotizarlas.',
   NOT_ASSESSABLE:
@@ -106,6 +109,7 @@ export const PARTIAL_QUOTE_REASON = {
   NOT_ASSESSABLE: 'NOT_ASSESSABLE',
   PENDING_TREATMENT: 'PENDING_TREATMENT',
   UNCONFIGURED: 'UNCONFIGURED',
+  MONTAJE_TARIFA_NO_CONFIGURADA: 'MONTAJE_TARIFA_NO_CONFIGURADA',
 } as const;
 
 export type PartialQuoteReasonCode =
@@ -164,6 +168,14 @@ export function derivePartialQuoteReasons(
     const unconfigured =
       line.pricingStatus === 'UNCONFIGURED' ||
       line.pricingSource === 'UNCONFIGURED';
+
+    if (line.serviceType === 'MONTAJE' && unconfigured) {
+      push(
+        PARTIAL_QUOTE_REASON.MONTAJE_TARIFA_NO_CONFIGURADA,
+        'El montaje queda pendiente: el taller no tiene tarifa configurada para esa instalación.',
+      );
+      continue;
+    }
 
     if (line.serviceType === 'REFACCION') {
       const awaiting =
@@ -280,6 +292,7 @@ const SERVICE_LABEL: Record<QuoteServiceType, string> = {
   REPARACION_PINTURA: 'Reparación y pintura',
   REFACCION: 'Refacción',
   MONTAJE_PINTURA: 'Montaje y pintura',
+  MONTAJE: 'Montaje',
   PENDIENTE: 'Pendiente de revisión',
   ADVERTENCIA: 'Advertencia',
 };
@@ -288,9 +301,13 @@ const SERVICE_PREFIXES = [
   /^refacci[oó]n(?:\s+de)?\s+/i,
   /^montar y pintar\s+/i,
   /^montaje y pintura(?:\s+de)?\s+/i,
+  /^montaje(?:\s+de)?\s+/i,
   /^reparaci[oó]n y pintura(?: estimada)?(?:\s+de)?\s+/i,
   /^reparar y pintar\s+/i,
 ];
+
+export const REFACCION_AVAILABILITY_DISCLAIMER =
+  'Precio aproximado sujeto a disponibilidad.';
 
 export function isCanonicalNarrativeEligible(
   quote: unknown,
@@ -324,11 +341,16 @@ export function resolveQuoteLinePieceLabel(
   line: QuoteLine,
   peritaje?: CanonicalPeritajeV1 | null,
 ): string {
-  const fromPeritaje = peritaje?.damages.find(
+  const damage = peritaje?.damages.find(
     (d) => d.damageItemId === line.damageItemId,
-  )?.pieceLabel;
+  );
+  const fromPeritaje = damage?.pieceLabel;
   const raw = fromPeritaje?.trim() || inferPieceLabelFromQuoteLine(line);
-  return humanizeClientPieceLabel(raw) || raw;
+  return (
+    getClientPieceLabel(damage?.pieceCode || raw, damage) ||
+    humanizeClientPieceLabel(raw) ||
+    raw
+  );
 }
 
 export function buildControlledQuoteLineLabel(
@@ -337,6 +359,7 @@ export function buildControlledQuoteLineLabel(
 ): string {
   const piece = String(pieceLabel ?? '').trim() || 'pieza';
   if (serviceType === 'REFACCION') return `Refacción ${piece}`;
+  if (serviceType === 'MONTAJE') return `Montaje ${piece}`;
   if (serviceType === 'MONTAJE_PINTURA') return `Montaje y pintura ${piece}`;
   if (serviceType === 'REPARACION_PINTURA') {
     return `Reparación y pintura ${piece}`;
@@ -345,11 +368,24 @@ export function buildControlledQuoteLineLabel(
   return `${SERVICE_LABEL[serviceType] ?? serviceType} ${piece}`.trim();
 }
 
+/**
+ * priceRange = referencia de mercado mostrable.
+ * amount = importe que CanonicalQuote usa en el total.
+ * El renderer nunca calcula el total desde texto.
+ */
 function lineDisplayAmount(line: QuoteLine): string | null {
   if (line.priceRange && line.priceRange.min >= 0 && line.priceRange.max >= line.priceRange.min) {
     return `${formatQuoteMoneyRange(line.priceRange.min, line.priceRange.max)} MXN`;
   }
   return `${formatQuoteMoney(line.amount)} MXN`;
+}
+
+function isMarketRefaccionLine(line: QuoteLine): boolean {
+  return (
+    line.serviceType === 'REFACCION' &&
+    (line.pricingSource === 'WEB_MARKET_ESTIMATE' ||
+      line.pricingSource === 'MARKET')
+  );
 }
 
 /**
@@ -370,6 +406,9 @@ export function renderCanonicalQuoteFinancialBlock(
     if (isChargeableQuoteLine(line)) {
       const amountText = lineDisplayAmount(line);
       lineTexts.push(`🛠️ ${label}: ${amountText}`);
+      if (isMarketRefaccionLine(line)) {
+        lineTexts.push(`_${REFACCION_AVAILABILITY_DISCLAIMER}_`);
+      }
       chargeableLabels.push(label);
       displayedAmounts.push(Math.round(line.amount));
       if (line.priceRange) {
@@ -390,6 +429,11 @@ export function renderCanonicalQuoteFinancialBlock(
           ? `🛠️ ${label}: pendiente de datos del vehículo`
           : `🛠️ ${label}: precio pendiente de estimación`,
       );
+      continue;
+    }
+
+    if (line.serviceType === 'MONTAJE' && !isChargeableQuoteLine(line)) {
+      lineTexts.push(`🛠️ ${label}: tarifa no configurada`);
       continue;
     }
 

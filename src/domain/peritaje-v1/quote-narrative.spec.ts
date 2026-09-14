@@ -4,6 +4,7 @@ import type { CanonicalQuoteV1, QuoteLine } from './types';
 import {
   CANONICAL_WARNING_COPY,
   NARRATIVE_EVENTS,
+  REFACCION_AVAILABILITY_DISCLAIMER,
   assembleClientQuoteMessage,
   buildControlledQuoteLineLabel,
   buildNarrativeSnapshotFields,
@@ -99,6 +100,37 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
     const block = renderCanonicalQuoteFinancialBlock(q);
     expect(block.text).toMatch(/Refacción fascia delantera/);
     expect(block.text).toMatch(/Montaje y pintura fascia delantera/);
+  });
+
+  it('disclaimer de disponibilidad solo en REFACCION de mercado', () => {
+    const marketRef = line({
+      serviceType: 'REFACCION',
+      amount: 3650,
+      description: 'Calavera derecha',
+      pricingSource: 'WEB_MARKET_ESTIMATE',
+      priceRange: { min: 3300, max: 3650, central: 3650 },
+    });
+    const install = line({
+      quoteLineId: 'ql_montaje_only',
+      serviceType: 'MONTAJE',
+      amount: 800,
+      description: 'Calavera derecha',
+    });
+    const q = quote({
+      lines: [marketRef, install],
+      total: 4450,
+      subtotal: 4450,
+    });
+    const block = renderCanonicalQuoteFinancialBlock(q);
+    expect(block.text).toContain('Refacción Calavera derecha');
+    expect(block.text).toContain(`_${REFACCION_AVAILABILITY_DISCLAIMER}_`);
+    expect(block.text).toContain('Montaje Calavera derecha: $800 MXN');
+    expect(block.text).not.toMatch(
+      /Montaje Calavera derecha:[\s\S]*Precio aproximado sujeto a disponibilidad/,
+    );
+    const paintOnly = quote({ lines: [montaje3400], total: 3400, subtotal: 3400 });
+    const paintBlock = renderCanonicalQuoteFinancialBlock(paintOnly);
+    expect(paintBlock.text).not.toContain(REFACCION_AVAILABILITY_DISCLAIMER);
   });
 
   it('5. REPARAR: no aparece REFACCION', () => {

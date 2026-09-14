@@ -202,7 +202,7 @@ describe('MOLDURA familia mínima', () => {
     expect(rows.some((r) => r.serviceType === 'REPARACION_PINTURA')).toBe(false);
   });
 
-  it('11. NEGRA + SUSTITUIR → REFACCION sin MONTAJE_PINTURA', () => {
+  it('11. NEGRA + SUSTITUIR → REFACCION + MONTAJE (sin MONTAJE_PINTURA)', () => {
     const rows = quoteRowsFromDamageInventory(
       [
         item({
@@ -215,9 +215,9 @@ describe('MOLDURA familia mínima', () => {
           pricingStatus: 'OK',
         }),
       ],
-      snap({ 'MOLDURA_PINTADA|MONTAJE_PINTURA': 2000 }),
+      snap({ 'MOLDURA_PINTADA|MONTAJE_PINTURA': 2000, 'MOLDURA|MONTAJE': 600 }),
     );
-    expect(rows.map((r) => r.serviceType)).toEqual(['REFACCION']);
+    expect(rows.map((r) => r.serviceType)).toEqual(['REFACCION', 'MONTAJE']);
     expect(rows.some((r) => r.serviceType === 'MONTAJE_PINTURA')).toBe(false);
   });
 

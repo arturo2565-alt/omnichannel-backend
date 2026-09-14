@@ -18,6 +18,7 @@ export type DraftClientMessageLineRow = {
     | 'REPARACION_PINTURA'
     | 'REFACCION'
     | 'MONTAJE_PINTURA'
+    | 'MONTAJE'
     | 'PENDIENTE'
     | 'ADVERTENCIA';
   billable?: boolean;
@@ -66,7 +67,7 @@ Responde SOLO el texto final listo para WhatsApp/Messenger (sin JSON, sin meta-e
 
 Reglas obligatorias:
 - Usa EXACTAMENTE los montos de "cotizacion.lineRows" y "cotizacion.total"; PROHIBIDO calcular, redondear distinto o inventar precios.
-- Cada lineRow trae description, treatment y serviceType ya decididos por el valuador. Copia description tal cual (puedes añadir emoji). PROHIBIDO cambiar el sentido: no conviertas REFACCION/MONTAJE_PINTURA en "reparar y pintar" ni REPARACION_PINTURA en "sustituir".
+- Cada lineRow trae description, treatment y serviceType ya decididos por el valuador. Copia description tal cual (puedes añadir emoji). PROHIBIDO cambiar el sentido: no conviertas REFACCION/MONTAJE/MONTAJE_PINTURA en "reparar y pintar" ni REPARACION_PINTURA en "sustituir".
 - Líneas con billable=false o treatment=PENDIENTE van en observaciones, sin precio, y NO alteran el total.
 - Si cotizacion.pricingIncomplete es true: el total es PARCIAL. PROHIBIDO presentarlo como presupuesto cerrado o como si el montaje/pintura cubriera la sustitución completa. Conserva visible el concepto de refacción con "precio pendiente de estimación".
 - Si hay disclaimer o possibleHiddenDamage, menciónalo como advertencia SIN inventar un monto.

@@ -200,6 +200,7 @@ export interface DraftQuoteLine {
     | 'REPARACION_PINTURA'
     | 'REFACCION'
     | 'MONTAJE_PINTURA'
+    | 'MONTAJE'
     | 'PENDIENTE'
     | 'ADVERTENCIA';
   physicalPanelKey?: string;

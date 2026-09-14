@@ -17,6 +17,10 @@ import {
 } from '../catalog/panel-pieza-catalog';
 import { mergeDamageEvidenceStatus } from '../catalog/damage-evidence';
 import {
+  isMolduraPaintedRepair,
+  parseMoldingFinishType,
+} from '../catalog/moldura';
+import {
   UNKNOWN_VEHICLE_ID,
   createDamageItemId,
   resolveModernVehicleIdentity,
@@ -41,6 +45,7 @@ export const QUOTE_SERVICE_TYPES = [
   'REPARACION_PINTURA',
   'REFACCION',
   'MONTAJE_PINTURA',
+  'MONTAJE',
   'PENDIENTE',
   'ADVERTENCIA',
 ] as const;
@@ -88,6 +93,34 @@ export function stripPosibleReemplazoPhrases(text: string): string {
 }
 
 const OPTICS_RE = /\b(faro|calavera|niebla)\b/i;
+const GRILLE_RE = /\b(parrilla|parilla|grille)\b/i;
+
+export const REPLACEMENT_INSTALLATION_MODES = [
+  'MONTAJE',
+  'MONTAJE_PINTURA',
+  'NONE',
+] as const;
+export type ReplacementInstallationMode =
+  (typeof REPLACEMENT_INSTALLATION_MODES)[number];
+
+export const REPLACEMENT_INSTALLATION_REASONS = [
+  'non_paintable_optic',
+  'non_paintable_grille',
+  'non_paintable_accessory',
+  'paintable_body_part',
+  'painted_molding',
+  'textured_non_paintable',
+  'unknown_finish_conservative',
+  'not_substitution',
+  'no_install_component',
+] as const;
+export type ReplacementInstallationReason =
+  (typeof REPLACEMENT_INSTALLATION_REASONS)[number];
+
+export type ReplacementInstallationResolution = {
+  installationMode: ReplacementInstallationMode;
+  reason: ReplacementInstallationReason;
+};
 
 const TREATMENT_RANK: Record<TreatmentDecision, number> = {
   PENDIENTE: 1,
@@ -289,12 +322,62 @@ export function isOpticsLikePieza(raw: string): boolean {
   return /^(FARO_|CAL_)/.test(codigo);
 }
 
-export function needsMontajePinturaComponent(pieza: string): boolean {
-  if (isInternalDamageRangePieza(pieza) || isIntegralPanelPieza(pieza)) {
-    return false;
+export function isGrilleLikePieza(raw: string): boolean {
+  const stripped = stripRefaccionPrefix(raw);
+  if (GRILLE_RE.test(stripped)) return true;
+  const catalog = resolveCatalogPiezaForMatrixLookup(stripped);
+  return /parr?illa/i.test(String(catalog ?? ''));
+}
+
+/**
+ * Instalación de una pieza SUSTITUIR. Determinista; el LLM no elige serviceType.
+ */
+export function resolveReplacementInstallationMode(item: {
+  pieza?: string | null;
+  tratamiento?: unknown;
+  finishType?: string | null;
+  physicalPanelKey?: string | null;
+}): ReplacementInstallationResolution {
+  const treatment = parseStructuredTreatment(item.tratamiento);
+  if (treatment && treatment !== 'SUSTITUIR') {
+    return { installationMode: 'NONE', reason: 'not_substitution' };
   }
-  if (isOpticsLikePieza(pieza)) return false;
-  return resolveCatalogPiezaForMatrixLookup(stripRefaccionPrefix(pieza)) != null;
+  const pieza = String(item.pieza ?? item.physicalPanelKey ?? '').trim();
+  if (!pieza) {
+    return { installationMode: 'NONE', reason: 'no_install_component' };
+  }
+  if (isInternalDamageRangePieza(pieza) || isIntegralPanelPieza(pieza)) {
+    return { installationMode: 'NONE', reason: 'no_install_component' };
+  }
+  if (isMolduraPieza(pieza) || isMolduraPieza(String(item.physicalPanelKey ?? ''))) {
+    const finish = parseMoldingFinishType(item.finishType);
+    if (isMolduraPaintedRepair(finish)) {
+      return { installationMode: 'MONTAJE_PINTURA', reason: 'painted_molding' };
+    }
+    if (finish === 'NEGRA_TEXTURIZADA') {
+      return { installationMode: 'MONTAJE', reason: 'textured_non_paintable' };
+    }
+    return { installationMode: 'NONE', reason: 'unknown_finish_conservative' };
+  }
+  if (isOpticsLikePieza(pieza)) {
+    return { installationMode: 'MONTAJE', reason: 'non_paintable_optic' };
+  }
+  if (isGrilleLikePieza(pieza)) {
+    return { installationMode: 'MONTAJE', reason: 'non_paintable_grille' };
+  }
+  if (resolveCatalogPiezaForMatrixLookup(stripRefaccionPrefix(pieza))) {
+    return { installationMode: 'MONTAJE_PINTURA', reason: 'paintable_body_part' };
+  }
+  return { installationMode: 'NONE', reason: 'no_install_component' };
+}
+
+export function needsMontajePinturaComponent(pieza: string): boolean {
+  return (
+    resolveReplacementInstallationMode({
+      pieza,
+      tratamiento: 'SUSTITUIR',
+    }).installationMode === 'MONTAJE_PINTURA'
+  );
 }
 
 export function looksLikeReplacementCue(
@@ -789,7 +872,8 @@ export function narrativeRespectsStructuredLines(
     const isReplace =
       line.tratamiento === 'SUSTITUIR' ||
       line.serviceType === 'REFACCION' ||
-      line.serviceType === 'MONTAJE_PINTURA';
+      line.serviceType === 'MONTAJE_PINTURA' ||
+      line.serviceType === 'MONTAJE';
     const isRepair = line.serviceType === 'REPARACION_PINTURA';
     if (
       isReplace &&

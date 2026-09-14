@@ -1,6 +1,7 @@
 import {
   canonicalizePanelCode,
   findPanelPiezaOption,
+  getClientPieceLabel,
   humanizeClientPieceLabel,
   normalizePanelPiezaCode,
   refaccionCatalogCodigoForPieza,
@@ -70,6 +71,16 @@ describe('panel-pieza-catalog', () => {
     expect(humanizeClientPieceLabel('ED')).toBe('Estribo derecho');
     expect(humanizeClientPieceLabel('fascia delantera')).toBe('fascia delantera');
     expect(humanizeClientPieceLabel('Cofre')).toBe('Cofre');
+  });
+
+  it('getClientPieceLabel es la presentación central y no muta pieceCode', () => {
+    expect(getClientPieceLabel('Calavera_Derecha')).toBe('Calavera derecha');
+    expect(getClientPieceLabel('Faro_Niebla_Izquierdo')).toBe(
+      'Faro de niebla izquierdo',
+    );
+    expect(getClientPieceLabel('FD')).toBe('Fascia delantera');
+    expect(getClientPieceLabel('SI')).toBe('Salpicadera delantera izquierda');
+    expect(getClientPieceLabel('Tapa Cajuela')).toBe('Tapa de cajuela');
   });
 
   it('refaccionCatalogCodigoForPieza mapea visión a código de catálogo', () => {

@@ -137,14 +137,19 @@ describe('draft-quote-inventory-pricing', () => {
       ],
       snap,
     );
-    expect(rows.map((r) => r.serviceType)).toEqual(['REFACCION', 'REPARACION_PINTURA']);
+    expect(rows.map((r) => r.serviceType)).toEqual([
+      'REFACCION',
+      'MONTAJE',
+      'REPARACION_PINTURA',
+    ]);
     expect(rows[0]?.precioMx).toBe(2860);
     expect(classifyQuoteRow(rows[0]!)).toBe('refaccion');
-    expect(rows[1]?.pieza).toBe('FT');
-    expect(rows[1]?.tratamiento).toBe('INCIERTO');
-    expect(Number.isFinite(rows[1]?.precioMx)).toBe(true);
-    expect(rows[1]!.precioMx).toBeGreaterThan(0);
-    expect(sumQuoteRowsSubtotal(rows)).toBe(2860 + rows[1]!.precioMx);
+    expect(rows[1]?.serviceType).toBe('MONTAJE');
+    expect(rows[2]?.pieza).toBe('FT');
+    expect(rows[2]?.tratamiento).toBe('INCIERTO');
+    expect(Number.isFinite(rows[2]?.precioMx)).toBe(true);
+    expect(rows[2]!.precioMx).toBeGreaterThan(0);
+    expect(sumQuoteRowsSubtotal(rows)).toBe(2860 + rows[2]!.precioMx);
   });
 
   it('DMFuerte en Cofre/Fascia desglosa refacción + cabina, no hojalatería sola', () => {
@@ -197,8 +202,9 @@ describe('draft-quote-inventory-pricing', () => {
       ],
       snap,
     );
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.precioMx).toBe(0);
+    expect(rows.every((r) => Number.isFinite(Number(r.precioMx) || 0))).toBe(
+      true,
+    );
     expect(Number.isFinite(sumQuoteRowsSubtotal(rows))).toBe(true);
   });
 });

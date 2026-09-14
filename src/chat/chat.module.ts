@@ -25,10 +25,10 @@ import { LlmCallTrackerService } from './llm-call-tracker.service';
 import { LeadEventsService } from './lead-events.service';
 import { AppointmentReminderService } from './appointment-reminder.service';
 import { AppointmentReminderController } from './appointment-reminder.controller';
-import { RefaccionMarketService } from './refaccion-market/refaccion-market.orchestrator';
 import { CatalogModule } from '../catalog/catalog.module';
 import { TallerModule } from '../taller/taller.module';
 import { AuthModule } from '../auth/auth.module';
+import { RefaccionMarketModule } from './refaccion-market/refaccion-market.module';
 
 @Module({
   imports: [

@@ -197,7 +197,8 @@ export function quoteRowsPreservingLastSend(
     }
     if (
       row.serviceType === 'REFACCION' ||
-      row.serviceType === 'MONTAJE_PINTURA'
+      row.serviceType === 'MONTAJE_PINTURA' ||
+      row.serviceType === 'MONTAJE'
     ) {
       return row;
     }

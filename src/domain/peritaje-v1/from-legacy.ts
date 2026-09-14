@@ -8,7 +8,7 @@ import {
 } from './ids';
 import { parseStructuredTreatment, treatmentImpliesReplacement } from './treatment';
 import {
-  humanizeClientPieceLabel,
+  getClientPieceLabel,
   physicalPanelKeyForPiece,
 } from '../../catalog/panel-pieza-catalog';
 import {
@@ -185,7 +185,7 @@ export function damageItemFromLegacy(
     pieceCode,
     pieceLabel: moldura
       ? humanizeMolduraPieceLabel(moldingPosition)
-      : humanizeClientPieceLabel(pieceCode) || pieceCode,
+      : getClientPieceLabel(pieceCode) || pieceCode,
     physicalPanelKey,
     ...(moldingPosition ? { moldingPosition } : {}),
     ...(finishType ? { finishType } : {}),
