@@ -110,6 +110,8 @@ export interface VehicleIdentity {
   confidence: ConfidenceLevel;
   source: IdentitySource;
   confirmedByUser: boolean;
+  /** Campos que el cliente confirmó explícitamente. Vision no los llena. */
+  confirmedFields?: string[];
 }
 
 export const EVIDENCE_TYPES = ['IMAGE'] as const;

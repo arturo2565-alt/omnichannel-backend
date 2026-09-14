@@ -164,6 +164,47 @@ describe('CANONICAL REFACCION = solo mercado', () => {
     expect(enriched.inventory?.[0]?.precioMx).toBe(0);
   });
 
+  it('1c. Vision make/model/year sin confirmar no ejecuta market', async () => {
+    const identities: VehiclePartIdentity[] = [];
+    const events: string[] = [];
+    await enrichInventoryWithMarketRefacciones(
+      {
+        pieza: 'Calavera_Derecha',
+        severidad: 'DMFuerte',
+        descripcionTecnica: '',
+        justificacion: '',
+        partesAfectadas: ['Calavera_Derecha'],
+        severidadDelDano: 'DMFuerte',
+        vehiculoDetectado: 'Nissan Versa 2014',
+        inventory: [item({ pieza: 'Calavera_Derecha' })],
+      },
+      {
+        estimate: async (identity: VehiclePartIdentity) => {
+          identities.push(identity);
+          return insufficientEstimate(identity);
+        },
+      } as never,
+      (event) => events.push(event),
+      {
+        vehicles: [
+          {
+            vehicleId: 'veh_nissan',
+            make: 'Nissan',
+            model: 'Versa',
+            year: '2014',
+            displayLabel: 'Nissan Versa 2014',
+            source: 'vision',
+            confirmedByUser: false,
+            confidence: 'MEDIUM',
+          },
+        ],
+      },
+    );
+    expect(identities).toHaveLength(0);
+    expect(events).toContain(REFACCION_MARKET_EVENTS.AWAITING_VEHICLE_DATA);
+    expect(events).not.toContain(REFACCION_MARKET_EVENTS.SEARCH_STARTED);
+  });
+
   it('2. precio manual en refaccion_catalog no afecta quote CANONICAL', async () => {
     const catalogManual = 4940;
     const service = {

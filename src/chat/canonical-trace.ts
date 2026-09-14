@@ -55,6 +55,11 @@ export const CANONICAL_TRACE_EVENTS = {
   REFACCION_REPRICE_STARTED: 'REFACCION_REPRICE_STARTED',
   REFACCION_REPRICE_RESULT: 'REFACCION_REPRICE_RESULT',
   CANONICAL_QUOTE_RESUMED: 'CANONICAL_QUOTE_RESUMED',
+  VISION_BATCH_VEHICLE_IDENTITY: 'VISION_BATCH_VEHICLE_IDENTITY',
+  CANONICAL_VEHICLE_REUSE: 'CANONICAL_VEHICLE_REUSE',
+  VEHICLE_IDENTITY_CONFIRMATION_REQUIRED:
+    'VEHICLE_IDENTITY_CONFIRMATION_REQUIRED',
+  SINGLE_VEHICLE_IDENTITY_MISMATCH: 'SINGLE_VEHICLE_IDENTITY_MISMATCH',
 } as const;
 
 export type CanonicalTraceEvent =
@@ -611,6 +616,8 @@ export function tracePendingQuoteLifecycle(
     vehicleId?: string;
     damageItemId?: string;
     requiredFields?: readonly string[];
+    missingFields?: readonly string[];
+    confirmationFields?: readonly string[];
     pricingStatus?: string;
   } = {},
 ): void {
@@ -621,6 +628,12 @@ export function tracePendingQuoteLifecycle(
     damageItemId: asString(payload.damageItemId),
     requiredFields: payload.requiredFields
       ? [...payload.requiredFields]
+      : undefined,
+    missingFields: payload.missingFields
+      ? [...payload.missingFields]
+      : undefined,
+    confirmationFields: payload.confirmationFields
+      ? [...payload.confirmationFields]
       : undefined,
     pricingStatus: asString(payload.pricingStatus),
   });

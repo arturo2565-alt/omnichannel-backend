@@ -176,6 +176,7 @@ import {
 import {
   CANONICAL_TRACE_EVENTS,
   mergeCanonicalTraceContext,
+  pegCanonicalTrace,
   runWithCanonicalTraceContext,
   tracePendingQuoteLifecycle,
   traceVisionInput,
@@ -3109,6 +3110,15 @@ export class ChatService implements OnModuleDestroy {
       const batchVehicle =
         batch.vehiculoDetectado ||
         pickVehicleLabelFromDamageInventory(batch.items);
+      pegCanonicalTrace(CANONICAL_TRACE_EVENTS.VISION_BATCH_VEHICLE_IDENTITY, {
+        conversationId: options?.conversationId,
+        batchIndex: idx,
+        batchCount: lotes.length,
+        imageCount: lote.length,
+        vehicleCandidate: batchVehicle,
+        itemCount: batch.items.length,
+        pieces: batch.items.map((i) => i.pieza),
+      });
       if (batchVehicle) {
         accumulatedVisionVehicle = batchVehicle;
       }
@@ -6092,9 +6102,25 @@ ${catalogAppend}`;
               vehicleId: req.vehicleId,
               damageItemId: req.damageItemId,
               requiredFields: req.requiredFields,
+              missingFields: req.missingFields,
+              confirmationFields: req.confirmationFields,
               pricingStatus: 'AWAITING_VEHICLE_DATA',
             },
           );
+          if ((req.confirmationFields ?? []).length > 0) {
+            pegCanonicalTrace(
+              CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY_CONFIRMATION_REQUIRED,
+              {
+                conversationId,
+                quoteId: authoritativeQuote.quoteId,
+                vehicleId: req.vehicleId,
+                damageItemId: req.damageItemId,
+                missingFields: req.missingFields,
+                confirmationFields: req.confirmationFields,
+                requiredFields: req.requiredFields,
+              },
+            );
+          }
         }
       }
     } else if (finance.mode === 'canonical_blocked') {

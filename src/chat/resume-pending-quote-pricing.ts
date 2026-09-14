@@ -8,7 +8,7 @@ import type {
   VehicleIdentity,
 } from '../domain/peritaje-v1';
 import { vehicleIdentityVersion } from '../domain/peritaje-v1/vehicle-identity-enrich';
-import { missingRefaccionVehicleFields } from '../domain/peritaje-v1/pending-quote-requirement';
+import { refaccionIdentityGaps } from '../domain/peritaje-v1/pending-quote-requirement';
 import { syncPendingQuoteRequirements } from '../domain/peritaje-v1/pending-quote-requirement';
 import type { DraftQuote } from './autofix-config';
 import {
@@ -173,16 +173,19 @@ async function runResume(
       moldingPosition: it.moldingPosition,
       finishType: it.finishType,
     });
-    const missing = missingRefaccionVehicleFields({
-      make: identity.marca,
-      model: identity.modelo,
-      year: identity.anio,
+    const gaps = refaccionIdentityGaps({
+      make: itemVehicle?.make ?? identity.marca,
+      model: itemVehicle?.model ?? identity.modelo,
+      year: itemVehicle?.year ?? identity.anio,
+      confirmedByUser: itemVehicle?.confirmedByUser === true,
+      confirmedFields: itemVehicle?.confirmedFields,
+      source: itemVehicle?.source ?? 'vision',
     });
-    if (missing.length) {
+    if (!gaps.readyForMarket) {
       next.push(
         applyAwaitingVehicleDataToItem(
           { ...it, tratamiento: 'SUSTITUIR' },
-          missing,
+          gaps.requiredFields,
         ),
       );
       continue;

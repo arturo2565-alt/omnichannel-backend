@@ -35,11 +35,20 @@ export interface PendingQuoteRequirement {
   damageItemId: string;
   type: PendingQuoteRequirementType;
   requiredFields: string[];
+  missingFields?: string[];
+  confirmationFields?: string[];
   reason: PendingQuoteRequirementReason;
   status: PendingQuoteRequirementStatus;
   createdAt?: string;
   resolvedAt?: string;
 }
+
+export type RefaccionIdentityGaps = {
+  missingFields: RefaccionRequiredVehicleField[];
+  confirmationFields: RefaccionRequiredVehicleField[];
+  requiredFields: RefaccionRequiredVehicleField[];
+  readyForMarket: boolean;
+};
 
 const PLACEHOLDER_MODEL_RE =
   /^(tu\s+)?(veh[ií]culo|unidad|auto|coche|cliente|desconocido|unknown|n\/?a|sin\s+dato)s?$/i;
@@ -85,10 +94,58 @@ export function missingRefaccionVehicleFields(input: {
   return missing;
 }
 
+export function refaccionIdentityGaps(vehicle?: {
+  make?: string | null;
+  model?: string | null;
+  year?: string | null;
+  marca?: string | null;
+  modelo?: string | null;
+  anio?: string | null;
+  confirmedByUser?: boolean;
+  confirmedFields?: readonly string[];
+  source?: string;
+} | null): RefaccionIdentityGaps {
+  const missing = missingRefaccionVehicleFields(vehicle ?? {});
+  const confirmed = new Set(
+    (vehicle?.confirmedFields ?? []).map((f) => String(f).toLowerCase()),
+  );
+  const fullyConfirmed = vehicle?.confirmedByUser === true;
+  const confirmation: RefaccionRequiredVehicleField[] = [];
+  if (!fullyConfirmed) {
+    const make = String(vehicle?.make ?? vehicle?.marca ?? '').trim();
+    const model = String(vehicle?.model ?? vehicle?.modelo ?? '').trim();
+    const year = String(vehicle?.year ?? vehicle?.anio ?? '').replace(/\D/g, '').slice(0, 4);
+    if (make && !confirmed.has('make') && !missing.includes('make')) {
+      confirmation.push('make');
+    }
+    if (isUsableModel(model) && !confirmed.has('model') && !missing.includes('model')) {
+      confirmation.push('model');
+    }
+    if (
+      isValidVehicleYear(year) &&
+      !confirmed.has('year') &&
+      !missing.includes('year')
+    ) {
+      confirmation.push('year');
+    }
+  }
+  const required = [...new Set([...missing, ...confirmation])];
+  return {
+    missingFields: missing,
+    confirmationFields: confirmation,
+    requiredFields: required,
+    readyForMarket: required.length === 0,
+  };
+}
+
 export function vehicleHasRefaccionIdentity(
-  input: Parameters<typeof missingRefaccionVehicleFields>[0],
+  input: Parameters<typeof missingRefaccionVehicleFields>[0] & {
+    confirmedByUser?: boolean;
+    confirmedFields?: readonly string[];
+    source?: string;
+  },
 ): boolean {
-  return missingRefaccionVehicleFields(input).length === 0;
+  return refaccionIdentityGaps(input).readyForMarket;
 }
 
 export function createPendingRequirementId(input: {
@@ -138,6 +195,10 @@ export function upsertOpenVehicleDataRequirement(
       list[idx] = {
         ...prev,
         requiredFields: [...next.requiredFields],
+        missingFields: next.missingFields ? [...next.missingFields] : prev.missingFields,
+        confirmationFields: next.confirmationFields
+          ? [...next.confirmationFields]
+          : prev.confirmationFields,
         quoteId: next.quoteId || prev.quoteId,
       };
       return list;
@@ -166,10 +227,11 @@ export function resolvePendingRequirementsForVehicle(
     if (req.status !== 'OPEN') return req;
     if (req.vehicleId !== vehicle.vehicleId) return req;
     if (req.type !== 'VEHICLE_DATA') return req;
-    const missing = missingRefaccionVehicleFields(vehicle).filter((f) =>
-      req.requiredFields.includes(f),
+    const gaps = refaccionIdentityGaps(vehicle);
+    const stillOpen = gaps.requiredFields.filter((f) =>
+      (req.requiredFields ?? []).includes(f),
     );
-    if (missing.length) return req;
+    if (stillOpen.length || !gaps.readyForMarket) return req;
     const done: PendingQuoteRequirement = {
       ...req,
       status: 'RESOLVED',
@@ -209,12 +271,8 @@ export function syncPendingQuoteRequirements(input: {
     if (line.serviceType !== 'REFACCION') continue;
     if (line.pricingStatus !== 'AWAITING_VEHICLE_DATA') continue;
     const vehicle = vehicles.get(line.vehicleId);
-    const requiredFields = missingRefaccionVehicleFields({
-      make: vehicle?.make,
-      model: vehicle?.model,
-      year: vehicle?.year,
-    });
-    if (!requiredFields.length) continue;
+    const gaps = refaccionIdentityGaps(vehicle);
+    if (gaps.readyForMarket) continue;
     awaitingIds.add(line.damageItemId);
     const before = list.length;
     const requirementId = createPendingRequirementId({
@@ -235,7 +293,9 @@ export function syncPendingQuoteRequirements(input: {
         vehicleId: line.vehicleId,
         damageItemId: line.damageItemId,
         type: 'VEHICLE_DATA',
-        requiredFields: [...requiredFields],
+        requiredFields: [...gaps.requiredFields],
+        missingFields: [...gaps.missingFields],
+        confirmationFields: [...gaps.confirmationFields],
         reason: 'REFACCION_MARKET_LOOKUP',
       },
       now,
@@ -293,7 +353,8 @@ export function formatPendingCanonicalRequirementsContext(input: {
       `- reason: ${req.reason}`,
       `- piece: ${piece}`,
       `- vehicle: ${vehicleLabel}`,
-      `- missingFields: ${req.requiredFields.join(', ')}`,
+      `- missingFields: ${(req.missingFields ?? req.requiredFields).join(', ') || '—'}`,
+      `- confirmationFields: ${(req.confirmationFields ?? []).join(', ') || '—'}`,
     ].join('\n');
   });
   return `PENDING_CANONICAL_REQUIREMENTS:\n${lines.join('\n')}`;

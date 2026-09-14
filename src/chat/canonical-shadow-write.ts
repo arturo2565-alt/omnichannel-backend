@@ -4,15 +4,21 @@ import type { DetectedDamageItem, VehicleDamageAnalysis } from './entities/chat.
 import type { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { canonicalPhysicalPanelKey } from './piece-treatment';
 import {
+  collectSingleVehicleIdentityMismatches,
   compareLegacyVsCanonical,
   formatShadowLogPayload,
   isCanonicalPeritajeV1,
+  resolveVisionBurstVehiclePolicy,
   selectCanonicalShadowToPersist,
   tryBuildVisionCanonicalShadow,
   type CanonicalPeritajeV1,
   type CanonicalShadowComparison,
 } from '../domain/peritaje-v1';
-import { traceCanonicalPeritajeBuilt } from './canonical-trace';
+import {
+  CANONICAL_TRACE_EVENTS,
+  pegCanonicalTrace,
+  traceCanonicalPeritajeBuilt,
+} from './canonical-trace';
 import { isBanioPinturaCompletoVisionInventory } from './vision-bpc-inventory';
 import {
   adaptCalculatedRowsToCanonicalQuoteV1,
@@ -53,6 +59,14 @@ export function buildVisionShadowSafe(
     const cartProfile = input.existingCart?.damageAnalysis?.quoteCartMeta
       ?.vehiclePricingProfile;
     const priorCanonical = priorCanonicalFromCart(input.existingCart);
+    const priorKnownCount = (priorCanonical?.vehicles ?? []).filter(
+      (v) => v.vehicleId && v.vehicleId !== 'veh_unknown',
+    ).length;
+    const explicitMultiVehicle = priorKnownCount >= 2;
+    const itemLabels = [
+      ...input.incomingInventory.map((i) => i.vehiculoDetectado),
+      ...(input.priorInventory ?? []).map((i) => i.vehiculoDetectado),
+    ];
     const built = tryBuildVisionCanonicalShadow({
       conversationId: input.conversationId,
       tallerId: input.tallerId,
@@ -73,7 +87,53 @@ export function buildVisionShadowSafe(
       ),
       canonicalizePanel: canonicalPhysicalPanelKey,
       viability: input.viability,
+      explicitMultiVehicle,
     });
+    const policy = resolveVisionBurstVehiclePolicy({
+      priorVehicles: priorCanonical?.vehicles,
+      rootLabel:
+        input.userConfirmedVehicleLabel ||
+        input.visionVehicleLabel ||
+        input.analysis?.vehiculoDetectado,
+      itemLabels,
+      explicitMultiVehicle,
+    });
+    const canonicalVehicleId =
+      policy.canonical?.vehicleId ?? built.vehicles[0]?.vehicleId;
+    pegCanonicalTrace(CANONICAL_TRACE_EVENTS.CANONICAL_VEHICLE_REUSE, {
+      conversationId: input.conversationId,
+      mode: policy.mode,
+      reason: policy.reason,
+      vehicleId: canonicalVehicleId,
+      vehicleCandidate:
+        policy.canonical?.displayLabel ||
+        input.visionVehicleLabel ||
+        input.analysis?.vehiculoDetectado,
+      knownMakes: policy.knownMakes,
+      damageVehicleIds: [
+        ...new Set(built.damages.map((d) => d.vehicleId)),
+      ],
+    });
+    if (policy.mode === 'SINGLE' && canonicalVehicleId) {
+      const mismatches = collectSingleVehicleIdentityMismatches({
+        canonicalVehicleId,
+        itemLabels,
+      });
+      if (mismatches.length) {
+        pegCanonicalTrace(
+          CANONICAL_TRACE_EVENTS.SINGLE_VEHICLE_IDENTITY_MISMATCH,
+          {
+            conversationId: input.conversationId,
+            vehicleId: canonicalVehicleId,
+            reason: policy.reason,
+            candidates: mismatches,
+            damageVehicleIds: [
+              ...new Set(built.damages.map((d) => d.vehicleId)),
+            ],
+          },
+        );
+      }
+    }
     traceCanonicalPeritajeBuilt(built, {
       merged: Boolean(priorCanonical || (input.priorInventory?.length ?? 0) > 0),
       priorDamageCount:

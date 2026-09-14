@@ -3,7 +3,10 @@ import type {
   VehicleDamageAnalysis,
 } from '../entities/chat.entity';
 import type { VehicleIdentity } from '../../domain/peritaje-v1';
-import { missingRefaccionVehicleFields } from '../../domain/peritaje-v1/pending-quote-requirement';
+import {
+  missingRefaccionVehicleFields,
+  refaccionIdentityGaps,
+} from '../../domain/peritaje-v1/pending-quote-requirement';
 import {
   applyXorTreatmentsToInventory,
   resolveInventoryTreatment,
@@ -112,19 +115,31 @@ export async function enrichInventoryWithMarketRefacciones(
       moldingPosition: it.moldingPosition,
       finishType: it.finishType,
     });
-    const missing = missingRefaccionVehicleFields({
-      make: identity.marca,
-      model: identity.modelo,
-      year: identity.anio,
-    });
-    if (missing.length) {
+    const gaps = vehicle
+      ? refaccionIdentityGaps(vehicle)
+      : (() => {
+          const missing = missingRefaccionVehicleFields({
+            make: identity.marca,
+            model: identity.modelo,
+            year: identity.anio,
+          });
+          return {
+            missingFields: missing,
+            confirmationFields: [] as typeof missing,
+            requiredFields: missing,
+            readyForMarket: missing.length === 0,
+          };
+        })();
+    if (!gaps.readyForMarket) {
       emit(REFACCION_MARKET_EVENTS.AWAITING_VEHICLE_DATA, {
         pieza: identity.piezaLabel,
         marca: identity.marca,
         modelo: identity.modelo,
         anio: identity.anio,
         confirmed: false,
-        requiredFields: missing,
+        requiredFields: gaps.requiredFields,
+        missingFields: gaps.missingFields,
+        confirmationFields: gaps.confirmationFields,
         damageItemId: it.damageItemId,
         pieceCode: it.pieza,
         pricingStatus: 'AWAITING_VEHICLE_DATA',
@@ -132,7 +147,7 @@ export async function enrichInventoryWithMarketRefacciones(
       next.push(
         applyAwaitingVehicleDataToItem(
           { ...it, tratamiento: 'SUSTITUIR' },
-          missing,
+          gaps.requiredFields,
         ),
       );
       continue;

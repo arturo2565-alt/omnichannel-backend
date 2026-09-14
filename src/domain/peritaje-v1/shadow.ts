@@ -16,6 +16,10 @@ import {
   reusePriorVehicleIdentity,
   singleNonUnknownVehicle,
 } from './vehicle-identity-enrich';
+import {
+  resolveVisionBurstVehiclePolicy,
+  stampDamagesOntoVehicle,
+} from './case-vehicle-identity';
 import { parseStructuredTreatment, resolveLockedTreatment } from './treatment';
 import { mergeDamageEvidenceStatus } from '../../catalog/damage-evidence';
 import { validateCanonicalPeritajeV1 } from './invariants';
@@ -387,6 +391,8 @@ export function buildVisionCanonicalShadow(input: {
   userConfirmedVehicleLabel?: string | null;
   pricingProfileLabel?: string | null;
   replaceInventory?: boolean;
+  /** true solo con evidencia real de 2+ vehículos (express/carrito multi). */
+  explicitMultiVehicle?: boolean;
   canonicalizePanel?: (raw: string) => string;
   now?: string;
   viability?: LegacyViabilityShape;
@@ -400,10 +406,26 @@ export function buildVisionCanonicalShadow(input: {
       input.visionVehicleLabel || input.analysisVehicleLabel,
     pricingProfileLabel: input.pricingProfileLabel,
   });
+  const burstPolicy = resolveVisionBurstVehiclePolicy({
+    priorVehicles: input.priorCanonical?.vehicles,
+    rootLabel:
+      input.userConfirmedVehicleLabel ||
+      input.visionVehicleLabel ||
+      input.analysisVehicleLabel ||
+      computedRoot.displayLabel,
+    itemLabels: [
+      ...(input.incomingInventory ?? []).map((i) => i.vehiculoDetectado),
+      ...(input.priorInventory ?? []).map((i) => i.vehiculoDetectado),
+    ],
+    explicitMultiVehicle: input.explicitMultiVehicle === true,
+  });
   const priorVehicle = singleNonUnknownVehicle(input.priorCanonical?.vehicles);
-  const rootVehicle = priorVehicle
-    ? reusePriorVehicleIdentity(priorVehicle, computedRoot)
-    : computedRoot;
+  const rootVehicle =
+    burstPolicy.mode === 'SINGLE' && burstPolicy.canonical
+      ? burstPolicy.canonical
+      : priorVehicle
+        ? reusePriorVehicleIdentity(priorVehicle, computedRoot)
+        : computedRoot;
 
   const adapt = (
     items: readonly LegacyDetectedDamageShape[],
@@ -416,9 +438,12 @@ export function buildVisionCanonicalShadow(input: {
             confirmedByUser: false,
           })
         : rootVehicle;
-      const vehicleId = priorVehicle
-        ? rootVehicle.vehicleId
-        : itemVehicle.vehicleId;
+      const vehicleId =
+        burstPolicy.mode === 'SINGLE'
+          ? rootVehicle.vehicleId
+          : priorVehicle
+            ? rootVehicle.vehicleId
+            : itemVehicle.vehicleId;
       const adapted = damageItemFromLegacy(item, {
         vehicleId,
         source,
@@ -448,16 +473,18 @@ export function buildVisionCanonicalShadow(input: {
       if (!vehiclesById.has(v.vehicleId)) vehiclesById.set(v.vehicleId, v);
     }
   }
-  for (const item of [
-    ...(input.incomingInventory ?? []),
-    ...(input.priorInventory ?? []),
-  ]) {
-    if (!item.vehiculoDetectado) continue;
-    const v = vehicleIdentityFromLegacyLabel(item.vehiculoDetectado, {
-      source: 'vision',
-      confirmedByUser: false,
-    });
-    if (!vehiclesById.has(v.vehicleId)) vehiclesById.set(v.vehicleId, v);
+  if (burstPolicy.mode === 'MULTI') {
+    for (const item of [
+      ...(input.incomingInventory ?? []),
+      ...(input.priorInventory ?? []),
+    ]) {
+      if (!item.vehiculoDetectado) continue;
+      const v = vehicleIdentityFromLegacyLabel(item.vehiculoDetectado, {
+        source: 'vision',
+        confirmedByUser: false,
+      });
+      if (!vehiclesById.has(v.vehicleId)) vehiclesById.set(v.vehicleId, v);
+    }
   }
 
   const incomingDoc: CanonicalPeritajeV1 = {
@@ -498,14 +525,22 @@ export function buildVisionCanonicalShadow(input: {
     replaceInventory: input.replaceInventory === true,
     now,
   });
-  const usedVehicleIds = new Set(merged.damages.map((d) => d.vehicleId));
-  const vehicles = merged.vehicles.filter((v) => usedVehicleIds.has(v.vehicleId));
-  if (!vehicles.length && merged.vehicles.length) {
-    return merged;
+  const unified =
+    burstPolicy.mode === 'SINGLE'
+      ? {
+          ...merged,
+          vehicles: [rootVehicle],
+          damages: stampDamagesOntoVehicle(merged.damages, rootVehicle.vehicleId),
+        }
+      : merged;
+  const usedVehicleIds = new Set(unified.damages.map((d) => d.vehicleId));
+  const vehicles = unified.vehicles.filter((v) => usedVehicleIds.has(v.vehicleId));
+  if (!vehicles.length && unified.vehicles.length) {
+    return unified;
   }
   return {
-    ...merged,
-    vehicles: vehicles.length ? vehicles : merged.vehicles,
+    ...unified,
+    vehicles: vehicles.length ? vehicles : unified.vehicles,
   };
 }
 

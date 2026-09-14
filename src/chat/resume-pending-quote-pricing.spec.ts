@@ -173,6 +173,24 @@ function mazdaCase(input?: {
   return stampMazdaIds(raw, inventory);
 }
 
+function withConfirmedFields(
+  peritaje: CanonicalPeritajeV1,
+  fields: string[] = ['make', 'model', 'year'],
+): CanonicalPeritajeV1 {
+  return {
+    ...peritaje,
+    vehicles: peritaje.vehicles.map((v) => ({
+      ...v,
+      confirmedFields: [...fields],
+      confirmedByUser:
+        fields.includes('make') &&
+        fields.includes('model') &&
+        fields.includes('year') &&
+        Boolean(v.year),
+    })),
+  };
+}
+
 function emptyDraft(): DraftQuote {
   return {
     status: 'PENDING_APPROVAL',
@@ -202,7 +220,7 @@ const paintSnap = snap({
 });
 
 describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
-  it('1-3. SUSTITUIR + make/model sin year → AWAITING, no market, crea requirement year', async () => {
+  it('1-3. SUSTITUIR + Vision make/model sin year → AWAITING, no market, pide year + confirmación', async () => {
     const { peritaje, inventory } = mazdaCase();
     let marketCalls = 0;
     const enriched = await enrichInventoryWithMarketRefacciones(
@@ -249,13 +267,15 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
       conversationId: 'conv_mazda',
     });
     expect(stamped.created).toHaveLength(1);
-    expect(stamped.created[0]?.requiredFields).toEqual(['year']);
+    expect(stamped.created[0]?.missingFields).toEqual(['year']);
+    expect(stamped.created[0]?.confirmationFields).toEqual(['make', 'model']);
+    expect(stamped.created[0]?.requiredFields).toEqual(['year', 'make', 'model']);
     expect(stamped.created[0]?.vehicleId).toBe(VEH);
     expect(stamped.created[0]?.damageItemId).toBe(DMG_CALAVERA);
     expect(stamped.created[0]?.reason).toBe('REFACCION_MARKET_LOOKUP');
   });
 
-  it('4-10. Cliente 2020 → confirm + resume: IDs iguales, solo market, cobrable', async () => {
+  it('4. Cliente solo “2020” no confirma modelo Vision ni busca mercado', async () => {
     const { peritaje, inventory } = mazdaCase();
     const awaiting = await enrichInventoryWithMarketRefacciones(
       {
@@ -301,9 +321,10 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
     if (!confirmed.ok) return;
     expect(confirmed.result.vehicle.vehicleId).toBe(VEH);
     expect(confirmed.result.vehicle.year).toBe('2020');
-    expect(confirmed.result.vehicle.confirmedByUser).toBe(true);
-    expect(confirmed.result.vehicle.source).toBe('user');
-    expect(confirmed.result.resolved).toHaveLength(1);
+    expect(confirmed.result.vehicle.model).toBe('2');
+    expect(confirmed.result.vehicle.confirmedByUser).toBe(false);
+    expect(confirmed.result.vehicle.confirmedFields).toEqual(['year']);
+    expect(confirmed.result.resolved).toHaveLength(0);
 
     const refaccionLineId = createQuoteLineId({
       damageItemId: DMG_CALAVERA,
@@ -329,10 +350,8 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
     });
     expect(resumed.visionCalled).toBe(false);
     expect(visionCalls).toBe(0);
-    expect(resumed.marketSearches).toBe(1);
-    expect(identities[0]?.marca.toLowerCase()).toContain('mazda');
-    expect(identities[0]?.modelo).toMatch(/2/);
-    expect(identities[0]?.anio).toBe('2020');
+    expect(resumed.marketSearches).toBe(0);
+    expect(identities).toHaveLength(0);
     expect(resumed.peritaje.vehicles[0]?.vehicleId).toBe(VEH);
     expect(
       resumed.inventory.find((i) => i.damageItemId === DMG_CALAVERA)?.damageItemId,
@@ -340,16 +359,97 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
     const refaccion = resumed.quote.lines.find((l) => l.serviceType === 'REFACCION');
     expect(refaccion?.quoteLineId).toBe(refaccionLineId);
     expect(refaccion?.damageItemId).toBe(DMG_CALAVERA);
+    expect(refaccion?.pricingStatus).toBe('AWAITING_VEHICLE_DATA');
+    expect(refaccion?.billable).toBe(false);
+    expect(resumed.quote.isPartial).toBe(true);
+    expect(resumed.requirements.some((r) => r.status === 'OPEN')).toBe(true);
+    expect(
+      resumed.requirements.find((r) => r.status === 'OPEN')?.confirmationFields,
+    ).toEqual(['make', 'model']);
+  });
+
+  it('4b. make/model ya confirmados + año → resume: IDs iguales, solo market, cobrable', async () => {
+    const { peritaje: raw, inventory } = mazdaCase();
+    const peritaje = withConfirmedFields(raw, ['make', 'model']);
+    const awaiting = await enrichInventoryWithMarketRefacciones(
+      {
+        pieza: 'Calavera_Izquierda',
+        severidad: 'DMFuerte',
+        descripcionTecnica: '',
+        justificacion: '',
+        partesAfectadas: ['Calavera_Izquierda'],
+        severidadDelDano: 'DMFuerte',
+        vehiculoDetectado: 'Mazda 2',
+        inventory,
+      },
+      { estimate: async () => {
+        throw new Error('no market sin año');
+      } } as never,
+      () => undefined,
+      { vehicles: peritaje.vehicles },
+    );
+    const initial = buildCanonicalQuoteV1({
+      peritaje,
+      pricedInventory: awaiting.inventory ?? [],
+      snap: paintSnap,
+      quoteId: 'quo_mazda_year_only',
+    });
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const stamped = stampPendingRequirementsAfterQuote({
+      draft: emptyDraft(),
+      peritaje,
+      quote: initial.quote,
+      conversationId: 'conv_mazda',
+    });
+    expect(stamped.created[0]?.missingFields).toEqual(['year']);
+    expect(stamped.created[0]?.confirmationFields).toEqual([]);
+    const parsed = parseConfirmVehicleIdentityArgs({ year: 2020 });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const confirmed = applyConfirmVehicleIdentity({
+      peritaje,
+      inventory: awaiting.inventory ?? [],
+      requirements: stamped.requirements,
+      args: parsed.args,
+    });
+    expect(confirmed.ok).toBe(true);
+    if (!confirmed.ok) return;
+    expect(confirmed.result.vehicle.vehicleId).toBe(VEH);
+    expect(confirmed.result.vehicle.confirmedByUser).toBe(true);
+    expect(confirmed.result.resolved).toHaveLength(1);
+    const refaccionLineId = createQuoteLineId({
+      damageItemId: DMG_CALAVERA,
+      serviceType: 'REFACCION',
+    });
+    const resumed = await resumePendingQuotePricing({
+      conversationId: 'conv_mazda',
+      peritaje: confirmed.result.peritaje,
+      inventory: confirmed.result.inventory,
+      existingQuote: initial.quote,
+      draft: stamped.draft,
+      requirements: confirmed.result.requirements,
+      vehicle: confirmed.result.vehicle,
+      marketService: {
+        estimate: async (identity: VehiclePartIdentity) =>
+          readyEstimate(identity, 4000),
+      } as never,
+      snap: paintSnap,
+    });
+    expect(resumed.visionCalled).toBe(false);
+    expect(resumed.marketSearches).toBe(1);
+    expect(resumed.peritaje.vehicles[0]?.vehicleId).toBe(VEH);
+    const refaccion = resumed.quote.lines.find((l) => l.serviceType === 'REFACCION');
+    expect(refaccion?.quoteLineId).toBe(refaccionLineId);
+    expect(refaccion?.damageItemId).toBe(DMG_CALAVERA);
     expect(refaccion?.billable).toBe(true);
     expect(refaccion?.pricingStatus).toBe('OK');
-    expect(refaccion?.amount).toBeGreaterThan(0);
-    expect(resumed.quote.total).toBe(refaccion?.amount);
     expect(resumed.quote.isPartial).toBe(false);
-    expect(resumed.requirements.every((r) => r.status === 'RESOLVED')).toBe(true);
   });
 
   it('11-12. Identidad completa + sample insuficiente → INSUFFICIENT, no pide año', async () => {
-    const { peritaje, inventory } = mazdaCase({ year: '2020', vehicleLabel: 'Mazda 2 2020 HB' });
+    const { peritaje: raw, inventory } = mazdaCase({ year: '2020', vehicleLabel: 'Mazda 2 2020 HB' });
+    const peritaje = withConfirmedFields(raw);
     const enriched = await enrichInventoryWithMarketRefacciones(
       {
         pieza: 'Calavera_Izquierda',
@@ -429,7 +529,7 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
         quote: initial.quote,
         conversationId: 'conv_mazda',
       }).requirements,
-      args: { year: '2020', variant: 'HB' },
+      args: { make: 'Mazda', model: '2', year: '2020', variant: 'HB' },
     });
     expect(confirmed.ok).toBe(true);
     if (!confirmed.ok) return;
@@ -496,7 +596,7 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
         quote: initial.quote,
         conversationId: 'conv_mazda',
       }).requirements,
-      args: { year: '2020' },
+      args: { make: 'Mazda', model: '2', year: '2020' },
     });
     expect(firstConfirm.ok).toBe(true);
     if (!firstConfirm.ok) return;
@@ -543,10 +643,11 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
   });
 
   it('17. Corrección de vehículo invalida market previo y re-busca', async () => {
-    const { peritaje, inventory } = mazdaCase({
+    const { peritaje: raw, inventory } = mazdaCase({
       year: '2020',
       vehicleLabel: 'Mazda 2 2020',
     });
+    const peritaje = withConfirmedFields(raw);
     const priced = await enrichInventoryWithMarketRefacciones(
       {
         pieza: 'Calavera_Izquierda',
@@ -708,5 +809,106 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
     expect(refaccion?.quoteLineId).toBe(
       initial.quote.lines.find((l) => l.serviceType === 'REFACCION')?.quoteLineId,
     );
+  });
+
+  it('20. Nissan Vision Versa: “Es Nissan Altima 2014” conserva vehicleId y no busca Versa', async () => {
+    const inventory: DetectedDamageItem[] = [
+      item({
+        pieza: 'Calavera_Derecha',
+        vehiculoDetectado: 'Nissan Versa',
+      }),
+    ];
+    const raw = peritajeFromLegacyAnalysis({
+      conversationId: 'conv_nissan',
+      tallerId: 't1',
+      peritajeId: 'per_nissan',
+      now: '2026-09-13T00:00:00.000Z',
+      canonicalizePanel: canonicalPhysicalPanelKey,
+      analysis: { vehiculoDetectado: 'Nissan Versa', inventory },
+    });
+    const stampedIds = stampInventoryFromCanonicalPeritaje(inventory, raw);
+    const vehicleId = raw.vehicles[0]!.vehicleId;
+    const damageItemId = raw.damages[0]!.damageItemId;
+    const awaiting = await enrichInventoryWithMarketRefacciones(
+      {
+        pieza: 'Calavera_Derecha',
+        severidad: 'DMFuerte',
+        descripcionTecnica: '',
+        justificacion: '',
+        partesAfectadas: ['Calavera_Derecha'],
+        severidadDelDano: 'DMFuerte',
+        vehiculoDetectado: 'Nissan Versa',
+        inventory: stampedIds,
+      },
+      { estimate: async () => {
+        throw new Error('no market sobre Versa no confirmado');
+      } } as never,
+      () => undefined,
+      { vehicles: raw.vehicles },
+    );
+    expect(awaiting.inventory?.[0]?.pricingStatus).toBe('AWAITING_VEHICLE_DATA');
+    const initial = buildCanonicalQuoteV1({
+      peritaje: raw,
+      pricedInventory: awaiting.inventory ?? [],
+      snap: paintSnap,
+      quoteId: 'quo_nissan',
+    });
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    const parsed = parseConfirmVehicleIdentityArgs({
+      make: 'Nissan',
+      model: 'Altima',
+      year: 2014,
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const confirmed = applyConfirmVehicleIdentity({
+      peritaje: raw,
+      inventory: awaiting.inventory ?? [],
+      requirements: stampPendingRequirementsAfterQuote({
+        draft: emptyDraft(),
+        peritaje: raw,
+        quote: initial.quote,
+        conversationId: 'conv_nissan',
+      }).requirements,
+      args: parsed.args,
+    });
+    expect(confirmed.ok).toBe(true);
+    if (!confirmed.ok) return;
+    expect(confirmed.result.vehicle.vehicleId).toBe(vehicleId);
+    expect(confirmed.result.vehicle.model).toBe('Altima');
+    expect(confirmed.result.vehicle.year).toBe('2014');
+    expect(confirmed.result.vehicle.confirmedByUser).toBe(true);
+    expect(confirmed.result.identityAttrsChanged).toBe(true);
+    expect(confirmed.result.peritaje.damages.every((d) => d.vehicleId === vehicleId)).toBe(
+      true,
+    );
+    expect(confirmed.result.inventory[0]?.damageItemId).toBe(damageItemId);
+    const queries: string[] = [];
+    const resumed = await resumePendingQuotePricing({
+      conversationId: 'conv_nissan',
+      peritaje: confirmed.result.peritaje,
+      inventory: confirmed.result.inventory,
+      existingQuote: initial.quote,
+      draft: emptyDraft(),
+      requirements: confirmed.result.requirements,
+      vehicle: confirmed.result.vehicle,
+      marketService: {
+        estimate: async (identity: VehiclePartIdentity) => {
+          queries.push(`${identity.marca} ${identity.modelo} ${identity.anio}`);
+          return readyEstimate(identity, 4800);
+        },
+      } as never,
+      snap: paintSnap,
+    });
+    expect(resumed.visionCalled).toBe(false);
+    expect(queries[0]).toMatch(/nissan\s+altima\s+2014/i);
+    expect(queries[0]).not.toMatch(/versa/i);
+    const refaccion = resumed.quote.lines.find((l) => l.serviceType === 'REFACCION');
+    expect(refaccion?.damageItemId).toBe(damageItemId);
+    expect(refaccion?.quoteLineId).toBe(
+      createQuoteLineId({ damageItemId, serviceType: 'REFACCION' }),
+    );
+    expect(refaccion?.pricingStatus).toBe('OK');
   });
 });

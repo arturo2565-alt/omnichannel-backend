@@ -175,7 +175,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
     type: 'function',
     name: 'confirmVehicleIdentity',
     description:
-      'Confirma o enriquece la identidad del vehículo (marca, modelo, año, versión/variante) cuando el cliente la proporciona. Úsala INMEDIATAMENTE si hay un PENDING_CANONICAL_REQUIREMENT y el cliente da el dato que faltaba. No inventes campos que el cliente no dijo. El backend reanuda sola la cotización pendiente: NO llames estimarRefaccionMercado después. No agradezcas el dato sin ejecutar esta tool.',
+      'Confirma o enriquece la identidad del vehículo (marca, modelo, año, versión/variante) cuando el cliente la proporciona. Make/model de Vision NO están confirmados: si confirmationFields incluye model, pide confirmación aunque Vision haya sugerido un modelo. Úsala INMEDIATAMENTE si hay un PENDING_CANONICAL_REQUIREMENT y el cliente da el dato. No inventes campos que el cliente no dijo. El backend reanuda sola la cotización pendiente: NO llames estimarRefaccionMercado después. No agradezcas el dato sin ejecutar esta tool.',
     parameters: {
       type: 'object',
       properties: {

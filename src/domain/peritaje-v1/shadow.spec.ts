@@ -432,4 +432,87 @@ describe('Fase 2 — dual-write shadow CanonicalPeritajeV1', () => {
       expect.arrayContaining(['TREATMENT_DIFFERENCE', 'VEHICLE_MISSING']),
     );
   });
+
+  it('5 fotos, batches 4+1, mismo auto → un vehicleId (Tapa Cajuela no inventa otro)', () => {
+    const batch1: LegacyDetectedDamageShape[] = [
+      { pieza: 'Calavera_Derecha', severidad: 'DMFuerte', descripcionTecnica: 'quebrada', urls_origen: ['https://cdn.example/1.jpg'], vehiculoDetectado: 'Nissan Versa', tratamiento: 'SUSTITUIR' },
+      { pieza: 'FT', severidad: 'DL', descripcionTecnica: 'roce', urls_origen: ['https://cdn.example/2.jpg'], vehiculoDetectado: 'Nissan Versa', tratamiento: 'REPARAR' },
+      { pieza: 'STD', severidad: 'DL', descripcionTecnica: 'roce', urls_origen: ['https://cdn.example/3.jpg'], vehiculoDetectado: 'Nissan Versa', tratamiento: 'REPARAR' },
+      { pieza: 'Cofre', severidad: 'DL', descripcionTecnica: 'roce', urls_origen: ['https://cdn.example/4.jpg'], vehiculoDetectado: 'Nissan Versa', tratamiento: 'REPARAR' },
+    ];
+    const first = buildVisionCanonicalShadow({
+      conversationId: 'c_nissan5',
+      incomingInventory: batch1,
+      visionVehicleLabel: 'Nissan Versa',
+      now: NOW,
+    });
+    expect(new Set(first.damages.map((d) => d.vehicleId)).size).toBe(1);
+    const second = buildVisionCanonicalShadow({
+      conversationId: 'c_nissan5',
+      incomingInventory: [
+        {
+          pieza: 'Tapa Cajuela',
+          severidad: 'DM',
+          descripcionTecnica: 'golpe',
+          urls_origen: ['https://cdn.example/5.jpg'],
+          vehiculoDetectado: 'Nissan',
+          tratamiento: 'REPARAR',
+        },
+      ],
+      priorCanonical: first,
+      visionVehicleLabel: 'Nissan',
+      now: '2026-09-13T01:00:00.000Z',
+    });
+    const ids = [...new Set(second.damages.map((d) => d.vehicleId))];
+    expect(ids).toHaveLength(1);
+    expect(ids[0]).toBe(first.vehicles[0]!.vehicleId);
+    expect(second.damages).toHaveLength(5);
+    expect(
+      second.damages.find((d) => /tapa|cajuela/i.test(d.pieceCode) || /tapa|cajuela/i.test(d.physicalPanelKey))
+        ?.vehicleId,
+    ).toBe(first.vehicles[0]!.vehicleId);
+  });
+
+  it('8 fotos, batches múltiples, mismo auto con drift Versa/Altima → un vehicleId', () => {
+    const mk = (
+      pieza: string,
+      url: string,
+      label: string,
+    ): LegacyDetectedDamageShape => ({
+      pieza,
+      severidad: 'DL',
+      descripcionTecnica: 'dano',
+      urls_origen: [url],
+      vehiculoDetectado: label,
+      tratamiento: 'REPARAR',
+    });
+    const batch1 = [
+      mk('Calavera_Derecha', 'https://cdn.example/a1.jpg', 'Nissan Versa'),
+      mk('FT', 'https://cdn.example/a2.jpg', 'Nissan Versa'),
+      mk('STD', 'https://cdn.example/a3.jpg', 'Nissan'),
+      mk('Cofre', 'https://cdn.example/a4.jpg', 'Nissan Versa'),
+    ];
+    const batch2 = [
+      mk('Tapa Cajuela', 'https://cdn.example/a5.jpg', 'Nissan Altima'),
+      mk('SI', 'https://cdn.example/a6.jpg', 'Nissan'),
+      mk('SD', 'https://cdn.example/a7.jpg', 'Nissan Altima'),
+      mk('FD', 'https://cdn.example/a8.jpg', 'Nissan Versa'),
+    ];
+    const first = buildVisionCanonicalShadow({
+      conversationId: 'c_nissan8',
+      incomingInventory: batch1,
+      visionVehicleLabel: 'Nissan Versa',
+      now: NOW,
+    });
+    const second = buildVisionCanonicalShadow({
+      conversationId: 'c_nissan8',
+      incomingInventory: batch2,
+      priorCanonical: first,
+      visionVehicleLabel: 'Nissan Altima',
+      now: '2026-09-13T01:00:00.000Z',
+    });
+    expect(second.damages).toHaveLength(8);
+    expect(new Set(second.damages.map((d) => d.vehicleId)).size).toBe(1);
+    expect(second.vehicles).toHaveLength(1);
+  });
 });

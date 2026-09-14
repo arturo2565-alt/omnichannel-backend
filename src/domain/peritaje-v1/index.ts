@@ -84,6 +84,7 @@ export {
   REFACCION_REQUIRED_VEHICLE_FIELDS,
   isValidVehicleYear,
   missingRefaccionVehicleFields,
+  refaccionIdentityGaps,
   vehicleHasRefaccionIdentity,
   createPendingRequirementId,
   upsertOpenVehicleDataRequirement,
@@ -99,7 +100,22 @@ export type {
   PendingQuoteRequirementReason,
   PendingQuoteRequirementStatus,
   RefaccionRequiredVehicleField,
+  RefaccionIdentityGaps,
 } from './pending-quote-requirement';
+
+export {
+  extractKnownMake,
+  collectVisionBurstLabels,
+  resolveVisionBurstVehiclePolicy,
+  remapDamageToVehicle,
+  stampDamagesOntoVehicle,
+  collectSingleVehicleIdentityMismatches,
+} from './case-vehicle-identity';
+
+export type {
+  VisionBurstVehicleMode,
+  VisionBurstVehiclePolicy,
+} from './case-vehicle-identity';
 
 export {
   validateVehicleYear,

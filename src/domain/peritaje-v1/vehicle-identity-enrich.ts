@@ -10,6 +10,7 @@ export type VehicleIdentityPatch = {
   displayLabel?: string;
   source?: IdentitySource;
   confirmedByUser?: boolean;
+  confirmedFields?: string[];
 };
 
 export type EnrichVehicleIdentityResult = {
@@ -112,7 +113,28 @@ export function enrichVehicleIdentity(
   next.displayLabel =
     cleanOptional(patch.displayLabel) || buildVehicleDisplayLabel(next);
   if (patch.source) next.source = patch.source;
-  if (patch.confirmedByUser === true) next.confirmedByUser = true;
+  const confirmed = new Set([
+    ...(existing.confirmedFields ?? []),
+    ...(patch.confirmedFields ?? []),
+  ]);
+  if (confirmed.size) next.confirmedFields = [...confirmed];
+  const hasMake = Boolean(next.make);
+  const hasModel = Boolean(next.model);
+  const hasYear = isValidVehicleYear(next.year);
+  const fieldsReady =
+    hasMake &&
+    hasModel &&
+    hasYear &&
+    confirmed.has('make') &&
+    confirmed.has('model') &&
+    confirmed.has('year');
+  if (patch.confirmedByUser === true && fieldsReady) {
+    next.confirmedByUser = true;
+  } else if (fieldsReady) {
+    next.confirmedByUser = true;
+  } else {
+    next.confirmedByUser = false;
+  }
   next.vehicleId = existing.vehicleId;
   const identityAttrsChanged = attrKey(existing) !== attrKey(next);
   const changed =
@@ -133,21 +155,40 @@ export function reusePriorVehicleIdentity(
   prior: VehicleIdentity,
   incoming: VehicleIdentity,
 ): VehicleIdentity {
+  const confirmed = new Set(
+    (prior.confirmedFields ?? []).map((f) => String(f).toLowerCase()),
+  );
+  const locked = prior.confirmedByUser === true;
+  const patch: VehicleIdentityPatch = {};
+  if (!locked && !confirmed.has('make') && incoming.make) {
+    patch.make = incoming.make;
+  }
+  if (!locked && !confirmed.has('model') && incoming.model) {
+    patch.model = incoming.model;
+  }
+  if (!locked && !confirmed.has('year') && incoming.year) {
+    patch.year = incoming.year;
+  }
+  if (!prior.version && incoming.version) patch.version = incoming.version;
+  if (!prior.variant && incoming.variant) patch.variant = incoming.variant;
+  const incomingLabel = String(incoming.displayLabel ?? '').trim();
+  const priorLabel = String(prior.displayLabel ?? '').trim();
+  if (!locked && incomingLabel && incomingLabel.length >= priorLabel.length) {
+    patch.displayLabel = incomingLabel;
+  }
+  if (!locked && incoming.source) patch.source = incoming.source;
   const enriched = enrichVehicleIdentity(prior, {
-    make: incoming.make,
-    model: incoming.model,
-    year: incoming.year,
-    version: incoming.version,
-    variant: incoming.variant,
-    displayLabel: incoming.displayLabel,
-    source: incoming.source,
-    confirmedByUser: incoming.confirmedByUser,
+    ...patch,
+    confirmedFields: prior.confirmedFields,
+    confirmedByUser: prior.confirmedByUser,
   });
   return {
     ...enriched.vehicle,
     vehicleId: prior.vehicleId,
-    confirmedByUser: prior.confirmedByUser || incoming.confirmedByUser,
+    confirmedByUser: prior.confirmedByUser,
+    confirmedFields: prior.confirmedFields ?? enriched.vehicle.confirmedFields,
     confidence: incoming.confidence || prior.confidence,
+    source: locked ? prior.source : incoming.source || prior.source,
   };
 }
 

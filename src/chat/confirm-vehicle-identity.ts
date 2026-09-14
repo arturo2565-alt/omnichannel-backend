@@ -10,6 +10,7 @@ import {
   type VehicleIdentityPatch,
 } from '../domain/peritaje-v1/vehicle-identity-enrich';
 import { resolvePendingRequirementsForVehicle } from '../domain/peritaje-v1/pending-quote-requirement';
+import { stampDamagesOntoVehicle } from '../domain/peritaje-v1/case-vehicle-identity';
 import { invalidateMarketPricingOnItem } from './refaccion-market/apply-awaiting-vehicle-data';
 
 export type ConfirmVehicleIdentityArgs = {
@@ -112,6 +113,13 @@ export function applyConfirmVehicleIdentity(
       error: 'No se encontró el vehículo a confirmar.',
     };
   }
+  const confirmedFields = [
+    ...new Set([
+      ...(input.args.make ? (['make'] as const) : []),
+      ...(input.args.model ? (['model', 'make'] as const) : []),
+      ...(input.args.year ? (['year'] as const) : []),
+    ]),
+  ];
   const patch: VehicleIdentityPatch = {
     ...(input.args.make ? { make: input.args.make } : {}),
     ...(input.args.model ? { model: input.args.model } : {}),
@@ -119,15 +127,24 @@ export function applyConfirmVehicleIdentity(
     ...(input.args.version ? { version: input.args.version } : {}),
     ...(input.args.variant ? { variant: input.args.variant } : {}),
     source: 'user',
-    confirmedByUser: true,
+    confirmedFields,
   };
   const enriched = enrichVehicleIdentity(vehicle, patch);
   const now = input.now ?? new Date().toISOString();
+  const knownVehicles = input.peritaje.vehicles.filter(
+    (v) => v.vehicleId && v.vehicleId !== 'veh_unknown',
+  );
+  const unifySingle = knownVehicles.length <= 1;
+  let damages = input.peritaje.damages;
+  if (unifySingle) {
+    damages = stampDamagesOntoVehicle(damages, vehicle.vehicleId);
+  }
   const peritaje: CanonicalPeritajeV1 = {
     ...input.peritaje,
     vehicles: input.peritaje.vehicles.map((v) =>
       v.vehicleId === vehicle.vehicleId ? enriched.vehicle : v,
     ),
+    damages,
     updatedAt: now,
   };
   const resolvedReqs = resolvePendingRequirementsForVehicle(
@@ -136,11 +153,13 @@ export function applyConfirmVehicleIdentity(
     now,
   );
   let inventory = input.inventory.map((it) => {
-    if (it.vehicleId && it.vehicleId !== vehicle.vehicleId) return it;
+    if (!unifySingle && it.vehicleId && it.vehicleId !== vehicle.vehicleId) {
+      return it;
+    }
     return {
       ...it,
       vehiculoDetectado: enriched.vehicle.displayLabel,
-      vehicleId: it.vehicleId || vehicle.vehicleId,
+      vehicleId: vehicle.vehicleId,
     };
   });
   if (enriched.identityAttrsChanged) {

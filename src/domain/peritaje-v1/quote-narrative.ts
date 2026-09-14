@@ -8,7 +8,7 @@ import {
   isMolduraPieza,
 } from '../../catalog/panel-pieza-catalog';
 import { isChargeableQuoteLine } from './quote-engine';
-import { missingRefaccionVehicleFields } from './pending-quote-requirement';
+import { refaccionIdentityGaps } from './pending-quote-requirement';
 import { QUOTE_SCHEMA_VERSION } from './types';
 import type {
   CanonicalPeritajeV1,
@@ -173,15 +173,23 @@ export function derivePartialQuoteReasons(
         const vehicle = peritaje?.vehicles?.find(
           (v) => v.vehicleId === line.vehicleId,
         );
-        const missing = missingRefaccionVehicleFields({
-          make: vehicle?.make,
-          model: vehicle?.model,
-          year: vehicle?.year,
-        });
+        const gaps = refaccionIdentityGaps(vehicle);
+        const needsModel =
+          gaps.confirmationFields.includes('model') ||
+          gaps.missingFields.includes('model');
+        const needsYear =
+          gaps.missingFields.includes('year') ||
+          gaps.confirmationFields.includes('year');
         const text =
-          missing.length === 1 && missing[0] === 'year'
-            ? 'Para cotizar la refacción falta el año del vehículo.'
-            : 'Para cotizar la refacción falta información del vehículo (marca, modelo o año).';
+          needsModel && needsYear
+            ? 'Para cotizar la refacción hay que confirmar modelo y año del vehículo.'
+            : needsModel
+              ? 'Para cotizar la refacción hay que confirmar el modelo del vehículo.'
+              : needsYear &&
+                  !gaps.confirmationFields.includes('make') &&
+                  !gaps.confirmationFields.includes('model')
+                ? 'Para cotizar la refacción falta el año del vehículo.'
+                : 'Para cotizar la refacción hay que confirmar la identidad del vehículo.';
         push(PARTIAL_QUOTE_REASON.AWAITING_VEHICLE_DATA, text);
         continue;
       }
