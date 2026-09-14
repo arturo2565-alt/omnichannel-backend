@@ -11,6 +11,8 @@ import {
   extractMonetaryAmounts,
   formatQuoteMoney,
   formatQuoteMoneyRange,
+  formatPendingConceptsCopy,
+  formatPartialQuoteFooter,
   isCanonicalNarrativeEligible,
   llmNarrativeContainsForbiddenMoney,
   renderCanonicalQuoteFinancialBlock,
@@ -578,5 +580,117 @@ describe('Fase 6 — renderer y conciliación financiera', () => {
     expect(block.totalText).toMatch(/Cotización parcial/);
     expect(block.text).toMatch(/pendiente de revisi[oó]n/);
     expect(block.totalText).not.toMatch(/refacci[oó]n/i);
+  });
+
+  it('partial copy singular', () => {
+    expect(formatPendingConceptsCopy(['el montaje'])).toBe(
+      'Cotización parcial: el montaje continúa pendiente.',
+    );
+    const q = quote({
+      lines: [
+        line({
+          quoteLineId: 'ql_m',
+          serviceType: 'MONTAJE',
+          amount: 0,
+          billable: false,
+          pricingStatus: 'UNCONFIGURED',
+          description: 'Calavera_Derecha',
+        }),
+      ],
+      isPartial: true,
+      total: 0,
+      subtotal: 0,
+    });
+    expect(formatPartialQuoteFooter(q)).toBe(
+      '_Cotización parcial: el montaje continúa pendiente._',
+    );
+  });
+
+  it('partial copy plural + human labels', () => {
+    expect(
+      formatPendingConceptsCopy([
+        'el montaje',
+        'la refacción de la calavera derecha',
+      ]),
+    ).toBe(
+      'Cotización parcial: el montaje y la refacción de la calavera derecha continúan pendientes.',
+    );
+    const q = quote({
+      lines: [
+        line({
+          quoteLineId: 'ql_ref',
+          damageItemId: 'dmg_cala',
+          serviceType: 'REFACCION',
+          amount: 0,
+          billable: false,
+          pricingStatus: 'INSUFFICIENT_MARKET_SAMPLE',
+          description: 'Calavera_Derecha',
+        }),
+        line({
+          quoteLineId: 'ql_m',
+          damageItemId: 'dmg_cala',
+          serviceType: 'MONTAJE',
+          amount: 0,
+          billable: false,
+          pricingStatus: 'UNCONFIGURED',
+          description: 'Calavera_Derecha',
+        }),
+      ],
+      isPartial: true,
+      total: 0,
+      subtotal: 0,
+    });
+    const footer = formatPartialQuoteFooter(q);
+    expect(footer).toMatch(/el montaje y la refacción de la calavera derecha continúan pendientes/);
+    expect(footer).not.toContain('Calavera_Derecha');
+    expect(footer).not.toMatch(/el montaje continúan pendientes/);
+  });
+
+  it('range visible vs amount canónico mantiene integridad', () => {
+    const basePaint = line({
+      quoteLineId: 'ql_paint',
+      serviceType: 'REPARACION_PINTURA',
+      amount: 6700,
+      description: 'fascia trasera',
+    });
+    const refaccion = line({
+      quoteLineId: 'ql_ref',
+      serviceType: 'REFACCION',
+      amount: 3350,
+      description: 'calavera derecha',
+      pricingSource: 'WEB_MARKET_ESTIMATE',
+      pricingStatus: 'OK',
+      priceRange: { min: 3000, max: 3650, central: 3350 },
+    });
+    const q = quote({
+      lines: [basePaint, refaccion],
+      total: 10050,
+      subtotal: 10050,
+    });
+    expect(q.total).toBe(10050);
+    expect(refaccion.amount).toBe(3350);
+    expect(refaccion.priceRange).toEqual({ min: 3000, max: 3650, central: 3350 });
+    const billableSum = q.lines
+      .filter((l) => l.billable)
+      .reduce((s, l) => s + l.amount, 0);
+    expect(billableSum).toBe(10050);
+    const block = renderCanonicalQuoteFinancialBlock(q);
+    expect(block.text).toContain(formatQuoteMoneyRange(3000, 3650));
+    expect(block.totalText).toContain(formatQuoteMoney(10050));
+    const message = assembleClientQuoteMessage({
+      intro: 'Hola',
+      technicalExplanation: '',
+      financialBlock: block.text,
+      warningsBlock: '',
+      cta: '¿Agendamos?',
+    });
+    const v = validateFinalClientQuoteMessage({
+      canonicalQuote: q,
+      renderedFinancialBlock: block.text,
+      finalMessage: message,
+    });
+    expect(v.ok).toBe(true);
+    const remainder = message.replace(block.text, '');
+    expect(extractMonetaryAmounts(remainder)).toEqual([]);
   });
 });

@@ -28,18 +28,22 @@ function render(level: PegLogLevel, event: string, data: PegazuzLogData): string
   return renderPrettyLog(record);
 }
 
-function write(level: PegLogLevel, event: string, data: PegazuzLogData): void {
-  if (!shouldLog(level)) return;
-  const line = render(level, event, data);
+function writeStd(level: PegLogLevel, text: string): void {
+  const payload = String(text ?? '');
   if (level === 'error') {
-    console.error(line);
+    console.error(payload);
     return;
   }
   if (level === 'warn') {
-    console.warn(line);
+    console.warn(payload);
     return;
   }
-  console.log(line);
+  console.log(payload);
+}
+
+function write(level: PegLogLevel, event: string, data: PegazuzLogData): void {
+  if (!shouldLog(level)) return;
+  writeStd(level, render(level, event, data));
 }
 
 function errorFields(

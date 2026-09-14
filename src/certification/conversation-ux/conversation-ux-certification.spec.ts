@@ -11,6 +11,17 @@ import {
 } from './report';
 import { hasMaterialTechnicalChange } from '../../chat/client-message-ux';
 import { computeQuoteDelta } from '../../chat/client-message-ux';
+import { composeModernClientQuoteMessage } from '../../chat/canonical-quote-narrative';
+import {
+  QUOTE_SCHEMA_VERSION,
+  sumChargeableAmount,
+} from '../../domain/peritaje-v1';
+import {
+  extractMonetaryAmounts,
+  formatQuoteMoney,
+  formatQuoteMoneyRange,
+  validateFinalClientQuoteMessage,
+} from '../../domain/peritaje-v1/quote-narrative';
 import {
   altimaPeritaje,
   partialAltimaQuote,
@@ -62,6 +73,64 @@ describe('Conversation UX certification', () => {
     expect(report.technicalRepeatViolations).toBe(0);
     expect(report.internalLabelsExposed).toBe(0);
     expect(report.inventedAmounts).toBe(0);
+  });
+
+  it('range visible vs amount canónico mantiene integridad', async () => {
+    const quote = {
+      schemaVersion: QUOTE_SCHEMA_VERSION,
+      quoteId: 'q_range_amount',
+      peritajeId: 'per_range',
+      generatedAt: '2026-09-14T00:00:00.000Z',
+      warnings: [] as string[],
+      isPartial: false,
+      subtotal: 10050,
+      total: 10050,
+      lines: [
+        {
+          quoteLineId: 'ql_base',
+          damageItemId: 'dmg_ft',
+          vehicleId: 'veh_1',
+          serviceType: 'REPARACION_PINTURA' as const,
+          description: 'fascia trasera',
+          billable: true,
+          amount: 6700,
+          confidence: 'HIGH' as const,
+        },
+        {
+          quoteLineId: 'ql_ref',
+          damageItemId: 'dmg_cala',
+          vehicleId: 'veh_1',
+          serviceType: 'REFACCION' as const,
+          description: 'calavera derecha',
+          billable: true,
+          amount: 3350,
+          priceRange: { min: 3000, max: 3650, central: 3350 },
+          pricingSource: 'WEB_MARKET_ESTIMATE' as const,
+          pricingStatus: 'OK' as const,
+          confidence: 'HIGH' as const,
+        },
+      ],
+    };
+    expect(sumChargeableAmount(quote.lines)).toBe(10050);
+    expect(quote.total).toBe(10050);
+
+    const composed = await composeModernClientQuoteMessage({
+      canonicalQuote: quote,
+      contactName: 'Arturo',
+      hasActiveAppointment: false,
+      llmParts: { intro: 'Hola Arturo', technicalExplanation: '', cta: '' },
+    });
+    expect(composed.finalMessage).toContain(formatQuoteMoneyRange(3000, 3650));
+    expect(composed.finalMessage).toContain(formatQuoteMoney(10050));
+    expect(composed.finalMessage).not.toContain('Calavera_Derecha');
+    const remainder = composed.finalMessage.replace(composed.financialBlock, '');
+    expect(extractMonetaryAmounts(remainder)).toEqual([]);
+    const validation = validateFinalClientQuoteMessage({
+      canonicalQuote: quote,
+      renderedFinancialBlock: composed.financialBlock,
+      finalMessage: composed.finalMessage,
+    });
+    expect(validation.ok).toBe(true);
   });
 
   it('hasMaterialTechnicalChange ignora precio e identidad vehicular', () => {

@@ -28,12 +28,15 @@ function captureStd(): {
   logs: string[];
   warns: string[];
   errors: string[];
+  logCalls: unknown[][];
   restore: () => void;
 } {
   const logs: string[] = [];
   const warns: string[] = [];
   const errors: string[] = [];
+  const logCalls: unknown[][] = [];
   const logSpy = jest.spyOn(console, 'log').mockImplementation((...args) => {
+    logCalls.push(args);
     logs.push(args.map(String).join(' '));
   });
   const warnSpy = jest.spyOn(console, 'warn').mockImplementation((...args) => {
@@ -46,6 +49,7 @@ function captureStd(): {
     logs,
     warns,
     errors,
+    logCalls,
     restore: () => {
       logSpy.mockRestore();
       warnSpy.mockRestore();
@@ -482,5 +486,54 @@ describe('Production Logging v1.1 pretty', () => {
     expect(vision).not.toContain('[Vision] Intento OpenAI');
     expect(vision).not.toContain('this.logger.log');
     expect((llm.match(/pegLogger\.info\('LLM'/g) ?? []).length).toBe(1);
+  });
+
+  it('pretty block usa una única escritura por evento', () => {
+    process.env.LOG_LEVEL = 'info';
+    process.env.PEG_LOG_FORMAT = 'pretty';
+    const cap = captureStd();
+    pegCanonicalTrace(CANONICAL_TRACE_EVENTS.CANONICAL_PERITAJE, {
+      damages: [
+        { treatment: 'REPARAR' },
+        { treatment: 'SUSTITUIR' },
+        { treatment: 'INCIERTO' },
+        { treatment: 'PENDIENTE' },
+      ],
+    });
+    expect(cap.logCalls).toHaveLength(1);
+    expect(cap.logCalls[0]).toHaveLength(1);
+    const block = String(cap.logCalls[0]![0]);
+    expect(block).toContain('🔧 Tratamientos');
+    expect(block).toContain('Reparar: 1');
+    expect(block).toContain('Pendiente: 1');
+    expect(block.split('\n').length).toBeGreaterThan(1);
+    cap.restore();
+  });
+
+  it('líneas pretty no se intercalan en fixture concurrente', () => {
+    process.env.LOG_LEVEL = 'info';
+    process.env.PEG_LOG_FORMAT = 'pretty';
+    const cap = captureStd();
+    pegCanonicalTrace(CANONICAL_TRACE_EVENTS.CANONICAL_PERITAJE, {
+      damages: [{ treatment: 'REPARAR' }],
+    });
+    pegCanonicalTrace(CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY, {
+      displayLabel: 'Nissan Altima',
+      confirmedByUser: false,
+    });
+    expect(cap.logCalls).toHaveLength(2);
+    expect(cap.logCalls.every((call) => call.length === 1)).toBe(true);
+    const treatment = String(cap.logCalls[0]![0]);
+    const vehicle = String(cap.logCalls[1]![0]);
+    expect(treatment.split('\n')[0]).toContain('Tratamientos');
+    expect(treatment).toContain('Reparar: 1');
+    expect(treatment).not.toContain('Vehículo');
+    expect(treatment).not.toContain('pendiente de confirmar');
+    expect(vehicle.split('\n')[0]).toContain('Vehículo');
+    expect(vehicle).toContain('Nissan Altima');
+    expect(vehicle).toContain('pendiente de confirmar');
+    expect(vehicle).not.toContain('Tratamientos');
+    expect(vehicle).not.toContain('Reparar:');
+    cap.restore();
   });
 });

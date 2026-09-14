@@ -28,9 +28,15 @@ function shortId(id?: string, n = 8): string | undefined {
   return stripped.slice(0, n);
 }
 
+function joinPrettyBlock(lines: Array<string | undefined>): string {
+  return lines
+    .filter((row): row is string => Boolean(row && String(row).length))
+    .join('\n');
+}
+
 function indentLines(title: string, rows: Array<string | undefined>): string {
   const body = rows.filter((row): row is string => Boolean(row && row.trim()));
-  return [title, ...body.map((row) => `   ${row}`)].join('\n');
+  return joinPrettyBlock([title, ...body.map((row) => `   ${row}`)]);
 }
 
 function yesNo(value: unknown): string {
@@ -118,7 +124,7 @@ function renderInbound(record: PegazuzLogRecord): string {
   const turn = shortTurnId(record.correlation.turnId) ?? shortId(record.correlation.turnId);
   const conv = shortConvId(record.correlation.conversationId);
   const title = `${EMOJI.inbound} TURN START · ${turn ?? '—'}`;
-  return [
+  return joinPrettyBlock([
     SEPARATOR,
     indentLines(title, [
       conv ? `Conversación: ${conv}` : undefined,
@@ -127,7 +133,7 @@ function renderInbound(record: PegazuzLogRecord): string {
         : undefined,
       `Tipo: ${inboundType(record.data)}`,
     ]),
-  ].join('\n');
+  ]);
 }
 
 function renderVehicle(record: PegazuzLogRecord): string {
@@ -295,7 +301,7 @@ function renderTurnComplete(record: PegazuzLogRecord): string {
       : undefined,
     timingBits.length ? `⏱ ${timingBits.join(' · ')}` : undefined,
   ]);
-  return `${body}\n${SEPARATOR}`;
+  return joinPrettyBlock([body, SEPARATOR]);
 }
 
 function renderWebhook(record: PegazuzLogRecord): string {
@@ -379,7 +385,7 @@ export function renderPrettyLog(record: PegazuzLogRecord): string {
         .filter(([key]) => key !== 'phase')
         .map(([key, value]) => `${key}=${String(value)}`);
       const title = `${record.event}${record.data.phase ? ` ${record.data.phase}` : ''}`;
-      return [title, ...bits.map((b) => `   ${b}`)].join('\n');
+      return joinPrettyBlock([title, ...bits.map((b) => `   ${b}`)]);
     }
   }
 }

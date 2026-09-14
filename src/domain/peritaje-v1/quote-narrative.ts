@@ -305,14 +305,18 @@ function joinSpanishList(items: string[]): string {
   return `${items.slice(0, -1).join(', ')} y ${items[items.length - 1]}`;
 }
 
+const FEMININE_PIECE_RE =
+  /^(tapa|calavera|fascia|salpicadera|moldura|puerta|luneta|caja|parrilla)\b/i;
+const MASCULINE_PIECE_RE =
+  /^(montaje|cofre|faro|espejo|parachoques|paragolpes|refuerzo|costado)\b/i;
+
 function withArticle(label: string): string {
   const raw = String(label ?? '').trim();
   if (!raw) return raw;
   if (/^(el|la|los|las)\s/i.test(raw)) return raw;
-  if (/^tapa\b/i.test(raw)) {
-    return `la ${raw.charAt(0).toLowerCase()}${raw.slice(1)}`;
-  }
-  if (/^montaje\b/i.test(raw)) return 'el montaje';
+  const lower = raw.charAt(0).toLowerCase() + raw.slice(1);
+  if (FEMININE_PIECE_RE.test(raw)) return `la ${lower}`;
+  if (MASCULINE_PIECE_RE.test(raw)) return `el ${lower}`;
   return raw;
 }
 
@@ -323,6 +327,21 @@ export function isPendingReviewDamage(damage?: DamageItem | null): boolean {
     damage.damageEvidenceStatus === 'SUSPECTED_INVOLVEMENT' ||
     damage.damageEvidenceStatus === 'NOT_ASSESSABLE'
   );
+}
+
+function pendingConceptLabel(
+  line: QuoteLine,
+  peritaje?: CanonicalPeritajeV1 | null,
+): string {
+  if (line.serviceType === 'MONTAJE' || line.serviceType === 'MONTAJE_PINTURA') {
+    return 'el montaje';
+  }
+  const piece = resolveQuoteLinePieceLabel(line, peritaje);
+  const articulated = withArticle(piece);
+  if (line.serviceType === 'REFACCION') {
+    return `la refacción de ${articulated}`;
+  }
+  return articulated;
 }
 
 export function pendingConceptLabelsForFooter(
@@ -338,11 +357,11 @@ export function pendingConceptLabelsForFooter(
       montaje = true;
       continue;
     }
-    const piece = resolveQuoteLinePieceLabel(line, peritaje);
-    const key = piece.toLowerCase();
+    const label = pendingConceptLabel(line, peritaje);
+    const key = label.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    labels.push(withArticle(piece));
+    labels.push(label);
   }
   const out: string[] = [];
   if (montaje) out.push('el montaje');
@@ -350,16 +369,26 @@ export function pendingConceptLabelsForFooter(
   return out;
 }
 
+/** Copy determinista singular/plural. No concatena verbos a ciegas. */
+export function formatPendingConceptsCopy(labels: readonly string[]): string {
+  const unique = [
+    ...new Set(
+      labels.map((label) => String(label ?? '').trim()).filter(Boolean),
+    ),
+  ];
+  if (unique.length === 0) return PRESENTATION_PARTIAL_FOOTER_GENERIC;
+  if (unique.length === 1) {
+    return `Cotización parcial: ${unique[0]} continúa pendiente.`;
+  }
+  return `Cotización parcial: ${joinSpanishList(unique)} continúan pendientes.`;
+}
+
 export function formatPartialQuoteFooter(
   quote: CanonicalQuoteV1,
   peritaje?: CanonicalPeritajeV1 | null,
 ): string {
   if (!quote.isPartial) return '';
-  const labels = pendingConceptLabelsForFooter(quote, peritaje);
-  if (!labels.length || labels.length > 3) {
-    return `_${PRESENTATION_PARTIAL_FOOTER_GENERIC}_`;
-  }
-  return `_Cotización parcial: ${joinSpanishList(labels)} continúan pendientes._`;
+  return `_${formatPendingConceptsCopy(pendingConceptLabelsForFooter(quote, peritaje))}_`;
 }
 
 const SERVICE_LABEL: Record<QuoteServiceType, string> = {
