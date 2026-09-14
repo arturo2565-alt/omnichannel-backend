@@ -22,7 +22,7 @@ export function inferLampType(title: string, snippet?: string): LampType {
 export function variantKeyOf(
   sample: Pick<MarketSample, 'title' | 'partNumber' | 'lampType'> & {
     snippet?: string;
-    detectedSide?: MarketSide | null;
+    detectedSide?: MarketSide | 'UNKNOWN' | null;
   },
 ): string {
   const side = sample.detectedSide ?? parseMarketSide(sample.title) ?? 'UNKNOWN';

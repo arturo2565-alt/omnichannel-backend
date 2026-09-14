@@ -14,6 +14,7 @@ import { MercadoLibreProvider } from './mercado-libre.provider';
 import { INDEXED_ML_SITE } from './site-scoped-queries';
 import type {
   MarketProviderId,
+  MarketSample,
   RawProviderHit,
   RefaccionMarketPolicy,
   RefaccionPriceProvider,
@@ -56,7 +57,7 @@ function stageIdOf(provider: RefaccionPriceProvider): string {
 }
 
 function uniqueCount(hits: readonly RawProviderHit[], identity: VehiclePartIdentity): number {
-  const samples = [];
+  const samples: MarketSample[] = [];
   for (const hit of hits) {
     const classified = classifyRawHit(hit, identity);
     if (classified.ok) samples.push(classified.sample);
@@ -69,7 +70,7 @@ function enoughForPricing(
   identity: VehiclePartIdentity,
   policy: RefaccionMarketPolicy,
 ): boolean {
-  const samples = [];
+  const samples: MarketSample[] = [];
   for (const hit of hits) {
     const classified = classifyRawHit(hit, identity);
     if (classified.ok) samples.push(classified.sample);
