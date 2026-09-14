@@ -15,4 +15,5 @@ export type OutgoingMessageJobData = {
   conversationId: string;
   channel: OutgoingMessageChannel;
   metaPayload: Record<string, unknown>;
+  pegTurnId?: string;
 };

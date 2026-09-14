@@ -2,7 +2,6 @@
  * Trazas de diagnóstico canónico (smoke live).
  * Observabilidad únicamente: no cambia treatment, pricing ni persistencia.
  */
-import { AsyncLocalStorage } from 'async_hooks';
 import type {
   CanonicalPeritajeV1,
   CanonicalQuoteV1,
@@ -13,6 +12,26 @@ import type {
 import { getLlmAuditContext } from './llm-audit-context';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import type { QuoteFlowDecision } from '../domain/peritaje-v1/quote-flow-mode';
+import {
+  getPegazuzContext,
+  hasPegazuzContext,
+  mergePegazuzContext,
+  patchTurnSummary,
+  runWithPegazuzContext,
+  type PegazuzContext,
+} from '../observability/pegazuz-context';
+import {
+  isDebugDetailEnabled,
+  shouldEmitLegacyTraceJson,
+} from '../observability/pegazuz-log-level';
+import { pegLogger } from '../observability/pegazuz-logger';
+import { sanitizeTracePayload } from '../observability/sanitize-log';
+
+export {
+  redactEvidenceRefForTrace,
+  sanitizeTracePayload,
+} from '../observability/sanitize-log';
+
 type ClientMessageTraceInput = {
   flow: string;
   fallbackUsed: boolean;
@@ -98,21 +117,39 @@ export const CANONICAL_TRACE_EVENTS = {
 export type CanonicalTraceEvent =
   (typeof CANONICAL_TRACE_EVENTS)[keyof typeof CANONICAL_TRACE_EVENTS];
 
-export type CanonicalTraceContext = {
-  conversationId?: string;
-  draftQuoteId?: string;
-  peritajeId?: string;
-  visionRunId?: string;
-  caseId?: string;
-  vehicleId?: string;
-  quoteFlowModeLogged?: boolean;
-  visionInputLogged?: boolean;
-};
+export type CanonicalTraceContext = PegazuzContext;
 
-const als = new AsyncLocalStorage<CanonicalTraceContext>();
-
-const SENSITIVE_KEY =
-  /^(phone|telefono|tel|mobile|whatsapp|waid|waId|fullName|nombre|nombreCompleto|customerName|contactName|displayName|jwt|authorization|token|apiKey|apikey|api_key|cookie|password|secret|prompt|systemPrompt|conversationTurns|messages|history|rawHits|samples|pages)$/i;
+const MARKET_OWNED_EVENTS = new Set<string>([
+  CANONICAL_TRACE_EVENTS.REFACCION_MARKET,
+  CANONICAL_TRACE_EVENTS.REFACCION_MARKET_SEARCH_STARTED,
+  CANONICAL_TRACE_EVENTS.REFACCION_MARKET_ESTIMATE_READY,
+  CANONICAL_TRACE_EVENTS.REFACCION_MARKET_INSUFFICIENT,
+  CANONICAL_TRACE_EVENTS.REFACCION_MARKET_COMPATIBILITY_REJECTED,
+  CANONICAL_TRACE_EVENTS.REFACCION_MARKET_AUDIT,
+  CANONICAL_TRACE_EVENTS.MARKET_LOOKUP_EXECUTED,
+  CANONICAL_TRACE_EVENTS.MARKET_CACHE_REUSED,
+  CANONICAL_TRACE_EVENTS.REFACCION_SEARCH_STARTED,
+  CANONICAL_TRACE_EVENTS.REFACCION_QUERIES_GENERATED,
+  CANONICAL_TRACE_EVENTS.REFACCION_CACHE_DECISION,
+  CANONICAL_TRACE_EVENTS.REFACCION_PROVIDER_REQUEST,
+  CANONICAL_TRACE_EVENTS.REFACCION_PROVIDER_RESPONSE,
+  CANONICAL_TRACE_EVENTS.REFACCION_RAW_SAMPLE,
+  CANONICAL_TRACE_EVENTS.REFACCION_SAMPLE_EVALUATED,
+  CANONICAL_TRACE_EVENTS.REFACCION_SEARCH_FUNNEL,
+  CANONICAL_TRACE_EVENTS.REFACCION_PART_TYPE_SELECTION,
+  CANONICAL_TRACE_EVENTS.REFACCION_ACCEPTED_SAMPLE,
+  CANONICAL_TRACE_EVENTS.REFACCION_PRICING_DECISION,
+  CANONICAL_TRACE_EVENTS.REFACCION_SEARCH_FINISHED,
+  CANONICAL_TRACE_EVENTS.PART_DISCOVERY_STARTED,
+  CANONICAL_TRACE_EVENTS.PART_NUMBER_DISCOVERED,
+  CANONICAL_TRACE_EVENTS.SHOPPING_LOOKUP_STARTED,
+  CANONICAL_TRACE_EVENTS.SHOPPING_LOOKUP_RESULT,
+  CANONICAL_TRACE_EVENTS.PART_NUMBER_PIVOT_STARTED,
+  CANONICAL_TRACE_EVENTS.PART_NUMBER_PIVOT_RESULT,
+  CANONICAL_TRACE_EVENTS.VARIANT_CLUSTER_CREATED,
+  CANONICAL_TRACE_EVENTS.CROSS_QUERY_DEDUPE,
+  CANONICAL_TRACE_EVENTS.MARKET_SAMPLE_SELECTED,
+]);
 
 export function isPegCanonicalTraceEnabled(): boolean {
   const raw = String(process.env[PEG_CANONICAL_TRACE_ENV] ?? '')
@@ -121,152 +158,189 @@ export function isPegCanonicalTraceEnabled(): boolean {
   return raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes';
 }
 
+function withAuditIds(patch: CanonicalTraceContext): CanonicalTraceContext {
+  const audit = getLlmAuditContext();
+  return {
+    ...patch,
+    conversationId:
+      patch.conversationId ??
+      (audit?.conversationId ? String(audit.conversationId) : undefined),
+    caseId: patch.caseId ?? (audit?.caseId ? String(audit.caseId) : undefined),
+  };
+}
+
 export function getCanonicalTraceContext(): CanonicalTraceContext | undefined {
-  return als.getStore();
+  return getPegazuzContext();
 }
 
 export function hasCanonicalTraceContext(): boolean {
-  return als.getStore() != null;
+  return hasPegazuzContext();
 }
 
 export function runWithCanonicalTraceContext<T>(
   ctx: CanonicalTraceContext,
   fn: () => T,
 ): T {
-  const parent = als.getStore();
-  return als.run(mergeTraceContext(parent, ctx), fn);
+  return runWithPegazuzContext(withAuditIds(ctx), fn);
 }
 
 export function mergeCanonicalTraceContext(
   patch: CanonicalTraceContext,
 ): void {
-  const store = als.getStore();
-  if (!store) return;
-  Object.assign(store, mergeTraceContext(store, patch));
-}
-
-function mergeTraceContext(
-  parent: CanonicalTraceContext | undefined,
-  next: CanonicalTraceContext,
-): CanonicalTraceContext {
-  const audit = getLlmAuditContext();
-  return {
-    ...parent,
-    ...compactIds({
-      conversationId: next.conversationId ?? parent?.conversationId,
-      draftQuoteId: next.draftQuoteId ?? parent?.draftQuoteId,
-      peritajeId: next.peritajeId ?? parent?.peritajeId,
-      visionRunId: next.visionRunId ?? parent?.visionRunId,
-      caseId: next.caseId ?? parent?.caseId ?? audit?.caseId ?? undefined,
-      vehicleId: next.vehicleId ?? parent?.vehicleId,
-    }),
-    quoteFlowModeLogged:
-      next.quoteFlowModeLogged ?? parent?.quoteFlowModeLogged,
-    visionInputLogged: next.visionInputLogged ?? parent?.visionInputLogged,
-  };
-}
-
-function compactIds(
-  ids: CanonicalTraceContext,
-): CanonicalTraceContext {
-  const out: CanonicalTraceContext = {};
-  for (const key of [
-    'conversationId',
-    'draftQuoteId',
-    'peritajeId',
-    'visionRunId',
-    'caseId',
-    'vehicleId',
-  ] as const) {
-    const value = String(ids[key] ?? '').trim();
-    if (value) out[key] = value;
-  }
-  return out;
+  mergePegazuzContext(withAuditIds(patch));
 }
 
 function correlationFrom(
   extra?: CanonicalTraceContext,
 ): CanonicalTraceContext {
-  const store = als.getStore();
+  const store = getPegazuzContext();
   const audit = getLlmAuditContext();
-  return compactIds({
-    conversationId: extra?.conversationId ?? store?.conversationId,
+  return {
+    conversationId:
+      extra?.conversationId ??
+      store?.conversationId ??
+      (audit?.conversationId ? String(audit.conversationId) : undefined),
+    turnId: extra?.turnId ?? store?.turnId,
+    quoteId: extra?.quoteId ?? store?.quoteId ?? store?.draftQuoteId,
     draftQuoteId: extra?.draftQuoteId ?? store?.draftQuoteId,
     peritajeId: extra?.peritajeId ?? store?.peritajeId,
     visionRunId: extra?.visionRunId ?? store?.visionRunId,
-    caseId: extra?.caseId ?? store?.caseId ?? audit?.caseId ?? undefined,
+    searchRunId: extra?.searchRunId ?? store?.searchRunId,
+    caseId:
+      extra?.caseId ??
+      store?.caseId ??
+      (audit?.caseId ? String(audit.caseId) : undefined),
     vehicleId: extra?.vehicleId ?? store?.vehicleId,
-  });
+  };
 }
 
-/** Hostname + último segmento; nunca URL firmada completa. */
-export function redactEvidenceRefForTrace(url: string): string {
-  const s = String(url ?? '').trim();
-  if (!s) return '';
-  if (/^data:image\//i.test(s)) return '[data-url]';
-  try {
-    const u = new URL(s);
-    const last = u.pathname.split('/').filter(Boolean).pop() ?? '';
-    const tail = last.length > 16 ? `…${last.slice(-12)}` : last;
-    return tail ? `${u.hostname}/${tail}` : u.hostname;
-  } catch {
-    return '[redacted-url]';
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function vehicleLabelOf(payload: Record<string, unknown>): string | undefined {
+  const display = String(payload.displayLabel ?? '').trim();
+  if (display) return display;
+  const make = String(payload.make ?? '').trim();
+  const model = String(payload.model ?? '').trim();
+  const year = String(payload.year ?? '').trim();
+  const label = [make, model, year].filter(Boolean).join(' ');
+  return label || undefined;
+}
+
+function emitCanonicalCompact(
+  event: string,
+  payload: Record<string, unknown>,
+): void {
+  if (event === CANONICAL_TRACE_EVENTS.VISION_INPUT) {
+    pegLogger.info('VISION', {
+      phase: 'COMPLETE',
+      input: payload.inputImageCount,
+      items: payload.itemCount,
+    });
+    return;
   }
-}
-
-function looksLikeUrl(value: string): boolean {
-  return (
-    /^https?:\/\//i.test(value) ||
-    /^data:image\//i.test(value) ||
-    /X-Amz-|Signature=|X-Goog-Signature|token=/i.test(value)
-  );
-}
-
-function looksLikeJwt(value: string): boolean {
-  return /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(value);
-}
-
-function looksLikePhone(value: string): boolean {
-  const digits = value.replace(/\D/g, '');
-  return (
-    /^\+?\d[\d\s-]{9,}$/.test(value.trim()) &&
-    digits.length >= 10 &&
-    digits.length <= 15
-  );
-}
-
-export function sanitizeTracePayload(value: unknown, depth = 0): unknown {
-  if (depth > 6) return '[truncated]';
-  if (value == null) return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return value;
-  if (typeof value === 'string') {
-    if (looksLikeJwt(value) || looksLikePhone(value)) return '[redacted]';
-    if (looksLikeUrl(value)) return redactEvidenceRefForTrace(value);
-    if (value.length > 240) return `${value.slice(0, 120)}…`;
-    return value;
+  if (event === CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY) {
+    const vehicle = vehicleLabelOf(payload);
+    pegLogger.info('VEHICLE', { vehicle });
+    if (vehicle) patchTurnSummary({ vehicle });
+    return;
   }
-  if (Array.isArray(value)) {
-    return value.slice(0, 40).map((item) => sanitizeTracePayload(item, depth + 1));
+  if (event === CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY_CORRECTED) {
+    const before = asRecord(payload.before);
+    const after = asRecord(payload.after);
+    const yearBefore = String(before.year ?? '').trim();
+    const yearAfter = String(after.year ?? '').trim();
+    const vehicle =
+      vehicleLabelOf(after) || vehicleLabelOf(before) || undefined;
+    pegLogger.info('VEHICLE', {
+      vehicle,
+      year:
+        yearBefore && yearAfter && yearBefore !== yearAfter
+          ? `${yearBefore}→${yearAfter}`
+          : yearAfter || yearBefore || undefined,
+    });
+    if (vehicle) patchTurnSummary({ vehicle });
+    return;
   }
-  if (typeof value !== 'object') return String(value);
-  const out: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (SENSITIVE_KEY.test(key)) continue;
-    if (/url/i.test(key) && typeof child === 'string') {
-      out[key] = redactEvidenceRefForTrace(child);
-      continue;
+  if (event === CANONICAL_TRACE_EVENTS.CANONICAL_PERITAJE) {
+    const damages = Array.isArray(payload.damages) ? payload.damages : [];
+    const counts = { reparar: 0, sustituir: 0, pendiente: 0, incierto: 0 };
+    for (const row of damages) {
+      const treatment = String(
+        asRecord(row).treatment ?? '',
+      ).toUpperCase();
+      if (treatment.includes('REPAR')) counts.reparar += 1;
+      else if (treatment.includes('SUST')) counts.sustituir += 1;
+      else if (treatment.includes('PEND')) counts.pendiente += 1;
+      else counts.incierto += 1;
     }
-    out[key] = sanitizeTracePayload(child, depth + 1);
+    pegLogger.info('TREATMENT', counts);
+    return;
   }
-  return out;
+  if (event === CANONICAL_TRACE_EVENTS.CANONICAL_QUOTE) {
+    const lines = Array.isArray(payload.lines) ? payload.lines : [];
+    const billable = lines.filter((row) => asRecord(row).billable === true)
+      .length;
+    const pending = lines.length - billable;
+    pegLogger.info('QUOTE', {
+      q: payload.quoteId,
+      total: payload.total,
+      partial: payload.isPartial,
+      billable,
+      pending,
+    });
+    patchTurnSummary({
+      quoteTotal:
+        typeof payload.total === 'number' ? payload.total : undefined,
+      partial:
+        typeof payload.isPartial === 'boolean' ? payload.isPartial : undefined,
+    });
+    mergeCanonicalTraceContext({
+      quoteId:
+        typeof payload.quoteId === 'string' ? payload.quoteId : undefined,
+    });
+    return;
+  }
+  if (event === CANONICAL_TRACE_EVENTS.CLIENT_MESSAGE_RENDERED) {
+    pegLogger.info('UX', {
+      mode: payload.mode,
+      delta: payload.deltaCount ?? (payload.deltaRendered ? 1 : 0),
+      greet: payload.greetingRendered,
+      technical: payload.technicalExplanationRendered,
+      warnings: payload.warningsRenderedCount,
+      cta: payload.ctaType,
+    });
+    if (typeof payload.mode === 'string') {
+      patchTurnSummary({ mode: payload.mode });
+    }
+  }
 }
+
+const CANONICAL_INFO_EVENTS = new Set<string>([
+  CANONICAL_TRACE_EVENTS.VISION_INPUT,
+  CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY,
+  CANONICAL_TRACE_EVENTS.VEHICLE_IDENTITY_CORRECTED,
+  CANONICAL_TRACE_EVENTS.CANONICAL_PERITAJE,
+  CANONICAL_TRACE_EVENTS.CANONICAL_QUOTE,
+  CANONICAL_TRACE_EVENTS.CLIENT_MESSAGE_RENDERED,
+]);
 
 export function pegCanonicalTrace(
   event: string,
   payload: Record<string, unknown> = {},
   extraCtx?: CanonicalTraceContext,
 ): void {
-  if (!isPegCanonicalTraceEnabled()) return;
+  if (MARKET_OWNED_EVENTS.has(event)) return;
+  if (extraCtx) mergeCanonicalTraceContext(extraCtx);
+  if (CANONICAL_INFO_EVENTS.has(event)) {
+    emitCanonicalCompact(event, payload);
+  } else if (isDebugDetailEnabled()) {
+    pegLogger.debug('CANONICAL', { event, ...payload });
+  }
+  if (!shouldEmitLegacyTraceJson() || !isPegCanonicalTraceEnabled()) return;
   const pieceHint =
     event === CANONICAL_TRACE_EVENTS.DAMAGE_ITEM &&
     typeof payload.pieceCode === 'string' &&
@@ -429,7 +503,7 @@ export function traceVisionInput(payload: {
   inputImageCount: number;
   itemCount?: number;
 }): void {
-  const store = als.getStore();
+  const store = getCanonicalTraceContext();
   if (store?.visionInputLogged) return;
   mergeCanonicalTraceContext({ visionInputLogged: true });
   pegCanonicalTrace(CANONICAL_TRACE_EVENTS.VISION_INPUT, {
@@ -479,7 +553,7 @@ export function traceCanonicalPeritajeBuilt(
   peritaje: CanonicalPeritajeV1 | null | undefined,
   opts?: { merged?: boolean; priorDamageCount?: number },
 ): void {
-  if (!peritaje || !isPegCanonicalTraceEnabled()) return;
+  if (!peritaje) return;
   mergeCanonicalTraceContext({
     peritajeId: peritaje.peritajeId,
     conversationId: peritaje.conversationId,
@@ -531,7 +605,7 @@ export function traceDamageMerge(payload: {
 }
 
 export function traceQuoteFlowMode(flow: QuoteFlowDecision): void {
-  const store = als.getStore();
+  const store = getCanonicalTraceContext();
   if (store?.quoteFlowModeLogged) return;
   mergeCanonicalTraceContext({ quoteFlowModeLogged: true });
   pegCanonicalTrace(CANONICAL_TRACE_EVENTS.QUOTE_FLOW_MODE, {
@@ -544,16 +618,19 @@ export function traceCanonicalQuoteBuilt(
   quote: CanonicalQuoteV1 | null | undefined,
   peritaje?: CanonicalPeritajeV1 | null,
 ): void {
-  if (!quote || !isPegCanonicalTraceEnabled()) return;
+  if (!quote) return;
   mergeCanonicalTraceContext({
     peritajeId: quote.peritajeId,
+    quoteId: quote.quoteId,
     vehicleId: quote.lines[0]?.vehicleId,
   });
-  for (const line of quote.lines) {
-    pegCanonicalTrace(
-      CANONICAL_TRACE_EVENTS.QUOTE_LINE,
-      summarizeQuoteLine(line, peritaje),
-    );
+  if (isDebugDetailEnabled() || isPegCanonicalTraceEnabled()) {
+    for (const line of quote.lines) {
+      pegCanonicalTrace(
+        CANONICAL_TRACE_EVENTS.QUOTE_LINE,
+        summarizeQuoteLine(line, peritaje),
+      );
+    }
   }
   pegCanonicalTrace(
     CANONICAL_TRACE_EVENTS.CANONICAL_QUOTE,
@@ -572,112 +649,11 @@ function asNumber(value: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/** Market events are owned by PegazuzLogger / market-search-trace. */
 export function traceRefaccionMarketEvent(
-  event: string,
-  payload: Record<string, unknown> = {},
-): void {
-  if (!isPegCanonicalTraceEnabled()) return;
-  const pieceCode = asString(payload.pieceCode) ?? asString(payload.pieza);
-  const vehicle = {
-    make: asString(payload.marca) ?? asString((payload.vehicle as { make?: unknown } | undefined)?.make),
-    model:
-      asString(payload.modelo) ??
-      asString((payload.vehicle as { model?: unknown } | undefined)?.model),
-    year:
-      asString(payload.anio) ??
-      asString((payload.vehicle as { year?: unknown } | undefined)?.year),
-  };
-  if (event === CANONICAL_TRACE_EVENTS.REFACCION_MARKET_SEARCH_STARTED) {
-    pegCanonicalTrace(event, {
-      damageItemId: asString(payload.damageItemId),
-      pieceCode,
-      vehicle,
-      preferredPartTypes: payload.preferredPartTypes,
-    });
-    return;
-  }
-  if (event === CANONICAL_TRACE_EVENTS.REFACCION_MARKET_ESTIMATE_READY) {
-    const range =
-      payload.priceRange && typeof payload.priceRange === 'object'
-        ? payload.priceRange
-        : {
-            min: asNumber(payload.precioMinEstimado),
-            max: asNumber(payload.precioMaxEstimado),
-            central: asNumber(payload.precioCentral) ?? asNumber(payload.amount),
-          };
-    pegCanonicalTrace(event, {
-      damageItemId: asString(payload.damageItemId),
-      pieceCode,
-      pricingSource:
-        asString(payload.pricingSource) ?? asString(payload.priceSource),
-      pricingStatus: asString(payload.pricingStatus),
-      sampleCount: asNumber(payload.sampleCount) ?? asNumber(payload.cantidadMuestras),
-      compatibleSampleCount:
-        asNumber(payload.compatibleSampleCount) ??
-        asNumber(payload.sampleCount) ??
-        asNumber(payload.cantidadMuestras),
-      selectedPartType:
-        asString(payload.selectedPartType) ?? asString(payload.partTypeGroup),
-      priceRange: range,
-      amount: asNumber(payload.amount) ?? asNumber(payload.precioCentral),
-      confidence: asString(payload.confidence),
-    });
-    return;
-  }
-  if (
-    event === CANONICAL_TRACE_EVENTS.REFACCION_MARKET_AUDIT ||
-    event === CANONICAL_TRACE_EVENTS.MARKET_LOOKUP_EXECUTED ||
-    event === CANONICAL_TRACE_EVENTS.MARKET_CACHE_REUSED
-  ) {
-    pegCanonicalTrace(event, {
-      damageItemId: asString(payload.damageItemId),
-      pieceCode,
-      family: asString(payload.family),
-      marketIdentityKey: asString(payload.marketIdentityKey),
-      marketStrategyVersion: asString(payload.marketStrategyVersion),
-      cacheHit: payload.cacheHit,
-      cacheKey: asString(payload.cacheKey),
-      lookupPath: asString(payload.lookupPath),
-      insufficientCause: asString(payload.insufficientCause),
-      cachedPricingStatus: asString(payload.cachedPricingStatus),
-      cacheAgeMs: asNumber(payload.cacheAgeMs),
-      cacheCreatedAt: asString(payload.cacheCreatedAt),
-      queries: payload.queries,
-      executedQueries: payload.executedQueries,
-      providersUsed: payload.providersUsed,
-      rawResultCount: asNumber(payload.rawResultCount),
-      compatibleSampleCount: asNumber(payload.compatibleSampleCount),
-      acceptedSampleCount: asNumber(payload.acceptedSampleCount),
-      rejectedResultCount: asNumber(payload.rejectedResultCount),
-      rejectedByReason: payload.rejectedByReason,
-      selectedPartType: asString(payload.selectedPartType),
-      acceptedDomains: payload.acceptedDomains,
-      sampleCount: asNumber(payload.sampleCount),
-      pricingStatus: asString(payload.pricingStatus),
-      searchRunId: asString(payload.searchRunId),
-      queryCount: asNumber(payload.queryCount),
-      providerCounts: payload.providerCounts,
-      funnel: payload.funnel,
-      bestAvailablePartType: asString(payload.bestAvailablePartType),
-      bestAvailableSampleCount: asNumber(payload.bestAvailableSampleCount),
-      samplesMissingToThreshold: asNumber(payload.samplesMissingToThreshold),
-      providerContribution: payload.providerContribution,
-      uniqueSamplesAfterCrossProviderDedupe: asNumber(
-        payload.uniqueSamplesAfterCrossProviderDedupe,
-      ),
-      independenceCounts: payload.independenceCounts,
-    });
-    return;
-  }
-  pegCanonicalTrace(event, {
-    damageItemId: asString(payload.damageItemId),
-    pieceCode,
-    vehicle,
-    sampleCount: asNumber(payload.sampleCount) ?? asNumber(payload.cantidadMuestras),
-    confirmed: payload.confirmed,
-    rawHits: undefined,
-  });
-}
+  _event: string,
+  _payload: Record<string, unknown> = {},
+): void {}
 
 export function tracePendingQuoteLifecycle(
   event:

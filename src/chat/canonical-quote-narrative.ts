@@ -308,6 +308,7 @@ export async function composeModernClientQuoteMessage(
       mode: ux.mode,
       fullQuoteRendered: Boolean(composed.fullQuoteRendered ?? ux.presentation === 'FULL'),
       deltaRendered: Boolean(composed.deltaRendered ?? ux.presentation === 'DELTA'),
+      deltaCount: ux.changedLines.length,
       greetingRendered: ux.shouldGreet,
       technicalExplanationRendered: Boolean(
         composed.parts.technicalExplanation && ux.technicalExplanation === 'allowed',

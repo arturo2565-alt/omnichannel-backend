@@ -4,8 +4,20 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getCanonicalTraceContext, pegCanonicalTrace } from '../canonical-trace';
+import {
+  getCanonicalTraceContext,
+  mergeCanonicalTraceContext,
+} from '../canonical-trace';
 import { getLlmAuditContext } from '../llm-audit-context';
+import {
+  isDebugDetailEnabled,
+  isTraceDetailEnabled,
+  shouldEmitLegacyTraceJson,
+  shouldLog,
+} from '../../observability/pegazuz-log-level';
+import { pegLogger } from '../../observability/pegazuz-logger';
+import { patchTurnSummary } from '../../observability/pegazuz-context';
+import { sanitizeTracePayload } from '../../observability/sanitize-log';
 import type { MarketProviderId, PartType, RawProviderHit } from './refaccion-market.types';
 import type { MarketRejectionReason } from './market-audit';
 
@@ -56,10 +68,16 @@ export const MARKET_TRACE_REJECTION_REASONS = [
 export type MarketTraceRejectionReason =
   (typeof MARKET_TRACE_REJECTION_REASONS)[number];
 
-const VERBOSE_ONLY = new Set<string>([
+const SAMPLE_EVENTS = new Set<string>([
   MARKET_TRACE_EVENTS.RAW_SAMPLE,
   MARKET_TRACE_EVENTS.SAMPLE_EVALUATED,
   MARKET_TRACE_EVENTS.ACCEPTED_SAMPLE,
+]);
+
+const TRACE_EVENTS = new Set<string>([
+  ...SAMPLE_EVENTS,
+  MARKET_TRACE_EVENTS.PROVIDER_REQUEST,
+  MARKET_TRACE_EVENTS.PROVIDER_RESPONSE,
 ]);
 
 export type MarketSearchTraceIds = {
@@ -138,20 +156,119 @@ export function resolveMarketTraceIds(
   };
 }
 
+export function compactMarketStatus(status: unknown): string {
+  const raw = String(status ?? '').trim();
+  if (raw === 'INSUFFICIENT_MARKET_SAMPLE') return 'INSUFFICIENT';
+  if (raw === 'AWAITING_VEHICLE_DATA') return 'AWAITING';
+  if (raw === 'OK') return 'OK';
+  return raw || 'UNKNOWN';
+}
+
+export function topRejectionReasons(
+  rejected: unknown,
+  limit = 3,
+): string[] {
+  if (!rejected || typeof rejected !== 'object') return [];
+  return Object.entries(rejected as Record<string, unknown>)
+    .map(([reason, count]) => ({
+      reason,
+      count: typeof count === 'number' ? count : Number(count) || 0,
+    }))
+    .filter((row) => row.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit)
+    .map((row) => `${row.reason}:${row.count}`);
+}
+
+function requiredSamplesOf(payload: Record<string, unknown>): number {
+  const n = Number(payload.requiredSamples ?? payload.minValidSamples);
+  return Number.isFinite(n) && n > 0 ? n : 4;
+}
+
 export function emitMarketTrace(
   event: string,
   ids: MarketSearchTraceIds,
   payload: Record<string, unknown> = {},
 ): void {
-  if (!isMarketTraceEnabled()) return;
-  if (VERBOSE_ONLY.has(event) && !isMarketTraceVerboseEnabled()) return;
-  const body = {
+  mergeCanonicalTraceContext({
+    searchRunId: ids.searchRunId,
+    conversationId: ids.conversationId,
+    quoteId: ids.quoteId,
+    vehicleId: ids.vehicleId,
+  });
+
+  if (event === MARKET_TRACE_EVENTS.SEARCH_STARTED) {
+    const vehicle = payload.vehicle as
+      | { make?: unknown; model?: unknown; year?: unknown }
+      | undefined;
+    pegLogger.info('MARKET', {
+      run: ids.searchRunId,
+      piece: ids.pieceCode,
+      vehicle: vehicle
+        ? [vehicle.make, vehicle.model, vehicle.year]
+            .map((part) => String(part ?? '').trim())
+            .filter(Boolean)
+            .join(' ')
+        : undefined,
+      phase: 'START',
+    });
+  }
+
+  if (event === MARKET_TRACE_EVENTS.SEARCH_FINISHED) {
+    const status = compactMarketStatus(payload.pricingStatus);
+    const accepted = Number(payload.acceptedSampleCount ?? 0);
+    const required = requiredSamplesOf(payload);
+    const compact = {
+      run: ids.searchRunId,
+      piece: ids.pieceCode,
+      vehicle: payload.vehicleLabel,
+      providerPath: payload.providerPath ?? payload.source,
+      raw: payload.rawResultCount,
+      unique: payload.uniqueSamples,
+      samples: `${accepted}/${required}`,
+      selectedPartType: payload.selectedPartType,
+      status,
+      duration: `${Number(payload.totalDurationMs ?? 0)}ms`,
+      ...(status === 'INSUFFICIENT'
+        ? { topRejectionReasons: topRejectionReasons(payload.rejectedByReason) }
+        : {}),
+    };
+    pegLogger.info('MARKET', compact);
+    if (status === 'INSUFFICIENT') {
+      pegLogger.warn('MARKET', {
+        event: 'MARKET_INSUFFICIENT',
+        ...compact,
+      });
+    }
+    patchTurnSummary({ market: status });
+  }
+
+  const sampleLike = SAMPLE_EVENTS.has(event);
+  if (sampleLike) {
+    if (!isMarketTraceVerboseEnabled() && !isTraceDetailEnabled()) return;
+    pegLogger.trace('MARKET', { event, piece: ids.pieceCode, ...payload });
+  } else if (
+    event !== MARKET_TRACE_EVENTS.SEARCH_STARTED &&
+    event !== MARKET_TRACE_EVENTS.SEARCH_FINISHED
+  ) {
+    if (TRACE_EVENTS.has(event)) {
+      pegLogger.trace('MARKET', { event, piece: ids.pieceCode, ...payload });
+    } else if (shouldLog('debug')) {
+      pegLogger.debug('MARKET', { event, piece: ids.pieceCode, ...payload });
+    }
+  }
+
+  if (!shouldEmitLegacyTraceJson()) return;
+  if (sampleLike && !isMarketTraceVerboseEnabled() && !isTraceDetailEnabled()) {
+    return;
+  }
+  if (!isMarketTraceEnabled() && !isDebugDetailEnabled()) return;
+  const body = sanitizeTracePayload({
     event,
     ...ids,
     ...payload,
-  };
+  });
   console.log(`${PEG_MARKET_TRACE_PREFIX} ${JSON.stringify(body)}`);
-  pegCanonicalTrace(event, body);
 }
 
 export type MarketSearchFunnel = {

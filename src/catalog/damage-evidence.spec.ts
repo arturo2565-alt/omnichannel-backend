@@ -312,6 +312,8 @@ describe('damageEvidenceStatus — confirmación vs tratamiento', () => {
   it('PRICING_ELIGIBILITY se registra para sospecha', () => {
     const prev = process.env.PEG_CANONICAL_TRACE;
     process.env.PEG_CANONICAL_TRACE = '1';
+    process.env.PEG_TRACE_MODE = 'debug';
+    process.env.LOG_LEVEL = 'debug';
     const logs: string[] = [];
     const spy = jest.spyOn(console, 'log').mockImplementation((...args) => {
       logs.push(args.map(String).join(' '));
@@ -338,6 +340,8 @@ describe('damageEvidenceStatus — confirmación vs tratamiento', () => {
       spy.mockRestore();
       if (prev == null) delete process.env.PEG_CANONICAL_TRACE;
       else process.env.PEG_CANONICAL_TRACE = prev;
+      delete process.env.PEG_TRACE_MODE;
+      delete process.env.LOG_LEVEL;
     }
   });
 });

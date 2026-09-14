@@ -28,10 +28,31 @@ const PHONE = '+525512345678';
 
 function enableTrace() {
   process.env[PEG_CANONICAL_TRACE_ENV] = 'true';
+  process.env.PEG_TRACE_MODE = 'debug';
+  process.env.LOG_LEVEL = 'debug';
 }
 
 function disableTrace() {
   delete process.env[PEG_CANONICAL_TRACE_ENV];
+  delete process.env.PEG_TRACE_MODE;
+  delete process.env.LOG_LEVEL;
+}
+
+function captureAllLogs(): { logs: string[]; restore: () => void } {
+  const logs: string[] = [];
+  const spy = jest.spyOn(console, 'log').mockImplementation((...args) => {
+    logs.push(args.map((a) => String(a)).join(' '));
+  });
+  const warnSpy = jest.spyOn(console, 'warn').mockImplementation((...args) => {
+    logs.push(args.map(String).join(' '));
+  });
+  return {
+    logs,
+    restore: () => {
+      spy.mockRestore();
+      warnSpy.mockRestore();
+    },
+  };
 }
 
 function capturePegLogs(): { logs: string[]; restore: () => void } {
@@ -122,6 +143,8 @@ describe('PEG_CANONICAL_TRACE', () => {
   afterEach(() => {
     if (prev == null) delete process.env[PEG_CANONICAL_TRACE_ENV];
     else process.env[PEG_CANONICAL_TRACE_ENV] = prev;
+    delete process.env.PEG_TRACE_MODE;
+    delete process.env.LOG_LEVEL;
     jest.restoreAllMocks();
   });
 
@@ -231,7 +254,7 @@ describe('PEG_CANONICAL_TRACE', () => {
 
   it('SUSTITUIR emite market trace', async () => {
     enableTrace();
-    const { logs, restore } = capturePegLogs();
+    const { logs, restore } = captureAllLogs();
     await enrichInventoryWithMarketRefacciones(
       {
         pieza: 'Cofre',
@@ -255,14 +278,14 @@ describe('PEG_CANONICAL_TRACE', () => {
       } as never,
     );
     const joined = logs.join('\n');
-    expect(joined).toContain(
-      CANONICAL_TRACE_EVENTS.REFACCION_MARKET_SEARCH_STARTED,
-    );
+    expect(joined).toContain('[MARKET]');
+    expect(joined).toContain('START');
     expect(joined).toContain(
       CANONICAL_TRACE_EVENTS.REFACCION_MARKET_ESTIMATE_READY,
     );
     expect(joined).toContain('dmg_cofre_test');
     expect(joined).not.toContain('https://');
+    expect(joined).not.toContain(PEG_CANONICAL_TRACE_PREFIX + ' REFACCION_RAW_SAMPLE');
     restore();
   });
 
@@ -373,7 +396,7 @@ describe('PEG_CANONICAL_TRACE', () => {
 
   it('logRefaccionMarketEvent insuficiente sigue siendo observable', () => {
     enableTrace();
-    const { logs, restore } = capturePegLogs();
+    const { logs, restore } = captureAllLogs();
     logRefaccionMarketEvent('REFACCION_MARKET_INSUFFICIENT', {
       pieza: 'STD',
       damageItemId: 'dmg_std',
@@ -384,6 +407,7 @@ describe('PEG_CANONICAL_TRACE', () => {
     expect(logs.join('\n')).toContain(
       CANONICAL_TRACE_EVENTS.REFACCION_MARKET_INSUFFICIENT,
     );
+    expect(logs.join('\n')).not.toContain(PEG_CANONICAL_TRACE_PREFIX);
     restore();
   });
 

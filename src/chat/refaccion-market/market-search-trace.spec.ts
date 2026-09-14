@@ -175,15 +175,31 @@ function observation(searchRunId = 'mrs_test') {
 }
 
 function setTraceFlags(opts: { trace?: boolean; verbose?: boolean }) {
-  if (opts.trace) process.env[PEG_MARKET_TRACE_ENV] = 'true';
-  else delete process.env[PEG_MARKET_TRACE_ENV];
-  if (opts.verbose) process.env[PEG_MARKET_TRACE_VERBOSE_ENV] = 'true';
-  else delete process.env[PEG_MARKET_TRACE_VERBOSE_ENV];
+  if (opts.verbose) {
+    process.env[PEG_MARKET_TRACE_ENV] = 'true';
+    process.env[PEG_MARKET_TRACE_VERBOSE_ENV] = 'true';
+    process.env.PEG_TRACE_MODE = 'trace';
+    process.env.LOG_LEVEL = 'trace';
+    return;
+  }
+  if (opts.trace) {
+    process.env[PEG_MARKET_TRACE_ENV] = 'true';
+    process.env.PEG_TRACE_MODE = 'debug';
+    process.env.LOG_LEVEL = 'debug';
+    delete process.env[PEG_MARKET_TRACE_VERBOSE_ENV];
+    return;
+  }
+  delete process.env[PEG_MARKET_TRACE_ENV];
+  delete process.env[PEG_MARKET_TRACE_VERBOSE_ENV];
+  delete process.env.PEG_TRACE_MODE;
+  delete process.env.LOG_LEVEL;
 }
 
 afterEach(() => {
   delete process.env[PEG_MARKET_TRACE_ENV];
   delete process.env[PEG_MARKET_TRACE_VERBOSE_ENV];
+  delete process.env.PEG_TRACE_MODE;
+  delete process.env.LOG_LEVEL;
 });
 
 describe('observabilidad profunda — invariante de resultado', () => {

@@ -124,16 +124,34 @@ function confirmedFieldsFromIdentity(
   return fields;
 }
 
+function vehicleLabelOf(identity: VehiclePartIdentity): string {
+  return [identity.marca, identity.modelo, identity.anio]
+    .map((part) => String(part ?? '').trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
+function providerPathOf(
+  estimate: RefaccionMarketEstimate,
+  fallback: string,
+): string {
+  const used = estimate.audit?.providersUsed ?? [];
+  if (used.length === 0) return fallback;
+  if (used[0] === 'SERPER_SHOPPING') return 'SERPER_SHOPPING';
+  return used.join('+');
+}
+
 export function emitCachedSearchFinished(input: {
   ids: MarketSearchTraceIds;
   estimate: RefaccionMarketEstimate;
   policy?: RefaccionMarketPolicy;
   totalDurationMs: number;
 }): void {
-  if (!isMarketTraceEnabled()) return;
   const policy = input.policy ?? DEFAULT_REFACCION_MARKET_POLICY;
   const audit = input.estimate.audit;
-  if (audit?.funnel) {
+  const diagnostic =
+    isMarketTraceEnabled() || isMarketTraceVerboseEnabled();
+  if (diagnostic && audit?.funnel) {
     emitMarketTrace(MARKET_TRACE_EVENTS.SEARCH_FUNNEL, input.ids, {
       ...audit.funnel,
     });
@@ -144,41 +162,50 @@ export function emitCachedSearchFinished(input: {
     OEM_NEW: audit?.funnel?.acceptedByPartType?.OEM_NEW ?? 0,
     OEM_USED: audit?.funnel?.acceptedByPartType?.OEM_USED ?? 0,
   };
-  emitMarketTrace(MARKET_TRACE_EVENTS.PART_TYPE_SELECTION, input.ids, {
-    preferredOrder: policy.preferredPartTypes,
-    counts,
-    minValidSamples: policy.minValidSamples,
-    selectedPartType: input.estimate.partTypeGroup ?? audit?.selectedPartType ?? null,
-    selectedSampleCount: input.estimate.cantidadMuestras,
-    bestAvailablePartType: audit?.bestAvailablePartType ?? null,
-    bestAvailableSampleCount: audit?.bestAvailableSampleCount ?? 0,
-    samplesMissingToThreshold: audit?.samplesMissingToThreshold ?? 0,
-  });
-  const pricedMembers = input.estimate.samples ?? [];
-  const stats = observePriceStats(pricedMembers.map((s) => s.price));
-  emitMarketTrace(MARKET_TRACE_EVENTS.PRICING_DECISION, input.ids, {
-    selectedPartType: input.estimate.partTypeGroup,
-    selectedSampleCount: input.estimate.cantidadMuestras,
-    ...stats,
-    marketRange: input.estimate.marketPriceRange,
-    marginMultiplier: policy.marginFactor,
-    roundedClientAmount: input.estimate.customerPriceRange?.precioCentral,
-    pricingStatus: input.estimate.pricingStatus,
-    ...(input.estimate.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE'
-      ? {
-          bestAvailablePartType: audit?.bestAvailablePartType ?? null,
-          bestAvailableSampleCount: audit?.bestAvailableSampleCount ?? 0,
-          samplesMissingToThreshold: audit?.samplesMissingToThreshold ?? 0,
-        }
-      : {}),
-  });
+  if (diagnostic) {
+    emitMarketTrace(MARKET_TRACE_EVENTS.PART_TYPE_SELECTION, input.ids, {
+      preferredOrder: policy.preferredPartTypes,
+      counts,
+      minValidSamples: policy.minValidSamples,
+      selectedPartType: input.estimate.partTypeGroup ?? audit?.selectedPartType ?? null,
+      selectedSampleCount: input.estimate.cantidadMuestras,
+      bestAvailablePartType: audit?.bestAvailablePartType ?? null,
+      bestAvailableSampleCount: audit?.bestAvailableSampleCount ?? 0,
+      samplesMissingToThreshold: audit?.samplesMissingToThreshold ?? 0,
+    });
+    const pricedMembers = input.estimate.samples ?? [];
+    const stats = observePriceStats(pricedMembers.map((s) => s.price));
+    emitMarketTrace(MARKET_TRACE_EVENTS.PRICING_DECISION, input.ids, {
+      selectedPartType: input.estimate.partTypeGroup,
+      selectedSampleCount: input.estimate.cantidadMuestras,
+      ...stats,
+      marketRange: input.estimate.marketPriceRange,
+      marginMultiplier: policy.marginFactor,
+      roundedClientAmount: input.estimate.customerPriceRange?.precioCentral,
+      pricingStatus: input.estimate.pricingStatus,
+      ...(input.estimate.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE'
+        ? {
+            bestAvailablePartType: audit?.bestAvailablePartType ?? null,
+            bestAvailableSampleCount: audit?.bestAvailableSampleCount ?? 0,
+            samplesMissingToThreshold: audit?.samplesMissingToThreshold ?? 0,
+          }
+        : {}),
+    });
+  }
   emitMarketTrace(MARKET_TRACE_EVENTS.SEARCH_FINISHED, input.ids, {
     pricingStatus: input.estimate.pricingStatus,
     totalDurationMs: input.totalDurationMs,
     providerDurationMs: 0,
     rawResultCount: audit?.rawResultCount ?? 0,
-    acceptedSampleCount: audit?.acceptedSampleCount ?? pricedMembers.length,
+    uniqueSamples:
+      audit?.uniqueSamplesAfterCrossProviderDedupe ??
+      audit?.funnel?.afterDedupe ??
+      0,
+    acceptedSampleCount: audit?.acceptedSampleCount ?? (input.estimate.samples ?? []).length,
+    requiredSamples: policy.minValidSamples,
     selectedPartType: input.estimate.partTypeGroup,
+    providerPath: providerPathOf(input.estimate, 'CACHE'),
+    rejectedByReason: audit?.rejectedByReason ?? audit?.funnel?.rejectedByReason,
     cacheHit: true,
     source: 'CACHE',
   });
@@ -203,42 +230,46 @@ export function observeSearchRun(input: {
     input.uniqueAccepted,
   );
   const partType = observePartTypeSelection(input.uniqueAccepted, policy);
-  if (!isMarketTraceEnabled()) {
-    return { funnel, partType };
+  const diagnostic = isMarketTraceEnabled() || isMarketTraceVerboseEnabled();
+  if (diagnostic) {
+    emitVerboseSamples(input.ids, input.identity, input.rawHits, input.uniqueAccepted);
+    emitMarketTrace(MARKET_TRACE_EVENTS.SEARCH_FUNNEL, input.ids, { ...funnel });
+    emitMarketTrace(MARKET_TRACE_EVENTS.PART_TYPE_SELECTION, input.ids, {
+      ...partType,
+    });
+
+    const pricedMembers = input.estimate.samples ?? [];
+    const stats = observePriceStats(pricedMembers.map((s) => s.price));
+    emitMarketTrace(MARKET_TRACE_EVENTS.PRICING_DECISION, input.ids, {
+      selectedPartType: input.estimate.partTypeGroup,
+      selectedSampleCount: input.estimate.cantidadMuestras,
+      ...stats,
+      marketRange: input.estimate.marketPriceRange,
+      marginMultiplier: policy.marginFactor,
+      roundedClientAmount: input.estimate.customerPriceRange?.precioCentral,
+      pricingStatus: input.estimate.pricingStatus,
+      ...(input.estimate.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE'
+        ? {
+            bestAvailablePartType: partType.bestAvailablePartType,
+            bestAvailableSampleCount: partType.bestAvailableSampleCount,
+            samplesMissingToThreshold: partType.samplesMissingToThreshold,
+          }
+        : {}),
+    });
   }
-
-  emitVerboseSamples(input.ids, input.identity, input.rawHits, input.uniqueAccepted);
-  emitMarketTrace(MARKET_TRACE_EVENTS.SEARCH_FUNNEL, input.ids, { ...funnel });
-  emitMarketTrace(MARKET_TRACE_EVENTS.PART_TYPE_SELECTION, input.ids, {
-    ...partType,
-  });
-
-  const pricedMembers = input.estimate.samples ?? [];
-  const stats = observePriceStats(pricedMembers.map((s) => s.price));
-  emitMarketTrace(MARKET_TRACE_EVENTS.PRICING_DECISION, input.ids, {
-    selectedPartType: input.estimate.partTypeGroup,
-    selectedSampleCount: input.estimate.cantidadMuestras,
-    ...stats,
-    marketRange: input.estimate.marketPriceRange,
-    marginMultiplier: policy.marginFactor,
-    roundedClientAmount: input.estimate.customerPriceRange?.precioCentral,
-    pricingStatus: input.estimate.pricingStatus,
-    ...(input.estimate.pricingStatus === 'INSUFFICIENT_MARKET_SAMPLE'
-      ? {
-          bestAvailablePartType: partType.bestAvailablePartType,
-          bestAvailableSampleCount: partType.bestAvailableSampleCount,
-          samplesMissingToThreshold: partType.samplesMissingToThreshold,
-        }
-      : {}),
-  });
 
   emitMarketTrace(MARKET_TRACE_EVENTS.SEARCH_FINISHED, input.ids, {
     pricingStatus: input.estimate.pricingStatus,
     totalDurationMs: input.totalDurationMs,
     providerDurationMs: input.providerDurationMs,
     rawResultCount: input.rawHits.length,
+    uniqueSamples: funnel.afterDedupe,
     acceptedSampleCount: input.uniqueAccepted.length,
+    requiredSamples: policy.minValidSamples,
     selectedPartType: input.estimate.partTypeGroup,
+    vehicleLabel: vehicleLabelOf(input.identity),
+    providerPath: providerPathOf(input.estimate, input.source),
+    rejectedByReason: funnel.rejectedByReason,
     cacheHit: input.cacheHit,
     source: input.source,
   });

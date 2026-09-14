@@ -6,7 +6,6 @@ import {
 } from './parse-vehicle-part-identity';
 import { MARKET_CACHE_TTL_MS, RefaccionMarketCache } from './refaccion-market.cache';
 import { createRefaccionMarketService } from './refaccion-market.orchestrator';
-import { REFACCION_MARKET_EVENTS } from './refaccion-market-events';
 import { insufficientEstimate } from './compute-market-range';
 import type { RawProviderHit, RefaccionPriceProvider } from './refaccion-market.types';
 
@@ -66,19 +65,28 @@ describe('market cache + strategy version', () => {
     const origLog = console.log;
     console.log = (...args: unknown[]) => {
       const line = args.map(String).join(' ');
-      const match = line.match(/\[RefaccionMarket\] ({.*})/);
-      if (!match?.[1]) return;
-      try {
-        const parsed = JSON.parse(match[1]) as { event?: string };
-        if (parsed.event) events.push(parsed.event);
-      } catch {
-        /* ignore */
+      if (line.includes('[MARKET]') && line.includes('audit=')) {
+        events.push('REFACCION_MARKET_AUDIT');
+      }
+      if (line.includes('event=MARKET_LOOKUP_EXECUTED')) {
+        events.push('MARKET_LOOKUP_EXECUTED');
+      }
+      if (line.includes('event=MARKET_CACHE_REUSED')) {
+        events.push('MARKET_CACHE_REUSED');
       }
     };
+    const prevLevel = process.env.LOG_LEVEL;
+    const prevMode = process.env.PEG_TRACE_MODE;
+    process.env.LOG_LEVEL = 'debug';
+    process.env.PEG_TRACE_MODE = 'debug';
     const market = createRefaccionMarketService({ providers: [provider] });
     const first = await market.estimate(altimaRight);
     const second = await market.estimate(altimaRight);
     console.log = origLog;
+    if (prevLevel == null) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = prevLevel;
+    if (prevMode == null) delete process.env.PEG_TRACE_MODE;
+    else process.env.PEG_TRACE_MODE = prevMode;
     expect(searches).toBe(1);
     expect(first.pricingStatus).toBe('INSUFFICIENT_MARKET_SAMPLE');
     expect(second.pricingStatus).toBe('INSUFFICIENT_MARKET_SAMPLE');

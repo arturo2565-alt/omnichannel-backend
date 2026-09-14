@@ -3,6 +3,7 @@ import type { ChatCompletionMessageParam } from 'openai/resources/chat/completio
 import { openAiChatCompletionParams } from './openai-model-config';
 import { createTrackedChatCompletion } from './tracked-chat-completion';
 import { resolvePiezaDisplayLabel } from './draft-quote-resume';
+import { pegLogger } from '../observability/pegazuz-logger';
 import {
   HIDDEN_DAMAGE_CLIENT_DISCLAIMER,
   narrativeRespectsStructuredLines,
@@ -257,16 +258,14 @@ export async function composeDraftClientMessageWithLlm(
     );
   }
 
-  console.log(
-    '[DraftClientMessage]',
-    JSON.stringify({
-      pricingMode: input.pricingMode,
-      lineCount: input.lineRows.length,
-      total: input.total,
-      historyTurns: history.length,
-      chars: text.length,
-    }),
-  );
+  pegLogger.debug('UX', {
+    event: 'DraftClientMessage',
+    pricingMode: input.pricingMode,
+    lineCount: input.lineRows.length,
+    total: input.total,
+    historyTurns: history.length,
+    chars: text.length,
+  });
 
   return text;
 }

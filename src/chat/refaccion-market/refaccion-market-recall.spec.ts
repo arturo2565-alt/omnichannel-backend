@@ -377,21 +377,20 @@ describe('side-drift — solo observabilidad', () => {
   });
 });
 
-describe('REFACCION_MARKET_AUDIT en PEG_CANONICAL_TRACE', () => {
-  const prev = process.env[PEG_CANONICAL_TRACE_ENV];
-
+describe('REFACCION_MARKET_AUDIT compacto', () => {
   afterEach(() => {
-    if (prev == null) delete process.env[PEG_CANONICAL_TRACE_ENV];
-    else process.env[PEG_CANONICAL_TRACE_ENV] = prev;
+    delete process.env.PEG_TRACE_MODE;
+    delete process.env.LOG_LEVEL;
+    delete process.env[PEG_CANONICAL_TRACE_ENV];
     jest.restoreAllMocks();
   });
 
-  it('emite counts/reasons, no listings raw', () => {
-    process.env[PEG_CANONICAL_TRACE_ENV] = 'true';
+  it('emite counts/reasons, no listings raw ni JSON canónico', () => {
+    process.env.PEG_TRACE_MODE = 'compact';
+    process.env.LOG_LEVEL = 'info';
     const logs: string[] = [];
     const spy = jest.spyOn(console, 'log').mockImplementation((...args) => {
-      const line = args.map((a) => String(a)).join(' ');
-      if (line.includes(PEG_CANONICAL_TRACE_PREFIX)) logs.push(line);
+      logs.push(args.map((a) => String(a)).join(' '));
     });
     runRefaccionMarketPipeline({
       identity: altimaLeft,
@@ -407,8 +406,10 @@ describe('REFACCION_MARKET_AUDIT en PEG_CANONICAL_TRACE', () => {
       emit: logRefaccionMarketEvent,
     });
     const joined = logs.join('\n');
-    expect(joined).toContain(CANONICAL_TRACE_EVENTS.REFACCION_MARKET_AUDIT);
-    expect(joined).toContain('acceptedSampleCount');
+    expect(joined).toContain('[MARKET]');
+    expect(joined).toContain('accepted=');
+    expect(joined).not.toContain(PEG_CANONICAL_TRACE_PREFIX);
+    expect(joined).not.toContain(CANONICAL_TRACE_EVENTS.REFACCION_MARKET_AUDIT);
     expect(joined).not.toContain('listing-xyz');
     expect(joined).not.toContain('https://secret.example');
     expect(joined).not.toContain('Stop trasero izq Nissan Altima 2013-2018');

@@ -1288,6 +1288,7 @@ export function traceClientMessageRendered(input: {
   mode: ClientMessageMode;
   fullQuoteRendered: boolean;
   deltaRendered: boolean;
+  deltaCount?: number;
   greetingRendered: boolean;
   technicalExplanationRendered: boolean;
   warningsRenderedCount: number;
@@ -1298,6 +1299,7 @@ export function traceClientMessageRendered(input: {
     mode: input.mode,
     fullQuoteRendered: input.fullQuoteRendered,
     deltaRendered: input.deltaRendered,
+    deltaCount: input.deltaCount ?? (input.deltaRendered ? 1 : 0),
     greetingRendered: input.greetingRendered,
     technicalExplanationRendered: input.technicalExplanationRendered,
     warningsRenderedCount: input.warningsRenderedCount,

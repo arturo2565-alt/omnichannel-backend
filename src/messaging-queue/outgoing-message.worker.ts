@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { UnrecoverableError, type Job } from 'bullmq';
 import axios, { AxiosError } from 'axios';
@@ -9,27 +8,62 @@ import {
 } from '../chat/whatsapp-config';
 import {
   OUTGOING_MESSAGES_QUEUE,
+  OUTGOING_MESSAGE_ATTEMPTS,
   type OutgoingMessageJobData,
 } from './outgoing-message.constants';
+import { pegLogger } from '../observability/pegazuz-logger';
+import { runWithPegazuzContext } from '../observability/pegazuz-context';
 
 const META_HTTP_TIMEOUT_MS = 20_000;
 const MESSENGER_SEND_URL = 'https://graph.facebook.com/v21.0/me/messages';
 
 @Processor(OUTGOING_MESSAGES_QUEUE)
 export class OutgoingMessageWorker extends WorkerHost {
-  private readonly logger = new Logger(OutgoingMessageWorker.name);
-
   async process(job: Job<OutgoingMessageJobData>): Promise<void> {
     const channel = String(job.data?.channel ?? '').trim().toLowerCase();
     const conversationId = String(job.data?.conversationId ?? '').trim();
+    return runWithPegazuzContext(
+      {
+        conversationId,
+        turnId: job.data?.pegTurnId,
+      },
+      () => this.processWithinContext(job, channel, conversationId),
+    );
+  }
+
+  private async processWithinContext(
+    job: Job<OutgoingMessageJobData>,
+    channel: string,
+    conversationId: string,
+  ): Promise<void> {
     const payload = job.data?.metaPayload;
     const attempt = `${job.attemptsMade + 1}/${job.opts.attempts ?? '?'}`;
+    const maxAttempts = job.opts.attempts ?? OUTGOING_MESSAGE_ATTEMPTS;
+    const startedAt = Date.now();
 
-    this.logger.log(
-      `process start job=${job.id} attempt=${attempt} channel=${channel} conversation=${conversationId}`,
-    );
+    pegLogger.debug('OUTBOUND', {
+      status: 'process_start',
+      job: job.id,
+      attempt,
+      channel,
+    });
+
+    if (job.attemptsMade > 0) {
+      pegLogger.warn('OUTBOUND', {
+        status: 'retry',
+        job: job.id,
+        attempt,
+        channel,
+      });
+    }
 
     if (!payload || typeof payload !== 'object') {
+      pegLogger.error('OUTBOUND', {
+        message: 'metaPayload vacío o inválido',
+        errorType: 'UnrecoverableError',
+        job: job.id,
+        channel,
+      });
       throw new UnrecoverableError(
         `outgoing job=${job.id}: metaPayload vacío o inválido`,
       );
@@ -41,18 +75,44 @@ export class OutgoingMessageWorker extends WorkerHost {
       } else if (channel === 'messenger' || channel === 'facebook') {
         await this.postMessenger(payload);
       } else {
+        pegLogger.error('OUTBOUND', {
+          message: `canal no soportado "${channel}"`,
+          errorType: 'UnrecoverableError',
+          job: job.id,
+          channel,
+        });
         throw new UnrecoverableError(
           `outgoing job=${job.id}: canal no soportado "${channel}"`,
         );
       }
     } catch (err) {
+      const lastAttempt = job.attemptsMade + 1 >= maxAttempts;
+      if (err instanceof UnrecoverableError || lastAttempt) {
+        pegLogger.error('OUTBOUND', {
+          message: err instanceof Error ? err.message : String(err),
+          errorType: lastAttempt ? 'DeadLetter' : err.constructor.name,
+          job: job.id,
+          channel,
+          err,
+        });
+      } else {
+        pegLogger.warn('OUTBOUND', {
+          status: 'failure',
+          job: job.id,
+          attempt,
+          channel,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
       if (err instanceof UnrecoverableError) throw err;
       throw this.toRetryableError(err, channel, conversationId, job.id);
     }
 
-    this.logger.log(
-      `process ok job=${job.id} channel=${channel} conversation=${conversationId}`,
-    );
+    pegLogger.info('OUTBOUND', {
+      channel,
+      status: 'sent',
+      duration: `${Date.now() - startedAt}ms`,
+    });
   }
 
   private async postWhatsApp(metaPayload: Record<string, unknown>): Promise<void> {

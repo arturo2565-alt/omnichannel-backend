@@ -1,4 +1,4 @@
-import { Inject, Logger, forwardRef } from '@nestjs/common';
+import { Inject, forwardRef } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { ChatService } from '../chat/chat.service';
@@ -7,11 +7,10 @@ import {
   INCOMING_MESSAGES_QUEUE,
   type IncomingMessageJobData,
 } from './incoming-message.constants';
+import { pegLogger } from '../observability/pegazuz-logger';
 
 @Processor(INCOMING_MESSAGES_QUEUE)
 export class IncomingMessageWorker extends WorkerHost {
-  private readonly logger = new Logger(IncomingMessageWorker.name);
-
   constructor(
     private readonly producer: IncomingMessageProducer,
     @Inject(forwardRef(() => ChatService))
@@ -25,20 +24,23 @@ export class IncomingMessageWorker extends WorkerHost {
     const tallerId = String(job.data?.tallerId ?? '').trim();
     const channel = job.data?.channel ?? 'unknown';
 
-    this.logger.log(
-      `process start job=${job.id} channel=${channel} conversation=${conversationId}`,
-    );
+    pegLogger.debug('INBOUND', {
+      status: 'process_start',
+      job: job.id,
+      channel,
+      conversation: conversationId,
+    });
 
     const items = await this.producer.drainBuffer(conversationId);
-    console.log('[IncomingMessageWorker] buffer drenado', {
-      id: job.id,
-      conversationId,
+    pegLogger.debug('INBOUND', {
+      status: 'buffer_drained',
+      job: job.id,
       count: items.length,
       kinds: items.map((i) => i.kind),
     });
 
     if (items.length === 0) {
-      this.logger.log(`process skip (buffer vacío) job=${job.id}`);
+      pegLogger.debug('INBOUND', { status: 'skip_empty', job: job.id });
       return;
     }
 
@@ -50,10 +52,11 @@ export class IncomingMessageWorker extends WorkerHost {
         items,
       });
     } catch (err) {
-      this.logger.error(
-        `processQueuedInboundBurst falló job=${job.id} conversation=${conversationId}`,
-        err instanceof Error ? err.stack : String(err),
-      );
+      pegLogger.error('INBOUND', {
+        message: `processQueuedInboundBurst falló job=${job.id}`,
+        conversationId,
+        err,
+      });
       throw err;
     }
 
@@ -64,9 +67,11 @@ export class IncomingMessageWorker extends WorkerHost {
         channel,
       );
     } catch (err) {
-      this.logger.warn(
-        `rescheduleIfBufferPending falló conversation=${conversationId}: ${String(err)}`,
-      );
+      pegLogger.warn('INBOUND', {
+        status: 'reschedule_failed',
+        conversationId,
+        message: String(err),
+      });
     }
   }
 }

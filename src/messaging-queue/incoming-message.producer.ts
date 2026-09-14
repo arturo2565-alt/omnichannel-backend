@@ -11,6 +11,7 @@ import {
   type IncomingMessageChannel,
   type IncomingMessageJobData,
 } from './incoming-message.constants';
+import { pegLogger } from '../observability/pegazuz-logger';
 
 @Injectable()
 export class IncomingMessageProducer {
@@ -45,9 +46,12 @@ export class IncomingMessageProducer {
     await this.redis.expire(key, 30 * 60);
 
     const job = await this.scheduleDebouncedJob(tid, cid, channel);
-    this.logger.log(
-      `buffered+scheduled job=${job?.id ?? cid} channel=${channel} kind=${item.kind} taller=${tid} conversation=${cid}`,
-    );
+    pegLogger.debug('INBOUND', {
+      status: 'buffered',
+      job: job?.id ?? cid,
+      channel,
+      kind: item.kind,
+    });
     return job;
   }
 
@@ -96,7 +100,10 @@ export class IncomingMessageProducer {
       const state = await job.getState();
       if (state === 'delayed' || state === 'waiting') {
         await job.remove();
-        this.logger.log(`debounce cancelado (sin fotos) conversation=${cid}`);
+        pegLogger.debug('INBOUND', {
+          status: 'debounce_cancelled',
+          conversation: cid,
+        });
       }
     } catch (err) {
       this.logger.warn(
@@ -190,9 +197,11 @@ export class IncomingMessageProducer {
         if (state === 'delayed' || state === 'waiting') {
           await existing.changeDelay(INCOMING_MESSAGE_DEBOUNCE_MS);
           await existing.updateData(data);
-          this.logger.log(
-            `debounce reset job=${conversationId} delay=${INCOMING_MESSAGE_DEBOUNCE_MS}ms`,
-          );
+          pegLogger.debug('INBOUND', {
+            status: 'debounce_reset',
+            job: conversationId,
+            delay: `${INCOMING_MESSAGE_DEBOUNCE_MS}ms`,
+          });
           return existing;
         }
         if (state === 'active') {

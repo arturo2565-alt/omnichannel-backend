@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import {
@@ -8,11 +8,12 @@ import {
   type OutgoingMessageChannel,
   type OutgoingMessageJobData,
 } from './outgoing-message.constants';
+import { pegLogger } from '../observability/pegazuz-logger';
+import { getPegazuzContext } from '../observability/pegazuz-context';
+import { markOutboundEnqueued } from '../observability/turn-log';
 
 @Injectable()
 export class OutgoingMessageProducer {
-  private readonly logger = new Logger(OutgoingMessageProducer.name);
-
   constructor(
     @InjectQueue(OUTGOING_MESSAGES_QUEUE)
     private readonly outgoingQueue: Queue<OutgoingMessageJobData>,
@@ -43,6 +44,7 @@ export class OutgoingMessageProducer {
       conversationId: cid,
       channel: ch,
       metaPayload,
+      pegTurnId: getPegazuzContext()?.turnId,
     };
 
     const job = await this.outgoingQueue.add('outbound', data, {
@@ -55,9 +57,13 @@ export class OutgoingMessageProducer {
       removeOnFail: false,
     });
 
-    this.logger.log(
-      `enqueued job=${job.id} channel=${ch} taller=${tid} conversation=${cid}`,
-    );
+    pegLogger.debug('OUTBOUND', {
+      status: 'enqueued',
+      job: job.id,
+      channel: ch,
+      conversation: cid,
+    });
+    markOutboundEnqueued();
     return job;
   }
 }

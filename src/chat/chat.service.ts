@@ -183,6 +183,16 @@ import {
   tracePendingQuoteLifecycle,
   traceVisionInput,
 } from './canonical-trace';
+import { createTurnId } from '../observability/pegazuz-context';
+import { pegLogger } from '../observability/pegazuz-logger';
+import { emitTurnComplete } from '../observability/turn-log';
+import {
+  logInboundReceived,
+  logWebhookDuplicate,
+  logWebhookEchoIgnored,
+  logWebhookPayloadTrace,
+  logWebhookReceipt,
+} from '../observability/webhook-log';
 import {
   applyComposedNarrativeToDraft,
   composeModernClientQuoteMessage,
@@ -1749,9 +1759,11 @@ export class ChatService implements OnModuleDestroy {
     lastMessageId?: string;
   }> {
     if (isMetaPageWebhook(body)) {
+      logWebhookPayloadTrace('messenger', body);
       return this.processMetaMessengerWebhook(body);
     }
     if (isMetaWhatsAppWebhook(body)) {
+      logWebhookPayloadTrace('whatsapp', body);
       return this.processMetaWhatsAppWebhook(body);
     }
     if (body && typeof body === 'object' && Array.isArray((body as any).entry)) {
@@ -1890,10 +1902,7 @@ export class ChatService implements OnModuleDestroy {
           if (postbackMid) {
             const dup = await this.findMessageByMetaMid(postbackMid);
             if (dup) {
-              console.log(
-                '[Meta webhook] mid/postback duplicado, omitido:',
-                postbackMid,
-              );
+              logWebhookDuplicate('postback', postbackMid);
               continue;
             }
           }
@@ -1913,14 +1922,12 @@ export class ChatService implements OnModuleDestroy {
             ...(postbackMid ? { metaMessageId: postbackMid } : {}),
             ...(contactHint ? { contactName: contactHint } : {}),
           });
-          console.log(
-            '[Meta webhook] postback inbound | PSID hilo:',
-            threadPsid,
-            '| title:',
-            title || '(sin title)',
-            '| payload:',
-            payload || '(sin payload)',
-          );
+          logInboundReceived({
+            channel: 'messenger',
+            type: 'postback',
+            messageId: postbackMid || saved.id,
+            conversationId: saved.conversationId,
+          });
           lastMessageId = saved.id;
           n++;
           continue;
@@ -2003,10 +2010,7 @@ export class ChatService implements OnModuleDestroy {
           if (metaMid) {
             const dup = await this.findMessageByMetaMid(metaMid);
             if (dup) {
-              console.log(
-                `[Meta webhook] mid duplicado (texto), omitido:`,
-                metaMid,
-              );
+              logWebhookDuplicate('text', metaMid);
               skipText = true;
             }
           }
@@ -2021,10 +2025,7 @@ export class ChatService implements OnModuleDestroy {
                   text,
                 );
               if (panelDup) {
-                console.log(
-                  '[Meta webhook] eco outbound ya guardado por el panel (ventana 5s), omitido | PSID:',
-                  threadPsid,
-                );
+                logWebhookEchoIgnored(metaMid);
                 skipText = true;
               }
             }
@@ -2038,14 +2039,16 @@ export class ChatService implements OnModuleDestroy {
                 : {}),
               ...(metaMid ? { metaMessageId: metaMid } : {}),
             });
-            console.log(
-              `[Meta webhook] texto ${isEcho ? '(eco→outbound)' : '(inbound)'} | PSID hilo:`,
-              threadPsid,
-              '| mid:',
-              metaMid || '(sin mid)',
-              '| message.externalId:',
-              saved.externalId,
-            );
+            if (isEcho) {
+              logWebhookEchoIgnored(metaMid);
+            } else {
+              logInboundReceived({
+                channel: 'messenger',
+                type: 'text',
+                messageId: metaMid || saved.id,
+                conversationId: saved.conversationId,
+              });
+            }
             lastMessageId = saved.id;
             n++;
           }
@@ -2056,10 +2059,7 @@ export class ChatService implements OnModuleDestroy {
           if (imageMid) {
             const dupImg = await this.findMessageByMetaMid(imageMid);
             if (dupImg) {
-              console.log(
-                `[Meta webhook] mid duplicado (imagen), omitido:`,
-                imageMid,
-              );
+              logWebhookDuplicate('image', imageMid);
               continue;
             }
           }
@@ -2074,10 +2074,7 @@ export class ChatService implements OnModuleDestroy {
                   url,
                 );
               if (panelImgDup) {
-                console.log(
-                  '[Meta webhook] eco imagen outbound ya en panel (ventana 5s), omitido | PSID:',
-                  threadPsid,
-                );
+                logWebhookEchoIgnored(imageMid);
                 continue;
               }
             }
@@ -2087,14 +2084,17 @@ export class ChatService implements OnModuleDestroy {
             message: url,
             ...(imageMid ? { metaMessageId: imageMid } : {}),
           });
-          console.log(
-            `[Meta webhook] imagen ${isEcho ? '(eco→outbound)' : '(inbound)'} | PSID hilo:`,
-            threadPsid,
-            '| mid:',
-            imageMid || '(sin mid)',
-            '| message.externalId:',
-            saved.externalId,
-          );
+          if (isEcho) {
+            logWebhookEchoIgnored(imageMid);
+          } else if (imgIdx === 0) {
+            logInboundReceived({
+              channel: 'messenger',
+              type: 'image',
+              count: imageUrls.length,
+              messageId: imageMid || saved.id,
+              conversationId: saved.conversationId,
+            });
+          }
           lastMessageId = saved.id;
           n++;
         }
@@ -2197,16 +2197,7 @@ export class ChatService implements OnModuleDestroy {
 
     const events = extractMetaWhatsAppInboundEvents(body);
     if (!events.length) {
-      console.log(
-        '[Meta WhatsApp webhook] Sin mensajes entrantes (status/plantilla/test aceptado).',
-        {
-          wabaId: meta.wabaId || '(vacío)',
-          displayPhoneNumber: meta.displayPhoneNumber || '',
-          phoneNumberId: meta.phoneNumberId || '',
-          hasStatuses: meta.hasStatuses,
-          hasMessages: meta.hasMessages,
-        },
-      );
+      logWebhookReceipt('status');
       return { processed: 0 };
     }
 
@@ -2256,10 +2247,7 @@ export class ChatService implements OnModuleDestroy {
       if (evt.messageId) {
         const dup = await this.findMessageByMetaMid(evt.messageId);
         if (dup) {
-          console.log(
-            '[Meta WhatsApp webhook] wamid duplicado, omitido:',
-            evt.messageId,
-          );
+          logWebhookDuplicate('wamid', evt.messageId);
           continue;
         }
       }
@@ -2282,16 +2270,12 @@ export class ChatService implements OnModuleDestroy {
               }
             : {}),
         });
-        console.log(
-          '[Meta WhatsApp webhook] texto inbound | wa_id:',
-          evt.threadWaId,
-          '| WABA:',
-          evt.wabaId,
-          '| display:',
-          evt.displayPhoneNumber,
-          '| wamid:',
-          evt.messageId || '(sin id)',
-        );
+        logInboundReceived({
+          channel: 'whatsapp',
+          type: 'text',
+          messageId: evt.messageId || saved.id,
+          conversationId: saved.conversationId,
+        });
         lastMessageId = saved.id;
         n++;
       }
@@ -5856,28 +5840,44 @@ ${catalogAppend}`;
     const conversationId = String(input.conversationId ?? '').trim();
     if (!conversationId) return;
 
-    const images = input.items.filter(
-      (it) => it.kind === 'image' && isIncomingImage(it.content),
-    );
-    if (images.length > 0) {
-      const attachingMessageId =
-        images[images.length - 1]?.messageId || images[0]!.messageId;
-      const burst = images.map((it) => it.content);
-      console.log(
-        `[IncomingBurst] visión conversation=${conversationId} fotos=${burst.length}`,
+    const turnId = createTurnId();
+    const startedAt = Date.now();
+    await runWithCanonicalTraceContext({ conversationId, turnId }, async () => {
+      const images = input.items.filter(
+        (it) => it.kind === 'image' && isIncomingImage(it.content),
       );
-      await this.processConsolidatedInboundImages(
+      logInboundReceived({
+        channel: input.channel || 'unknown',
+        type: images.length > 0 ? 'image' : 'text',
+        count: images.length > 0 ? images.length : undefined,
+        messageId: input.items[0]?.messageId,
         conversationId,
-        attachingMessageId,
-        burst,
-      );
-      return;
-    }
-
-    console.log(
-      `[IncomingBurst] texto conversation=${conversationId} items=${input.items.length}`,
-    );
-    await this.processDebouncedAutopilotTextReply(conversationId);
+      });
+      try {
+        if (images.length > 0) {
+          const attachingMessageId =
+            images[images.length - 1]?.messageId || images[0]!.messageId;
+          const burst = images.map((it) => it.content);
+          await this.processConsolidatedInboundImages(
+            conversationId,
+            attachingMessageId,
+            burst,
+          );
+        } else {
+          await this.processDebouncedAutopilotTextReply(conversationId);
+        }
+      } catch (err) {
+        pegLogger.error('TURN', {
+          message: 'inbound burst failed',
+          conversationId,
+          turnId,
+          err,
+        });
+        throw err;
+      } finally {
+        emitTurnComplete(startedAt);
+      }
+    });
   }
 
   /**
@@ -5915,9 +5915,9 @@ ${catalogAppend}`;
 
     const recentUrls = await this.getRecentImages(conversationId, 45);
     let imageUrls = Array.from(new Set([...fromBurst, ...recentUrls]));
-    console.log(
-      `[VisionPipeline] Total imágenes recolectadas para peritaje: ${imageUrls.length}`,
-    );
+    pegLogger.debug('VISION', {
+      collected: imageUrls.length,
+    });
 
     if (!imageUrls.length) {
       const fallbackMsg = await this.messageRepository.findOne({
@@ -5968,13 +5968,10 @@ ${catalogAppend}`;
 
     if (!visionResult.viability.peritajeViable || newInventory.length === 0) {
       const aclaracion = resolveClienteAclaracion(visionResult.viability);
-      console.log(
-        '[VisionPipeline] Peritaje no viable — sin cotización',
-        JSON.stringify({
-          conversationId,
-          motivo: visionResult.viability.motivoInviable,
-        }),
-      );
+      pegLogger.debug('VISION', {
+        viable: false,
+        motivo: visionResult.viability.motivoInviable,
+      });
       await this.saveMessage({
         direction: 'outbound',
         conversationId,

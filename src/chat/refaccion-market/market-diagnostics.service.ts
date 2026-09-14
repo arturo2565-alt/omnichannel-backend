@@ -3,6 +3,7 @@ import { isMarketTraceEnabled, isMarketTraceVerboseEnabled } from './market-sear
 import { SerperShoppingProvider } from './serper-shopping.provider';
 import { isSerperConfigured } from './serper-config';
 import { MARKET_STRATEGY_VERSION } from './parse-vehicle-part-identity';
+import { pegLogger } from '../../observability/pegazuz-logger';
 
 export const PEG_MARKET_DIAGNOSTIC_PREFIX = '[PEG_MARKET_DIAGNOSTIC]';
 
@@ -21,8 +22,9 @@ export class MarketDiagnosticsService implements OnModuleInit {
   }
 
   onModuleInit(): void {
-    console.log(
-      `${PEG_MARKET_DIAGNOSTIC_PREFIX} MARKET_MODULE_INITIALIZED ${JSON.stringify(this.snapshot())}`,
-    );
+    pegLogger.debug('MARKET', {
+      event: 'MARKET_MODULE_INITIALIZED',
+      ...this.snapshot(),
+    });
   }
 }

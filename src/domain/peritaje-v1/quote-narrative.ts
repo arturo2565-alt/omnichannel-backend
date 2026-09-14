@@ -11,6 +11,7 @@ import {
 import { isChargeableQuoteLine } from './quote-engine';
 import { refaccionIdentityGaps } from './pending-quote-requirement';
 import { QUOTE_SCHEMA_VERSION } from './types';
+import { pegLogger } from '../../observability/pegazuz-logger';
 import type {
   CanonicalPeritajeV1,
   CanonicalQuoteV1,
@@ -857,14 +858,11 @@ export function logNarrativeEvents(
   events: readonly NarrativeObservabilityEvent[],
 ): void {
   for (const ev of events) {
-    console.log(
-      '[QuoteNarrative]',
-      JSON.stringify({
-        event: ev.event,
-        quoteId: ev.quoteId,
-        detail: ev.detail,
-      }),
-    );
+    pegLogger.debug('NARRATIVE', {
+      event: ev.event,
+      quoteId: ev.quoteId,
+      detail: ev.detail,
+    });
   }
 }
 

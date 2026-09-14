@@ -1,6 +1,10 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import { createHash } from 'crypto';
 import { applySentryAlsTags } from '../sentry/sentry-als';
+import { isLlmCacheDebugEnabled } from '../observability/pegazuz-log-level';
+import { pegLogger } from '../observability/pegazuz-logger';
+
+export { isLlmCacheDebugEnabled } from '../observability/pegazuz-log-level';
 
 export type LlmAuditContext = {
   tallerId?: string | null;
@@ -43,12 +47,6 @@ type LlmUsageReporter = (input: LlmUsageReportInput) => void;
 
 const llmAuditAls = new AsyncLocalStorage<LlmAuditContext>();
 let reporter: LlmUsageReporter | null = null;
-
-/** Activo por defecto; `LLM_CACHE_DEBUG=false` lo apaga. */
-export function isLlmCacheDebugEnabled(): boolean {
-  const raw = String(process.env.LLM_CACHE_DEBUG ?? 'true').trim().toLowerCase();
-  return raw !== '0' && raw !== 'false' && raw !== 'off';
-}
 
 export function registerLlmUsageReporter(fn: LlmUsageReporter | null): void {
   reporter = fn;
@@ -115,8 +113,21 @@ export async function runWithLlmAuditContextAsync<T>(
 
 /** Fire-and-forget hacia el reporter Nest (si está registrado). */
 export function reportLlmUsage(input: LlmUsageReportInput): void {
-  if (!reporter) return;
   const ctx = llmAuditAls.getStore();
+  const promptTokens = input.promptTokens ?? 0;
+  const cachedTokens = input.cachedTokens ?? 0;
+  const cachePct =
+    promptTokens > 0 ? Math.round((cachedTokens / promptTokens) * 100) : 0;
+  pegLogger.info('LLM', {
+    source: input.purpose || ctx?.purpose || 'unknown',
+    model: input.model,
+    input: promptTokens,
+    cached: cachedTokens,
+    output: input.completionTokens ?? 0,
+    cachePct,
+    latency: `${input.durationMs ?? 0}ms`,
+  });
+  if (!reporter) return;
   try {
     reporter({
       provider: input.provider ?? ctx?.provider ?? 'openai',
@@ -180,30 +191,12 @@ function logUsageAudit(
   extracted: ExtractedLlmUsage,
 ): void {
   if (!isLlmCacheDebugEnabled()) return;
-  console.log(
-    '[LlmCacheDebug] usage raw',
-    JSON.stringify(
-      {
-        api,
-        usage: usage ?? null,
-        extracted,
-        pathsTried:
-          api === 'chat_completions'
-            ? [
-                'usage.prompt_tokens_details.cached_tokens',
-                'usage.input_tokens_details.cached_tokens',
-                'usage.cached_tokens',
-              ]
-            : [
-                'usage.input_tokens_details.cached_tokens',
-                'usage.prompt_tokens_details.cached_tokens',
-                'usage.cached_tokens',
-              ],
-      },
-      null,
-      2,
-    ),
-  );
+  pegLogger.debug('LLM', {
+    event: 'usage_raw',
+    api,
+    extracted,
+  });
+  pegLogger.trace('LLM', { event: 'usage_raw', api, usage, extracted });
 }
 
 /** Fingerprint del prefijo estable para comparar llamadas consecutivas. */
@@ -216,21 +209,19 @@ export function logStablePromptPrefixAudit(
   const head = text.slice(0, 300);
   const hash = createHash('sha256').update(text).digest('hex').slice(0, 16);
   const leadingWs = text.match(/^\s*/)?.[0] ?? '';
-  console.log(
-    '[LlmCacheDebug] stable prefix',
-    JSON.stringify(
-      {
-        source,
-        charLength: text.length,
-        sha256_16: hash,
-        leadingWhitespaceCodes: [...leadingWs].map((ch) => ch.charCodeAt(0)),
-        first300: head,
-        startsWithDynamicMarker: text.includes('[CONTEXTO_DINAMICO_SERVIDOR]'),
-      },
-      null,
-      2,
-    ),
-  );
+  pegLogger.debug('LLM', {
+    event: 'stable_prefix',
+    source,
+    charLength: text.length,
+    sha256_16: hash,
+  });
+  pegLogger.trace('LLM', {
+    event: 'stable_prefix',
+    source,
+    first300: head,
+    leadingWhitespaceCodes: [...leadingWs].map((ch) => ch.charCodeAt(0)),
+    startsWithDynamicMarker: text.includes('[CONTEXTO_DINAMICO_SERVIDOR]'),
+  });
 }
 
 export function extractChatCompletionUsage(usage: unknown): ExtractedLlmUsage {
