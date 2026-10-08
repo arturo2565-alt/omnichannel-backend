@@ -1,5 +1,10 @@
 import {
   buildCanonicalQuoteV1,
+  CANONICAL_BLOCKED_MARKER,
+  isCanonicalBlockedState,
+  noteCanonicalBlockedOnPayload,
+  readFinanceAuthorization,
+  releaseCanonicalReconstruction,
   projectCanonicalQuoteOntoDraft,
   resolveAuthoritativeDraftFinance,
 } from './canonical-quote-engine';
@@ -565,17 +570,139 @@ describe('Fase 5 — Canonical Quote Engine', () => {
         vehiculoDetectado: 'Mazda 3 2020',
       }),
     ];
+    const prior = {
+      ...emptyDraft(),
+      total: 100,
+      subtotal: 100,
+      formalNarrative: 'Inversión Total Estimada: $100 MXN',
+      clientMessage: 'Inversión Total Estimada: $100 MXN',
+    };
     const finance = resolveAuthoritativeDraftFinance({
       peritaje: peritajeFrom(inv),
       pricedInventory: inv,
       snap: pricing,
-      priorDraft: { ...emptyDraft(), total: 100 },
+      priorDraft: prior,
       legacyDraft: { ...emptyDraft(), total: 999999, subtotal: 999999 },
       legacyEstimate: 999999,
     });
     expect(finance.mode).toBe('canonical_blocked');
-    expect(finance.estimateAmount).toBe(100);
-    expect(finance.estimateAmount).not.toBe(999999);
+    if (finance.mode !== 'canonical_blocked') return;
+    expect(finance.estimateAmount).toBe(0);
+    expect(finance.draft.total).toBe(0);
+    expect(finance.draft.subtotal).toBe(0);
+    expect(finance.draft.shownWarnings).toEqual([CANONICAL_BLOCKED_MARKER]);
+    expect(finance.draft.canonicalReconstruction).toBe('blocked');
+    expect(finance.draft.clientMessage).toBe('');
+    expect(finance.draft.formalNarrative).toBe('');
+    expect(finance.draft.renderedFinancialBlock).toBe('');
+    expect(isCanonicalBlockedState(finance.draft)).toBe(true);
+    expect(
+      isCanonicalBlockedState({ ...emptyDraft(), total: 0, shownWarnings: [] }),
+    ).toBe(false);
+    expect(prior.total).toBe(100);
+    expect(prior.formalNarrative).toContain('$100');
+    expect(Object.prototype.hasOwnProperty.call(finance, 'quote')).toBe(false);
+  });
+
+  it('20. cotización válida, reconstrucción fallida y reconstrucción posterior exitosa', () => {
+    const valid = [
+      item({
+        pieza: 'FD',
+        tratamiento: 'REPARAR',
+        treatmentSource: 'vision',
+        vehiculoDetectado: 'Mazda 3 2020',
+      }),
+    ];
+    const first = resolveAuthoritativeDraftFinance({
+      peritaje: peritajeFrom(valid),
+      pricedInventory: valid,
+      snap: pricing,
+      priorDraft: emptyDraft(),
+      legacyDraft: { ...emptyDraft(), total: 1, subtotal: 1 },
+      legacyEstimate: 1,
+    });
+    expect(first.mode).toBe('canonical');
+    if (first.mode !== 'canonical') return;
+    const historical = first.quote;
+    const historicalTotal = historical.total;
+    const historicalLine = historical.lines[0]!;
+    const prior = {
+      ...projectCanonicalQuoteOntoDraft(emptyDraft(), historical, pricing, first.rows),
+      formalNarrative: `Total histórico $${historicalTotal} MXN`,
+      clientMessage: `Total histórico $${historicalTotal} MXN`,
+      quoteFlowMode: 'CANONICAL' as const,
+    };
+    const priorLineSubtotal = prior.lines[0]?.subtotal;
+
+    const invalid = [
+      item({
+        pieza: 'REFACCION',
+        tratamiento: 'REPARAR',
+        treatmentSource: 'vision',
+        vehiculoDetectado: 'Mazda 3 2020',
+      }),
+    ];
+    const failed = resolveAuthoritativeDraftFinance({
+      peritaje: peritajeFrom(invalid),
+      pricedInventory: invalid,
+      snap: pricing,
+      priorDraft: prior,
+      legacyDraft: {
+        ...emptyDraft(),
+        total: 999999,
+        subtotal: 999999,
+        formalNarrative: 'Inversión Total Estimada: $999,999 MXN',
+      },
+      legacyEstimate: 999999,
+      existingQuote: historical,
+    });
+    expect(failed.mode).toBe('canonical_blocked');
+    if (failed.mode !== 'canonical_blocked') return;
+    expect(failed.estimateAmount).toBe(0);
+    expect(failed.draft.total).toBe(0);
+    expect(failed.draft.clientMessage).toBe('');
+    expect(failed.draft.formalNarrative).toBe('');
+    expect(isCanonicalBlockedState(failed.draft)).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(failed, 'quote')).toBe(false);
+    expect(failed.historicalQuote).toBe(historical);
+    expect(historical.total).toBe(historicalTotal);
+    expect(historical.lines[0]?.quoteLineId).toBe(historicalLine.quoteLineId);
+    expect(historical.lines[0]?.damageItemId).toBe(historicalLine.damageItemId);
+    expect(historical.lines[0]?.amount).toBe(historicalLine.amount);
+    expect(prior.total).toBe(historicalTotal);
+    expect(prior.clientMessage).toContain(String(historicalTotal));
+    expect(prior.lines).toHaveLength(failed.draft.lines.length);
+    expect(failed.draft.lines[0]?.quoteLineId).toBe(prior.lines[0]?.quoteLineId);
+    expect(failed.draft.lines[0]?.damageItemId).toBe(prior.lines[0]?.damageItemId);
+    expect(prior.lines[0]?.subtotal).toBe(priorLineSubtotal);
+    expect(failed.draft.lines[0]?.subtotal).toBe(0);
+
+    const preserved = noteCanonicalBlockedOnPayload(prior);
+    expect(preserved.total).toBe(historicalTotal);
+    expect(preserved.clientMessage).toBe(prior.clientMessage);
+    expect(preserved.lines).toBe(prior.lines);
+    expect(isCanonicalBlockedState(preserved)).toBe(true);
+    expect(preserved.canonicalReconstruction).toBe('blocked');
+    expect(prior.shownWarnings ?? []).not.toContain(CANONICAL_BLOCKED_MARKER);
+    expect(prior.canonicalReconstruction).toBeUndefined();
+
+    const again = resolveAuthoritativeDraftFinance({
+      peritaje: peritajeFrom(valid),
+      pricedInventory: valid,
+      snap: pricing,
+      priorDraft: preserved,
+      legacyDraft: { ...emptyDraft(), total: 1, subtotal: 1 },
+      legacyEstimate: 1,
+      existingQuote: historical,
+    });
+    expect(again.mode).toBe('canonical');
+    if (again.mode !== 'canonical') return;
+    expect(again.estimateAmount).toBe(historicalTotal);
+    expect(again.quote.lines[0]?.amount).toBe(historicalLine.amount);
+    expect(again.quote.lines[0]?.quoteLineId).toBe(historicalLine.quoteLineId);
+    expect(again.quote.lines[0]?.damageItemId).toBe(historicalLine.damageItemId);
+    expect(again.draft.total).toBe(historicalTotal);
+    expect(isCanonicalBlockedState(again.draft)).toBe(false);
   });
 
   it('18. BPE usa el resolver integral de su propio catálogo (sin fórmula BPEI/BPCC)', () => {
@@ -643,5 +770,153 @@ describe('Fase 5 — Canonical Quote Engine', () => {
     expect(built.quote.lines[0]?.billable).toBe(false);
     expect(built.quote.total).toBe(0);
     expect(built.quote.isPartial).toBe(true);
+    const partial = resolveAuthoritativeDraftFinance({
+      peritaje: peritajeFrom(inv),
+      pricedInventory: inv,
+      snap: pricing,
+      vehicleProfile: profile,
+      priorDraft: emptyDraft(),
+      legacyDraft: emptyDraft(),
+      legacyEstimate: 0,
+    });
+    expect(partial.mode).toBe('canonical');
+    if (partial.mode !== 'canonical') return;
+    expect(isCanonicalBlockedState(partial.draft)).toBe(false);
+    expect(partial.quote.isPartial).toBe(true);
+  });
+});
+
+describe('estado financiero de reconstrucción canónica', () => {
+  const pricing = snap({ Fascia: 4500 });
+
+  it('ausente, válido, bloqueado por campo, bloqueado por marcador e ilegible', () => {
+    expect(readFinanceAuthorization(null)).toBe('allowed');
+    expect(readFinanceAuthorization(undefined)).toBe('allowed');
+    expect(isCanonicalBlockedState(null)).toBe(false);
+    expect(isCanonicalBlockedState(emptyDraft())).toBe(false);
+
+    const valid = {
+      ...emptyDraft(),
+      quoteFlowMode: 'CANONICAL' as const,
+      total: 4500,
+    };
+    expect(readFinanceAuthorization(valid)).toBe('allowed');
+    expect(isCanonicalBlockedState(valid)).toBe(false);
+
+    const legacy = { ...emptyDraft(), quoteFlowMode: 'LEGACY' as const, total: 1800 };
+    expect(readFinanceAuthorization(legacy)).toBe('allowed');
+
+    const byField = {
+      ...emptyDraft(),
+      canonicalReconstruction: 'blocked' as const,
+    };
+    expect(isCanonicalBlockedState(byField)).toBe(true);
+    expect(readFinanceAuthorization(byField)).toBe('blocked');
+
+    const byMarker = {
+      ...emptyDraft(),
+      shownWarnings: [CANONICAL_BLOCKED_MARKER],
+    };
+    expect(isCanonicalBlockedState(byMarker)).toBe(true);
+    expect(readFinanceAuthorization(byMarker)).toBe('blocked');
+
+    expect(readFinanceAuthorization('blocked')).toBe('unreadable');
+    expect(readFinanceAuthorization(['CANONICAL_BLOCKED'])).toBe('unreadable');
+    const exploding = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('payload ilegible');
+        },
+      },
+    );
+    expect(readFinanceAuthorization(exploding)).toBe('unreadable');
+  });
+
+  it('no libera el bloqueo si la cotización no es válida y no muta el origen', () => {
+    const blocked = noteCanonicalBlockedOnPayload({
+      ...emptyDraft(),
+      clientMessage: 'Total histórico $4500',
+      total: 4500,
+    });
+    const invalid = {
+      schemaVersion: 'quote.v1',
+      lines: [],
+      subtotal: 10,
+      total: 99,
+      isPartial: false,
+    } as unknown as Parameters<typeof releaseCanonicalReconstruction>[1];
+    expect(releaseCanonicalReconstruction(blocked, invalid)).toBeNull();
+    expect(blocked.canonicalReconstruction).toBe('blocked');
+    expect(blocked.clientMessage).toContain('4500');
+
+    const built = buildCanonicalQuoteV1({
+      peritaje: peritajeFrom([
+        item({
+          pieza: 'FD',
+          tratamiento: 'REPARAR',
+          treatmentSource: 'vision',
+          vehiculoDetectado: 'Mazda 3 2020',
+        }),
+      ]),
+      pricedInventory: [
+        item({
+          pieza: 'FD',
+          tratamiento: 'REPARAR',
+          treatmentSource: 'vision',
+          vehiculoDetectado: 'Mazda 3 2020',
+        }),
+      ],
+      snap: pricing,
+    });
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    const released = releaseCanonicalReconstruction(blocked, built.quote);
+    expect(released).not.toBeNull();
+    expect(released?.canonicalReconstruction).toBeUndefined();
+    expect(released?.shownWarnings ?? []).not.toContain(CANONICAL_BLOCKED_MARKER);
+    expect(blocked.canonicalReconstruction).toBe('blocked');
+    expect(noteCanonicalBlockedOnPayload(blocked)).toBe(blocked);
+  });
+
+  it('conservar la cotización histórica no levanta un bloqueo activo', () => {
+    const historical = buildCanonicalQuoteV1({
+      peritaje: peritajeFrom([
+        item({
+          pieza: 'FD',
+          tratamiento: 'REPARAR',
+          treatmentSource: 'vision',
+          vehiculoDetectado: 'Mazda 3 2020',
+        }),
+      ]),
+      pricedInventory: [
+        item({
+          pieza: 'FD',
+          tratamiento: 'REPARAR',
+          treatmentSource: 'vision',
+          vehiculoDetectado: 'Mazda 3 2020',
+        }),
+      ],
+      snap: pricing,
+    });
+    expect(historical.ok).toBe(true);
+    if (!historical.ok) return;
+    const prior = noteCanonicalBlockedOnPayload({
+      ...emptyDraft(),
+      quoteFlowMode: 'CANONICAL',
+      total: historical.quote.total,
+    });
+    const kept = resolveAuthoritativeDraftFinance({
+      pricedInventory: [],
+      snap: pricing,
+      priorDraft: prior,
+      legacyDraft: emptyDraft(),
+      legacyEstimate: 0,
+      existingQuote: historical.quote,
+    });
+    expect(kept.mode).toBe('canonical_blocked');
+    if (kept.mode !== 'canonical_blocked') return;
+    expect(kept.historicalQuote).toBe(historical.quote);
+    expect(Object.prototype.hasOwnProperty.call(kept, 'quote')).toBe(false);
   });
 });

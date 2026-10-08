@@ -20,6 +20,7 @@ import {
 } from '../domain/peritaje-v1/quote-engine';
 import {
   createQuoteLineId,
+  QUOTE_SCHEMA_VERSION,
   type CanonicalPeritajeV1,
   type CanonicalQuoteV1,
   type DamageItem,
@@ -508,6 +509,109 @@ export function logCanonicalBuildFailed(ctx: {
   );
 }
 
+/** Identifica total 0 de compatibilidad como bloqueo, no como cotización gratuita. */
+export const CANONICAL_BLOCKED_MARKER = 'CANONICAL_BLOCKED';
+
+export type CommercialAuthorization = 'allowed' | 'blocked' | 'unreadable';
+
+export function isCanonicalBlockedState(
+  draft?: {
+    shownWarnings?: readonly string[] | null;
+    canonicalReconstruction?: string | null;
+  } | null,
+): boolean {
+  if (!draft || typeof draft !== 'object') return false;
+  if (draft.canonicalReconstruction === 'blocked') return true;
+  const warnings = draft.shownWarnings;
+  return Array.isArray(warnings) && warnings.includes(CANONICAL_BLOCKED_MARKER);
+}
+
+/**
+ * Autorización comercial. Un payload ausente no es bloqueo.
+ * Un payload ilegible no autoriza.
+ */
+export function readFinanceAuthorization(
+  payload: unknown,
+): CommercialAuthorization {
+  if (payload == null) return 'allowed';
+  if (typeof payload !== 'object' || Array.isArray(payload)) return 'unreadable';
+  try {
+    return isCanonicalBlockedState(payload as DraftQuote) ? 'blocked' : 'allowed';
+  } catch {
+    return 'unreadable';
+  }
+}
+
+/**
+ * Quita el bloqueo solo si la cotización nueva es financieramente válida.
+ * No muta el borrador de origen: la limpieza ocurre al persistir la copia.
+ */
+export function releaseCanonicalReconstruction(
+  draft: DraftQuote,
+  quote: CanonicalQuoteV1 | null | undefined,
+): DraftQuote | null {
+  if (!quote || quote.schemaVersion !== QUOTE_SCHEMA_VERSION) return null;
+  if (!Array.isArray(quote.lines)) return null;
+  if (validateCanonicalQuoteFinancial(quote).length > 0) return null;
+  const next: DraftQuote = {
+    ...draft,
+    shownWarnings: (draft.shownWarnings ?? []).filter(
+      (warning) => warning !== CANONICAL_BLOCKED_MARKER,
+    ),
+  };
+  delete next.canonicalReconstruction;
+  return next;
+}
+
+/**
+ * Marca el payload sin tocar líneas, totales, evidencia ni el texto histórico.
+ * La cotización anterior sigue en el carrito y no autoriza esta operación.
+ */
+export function noteCanonicalBlockedOnPayload(payload: DraftQuote): DraftQuote {
+  const warnings = payload.shownWarnings ?? [];
+  const hasMarker = warnings.includes(CANONICAL_BLOCKED_MARKER);
+  if (hasMarker && payload.canonicalReconstruction === 'blocked') return payload;
+  return {
+    ...payload,
+    canonicalReconstruction: 'blocked',
+    shownWarnings: hasMarker ? warnings : [...warnings, CANONICAL_BLOCKED_MARKER],
+  };
+}
+
+function sealBlockedDraft(prior: DraftQuote): DraftQuote {
+  return {
+    ...prior,
+    lines: prior.lines.map((line) => ({
+      ...line,
+      unitPrice: 0,
+      subtotal: 0,
+    })),
+    subtotal: 0,
+    total: 0,
+    pricingIncomplete: true,
+    quoteFlowMode: QUOTE_FLOW_MODE.CANONICAL,
+    formalNarrative: '',
+    generatedMessage: '',
+    clientMessage: '',
+    renderedFinancialBlock: '',
+    narrativeFlow: undefined,
+    canonicalReconstruction: 'blocked',
+    shownWarnings: [CANONICAL_BLOCKED_MARKER],
+  };
+}
+
+function blockedFinance(
+  prior: DraftQuote,
+  historicalQuote: CanonicalQuoteV1 | null,
+): AuthoritativeFinance {
+  return {
+    mode: 'canonical_blocked',
+    draft: sealBlockedDraft(prior),
+    estimateAmount: 0,
+    historicalQuote,
+  };
+}
+
 export type AuthoritativeFinance =
   | {
       mode: 'canonical';
@@ -519,7 +623,10 @@ export type AuthoritativeFinance =
   | {
       mode: 'canonical_blocked';
       draft: DraftQuote;
+      /** Cero de compatibilidad. No es un importe aprobado. */
       estimateAmount: number;
+      /** Referencia intacta. No es la cotización de esta operación. */
+      historicalQuote: CanonicalQuoteV1 | null;
     }
   | {
       mode: 'legacy';
@@ -630,31 +737,11 @@ export function resolveAuthoritativeDraftFinance(input: {
     });
 
     if (!built.ok) {
-      if (input.existingQuote && flow.mode === QUOTE_FLOW_MODE.CANONICAL) {
-        logFlowEvent(FLOW_EVENTS.MODERN_FLOW_LEGACY_DOWNGRADE, {
-          conversationId: input.conversationId,
-          blocked: true,
-          reason: 'build_failed_keep_prior',
-        });
-        return finishCanonical(input.existingQuote, [
-          ...(input.pricedRows ?? []),
-        ]);
-      }
       logCanonicalBuildFailed({
         conversationId: input.conversationId,
         codes: built.violations.map((v) => v.code),
       });
-      return {
-        mode: 'canonical_blocked',
-        draft: stampDraft({
-          ...input.priorDraft,
-          pricingIncomplete: true,
-        }),
-        estimateAmount: Math.max(
-          0,
-          Math.round(Number(input.priorDraft.total) || 0),
-        ),
-      };
+      return blockedFinance(input.priorDraft, input.existingQuote ?? null);
     }
 
     const diffs = compareCanonicalVsLegacyFinance({
@@ -691,6 +778,9 @@ export function resolveAuthoritativeDraftFinance(input: {
   }
 
   if (input.existingQuote) {
+    if (isCanonicalBlockedState(input.priorDraft)) {
+      return blockedFinance(input.priorDraft, input.existingQuote);
+    }
     logFlowEvent(FLOW_EVENTS.MODERN_FLOW_LEGACY_DOWNGRADE, {
       conversationId: input.conversationId,
       blocked: true,
@@ -703,14 +793,7 @@ export function resolveAuthoritativeDraftFinance(input: {
     conversationId: input.conversationId,
     reason: flow.reason,
   });
-  return {
-    mode: 'canonical_blocked',
-    draft: stampDraft({
-      ...input.priorDraft,
-      pricingIncomplete: true,
-    }),
-    estimateAmount: Math.max(0, Math.round(Number(input.priorDraft.total) || 0)),
-  };
+  return blockedFinance(input.priorDraft, null);
 }
 
 export { canAttemptCanonicalFinancialFlow, isCanonicalFinancialAuthority };

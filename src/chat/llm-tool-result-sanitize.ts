@@ -72,6 +72,8 @@ const KEEP_KEYS = new Set([
   'quotealreadysent',
   'resumed',
   'pendingresolved',
+  'canonicalblocked',
+  'financecommunication',
 ]);
 
 function normKey(key: string): string {
@@ -135,6 +137,26 @@ export function sanitizeToolResultForLlm(
   internal: Record<string, unknown>,
   opts?: { toolName?: string },
 ): Record<string, unknown> {
+  if (internal.canonicalBlocked === true) {
+    return {
+      success: false,
+      canonicalBlocked: true,
+      quoteUpdated: false,
+      requiresCanonicalComposition: false,
+      financeCommunication: 'blocked',
+      quoteFlowMode: internal.quoteFlowMode ?? 'CANONICAL',
+      quoteMode: internal.quoteMode ?? internal.quoteFlowMode ?? 'CANONICAL',
+      ...(typeof internal.draftQuoteId === 'string'
+        ? { draftQuoteId: internal.draftQuoteId }
+        : {}),
+      ...(typeof internal.error === 'string' && internal.error.trim()
+        ? { error: internal.error }
+        : {}),
+      instruccionParaModelo:
+        'La reconstrucción canónica está bloqueada. No hay cotización confirmada. No menciones importes, totales ni precios.',
+    };
+  }
+
   const toolName = opts?.toolName ?? '';
   if (!isCanonicalToolContext(toolName, internal)) {
     return { ...internal };

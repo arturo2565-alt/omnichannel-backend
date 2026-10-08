@@ -50,7 +50,13 @@ import { ChatGateway } from './chat.gateway';
 import { commitVisionShadowToDraft } from './canonical-shadow-write';
 import {
   buildCanonicalFreeze,
+  CANONICAL_BLOCKED_MARKER,
+  isCanonicalBlockedState,
+  noteCanonicalBlockedOnPayload,
+  readFinanceAuthorization,
+  releaseCanonicalReconstruction,
   resolveAuthoritativeDraftFinance,
+  type CommercialAuthorization,
 } from './canonical-quote-engine';
 import {
   commercialBundleFromExpress,
@@ -117,6 +123,65 @@ function resolveStoredPiezaFromExpressLine(
 
 const ACTIVE_CART_STATUS = 'PENDING_APPROVAL';
 const APPROVED_CART_STATUS = 'APPROVED';
+
+type CartFinanceSnapshot = {
+  messageId: string | null;
+  imageUrl: string;
+  damageAnalysis: DraftQuoteEntity['damageAnalysis'];
+  estimateAmount: number;
+  quotePayload: DraftQuoteEntity['quotePayload'];
+  canonicalQuoteV1: DraftQuoteEntity['canonicalQuoteV1'];
+  canonicalPeritajeV1: DraftQuoteEntity['canonicalPeritajeV1'];
+  status: DraftQuoteEntity['status'];
+  tallerId: string | null;
+};
+
+function captureCartFinance(row: DraftQuoteEntity): CartFinanceSnapshot {
+  return {
+    messageId: row.messageId,
+    imageUrl: row.imageUrl,
+    damageAnalysis: row.damageAnalysis,
+    estimateAmount: row.estimateAmount,
+    quotePayload: row.quotePayload,
+    canonicalQuoteV1: row.canonicalQuoteV1,
+    canonicalPeritajeV1: row.canonicalPeritajeV1,
+    status: row.status,
+    tallerId: row.tallerId,
+  };
+}
+
+function restoreCartFinance(
+  row: DraftQuoteEntity,
+  snap: CartFinanceSnapshot,
+): void {
+  row.messageId = snap.messageId;
+  row.imageUrl = snap.imageUrl;
+  row.damageAnalysis = snap.damageAnalysis;
+  row.estimateAmount = snap.estimateAmount;
+  row.quotePayload = snap.quotePayload;
+  row.canonicalQuoteV1 = snap.canonicalQuoteV1;
+  row.canonicalPeritajeV1 = snap.canonicalPeritajeV1;
+  row.status = snap.status;
+  row.tallerId = snap.tallerId;
+}
+
+function authorizePersistedCanonicalDraft(
+  draft: DraftQuote,
+  quote: CanonicalQuoteV1 | null | undefined,
+): { draft: DraftQuote; authorizedTotal: number | null } {
+  if (!quote) {
+    if (isCanonicalBlockedState(draft)) {
+      throw new Error('CANONICAL_RECONSTRUCTION_NOT_ELIGIBLE');
+    }
+    return { draft, authorizedTotal: null };
+  }
+  const released = releaseCanonicalReconstruction(draft, quote);
+  if (released) return { draft: released, authorizedTotal: quote.total };
+  if (isCanonicalBlockedState(draft)) {
+    throw new Error('CANONICAL_RECONSTRUCTION_NOT_ELIGIBLE');
+  }
+  return { draft, authorizedTotal: null };
+}
 
 function emptyPayloadFallback(): DraftQuote {
   return {
@@ -263,14 +328,39 @@ export class QuoteCartService {
     });
   }
 
+  /**
+   * allowed: no hay carrito, o el payload no está bloqueado.
+   * unreadable: el repositorio falló y no se puede comprobar el estado.
+   */
+  async readCommercialAuthorization(
+    conversationId: string,
+    tallerId?: string | null,
+  ): Promise<CommercialAuthorization> {
+    try {
+      const cart = await this.resolveActiveCart(conversationId, tallerId);
+      if (!cart) return 'allowed';
+      return readFinanceAuthorization(cart.quotePayload);
+    } catch {
+      return 'unreadable';
+    }
+  }
+
   async recordQuoteSendSnapshot(
     conversationId: string,
     tallerId: string | null | undefined,
     opts?: { formalNarrative?: string },
   ): Promise<void> {
-    let cart = await this.resolveActiveCart(conversationId, tallerId);
-    if (!cart) {
-      cart = await this.getOrCreateActiveCart(conversationId, tallerId);
+    let cart: DraftQuoteEntity | null;
+    try {
+      cart = await this.resolveActiveCart(conversationId, tallerId);
+      if (!cart) {
+        cart = await this.getOrCreateActiveCart(conversationId, tallerId);
+      }
+    } catch {
+      return;
+    }
+    if (readFinanceAuthorization(cart.quotePayload) !== 'allowed') {
+      return;
     }
     const desglose = desgloseFromCartEntity(cart);
     if (!desglose.length) {
@@ -328,6 +418,18 @@ export class QuoteCartService {
     );
   }
 
+  /**
+   * Detalle del carrito para el panel.
+   *
+   * Contrato aditivo consumido por el frontend:
+   * `financeCommunication` es `authorized`, `legacy` o `blocked`.
+   * Durante `blocked`, `activeDraft.canonicalQuoteV1` y
+   * `activeDraft.estimateAmount` son null, `totalGlobal` es null (no 0),
+   * `desglose` queda vacío y los textos de cliente del draft activo no son
+   * un mensaje autorizado para enviar. El historial consultable está en
+   * `history` y `historicalQuote`. Esos importes no son la cotización
+   * vigente de la operación bloqueada.
+   */
   async getConversationCartDetail(
     conversationId: string,
     tallerId: string,
@@ -336,6 +438,9 @@ export class QuoteCartService {
       (await this.resolveActiveCart(conversationId, tallerId)) ??
       (await this.getOrCreateActiveCart(conversationId, tallerId));
     active.items?.sort((a, b) => a.sortOrder - b.sortOrder);
+    if (isCanonicalBlockedState(active.quotePayload)) {
+      return this.blockedCartDetail(conversationId, active);
+    }
     const view = buildActiveCartViewFromEntity(active);
     const quotePayload =
       active.quotePayload ?
@@ -354,12 +459,68 @@ export class QuoteCartService {
       canonicalQuoteV1: active.canonicalQuoteV1,
       canonicalPeritajeV1: active.canonicalPeritajeV1,
     };
+    const flow = String(active.quotePayload?.quoteFlowMode ?? '').toUpperCase();
     return {
       ...view,
+      financeCommunication: flow === 'CANONICAL' ? 'authorized' : 'legacy',
       conversationId,
       activeDraft: draftSummary,
       pendingDraft: draftSummary,
       approvedDrafts: [],
+    };
+  }
+
+  private blockedCartDetail(
+    conversationId: string,
+    active: DraftQuoteEntity,
+  ): Record<string, unknown> {
+    const payload = active.quotePayload;
+    const exposedPayload = payload
+      ? {
+          ...payload,
+          canonicalReconstruction: 'blocked' as const,
+          formalNarrative: '',
+          generatedMessage: '',
+          clientMessage: '',
+          renderedFinancialBlock: '',
+        }
+      : payload;
+    const draftSummary = {
+      id: active.id,
+      status: active.status,
+      estimateAmount: null,
+      quotePayload: exposedPayload,
+      damageAnalysis: active.damageAnalysis,
+      items: active.items ?? [],
+      imageUrl: active.imageUrl ?? '',
+      messageId: active.messageId,
+      createdAt: active.createdAt,
+      canonicalQuoteV1: null,
+      canonicalPeritajeV1: active.canonicalPeritajeV1,
+    };
+    return {
+      success: false,
+      canonicalBlocked: true,
+      quoteUpdated: false,
+      requiresCanonicalComposition: false,
+      financeCommunication: 'blocked',
+      authorizedQuote: null,
+      approvedEstimateAmount: null,
+      totalGlobal: null,
+      desglose: [],
+      conversationId,
+      activeDraft: draftSummary,
+      pendingDraft: draftSummary,
+      approvedDrafts: [],
+      historicalQuote: active.canonicalQuoteV1 ?? null,
+      history: {
+        canonicalQuoteV1: active.canonicalQuoteV1 ?? null,
+        clientMessage: String(
+          payload?.clientMessage ?? payload?.formalNarrative ?? '',
+        ),
+        formalNarrative: String(payload?.formalNarrative ?? ''),
+        estimateAmount: active.estimateAmount,
+      },
     };
   }
 
@@ -368,6 +529,21 @@ export class QuoteCartService {
     tallerId?: string | null,
   ): Promise<Record<string, unknown>> {
     const active = await this.resolveActiveCart(conversationId, tallerId);
+    if (active && isCanonicalBlockedState(active.quotePayload)) {
+      return {
+        success: false,
+        canonicalBlocked: true,
+        quoteUpdated: false,
+        requiresCanonicalComposition: false,
+        financeCommunication: 'blocked',
+        desglose: [],
+        draftQuoteId: active.id,
+        quoteFlowMode: active.quotePayload?.quoteFlowMode ?? 'CANONICAL',
+        quoteMode: active.quotePayload?.quoteFlowMode ?? 'CANONICAL',
+        instruccionParaModelo:
+          'La última reconstrucción quedó bloqueada. No hay una cotización confirmada para comunicarla. No menciones importes, totales ni precios.',
+      };
+    }
     return {
       ...buildActiveCartViewFromEntity(active),
       quoteFlowMode: active?.quotePayload?.quoteFlowMode,
@@ -451,41 +627,48 @@ export class QuoteCartService {
     canonicalQuoteV1?: CanonicalQuoteV1 | null;
   }): Promise<{ savedDraft: DraftQuoteEntity; priorMessageId: string | null }> {
     const persistedImageUrl = persistDraftImageUrlField(input.allImageUrls);
-    const draftQuoteForClient = input.draftQuoteDoc;
+    const authorized = authorizePersistedCanonicalDraft(
+      input.draftQuoteDoc,
+      input.canonicalQuoteV1,
+    );
+    const draftQuoteForClient = authorized.draft;
+    const estimateAmount = authorized.authorizedTotal ?? input.estimateAmount;
 
     if (input.existingCart) {
-      const priorMessageId = input.existingCart.messageId;
-      if (input.messageId) {
-        input.existingCart.messageId = input.messageId;
+      const row = input.existingCart;
+      const before = captureCartFinance(row);
+      const priorMessageId = row.messageId;
+      try {
+        if (input.messageId) row.messageId = input.messageId;
+        row.imageUrl = persistedImageUrl;
+        row.damageAnalysis = input.analysis;
+        row.estimateAmount = estimateAmount;
+        row.quotePayload = draftQuoteForClient;
+        row.tallerId = input.tallerId;
+        row.status = ACTIVE_CART_STATUS;
+        if (input.canonicalQuoteV1) {
+          row.canonicalQuoteV1 = input.canonicalQuoteV1;
+        }
+        commitVisionShadowToDraft({
+          draft: row,
+          incoming: input.canonicalPeritajeV1,
+          analysis: input.analysis,
+          quotePayload: draftQuoteForClient,
+        });
+        const savedDraft = await this.draftQuoteRepository.save(row);
+        this.emitAuthorizedDraftReady({
+          savedDraft,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          analysis: input.analysis,
+          draftQuote: draftQuoteForClient,
+          estimateAmount,
+        });
+        return { savedDraft, priorMessageId: priorMessageId ?? null };
+      } catch (err) {
+        restoreCartFinance(row, before);
+        throw err;
       }
-      input.existingCart.imageUrl = persistedImageUrl;
-      input.existingCart.damageAnalysis = input.analysis;
-      input.existingCart.estimateAmount = input.estimateAmount;
-      input.existingCart.quotePayload = draftQuoteForClient;
-      input.existingCart.tallerId = input.tallerId;
-      input.existingCart.status = ACTIVE_CART_STATUS;
-      if (input.canonicalQuoteV1) {
-        input.existingCart.canonicalQuoteV1 = input.canonicalQuoteV1;
-      }
-      commitVisionShadowToDraft({
-        draft: input.existingCart,
-        incoming: input.canonicalPeritajeV1,
-        analysis: input.analysis,
-        quotePayload: draftQuoteForClient,
-      });
-      const savedDraft = await this.draftQuoteRepository.save(input.existingCart);
-
-      this.chatGateway.emitDraftQuoteReady({
-        draftQuoteId: savedDraft.id,
-        conversationId: input.conversationId,
-        messageId: input.messageId,
-        damageAnalysis: input.analysis,
-        draftQuote: draftQuoteForClient,
-        estimateAmount: input.estimateAmount,
-        isAutoPilotActive: true,
-      });
-
-      return { savedDraft, priorMessageId: priorMessageId ?? null };
     }
 
     const row = this.draftQuoteRepository.create({
@@ -494,7 +677,7 @@ export class QuoteCartService {
       messageId: input.messageId,
       imageUrl: persistedImageUrl,
       damageAnalysis: input.analysis,
-      estimateAmount: input.estimateAmount,
+      estimateAmount,
       quotePayload: draftQuoteForClient,
       status: ACTIVE_CART_STATUS,
       ...(input.canonicalQuoteV1
@@ -508,17 +691,93 @@ export class QuoteCartService {
       quotePayload: draftQuoteForClient,
     });
     const savedDraft = await this.draftQuoteRepository.save(row);
+    this.emitAuthorizedDraftReady({
+      savedDraft,
+      conversationId: input.conversationId,
+      messageId: input.messageId,
+      analysis: input.analysis,
+      draftQuote: draftQuoteForClient,
+      estimateAmount,
+    });
+    return { savedDraft, priorMessageId: null };
+  }
 
+  private emitAuthorizedDraftReady(input: {
+    savedDraft: DraftQuoteEntity;
+    conversationId: string;
+    messageId: string;
+    analysis: VehicleDamageAnalysis;
+    draftQuote: DraftQuote;
+    estimateAmount: number;
+  }): void {
+    if (isCanonicalBlockedState(input.savedDraft.quotePayload)) return;
     this.chatGateway.emitDraftQuoteReady({
-      draftQuoteId: savedDraft.id,
+      draftQuoteId: input.savedDraft.id,
       conversationId: input.conversationId,
       messageId: input.messageId,
       damageAnalysis: input.analysis,
-      draftQuote: draftQuoteForClient,
+      draftQuote: input.draftQuote,
       estimateAmount: input.estimateAmount,
       isAutoPilotActive: true,
     });
+  }
 
+  /**
+   * Persiste evidencia del turno bloqueado.
+   * No sustituye la cotización histórica, no registra un importe nuevo
+   * y no emite confirmación de cotización lista.
+   */
+  async persistCanonicalBlockedVision(input: {
+    conversationId: string;
+    tallerId: string | null;
+    messageId: string;
+    analysis: VehicleDamageAnalysis;
+    allImageUrls: readonly string[];
+    existingCart: DraftQuoteEntity | null;
+    canonicalPeritajeV1?: CanonicalPeritajeV1 | null;
+    blockedDraft: DraftQuote;
+  }): Promise<{ savedDraft: DraftQuoteEntity; priorMessageId: string | null }> {
+    const persistedImageUrl = persistDraftImageUrlField(input.allImageUrls);
+    if (input.existingCart) {
+      const row = input.existingCart;
+      const priorMessageId = row.messageId ?? null;
+      if (input.messageId) row.messageId = input.messageId;
+      row.imageUrl = persistedImageUrl;
+      row.damageAnalysis = input.analysis;
+      row.tallerId = input.tallerId;
+      const shadowPayload =
+        row.canonicalQuoteV1?.lines?.length && row.quotePayload
+          ? row.quotePayload
+          : row.quotePayload
+            ? { ...row.quotePayload, lines: [] }
+            : undefined;
+      commitVisionShadowToDraft({
+        draft: row,
+        incoming: input.canonicalPeritajeV1,
+        analysis: input.analysis,
+        quotePayload: shadowPayload,
+      });
+      if (row.quotePayload) {
+        row.quotePayload = noteCanonicalBlockedOnPayload(row.quotePayload);
+      }
+      const savedDraft = await this.draftQuoteRepository.save(row);
+      return { savedDraft, priorMessageId };
+    }
+
+    const row = this.draftQuoteRepository.create({
+      conversationId: input.conversationId,
+      tallerId: input.tallerId,
+      messageId: input.messageId,
+      imageUrl: persistedImageUrl,
+      damageAnalysis: input.analysis,
+      estimateAmount: 0,
+      quotePayload: input.blockedDraft,
+      status: ACTIVE_CART_STATUS,
+      ...(input.canonicalPeritajeV1
+        ? { canonicalPeritajeV1: input.canonicalPeritajeV1 }
+        : {}),
+    });
+    const savedDraft = await this.draftQuoteRepository.save(row);
     return { savedDraft, priorMessageId: null };
   }
 
@@ -741,6 +1000,9 @@ export class QuoteCartService {
       linesDto,
       tallerId,
     );
+    if (isCanonicalBlockedState(saved.quotePayload)) {
+      return saved;
+    }
 
     this.chatGateway.emitDraftQuoteReady({
       draftQuoteId: saved.id,
@@ -858,6 +1120,15 @@ export class QuoteCartService {
       );
     }
     const envelope = await this.getCartSummaryEnvelope(conversationId, tallerId);
+    if (envelope.canonicalBlocked === true) {
+      return {
+        ...envelope,
+        success: false,
+        quoteUpdated: false,
+        canonicalBlocked: true,
+        requiresCanonicalComposition: false,
+      };
+    }
     const saved = await this.resolveActiveCart(conversationId, tallerId);
     const canonical = saved?.canonicalQuoteV1;
     return {
@@ -892,15 +1163,24 @@ export class QuoteCartService {
     const quotes = Object.values(byId);
     const aggregate: AggregateQuoteView | undefined =
       quotes.length > 1 ? buildAggregateQuoteView(quotes) : undefined;
-    row.canonicalQuoteV1 = bundle.quote;
-    row.quotePayload = {
+    const nextPayload: DraftQuote = {
       ...prior,
       vehicleQuotesById: byId,
       vehicleQuoteLabels: labels,
       ...(aggregate ? { aggregateQuoteView: aggregate } : {}),
       quoteFlowMode: 'CANONICAL',
     };
-    await this.draftQuoteRepository.save(row);
+    const released = releaseCanonicalReconstruction(nextPayload, bundle.quote);
+    if (!released) return;
+    const before = captureCartFinance(row);
+    row.canonicalQuoteV1 = bundle.quote;
+    row.quotePayload = released;
+    try {
+      await this.draftQuoteRepository.save(row);
+    } catch (err) {
+      restoreCartFinance(row, before);
+      throw err;
+    }
   }
 
   private async rebuildAndPersist(
@@ -1040,24 +1320,55 @@ export class QuoteCartService {
     });
 
     let persistRows = quoteRows;
+    let authorizedDraft: DraftQuote | null = null;
     if (finance.mode === 'canonical') {
-      row.canonicalQuoteV1 = finance.quote;
-      persistRows = finance.rows;
       const financial = renderCanonicalQuoteFinancialBlock(finance.quote);
       const warnings = renderCanonicalQuoteWarningsBlock(finance.quote);
-      finance.draft.renderedFinancialBlock = financial.text;
-      finance.draft.shownWarnings = warnings.shownWarnings;
-      finance.draft.quoteFlowMode = 'CANONICAL';
-    } else if (finance.mode === 'canonical_blocked') {
+      const released = releaseCanonicalReconstruction(finance.draft, finance.quote);
+      if (released) {
+        released.renderedFinancialBlock = financial.text;
+        released.shownWarnings = warnings.shownWarnings.filter(
+          (warning) => warning !== CANONICAL_BLOCKED_MARKER,
+        );
+        released.quoteFlowMode = 'CANONICAL';
+        authorizedDraft = released;
+        persistRows = finance.rows;
+      }
+    }
+    if (
+      finance.mode === 'canonical_blocked' ||
+      (finance.mode === 'canonical' && !authorizedDraft)
+    ) {
+      const before = captureCartFinance(row);
       row.damageAnalysis = analysis;
-      const savedBlocked = await this.draftQuoteRepository.save(row);
-      return savedBlocked;
+      if (row.quotePayload) {
+        row.quotePayload = noteCanonicalBlockedOnPayload(row.quotePayload);
+      }
+      try {
+        return await this.draftQuoteRepository.save(row);
+      } catch (err) {
+        restoreCartFinance(row, before);
+        throw err;
+      }
     }
 
+    const before = captureCartFinance(row);
     row.damageAnalysis = analysis;
     row.estimateAmount = finance.estimateAmount;
-    row.quotePayload = finance.draft;
-    const saved = await this.draftQuoteRepository.save(row);
+    row.quotePayload =
+      finance.mode === 'canonical' && authorizedDraft
+        ? authorizedDraft
+        : finance.draft;
+    if (finance.mode === 'canonical') {
+      row.canonicalQuoteV1 = finance.quote;
+    }
+    let saved: DraftQuoteEntity;
+    try {
+      saved = await this.draftQuoteRepository.save(row);
+    } catch (err) {
+      restoreCartFinance(row, before);
+      throw err;
+    }
     await this.syncLineItems(
       saved.id,
       inventory,
@@ -1151,17 +1462,42 @@ export class QuoteCartService {
       })),
     });
 
+    let panelDraft: DraftQuote | null = null;
     if (finance.mode === 'canonical') {
-      row.canonicalQuoteV1 = finance.quote;
-    } else if (finance.mode === 'canonical_blocked') {
+      panelDraft = releaseCanonicalReconstruction(finance.draft, finance.quote);
+    }
+    if (
+      finance.mode === 'canonical_blocked' ||
+      (finance.mode === 'canonical' && !panelDraft)
+    ) {
+      const before = captureCartFinance(row);
       row.damageAnalysis = analysis;
-      return this.draftQuoteRepository.save(row);
+      if (row.quotePayload) {
+        row.quotePayload = noteCanonicalBlockedOnPayload(row.quotePayload);
+      }
+      try {
+        return await this.draftQuoteRepository.save(row);
+      } catch (err) {
+        restoreCartFinance(row, before);
+        throw err;
+      }
     }
 
+    const before = captureCartFinance(row);
     row.damageAnalysis = analysis;
     row.estimateAmount = finance.estimateAmount;
-    row.quotePayload = finance.draft;
-    const saved = await this.draftQuoteRepository.save(row);
+    row.quotePayload =
+      finance.mode === 'canonical' && panelDraft ? panelDraft : finance.draft;
+    if (finance.mode === 'canonical') {
+      row.canonicalQuoteV1 = finance.quote;
+    }
+    let saved: DraftQuoteEntity;
+    try {
+      saved = await this.draftQuoteRepository.save(row);
+    } catch (err) {
+      restoreCartFinance(row, before);
+      throw err;
+    }
     await this.syncLineItems(
       saved.id,
       inventory,

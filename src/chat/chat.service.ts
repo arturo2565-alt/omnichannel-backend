@@ -171,7 +171,12 @@ import {
 } from './canonical-shadow-write';
 import { stampAnalysisFromCanonicalPeritaje } from './canonical-identity';
 import {
+  CANONICAL_BLOCKED_MARKER,
+  isCanonicalBlockedState,
+  noteCanonicalBlockedOnPayload,
   projectCanonicalQuoteOntoDraft,
+  readFinanceAuthorization,
+  releaseCanonicalReconstruction,
   resolveAuthoritativeDraftFinance,
 } from './canonical-quote-engine';
 import {
@@ -205,6 +210,7 @@ import {
 } from './client-message-ux';
 import { sanitizeToolResultForLlm } from './llm-tool-result-sanitize';
 import { composeAggregateClientQuoteMessage } from '../domain/peritaje-v1/aggregate-quote';
+import { renderDeterministicBlockedClientMessage } from '../domain/peritaje-v1/quote-narrative';
 import type {
   CanonicalPeritajeV1,
   CanonicalQuoteV1,
@@ -2545,21 +2551,29 @@ export class ChatService implements OnModuleDestroy {
       resolvedDirection === 'outbound' &&
       String(data.conversationLeadStatus ?? '').trim() === 'cotizado'
     ) {
-      await this.quoteCartService.recordQuoteSendSnapshot(
-        conversation.id,
-        conversation.tallerId,
-        {
-          formalNarrative: contentToSave || undefined,
-        },
-      );
-      const total = await this.resolveQuoteSendTotal(
+      const authorization = await this.quoteCartService.readCommercialAuthorization(
         conversation.id,
         conversation.tallerId,
       );
-      await this.leadEventsService.logTransition(conversation.id, 'cotizado', {
-        total,
-      });
-      conversation.status = 'cotizado';
+      if (authorization === 'allowed') {
+        await this.quoteCartService.recordQuoteSendSnapshot(
+          conversation.id,
+          conversation.tallerId,
+          {
+            formalNarrative: contentToSave || undefined,
+          },
+        );
+        const total = await this.resolveQuoteSendTotal(
+          conversation.id,
+          conversation.tallerId,
+        );
+        if (total != null) {
+          await this.leadEventsService.logTransition(conversation.id, 'cotizado', {
+            total,
+          });
+          conversation.status = 'cotizado';
+        }
+      }
     }
 
     await this.conversationRepository.save(conversation);
@@ -3312,15 +3326,76 @@ export class ChatService implements OnModuleDestroy {
     );
   }
 
+  /**
+   * Turno bloqueado: conserva la cotización histórica, no confirma envío
+   * y no marca el lead como cotizado.
+   */
+  private async continueCanonicalBlockedTurn(params: {
+    conversationId: string;
+    tallerId: string | null | undefined;
+    platform?: string | null;
+    messageId: string;
+    analysis: VehicleDamageAnalysis;
+    allImageUrls: readonly string[];
+    existingCart: DraftQuoteEntity | null;
+    peritaje?: CanonicalPeritajeV1 | null;
+    blockedDraft: DraftQuote;
+  }): Promise<void> {
+    const { savedDraft } =
+      await this.quoteCartService.persistCanonicalBlockedVision({
+        conversationId: params.conversationId,
+        tallerId: params.tallerId ?? null,
+        messageId: params.messageId,
+        analysis: params.analysis,
+        allImageUrls: params.allImageUrls,
+        existingCart: params.existingCart,
+        canonicalPeritajeV1: params.peritaje,
+        blockedDraft: params.blockedDraft,
+      });
+
+    await this.messageRepository.update(
+      { id: params.messageId },
+      params.existingCart?.quotePayload
+        ? { damageAnalysis: params.analysis }
+        : {
+            damageAnalysis: params.analysis,
+            draftQuote: savedDraft.quotePayload,
+          },
+    );
+
+    const tallerId =
+      pickFirstNonEmptyTrimmedString(params.tallerId) ||
+      (await this.tallerService.findDefaultTallerId());
+    await this.saveMessage({
+      direction: 'outbound',
+      conversationId: params.conversationId,
+      message: renderDeterministicBlockedClientMessage(),
+      tallerId,
+      platform: params.platform ?? undefined,
+      user: 'Asistente IA',
+      contactName: 'Asistente IA',
+    });
+    await this.conversationRepository.update(
+      { id: params.conversationId },
+      { isAutoPilotActive: true },
+    );
+  }
+
   private async resolveQuoteSendTotal(
     conversationId: string,
     tallerId: string | null | undefined,
-  ): Promise<number> {
-    const cart = await this.quoteCartService.resolveActiveCart(
-      conversationId,
-      tallerId,
-    );
+  ): Promise<number | null> {
+    let cart: Awaited<ReturnType<QuoteCartService['resolveActiveCart']>>;
+    try {
+      cart = await this.quoteCartService.resolveActiveCart(
+        conversationId,
+        tallerId,
+      );
+    } catch {
+      return null;
+    }
     if (!cart) return 0;
+    if (readFinanceAuthorization(cart.quotePayload) !== 'allowed') return null;
     const snapTotal = cart.quotePayload?.lastSendSnapshot?.total;
     if (Number.isFinite(Number(snapTotal))) {
       return Math.max(0, Math.round(Number(snapTotal)));
@@ -3999,6 +4074,24 @@ export class ChatService implements OnModuleDestroy {
 
     const canonicalQuote = narrativeOptions?.canonicalQuote ?? null;
     const peritaje = narrativeOptions?.peritaje ?? null;
+    if (
+      isCanonicalBlockedState(draft) ||
+      (draft.quoteFlowMode === 'CANONICAL' &&
+        !isCanonicalNarrativeEligible(canonicalQuote))
+    ) {
+      const text = renderDeterministicBlockedClientMessage({ contactName });
+      draft.formalNarrative = text;
+      draft.generatedMessage = text;
+      draft.clientMessage = text;
+      draft.renderedFinancialBlock = '';
+      draft.canonicalReconstruction = 'blocked';
+      const warnings = draft.shownWarnings ?? [];
+      draft.shownWarnings = warnings.includes(CANONICAL_BLOCKED_MARKER)
+        ? warnings
+        : [...warnings, CANONICAL_BLOCKED_MARKER];
+      draft.narrativeFlow = undefined;
+      return;
+    }
     if (isCanonicalNarrativeEligible(canonicalQuote)) {
       let chatPrompt = '';
       let dialogue: ChatCompletionMessageParam[] = [];
@@ -4141,6 +4234,9 @@ export class ChatService implements OnModuleDestroy {
       conversation.id,
       conversation.tallerId,
     );
+    if (isCanonicalBlockedState(cart?.quotePayload)) {
+      return null;
+    }
     const byId = cart?.quotePayload?.vehicleQuotesById ?? {};
     const labels = cart?.quotePayload?.vehicleQuoteLabels ?? {};
     const vehicleQuotes = Object.entries(byId);
@@ -4229,6 +4325,9 @@ export class ChatService implements OnModuleDestroy {
     },
   ): Promise<DraftQuoteEntity> {
     const draft = row.quotePayload;
+    if (isCanonicalBlockedState(draft)) {
+      return row;
+    }
     const analysis = row.damageAnalysis;
     const urls = parseDraftImageUrls(row.imageUrl ?? '');
     const imageCount = Math.max(1, urls.length);
@@ -4287,6 +4386,9 @@ export class ChatService implements OnModuleDestroy {
         convId,
         tallerId,
       );
+      if (isCanonicalBlockedState(cart?.quotePayload)) {
+        return renderDeterministicBlockedClientMessage();
+      }
       if (isCanonicalNarrativeEligible(cart?.canonicalQuoteV1)) {
         canonicalQuote = cart!.canonicalQuoteV1;
         canonicalPeritaje = cart!.canonicalPeritajeV1 ?? canonicalPeritaje;
@@ -6114,7 +6216,27 @@ ${catalogAppend}`;
     let draftQuoteForClient = draftQuoteDoc;
     let authoritativeQuote = existingCart?.canonicalQuoteV1 ?? null;
     if (finance.mode === 'canonical') {
-      draftQuoteForClient = finance.draft;
+      const released = releaseCanonicalReconstruction(
+        finance.draft,
+        finance.quote,
+      );
+      if (!released) {
+        await this.continueCanonicalBlockedTurn({
+          conversationId,
+          tallerId: visionTallerId,
+          platform: convRow?.platform,
+          messageId: attachingMessageId,
+          analysis: analysisForQuote,
+          allImageUrls,
+          existingCart,
+          peritaje: shadowPeritaje,
+          blockedDraft: noteCanonicalBlockedOnPayload(
+            existingCart?.quotePayload ?? finance.draft,
+          ),
+        });
+        return;
+      }
+      draftQuoteForClient = released;
       estimateAmount = finance.estimateAmount;
       authoritativeQuote = finance.quote;
       if (authoritativeQuote && shadowPeritaje) {
@@ -6156,9 +6278,18 @@ ${catalogAppend}`;
         }
       }
     } else if (finance.mode === 'canonical_blocked') {
-      draftQuoteForClient = finance.draft;
-      estimateAmount = finance.estimateAmount;
-      authoritativeQuote = null;
+      await this.continueCanonicalBlockedTurn({
+        conversationId,
+        tallerId: visionTallerId,
+        platform: convRow?.platform,
+        messageId: attachingMessageId,
+        analysis: analysisForQuote,
+        allImageUrls,
+        existingCart,
+        peritaje: shadowPeritaje,
+        blockedDraft: finance.draft,
+      });
+      return;
     }
 
     await this.applyClientFacingFormalNarrativeToDraft(
@@ -6429,8 +6560,40 @@ ${catalogAppend}`;
         })),
       });
       let quotePayloadForClient = quotePayload;
+      const rowBeforePanelSave = {
+        canonicalQuoteV1: row.canonicalQuoteV1,
+        estimateAmount: row.estimateAmount,
+        quotePayload: row.quotePayload,
+        damageAnalysis: row.damageAnalysis,
+      };
       if (panelFinance.mode === 'canonical') {
-        quotePayloadForClient = panelFinance.draft;
+        const released = releaseCanonicalReconstruction(
+          panelFinance.draft,
+          panelFinance.quote,
+        );
+        if (!released) {
+          row.damageAnalysis = analysisMerged;
+          if (row.quotePayload) {
+            row.quotePayload = noteCanonicalBlockedOnPayload(row.quotePayload);
+          }
+          try {
+            const savedBlocked = await this.draftQuoteRepository.save(row);
+            if (row.messageId) {
+              await this.messageRepository.update(
+                { id: row.messageId },
+                { damageAnalysis: analysisMerged },
+              );
+            }
+            return this.loadDraftQuoteWithItemsOrThrow(savedBlocked.id, tallerId);
+          } catch (err) {
+            row.canonicalQuoteV1 = rowBeforePanelSave.canonicalQuoteV1;
+            row.estimateAmount = rowBeforePanelSave.estimateAmount;
+            row.quotePayload = rowBeforePanelSave.quotePayload;
+            row.damageAnalysis = rowBeforePanelSave.damageAnalysis;
+            throw err;
+          }
+        }
+        quotePayloadForClient = released;
         row.canonicalQuoteV1 = panelFinance.quote;
         row.estimateAmount = panelFinance.estimateAmount;
         if (row.canonicalPeritajeV1 && panelFinance.quote) {
@@ -6442,8 +6605,26 @@ ${catalogAppend}`;
           }).draft;
         }
       } else if (panelFinance.mode === 'canonical_blocked') {
-        quotePayloadForClient = panelFinance.draft;
-        row.estimateAmount = panelFinance.estimateAmount;
+        row.damageAnalysis = analysisMerged;
+        if (row.quotePayload) {
+          row.quotePayload = noteCanonicalBlockedOnPayload(row.quotePayload);
+        }
+        try {
+          const savedBlocked = await this.draftQuoteRepository.save(row);
+          if (row.messageId) {
+            await this.messageRepository.update(
+              { id: row.messageId },
+              { damageAnalysis: analysisMerged },
+            );
+          }
+          return this.loadDraftQuoteWithItemsOrThrow(savedBlocked.id, tallerId);
+        } catch (err) {
+          row.canonicalQuoteV1 = rowBeforePanelSave.canonicalQuoteV1;
+          row.estimateAmount = rowBeforePanelSave.estimateAmount;
+          row.quotePayload = rowBeforePanelSave.quotePayload;
+          row.damageAnalysis = rowBeforePanelSave.damageAnalysis;
+          throw err;
+        }
       } else {
         row.estimateAmount = estimateAmount;
       }
@@ -6467,7 +6648,16 @@ ${catalogAppend}`;
       row.damageAnalysis = analysisMerged;
       row.quotePayload = quotePayloadForClient;
 
-      const saved = await this.draftQuoteRepository.save(row);
+      let saved: DraftQuoteEntity;
+      try {
+        saved = await this.draftQuoteRepository.save(row);
+      } catch (err) {
+        row.canonicalQuoteV1 = rowBeforePanelSave.canonicalQuoteV1;
+        row.estimateAmount = rowBeforePanelSave.estimateAmount;
+        row.quotePayload = rowBeforePanelSave.quotePayload;
+        row.damageAnalysis = rowBeforePanelSave.damageAnalysis;
+        throw err;
+      }
       await this.syncDraftQuoteLineItems(
         saved.id,
         analysisMerged,
@@ -6834,12 +7024,27 @@ ${catalogAppend}`;
         conversation.tallerId,
         result,
       );
+      if (
+        cartEnvelope.canonicalBlocked === true ||
+        cartEnvelope.success === false
+      ) {
+        return {
+          ...result,
+          ...cartEnvelope,
+          success: false,
+          quoteUpdated: false,
+          requiresCanonicalComposition: false,
+        };
+      }
       return { ...result, ...cartEnvelope };
     } catch (err) {
       console.error('[CARRITO] persistExpressQuote:', err);
       return {
         ...result,
+        success: false,
+        quoteUpdated: false,
         cartPersisted: false,
+        requiresCanonicalComposition: false,
         error:
           'Cotización calculada pero no se pudo guardar en el carrito global.',
       };
@@ -7383,6 +7588,9 @@ ${catalogAppend}`;
         quoteUpdated: false,
         quoteFlowMode: legacyMode ? 'LEGACY' : 'CANONICAL',
         vehicleConfirmed: true,
+        ...(isCanonicalBlockedState(cart.quotePayload)
+          ? { canonicalBlocked: true, requiresCanonicalComposition: false }
+          : {}),
       };
     }
 
@@ -7478,8 +7686,6 @@ ${catalogAppend}`;
       quote = resumedQuote.quote;
       requirements = resumedQuote.requirements;
       analysis.inventory = resumedQuote.inventory;
-      resumed = true;
-      quoteUpdated = resumedQuote.quoteChanged;
 
       let draft = projectCanonicalQuoteOntoDraft(
         cart.quotePayload,
@@ -7488,6 +7694,22 @@ ${catalogAppend}`;
       );
       draft = attachPendingRequirementsToDraft(draft, requirements);
       draft.quoteFlowMode = 'CANONICAL';
+      const released = releaseCanonicalReconstruction(draft, resumedQuote.quote);
+      if (!released) {
+        return {
+          success: true,
+          quoteUpdated: false,
+          resumed: false,
+          canonicalBlocked: true,
+          requiresCanonicalComposition: false,
+          quoteFlowMode: 'CANONICAL',
+          vehicleConfirmed: true,
+          pendingResolved: applied.result.resolved.length > 0,
+        };
+      }
+      draft = released;
+      resumed = true;
+      quoteUpdated = resumedQuote.quoteChanged;
 
       const prevVehicle = cart.canonicalPeritajeV1?.vehicles?.[0];
       const nextVehicle = applied.result.vehicle;
@@ -7559,6 +7781,7 @@ ${catalogAppend}`;
       );
     }
     await this.draftQuoteRepository.save(cart);
+    const stillBlocked = isCanonicalBlockedState(cart.quotePayload);
     return {
       success: true,
       quoteUpdated: false,
@@ -7566,6 +7789,9 @@ ${catalogAppend}`;
       vehicleConfirmed: true,
       resumed: false,
       pendingResolved: applied.result.resolved.length > 0,
+      ...(stillBlocked
+        ? { canonicalBlocked: true, requiresCanonicalComposition: false }
+        : {}),
     };
   }
 
@@ -8444,12 +8670,17 @@ ${catalogAppend}`;
           ) {
             lastConfirmedIso = String(payload.scheduledAt);
           }
-          if (name === 'obtenerCotizacionExpress' && payload.success) {
+          if (
+            name === 'obtenerCotizacionExpress' &&
+            payload.success === true &&
+            payload.canonicalBlocked !== true
+          ) {
             expressQuoted = true;
           }
           if (
             name === 'confirmVehicleIdentity' &&
-            payload.success &&
+            payload.success === true &&
+            payload.canonicalBlocked !== true &&
             (payload.quoteUpdated || payload.resumed)
           ) {
             expressQuoted = true;
@@ -8464,6 +8695,8 @@ ${catalogAppend}`;
         },
       }),
       );
+
+      const commercial = await this.commercialSendAllowed(conversation);
 
       if (!lastConfirmedIso && (expressQuoted || userRequestsFullQuote(mergedForInstant))) {
         const modern = await this.tryComposeModernMessageFromActiveCart(
@@ -8483,7 +8716,7 @@ ${catalogAppend}`;
             interceptorTurns,
             mergedForInstant,
           );
-          return { text, markQuoted: true };
+          return { text, markQuoted: commercial };
         }
       }
 
@@ -8495,7 +8728,7 @@ ${catalogAppend}`;
           interceptorTurns,
           mergedForInstant,
         );
-        return { text, markQuoted: expressQuoted };
+        return { text, markQuoted: expressQuoted && commercial };
       }
 
       const text = await this.finalizeAutopilotReplyWithAppointmentGuard(
@@ -8505,11 +8738,21 @@ ${catalogAppend}`;
         interceptorTurns,
         mergedForInstant,
       );
-      return { text, markQuoted: expressQuoted };
+      return { text, markQuoted: expressQuoted && commercial };
     } catch (err) {
       console.error('composeAutopilotReplyWithTools:', err);
       return { text: AUTOPILOT_TECHNICAL_FALLBACK_REPLY, markQuoted: false };
     }
+  }
+
+  private async commercialSendAllowed(
+    conversation: Conversation,
+  ): Promise<boolean> {
+    const authorization = await this.quoteCartService.readCommercialAuthorization(
+      conversation.id,
+      conversation.tallerId,
+    );
+    return authorization === 'allowed';
   }
 
   /** Texto sugerido para mensajes entrantes (ventas corto), con historial reciente. */
@@ -8562,7 +8805,11 @@ ${catalogAppend}`;
       inboundMsg.tallerId ??
       (await this.tallerService.findDefaultTallerId());
 
-    if (composed.markQuoted) {
+    const markQuoted =
+      composed.markQuoted === true &&
+      (await this.commercialSendAllowed(conversation));
+
+    if (markQuoted) {
       await this.saveMessage({
         direction: 'outbound',
         conversationId: conversation.id,

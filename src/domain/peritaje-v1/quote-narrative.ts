@@ -975,6 +975,30 @@ export function logNarrativeEvents(
   }
 }
 
+export function renderDeterministicBlockedClientMessage(input?: {
+  contactName?: string;
+}): string {
+  const name = String(input?.contactName ?? '').trim();
+  const rest =
+    'Esta actualización todavía no tiene una cotización confirmada. Te la comparto cuando quede armada.';
+  if (!name) return `Sigo con tu solicitud. ${rest}`;
+  return `${name}, sigo con tu solicitud. ${rest}`;
+}
+
+/**
+ * Texto del turno bloqueado. Ignora narrativa legacy, texto del LLM e importes históricos.
+ */
+export function composeClientTextWhenCanonicalBlocked(input?: {
+  contactName?: string;
+  llmText?: string | null;
+  legacyNarrative?: string | null;
+  historicalTotal?: number | null;
+}): string {
+  return renderDeterministicBlockedClientMessage({
+    contactName: input?.contactName,
+  });
+}
+
 export function renderDeterministicClientQuoteFallback(input: {
   contactName: string;
   vehicle?: VehicleIdentity | null;

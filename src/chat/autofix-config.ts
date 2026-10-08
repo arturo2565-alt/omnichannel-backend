@@ -320,6 +320,12 @@ export interface DraftQuote {
   }>;
   renderedFinancialBlock?: string;
   shownWarnings?: string[];
+  /**
+   * Reconstrucción canónica bloqueada. Ausente cuando no hay cotización,
+   * cuando la cotización vigente es válida y en cotizaciones legacy.
+   * Compatible con el marcador CANONICAL_BLOCKED de shownWarnings.
+   */
+  canonicalReconstruction?: 'blocked';
   analysisBasis: {
     pieza: string;
     severidad: string;

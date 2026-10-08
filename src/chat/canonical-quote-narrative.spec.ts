@@ -11,7 +11,11 @@ import {
 } from './canonical-quote-narrative';
 import type { DraftQuote } from './autofix-config';
 import { buildClienteFormalNarrativeSinCita } from './draft-quote-resume';
-import { NARRATIVE_EVENTS } from '../domain/peritaje-v1/quote-narrative';
+import {
+  composeClientTextWhenCanonicalBlocked,
+  NARRATIVE_EVENTS,
+  renderDeterministicBlockedClientMessage,
+} from '../domain/peritaje-v1/quote-narrative';
 
 function line(
   partial: Partial<QuoteLine> & Pick<QuoteLine, 'serviceType' | 'amount'>,
@@ -220,6 +224,30 @@ describe('Fase 6 — compositor canónico', () => {
     expect(previewModernFinancialBlock(q)).toBe(
       renderCanonicalQuoteFinancialBlock(q).text,
     );
+  });
+
+  it('25. bloqueo ignora narrativa legacy, LLM e importe histórico', () => {
+    const legacy = buildClienteFormalNarrativeSinCita({
+      contactName: 'Luis',
+      lineRows: [{ pieza: 'Puerta', precioMx: 4500 }],
+      total: 4500,
+      mapsUrl: 'https://maps.example',
+      damageIntro: 'Ya analizamos tus fotos.',
+    });
+    const text = composeClientTextWhenCanonicalBlocked({
+      contactName: 'Luis',
+      llmText: 'Te lo dejo en unos 10 mil pesos, total $9,999 MXN',
+      legacyNarrative: legacy,
+      historicalTotal: 4500,
+    });
+    expect(text).toBe(
+      renderDeterministicBlockedClientMessage({ contactName: 'Luis' }),
+    );
+    expect(text).not.toMatch(/\$|MXN|pesos|\d/i);
+    expect(text).not.toContain('4500');
+    expect(text).not.toContain('9,999');
+    expect(text).not.toContain('Inversión Total');
+    expect(text).not.toMatch(/cotizaci[oó]n enviada|presupuesto cerrado/i);
   });
 
   it('24. legacy sin canonical: flujo anterior sigue funcionando', () => {

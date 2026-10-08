@@ -91,4 +91,36 @@ describe('Fase 8 — tool result expuesto al LLM', () => {
     expect(exposed.vehicleCount).toBe(2);
     expect(toolResultHasExposedMoney(exposed)).toBe(false);
   });
+
+  it('un bloqueo canónico no parece una actualización exitosa ni entrega importes', () => {
+    const exposed = sanitizeToolResultForLlm(
+      {
+        success: true,
+        canonicalBlocked: true,
+        quoteUpdated: true,
+        requiresCanonicalComposition: true,
+        totalGlobal: 0,
+        estimateAmount: 4500,
+        desglose: [{ pieza: 'Fascia', precioMx: 4500 }],
+        canonicalQuoteV1: { total: 4500, clientMessage: 'Total $4,500' },
+        clientMessage: 'Total histórico $4,500',
+        quoteFlowMode: 'CANONICAL',
+        instruccionParaModelo: 'La cotización se actualizó.',
+      },
+      { toolName: 'obtenerCotizacionExpress' },
+    );
+    expect(exposed).toMatchObject({
+      success: false,
+      canonicalBlocked: true,
+      quoteUpdated: false,
+      requiresCanonicalComposition: false,
+      financeCommunication: 'blocked',
+    });
+    expect(exposed.totalGlobal).toBeUndefined();
+    expect(exposed.canonicalQuoteV1).toBeUndefined();
+    expect(exposed.clientMessage).toBeUndefined();
+    expect(exposed.instruccionParaModelo).not.toMatch(/actualizó|4,?500|\$/);
+    expect(JSON.stringify(exposed)).not.toMatch(/4500|4,500|\$/);
+    expect(toolResultHasExposedMoney(exposed)).toBe(false);
+  });
 });
