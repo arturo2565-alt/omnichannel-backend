@@ -7,6 +7,7 @@ import { initSentry } from './sentry/sentry.init';
 import { SentryExceptionFilter } from './sentry/sentry-exception.filter';
 import { AppModule } from './app.module';
 import { pegLogger } from './observability/pegazuz-logger';
+import { resolveDbSynchronize } from './config/db-synchronize';
 import {
   getLogLevel,
   getPegLogFormat,
@@ -28,6 +29,11 @@ async function bootstrap() {
     traceMode: getPegTraceMode(),
     logFormat: getPegLogFormat(),
     nodeEnv: process.env.NODE_ENV ?? null,
+    dbSynchronize: resolveDbSynchronize(
+      process.env.DB_SYNCHRONIZE,
+      process.env.DATABASE_URL,
+    ),
+    schemaMigrations: 'manual',
   });
 
   app.use(json({ limit: '50mb' }));

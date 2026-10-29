@@ -10,6 +10,7 @@ import { TallerModule } from './taller/taller.module';
 import { MessagingQueueModule } from './messaging-queue/messaging-queue.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { DebugController } from './sentry/debug.controller';
+import { resolveDbSynchronize } from './config/db-synchronize';
 import {
   buildBullMqRedisConnection,
   validateEnv,
@@ -22,6 +23,7 @@ import { Contact } from './chat/entities/contact.entity';
 import { DraftQuoteEntity } from './chat/entities/draft-quote.entity';
 import { DraftQuoteItem } from './chat/entities/draft-quote-item.entity';
 import { AppointmentEntity } from './chat/entities/appointment.entity';
+import { ContractedWork } from './chat/entities/contracted-work.entity';
 import { AiConfigEntity } from './chat/entities/ai-config.entity';
 import { LlmCall } from './chat/entities/llm-call.entity';
 import { LeadEventEntity } from './chat/entities/lead-event.entity';
@@ -30,10 +32,15 @@ import { PriceMatrix } from './catalog/entities/price-matrix.entity';
 const databaseUrl = process.env.DATABASE_URL?.trim();
 const isCloudDatabase = Boolean(databaseUrl);
 
-/** Activo por defecto; en prod pon DB_SYNCHRONIZE=false cuando las tablas ya existan. */
-const dbSynchronize =
-  process.env.DB_SYNCHRONIZE === 'true' ||
-  process.env.DB_SYNCHRONIZE !== 'false';
+/**
+ * Una base remota no se altera al arrancar.
+ * DB_SYNCHRONIZE=true lo vuelve a encender. La migración CRM es el script
+ * migrate:crm-001a, no este proceso.
+ */
+const dbSynchronize = resolveDbSynchronize(
+  process.env.DB_SYNCHRONIZE,
+  databaseUrl,
+);
 
 @Module({
   imports: [
@@ -63,6 +70,7 @@ const dbSynchronize =
         DraftQuoteEntity,
         DraftQuoteItem,
         AppointmentEntity,
+        ContractedWork,
         AiConfigEntity,
         LlmCall,
         LeadEventEntity,

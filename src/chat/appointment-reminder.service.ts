@@ -9,6 +9,11 @@ import { Message } from './entities/chat.entity';
 import { OutgoingMessageProducer } from '../messaging-queue/outgoing-message.producer';
 import { LeadEventsService } from './lead-events.service';
 import { WORKSHOP_TIMEZONE } from './appointment-intent';
+import { shouldAttemptAppointmentReminder } from './crm-appointment';
+import {
+  LEGACY_APPOINTMENT_SELECT,
+  readAppointmentStorage,
+} from './appointment-directory';
 import {
   normalizeWhatsAppMessageBody,
   normalizeWhatsAppRecipientWaId,
@@ -63,14 +68,34 @@ export class AppointmentReminderService {
     try {
       const now = new Date();
       const until = new Date(now.getTime() + REMINDER_WINDOW_MS);
-      const appointments = await this.appointmentRepository.find({
-        where: {
-          status: 'confirmada',
-          scheduledAt: Between(now, until),
-        },
-        relations: ['conversation'],
-        order: { scheduledAt: 'ASC' },
-      });
+      const storage = await readAppointmentStorage(
+        this.appointmentRepository.manager,
+      );
+      const appointments =
+        storage === 'legacy'
+          ? await this.appointmentRepository
+              .createQueryBuilder('a')
+              .leftJoinAndSelect('a.conversation', 'conversation')
+              .select([
+                ...LEGACY_APPOINTMENT_SELECT,
+                'conversation.id',
+                'conversation.tallerId',
+                'conversation.platform',
+                'conversation.externalId',
+                'conversation.contactName',
+              ])
+              .where('a.status = :status', { status: 'confirmada' })
+              .andWhere('a.scheduledAt BETWEEN :now AND :until', { now, until })
+              .orderBy('a.scheduledAt', 'ASC')
+              .getMany()
+          : await this.appointmentRepository.find({
+              where: {
+                status: 'confirmada',
+                scheduledAt: Between(now, until),
+              },
+              relations: ['conversation'],
+              order: { scheduledAt: 'ASC' },
+            });
       result.scanned = appointments.length;
 
       for (const apt of appointments) {
@@ -96,11 +121,32 @@ export class AppointmentReminderService {
   }
 
   private async processAppointment(apt: AppointmentEntity): Promise<boolean> {
+    if (
+      !shouldAttemptAppointmentReminder({
+        status: apt.status,
+        conversationId: apt.conversationId,
+      })
+    ) {
+      this.logger.debug(
+        `recordatorio omitido appointment=${apt.id}: sin conversación de canal`,
+      );
+      return false;
+    }
     const conversation = apt.conversation;
     const conversationId = String(
       apt.conversationId ?? conversation?.id ?? '',
     ).trim();
     if (!conversation || !conversationId) return false;
+    if (
+      apt.tallerId &&
+      conversation.tallerId &&
+      apt.tallerId !== conversation.tallerId
+    ) {
+      this.logger.warn(
+        `recordatorio omitido appointment=${apt.id}: el taller de la cita no coincide con la conversación`,
+      );
+      return false;
+    }
 
     if (await this.hasRecentReminder(conversationId)) {
       return false;

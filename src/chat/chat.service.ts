@@ -31,6 +31,17 @@ import {
   AppointmentEntity,
   type AppointmentStatus,
 } from './entities/appointment.entity';
+import {
+  insertLegacyAppointmentRow,
+  LEGACY_APPOINTMENT_SELECT,
+  listAppointmentsForTaller,
+  readAppointmentStorage,
+  updateLegacyAppointmentClientFields,
+} from './appointment-directory';
+import {
+  toAppointmentRealtimePayload,
+} from './crm-appointment';
+import { patchAppointmentVisit } from './appointment-visit';
 import { ChatGateway } from './chat.gateway';
 import { OpenAI } from 'openai';
 import { v2 as cloudinary } from 'cloudinary';
@@ -3231,11 +3242,7 @@ export class ChatService implements OnModuleDestroy {
   private async loadLatestAppointmentForConversation(
     conversationId: string,
   ): Promise<AppointmentEntity | null> {
-    const rows = await this.appointmentRepository.find({
-      where: { conversationId },
-      order: { scheduledAt: 'DESC' },
-      take: 1,
-    });
+    const rows = await this.loadConversationAppointments(conversationId, false);
     return rows[0] ?? null;
   }
 
@@ -3243,15 +3250,42 @@ export class ChatService implements OnModuleDestroy {
   private async loadActiveAppointmentForConversation(
     conversationId: string,
   ): Promise<AppointmentEntity | null> {
-    const rows = await this.appointmentRepository.find({
+    const rows = await this.loadConversationAppointments(conversationId, true);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Antes de la migración 004 el repositorio no puede seleccionar columnas CRM.
+   * Después, la lectura completa conserva tallerId y el resto de campos nuevos.
+   */
+  private async loadConversationAppointments(
+    conversationId: string,
+    activeOnly: boolean,
+  ): Promise<AppointmentEntity[]> {
+    const storage = await readAppointmentStorage(this.appointmentRepository.manager);
+    if (storage === 'legacy') {
+      const qb = this.appointmentRepository
+        .createQueryBuilder('a')
+        .select([...LEGACY_APPOINTMENT_SELECT])
+        .where('a.conversationId = :conversationId', { conversationId })
+        .orderBy('a.scheduledAt', 'DESC');
+      if (activeOnly) {
+        qb.andWhere('a.status IN (:...statuses)', {
+          statuses: ['confirmada', 'pendiente'],
+        });
+      }
+      return qb.take(1).getMany();
+    }
+    return this.appointmentRepository.find({
       where: {
         conversationId,
-        status: In(['confirmada', 'pendiente'] satisfies AppointmentStatus[]),
+        ...(activeOnly
+          ? { status: In(['confirmada', 'pendiente'] satisfies AppointmentStatus[]) }
+          : {}),
       },
       order: { scheduledAt: 'DESC' },
       take: 1,
     });
-    return rows[0] ?? null;
   }
 
   private extractDraftClientMessage(draft: {
@@ -7165,7 +7199,22 @@ ${catalogAppend}`;
       row.quoteSummary = fields.quoteSummary;
       dirty = true;
     }
-    if (dirty) await this.appointmentRepository.save(row);
+    if (!dirty) return;
+    const storage = await readAppointmentStorage(this.appointmentRepository.manager);
+    if (storage === 'legacy') {
+      await updateLegacyAppointmentClientFields(
+        this.appointmentRepository.manager,
+        row.id,
+        {
+          clientName: row.clientName,
+          vehicle: row.vehicle,
+          phone: row.phone,
+          quoteSummary: row.quoteSummary,
+        },
+      );
+      return;
+    }
+    await this.appointmentRepository.save(row);
   }
 
   private async syncContactFromAppointmentFields(
@@ -7257,16 +7306,15 @@ ${catalogAppend}`;
     if (existingActive) {
       await this.mergeAppointmentClientFields(existingActive, fields);
       await this.syncContactFromAppointmentFields(conversation, fields);
-      this.chatGateway.emitAppointmentCreated({
-        id: existingActive.id,
-        conversationId: conversation.id,
-        clientName: existingActive.clientName,
-        vehicle: existingActive.vehicle,
-        phone: existingActive.phone,
-        quoteSummary: existingActive.quoteSummary,
-        scheduledAt: existingActive.scheduledAt.toISOString(),
-        status: existingActive.status,
-      });
+      const existingTallerId = String(
+        existingActive.tallerId ?? conversation.tallerId ?? '',
+      ).trim();
+      if (existingTallerId) {
+        this.chatGateway.emitAppointmentCreated(
+          existingTallerId,
+          toAppointmentRealtimePayload(existingTallerId, existingActive),
+        );
+      }
       this.chatGateway.emitConversationLeadUpdated({
         conversationId: conversation.id,
         status: conversation.status,
@@ -7284,16 +7332,45 @@ ${catalogAppend}`;
       };
     }
 
-    const row = this.appointmentRepository.create({
-      conversationId: conversation.id,
-      clientName: fields.clientName,
-      vehicle: fields.vehicle,
-      phone: fields.phone,
-      quoteSummary: fields.quoteSummary,
-      scheduledAt: d,
-      status: 'confirmada',
-    });
-    const saved = await this.appointmentRepository.save(row);
+    const storage = await readAppointmentStorage(this.appointmentRepository.manager);
+    let saved: AppointmentEntity;
+    if (storage === 'legacy') {
+      const id = randomUUID();
+      await insertLegacyAppointmentRow(this.appointmentRepository.manager, {
+        id,
+        conversationId: conversation.id,
+        clientName: fields.clientName,
+        vehicle: fields.vehicle,
+        phone: fields.phone,
+        quoteSummary: fields.quoteSummary,
+        scheduledAt: d,
+      });
+      saved = this.appointmentRepository.create({
+        id,
+        conversationId: conversation.id,
+        clientName: fields.clientName,
+        vehicle: fields.vehicle,
+        phone: fields.phone,
+        quoteSummary: fields.quoteSummary,
+        scheduledAt: d,
+        status: 'confirmada',
+      });
+    } else {
+      saved = await this.appointmentRepository.save(
+        this.appointmentRepository.create({
+          conversationId: conversation.id,
+          tallerId: conversation.tallerId ?? null,
+          contactId: conversation.contactId ?? null,
+          clientName: fields.clientName,
+          vehicle: fields.vehicle,
+          phone: fields.phone,
+          quoteSummary: fields.quoteSummary,
+          scheduledAt: d,
+          status: 'confirmada',
+          source: 'autopilot',
+        }),
+      );
+    }
 
     await this.syncContactFromAppointmentFields(conversation, fields);
 
@@ -7302,16 +7379,15 @@ ${catalogAppend}`;
     });
     conversation.status = 'agendado';
 
-    this.chatGateway.emitAppointmentCreated({
-      id: saved.id,
-      conversationId: conversation.id,
-      clientName: saved.clientName,
-      vehicle: saved.vehicle,
-      phone: saved.phone,
-      quoteSummary: saved.quoteSummary,
-      scheduledAt: saved.scheduledAt.toISOString(),
-      status: saved.status,
-    });
+    const createdTallerId = String(
+      saved.tallerId ?? conversation.tallerId ?? '',
+    ).trim();
+    if (createdTallerId) {
+      this.chatGateway.emitAppointmentCreated(
+        createdTallerId,
+        toAppointmentRealtimePayload(createdTallerId, saved),
+      );
+    }
 
     this.chatGateway.emitConversationLeadUpdated({
       conversationId: conversation.id,
@@ -8843,80 +8919,23 @@ ${catalogAppend}`;
     await this.conversationRepository.delete({ id: conversationId });
   }
 
-  async findAllAppointments(tallerId: string): Promise<
-    {
-      id: string;
-      clientName: string;
-      vehicle: string | null;
-      phone: string | null;
-      quoteSummary: string | null;
-      scheduledAt: string;
-      status: AppointmentStatus;
-      conversationId: string | null;
-    }[]
-  > {
-    const rows = await this.appointmentRepository
-      .createQueryBuilder('a')
-      .innerJoin('a.conversation', 'c')
-      .where('c.tallerId = :tallerId', { tallerId })
-      .orderBy('a.scheduledAt', 'ASC')
-      .getMany();
-    return rows.map((a) => ({
-      id: a.id,
-      clientName: a.clientName,
-      vehicle: a.vehicle,
-      phone: a.phone,
-      quoteSummary: a.quoteSummary ?? null,
-      scheduledAt: a.scheduledAt.toISOString(),
-      status: a.status,
-      conversationId: a.conversationId,
-    }));
+  async findAllAppointments(tallerId: string) {
+    return listAppointmentsForTaller(this.appointmentRepository.manager, tallerId);
   }
 
   async patchAppointmentStatus(
     id: string,
-    body: { status?: string },
+    body: { status?: string; visitStatus?: string },
     tallerId: string,
-  ): Promise<{ id: string; status: AppointmentStatus }> {
-    const allowed: AppointmentStatus[] = [
-      'pendiente',
-      'confirmada',
-      'finalizada',
-    ];
-    const row = await this.appointmentRepository.findOne({
-      where: { id },
-      relations: ['conversation'],
-    });
-    if (!row || row.conversation?.tallerId !== tallerId) {
-      throw new NotFoundException(`Cita no encontrada: ${id}`);
-    }
-    const raw = String(body.status ?? '').toLowerCase().trim();
-    if (!allowed.includes(raw as AppointmentStatus)) {
-      throw new BadRequestException(
-        `status debe ser uno de: ${allowed.join(', ')}`,
-      );
-    }
-    row.status = raw as AppointmentStatus;
-    await this.appointmentRepository.save(row);
-
-    if (raw === 'finalizada' && row.conversationId) {
-      await this.leadEventsService.logTransition(row.conversationId, 'atendido');
-      if (row.conversation) {
-        row.conversation.status = 'atendido';
-        this.chatGateway.emitConversationLeadUpdated({
-          conversationId: row.conversationId,
-          status: 'atendido',
-          contactName: row.conversation.contactName,
-          lastMessageAt: row.conversation.lastMessageAt
-            ? row.conversation.lastMessageAt.toISOString()
-            : null,
-          lastMessage: row.conversation.lastMessage ?? null,
-          isAutoPilotActive: Boolean(row.conversation.isAutoPilotActive),
-        });
-      }
-    }
-
-    return { id: row.id, status: row.status };
+  ): Promise<{ id: string; status: AppointmentStatus; visitStatus: string }> {
+    return patchAppointmentVisit(
+      this.appointmentRepository.manager,
+      this.leadEventsService,
+      this.chatGateway,
+      id,
+      body ?? {},
+      tallerId,
+    );
   }
 
   async findAllMessages() {
