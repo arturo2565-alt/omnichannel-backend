@@ -21,6 +21,11 @@ export class CrmAppointmentsController {
     private readonly chatService: ChatService,
   ) {}
 
+  @Get('suggestions')
+  suggestions(@CurrentUser() user: AuthenticatedUser) {
+    return this.manualAppointments.suggestions(user.tallerId);
+  }
+
   @Get()
   list(@CurrentUser() user: AuthenticatedUser) {
     return this.manualAppointments.listManual(user.tallerId);
@@ -41,6 +46,15 @@ export class CrmAppointmentsController {
     @Body() body: { status?: string; visitStatus?: string },
   ) {
     return this.chatService.patchAppointmentStatus(id, body ?? {}, user.tallerId);
+  }
+
+  @Patch(':id/commercial')
+  saveCommercial(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.manualAppointments.saveCommercial(user.tallerId, id, body ?? {});
   }
 
   @Post(':id/contract')

@@ -10,6 +10,7 @@ import { Contact } from './entities/contact.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { AppointmentEntity } from './entities/appointment.entity';
+import { AppointmentServiceLine } from './entities/appointment-service-line.entity';
 import { ContractedWork } from './entities/contracted-work.entity';
 import { AiConfigEntity } from './entities/ai-config.entity';
 import { LlmCall } from './entities/llm-call.entity';
@@ -37,6 +38,7 @@ const entities = [
   DraftQuoteEntity,
   DraftQuoteItem,
   AppointmentEntity,
+  AppointmentServiceLine,
   ContractedWork,
   AiConfigEntity,
   LlmCall,
@@ -217,6 +219,7 @@ describeDisposable('CRM-003 base PostgreSQL desechable', () => {
       ds.getRepository(AppointmentEntity),
       ds.getRepository(Contact),
       ds.getRepository(ContractedWork),
+      ds.getRepository(AppointmentServiceLine),
       {
         emitAppointmentCreated: jest.fn(),
         emitAppointmentUpdated: jest.fn(),

@@ -4,6 +4,7 @@ import {
   toAppointmentListItem,
   type AppointmentListItem,
   type AppointmentSource,
+  type CrmServiceLine,
 } from './crm-appointment';
 
 export const APPOINTMENT_VISIBILITY_SQL =
@@ -22,6 +23,11 @@ export const LEGACY_APPOINTMENT_SELECT = [
 ] as const;
 
 export type AppointmentStorage = 'legacy' | 'partial' | 'ready';
+
+export type CrmCommercialSchema = {
+  attribution: boolean;
+  lines: boolean;
+};
 
 type SqlRunner = Pick<EntityManager, 'query'>;
 
@@ -57,6 +63,39 @@ export async function readAppointmentStorage(
   if (!hasTaller) return 'legacy';
   if (!hasContracts) return 'partial';
   return 'ready';
+}
+
+export async function readCrmCommercialSchema(
+  manager: SqlRunner,
+): Promise<CrmCommercialSchema> {
+  const rows = await manager.query(`
+    SELECT
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'appointments'
+          AND column_name = 'campaignName'
+      ) AS "hasAttribution",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = current_schema()
+          AND table_name = 'appointment_service_lines'
+      ) AS "hasLines"
+  `);
+  const row = (Array.isArray(rows) ? rows[0] : null) as
+    | (StorageRow & {
+        hasAttribution?: boolean | string;
+        hasLines?: boolean | string;
+        hasattribution?: boolean | string;
+        haslines?: boolean | string;
+      })
+    | null;
+  return {
+    attribution: isSqlFlag(row?.hasAttribution ?? row?.hasattribution),
+    lines: isSqlFlag(row?.hasLines ?? row?.haslines),
+  };
 }
 
 export async function listAppointmentsForTaller(
@@ -101,6 +140,14 @@ export async function listAppointmentsForTaller(
       : '';
   const contractSelect =
     storage === 'ready' ? 'cw."contractedAmount" AS "contractedAmount"' : 'NULL AS "contractedAmount"';
+  const commercial = await readCrmCommercialSchema(manager);
+  const attributionSelect = commercial.attribution
+    ? `,
+      a."campaignName" AS "campaignName",
+      a."adName" AS "adName",
+      a."adExternalId" AS "adExternalId",
+      a."attributionKind" AS "attributionKind"`
+    : '';
 
   const sql = `
     SELECT
@@ -123,6 +170,7 @@ export async function listAppointmentsForTaller(
       a.notes,
       a.source,
       ${contractSelect}
+      ${attributionSelect}
     FROM appointments a
     LEFT JOIN conversation c ON c.id = a."conversationId"
     ${contractJoin}
@@ -132,7 +180,24 @@ export async function listAppointmentsForTaller(
   `;
 
   const rows = await manager.query(sql, params);
-  return mapAppointmentRows(rows, true);
+  const items = mapAppointmentRows(rows, true);
+  if (!commercial.lines || items.length === 0) return items;
+  const lineRows = await manager.query(
+    `
+      SELECT
+        id,
+        "appointmentId" AS "appointmentId",
+        name,
+        "quantityHundredths" AS "quantityHundredths",
+        "unitPriceCents" AS "unitPriceCents",
+        "subtotalCents" AS "subtotalCents"
+      FROM appointment_service_lines
+      WHERE "tallerId" = $1 AND "appointmentId" = ANY($2)
+      ORDER BY "sortOrder" ASC, "createdAt" ASC
+    `,
+    [tallerId, items.map((item) => item.id)],
+  );
+  return attachServiceLines(items, lineRows);
 }
 
 export async function insertLegacyAppointmentRow(
@@ -239,6 +304,10 @@ function mapAppointmentRows(
         origin: extended && isProspectOrigin(origin) ? origin : null,
         notes: extended ? nullableString(record.notes) : null,
         source: extended ? nullableString(record.source) : null,
+        campaignName: extended ? nullableString(record.campaignName) : null,
+        adName: extended ? nullableString(record.adName) : null,
+        adExternalId: extended ? nullableString(record.adExternalId) : null,
+        attributionKind: extended ? nullableString(record.attributionKind) : null,
       },
       record.contractedAmount == null ? null : Number(record.contractedAmount),
     );
@@ -249,6 +318,37 @@ function nullableString(value: unknown): string | null {
   if (value == null) return null;
   const text = String(value);
   return text.length ? text : null;
+}
+
+function attachServiceLines(
+  items: AppointmentListItem[],
+  rows: unknown,
+): AppointmentListItem[] {
+  const grouped = new Map<string, CrmServiceLine[]>();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const record = row as Record<string, unknown>;
+    const appointmentId = nullableString(record.appointmentId);
+    if (!appointmentId) continue;
+    const line: CrmServiceLine = {
+      id: String(record.id),
+      name: String(record.name ?? ''),
+      quantityHundredths: Number(record.quantityHundredths),
+      unitPriceCents: Number(record.unitPriceCents),
+      subtotalCents: Number(record.subtotalCents),
+    };
+    const bucket = grouped.get(appointmentId) ?? [];
+    bucket.push(line);
+    grouped.set(appointmentId, bucket);
+  }
+  return items.map((item) => {
+    const lines = grouped.get(item.id) ?? [];
+    const quotedTotalCents = lines.reduce((sum, line) => sum + line.subtotalCents, 0);
+    return {
+      ...item,
+      lines,
+      quotedTotalCents: lines.length ? quotedTotalCents : null,
+    };
+  });
 }
 
 function isSqlFlag(value: unknown): boolean {

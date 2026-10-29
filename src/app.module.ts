@@ -24,6 +24,7 @@ import { DraftQuoteEntity } from './chat/entities/draft-quote.entity';
 import { DraftQuoteItem } from './chat/entities/draft-quote-item.entity';
 import { AppointmentEntity } from './chat/entities/appointment.entity';
 import { ContractedWork } from './chat/entities/contracted-work.entity';
+import { AppointmentServiceLine } from './chat/entities/appointment-service-line.entity';
 import { AiConfigEntity } from './chat/entities/ai-config.entity';
 import { LlmCall } from './chat/entities/llm-call.entity';
 import { LeadEventEntity } from './chat/entities/lead-event.entity';
@@ -34,8 +35,8 @@ const isCloudDatabase = Boolean(databaseUrl);
 
 /**
  * Una base remota no se altera al arrancar.
- * DB_SYNCHRONIZE=true lo vuelve a encender. La migración CRM es el script
- * migrate:crm-001a, no este proceso.
+ * DB_SYNCHRONIZE=true lo vuelve a encender. Las migraciones CRM son los
+ * scripts migrate:crm-001a y migrate:crm-008, no este proceso.
  */
 const dbSynchronize = resolveDbSynchronize(
   process.env.DB_SYNCHRONIZE,
@@ -70,6 +71,7 @@ const dbSynchronize = resolveDbSynchronize(
         DraftQuoteEntity,
         DraftQuoteItem,
         AppointmentEntity,
+        AppointmentServiceLine,
         ContractedWork,
         AiConfigEntity,
         LlmCall,

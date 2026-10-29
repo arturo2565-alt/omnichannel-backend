@@ -14,6 +14,7 @@ import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { AppointmentEntity } from './entities/appointment.entity';
 import { ContractedWork } from './entities/contracted-work.entity';
+import { AppointmentServiceLine } from './entities/appointment-service-line.entity';
 import { AiConfigEntity } from './entities/ai-config.entity';
 import { LlmCall } from './entities/llm-call.entity';
 import { LeadEventEntity } from './entities/lead-event.entity';
@@ -47,6 +48,7 @@ import { RefaccionMarketModule } from './refaccion-market/refaccion-market.modul
       DraftQuoteEntity,
       DraftQuoteItem,
       AppointmentEntity,
+      AppointmentServiceLine,
       ContractedWork,
       AiConfigEntity,
       LlmCall,

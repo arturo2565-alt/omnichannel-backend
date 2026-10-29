@@ -1,5 +1,11 @@
 import type { AppointmentStatus } from './entities/appointment.entity';
 import { isUsableAppointmentClientName, isUsableAppointmentPhone } from './appointment-client-guard';
+import {
+  parseServiceLines,
+  pesosFromCents,
+  serviceSummary,
+  type ParsedServiceLine,
+} from './crm-money';
 
 export const PROSPECT_ORIGINS = [
   'facebook',
@@ -12,6 +18,17 @@ export const PROSPECT_ORIGINS = [
 ] as const;
 
 export type ProspectOrigin = (typeof PROSPECT_ORIGINS)[number];
+
+export const ATTRIBUTION_KINDS = ['manual', 'verified', 'unknown'] as const;
+export type AttributionKind = (typeof ATTRIBUTION_KINDS)[number];
+
+export type CrmServiceLine = {
+  id: string;
+  name: string;
+  quantityHundredths: number;
+  unitPriceCents: number;
+  subtotalCents: number;
+};
 
 export const VISIT_STATUSES = [
   'agendada',
@@ -44,7 +61,13 @@ export type AppointmentListItem = {
   vehicleYear: number | null;
   serviceRequested: string | null;
   quotedAmount: number | null;
+  quotedTotalCents: number | null;
+  lines: CrmServiceLine[];
   origin: ProspectOrigin | null;
+  campaignName: string | null;
+  adName: string | null;
+  adExternalId: string | null;
+  attributionKind: AttributionKind | null;
   notes: string | null;
   source: AppointmentSource | null;
   contractedAmount: number | null;
@@ -164,6 +187,10 @@ export function isProspectOrigin(value: string): value is ProspectOrigin {
   return (PROSPECT_ORIGINS as readonly string[]).includes(value);
 }
 
+export function isAttributionKind(value: unknown): value is AttributionKind {
+  return (ATTRIBUTION_KINDS as readonly string[]).includes(String(value ?? ''));
+}
+
 export type ParsedManualAppointment = {
   clientRequestId: string;
   clientName: string;
@@ -173,7 +200,12 @@ export type ParsedManualAppointment = {
   vehicleYear: number | null;
   serviceRequested: string | null;
   quotedAmount: number | null;
+  lines: ParsedServiceLine[] | null;
   origin: ProspectOrigin;
+  campaignName: string | null;
+  adName: string | null;
+  adExternalId: string | null;
+  attributionKind: AttributionKind;
   notes: string | null;
   scheduledAtIso: string;
 };
@@ -211,10 +243,23 @@ export function parseManualAppointmentInput(
   const yearParsed = optionalYear(body.vehicleYear);
   if (!yearParsed.ok) return yearParsed;
 
-  const serviceRequested = optionalText(body.serviceRequested, 200);
   const notes = optionalText(body.notes, 2000);
-  const money = optionalMoney(body.quotedAmount);
+  const parsedLines = 'lines' in body ? parseServiceLines(body.lines) : null;
+  if (parsedLines && !parsedLines.ok) return parsedLines;
+  const lines = parsedLines ? parsedLines.lines : null;
+  const lineTotal =
+    lines && lines.length
+      ? lines.reduce((sum, line) => sum + line.subtotalCents, 0)
+      : null;
+  const money =
+    lineTotal == null
+      ? optionalMoney(body.quotedAmount)
+      : { ok: true as const, amount: pesosFromCents(lineTotal) };
   if (!money.ok) return money;
+  const serviceRequested =
+    lines && lines.length
+      ? serviceSummary(lines)
+      : optionalText(body.serviceRequested, 200);
 
   const originRaw = String(body.origin ?? 'desconocido').trim().toLowerCase();
   const origin = originRaw || 'desconocido';
@@ -224,6 +269,8 @@ export function parseManualAppointmentInput(
       error: `Origen inválido. Usa: ${PROSPECT_ORIGINS.join(', ')}.`,
     };
   }
+  const attribution = parseAttribution(body);
+  if (!attribution.ok) return attribution;
 
   return {
     ok: true,
@@ -236,9 +283,48 @@ export function parseManualAppointmentInput(
       vehicleYear: yearParsed.year,
       serviceRequested,
       quotedAmount: money.amount,
+      lines,
       origin,
+      campaignName: attribution.value.campaignName,
+      adName: attribution.value.adName,
+      adExternalId: attribution.value.adExternalId,
+      attributionKind: attribution.value.attributionKind,
       notes,
       scheduledAtIso,
+    },
+  };
+}
+
+export function parseAttribution(
+  body: Record<string, unknown>,
+):
+  | {
+      ok: true;
+      value: {
+        campaignName: string | null;
+        adName: string | null;
+        adExternalId: string | null;
+        attributionKind: AttributionKind;
+      };
+    }
+  | { ok: false; error: string } {
+  if (String(body.attributionKind ?? '').trim().toLowerCase() === 'verified') {
+    return {
+      ok: false,
+      error: 'La atribución verificada no se captura a mano.',
+    };
+  }
+  const campaignName = optionalText(body.campaignName, 120);
+  const adName = optionalText(body.adName, 120);
+  const adExternalId = optionalText(body.adExternalId, 128);
+  return {
+    ok: true,
+    value: {
+      campaignName,
+      adName,
+      adExternalId,
+      attributionKind:
+        campaignName || adName || adExternalId ? 'manual' : 'unknown',
     },
   };
 }
@@ -287,6 +373,12 @@ export function toAppointmentListItem(
     origin?: string | null;
     notes?: string | null;
     source?: string | null;
+    campaignName?: string | null;
+    adName?: string | null;
+    adExternalId?: string | null;
+    attributionKind?: string | null;
+    lines?: CrmServiceLine[];
+    quotedTotalCents?: number | null;
   },
   contractedAmount: number | null,
 ): AppointmentListItem {
@@ -320,6 +412,15 @@ export function toAppointmentListItem(
         ? null
         : Math.round(Number(row.quotedAmount)),
     origin: isProspectOrigin(origin) ? origin : null,
+    campaignName: row.campaignName ?? null,
+    adName: row.adName ?? null,
+    adExternalId: row.adExternalId ?? null,
+    attributionKind: isAttributionKind(row.attributionKind)
+      ? row.attributionKind
+      : null,
+    lines: row.lines ?? [],
+    quotedTotalCents:
+      row.quotedTotalCents == null ? null : Math.round(row.quotedTotalCents),
     notes: row.notes ?? null,
     source: source === 'manual' || source === 'autopilot' ? source : null,
     contractedAmount:
