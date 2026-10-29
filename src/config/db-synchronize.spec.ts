@@ -55,16 +55,16 @@ describe('assertRemoteSynchronizeAllowed', () => {
     ).not.toThrow();
   });
 
-  it('bloquea synchronize remoto y no revela el host ni la clave', () => {
-    expect(() => assertRemoteSynchronizeAllowed('true', remote, {})).toThrow(
-      /no puede quedar activo/,
-    );
-    try {
+  it('bloquea synchronize remoto, también en staging, y no revela el host ni la clave', () => {
+    expect(() =>
       assertRemoteSynchronizeAllowed('true', remote, {
         PEGAZUZ_ENV: 'staging',
         STAGING_SCHEMA_BOOTSTRAP: 'yes',
-        STAGING_DB_HOST: 'otro.example.test',
-      });
+        STAGING_DB_HOST: 'db.example.railway.app',
+      }),
+    ).toThrow(/bootstrap:staging/);
+    try {
+      assertRemoteSynchronizeAllowed('true', remote, {});
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       expect(message).not.toContain('db.example.railway.app');
@@ -72,14 +72,7 @@ describe('assertRemoteSynchronizeAllowed', () => {
     }
   });
 
-  it('permite el bootstrap solo con el host de staging fijado', () => {
-    expect(() =>
-      assertRemoteSynchronizeAllowed('true', remote, {
-        PEGAZUZ_ENV: 'staging',
-        STAGING_SCHEMA_BOOTSTRAP: 'yes',
-        STAGING_DB_HOST: 'db.example.railway.app',
-      }),
-    ).not.toThrow();
+  it('permite synchronize en una base local', () => {
     expect(() =>
       assertRemoteSynchronizeAllowed('true', 'postgres://u:p@127.0.0.1:5432/app', {}),
     ).not.toThrow();

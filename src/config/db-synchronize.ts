@@ -43,36 +43,21 @@ export function isLocalDatabaseUrl(databaseUrl: string | undefined): boolean {
 }
 
 /**
- * synchronize contra una base remota solo se permite para crear el esquema
- * vacío de staging, con el host fijado y una confirmación aparte.
- * Producción queda bloqueada aunque alguien ponga DB_SYNCHRONIZE=true.
+ * El proceso de Nest no sincroniza una base remota.
+ * El esquema vacío de staging lo crea `npm run bootstrap:staging`, que cierra
+ * su propia conexión y deja DB_SYNCHRONIZE en false.
  */
 export function assertRemoteSynchronizeAllowed(
   flag: string | undefined,
   databaseUrl: string | undefined,
-  env: NodeJS.ProcessEnv,
+  _env: NodeJS.ProcessEnv,
 ): void {
   if (!resolveDbSynchronize(flag, databaseUrl)) return;
   const url = String(databaseUrl ?? '').trim();
   if (!url || isLocalDatabaseUrl(url)) return;
 
-  const staging = String(env.PEGAZUZ_ENV ?? '').trim().toLowerCase() === 'staging';
-  const bootstrap =
-    String(env.STAGING_SCHEMA_BOOTSTRAP ?? '').trim().toLowerCase() === 'yes';
-  const pinned = String(env.STAGING_DB_HOST ?? '').trim().toLowerCase();
-  const host = postgresHostname(url);
-  if (
-    staging &&
-    bootstrap &&
-    pinned &&
-    !pinned.includes('production') &&
-    host === pinned
-  ) {
-    return;
-  }
-
   throw new Error(
-    'DB_SYNCHRONIZE no puede quedar activo en una base remota. En producción es false. El esquema vacío de staging exige PEGAZUZ_ENV=staging, STAGING_SCHEMA_BOOTSTRAP=yes y STAGING_DB_HOST.',
+    'DB_SYNCHRONIZE no puede quedar activo en una base remota. El esquema vacío de staging lo crea npm run bootstrap:staging y el servicio permanece en false.',
   );
 }
 
