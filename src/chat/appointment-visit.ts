@@ -18,14 +18,17 @@ import type { AppointmentStatus } from './entities/appointment.entity';
 type SqlRunner = Pick<EntityManager, 'query'>;
 
 type VisitGateway = {
-  emitConversationLeadUpdated(payload: {
-    conversationId: string;
-    status: string;
-    contactName?: string;
-    lastMessageAt?: string | null;
-    lastMessage?: string | null;
-    isAutoPilotActive?: boolean;
-  }): void;
+  emitConversationLeadUpdated(
+    tallerId: string,
+    payload: {
+      conversationId: string;
+      status: string;
+      contactName?: string;
+      lastMessageAt?: string | null;
+      lastMessage?: string | null;
+      isAutoPilotActive?: boolean;
+    },
+  ): void;
   emitAppointmentUpdated(tallerId: string, payload: AppointmentRealtimePayload): void;
 };
 
@@ -76,7 +79,7 @@ export async function patchAppointmentVisit(
           : null;
     if (leadStatus) {
       await leads.logTransition(row.conversationId, leadStatus);
-      gateway.emitConversationLeadUpdated({
+      gateway.emitConversationLeadUpdated(tallerId, {
         conversationId: row.conversationId,
         status: leadStatus,
         contactName: row.contactName,

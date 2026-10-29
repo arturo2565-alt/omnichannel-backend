@@ -475,15 +475,18 @@ export class QuoteCartService {
       });
       const savedDraft = await this.draftQuoteRepository.save(input.existingCart);
 
-      this.chatGateway.emitDraftQuoteReady({
-        draftQuoteId: savedDraft.id,
-        conversationId: input.conversationId,
-        messageId: input.messageId,
-        damageAnalysis: input.analysis,
-        draftQuote: draftQuoteForClient,
-        estimateAmount: input.estimateAmount,
-        isAutoPilotActive: true,
-      });
+      this.chatGateway.emitDraftQuoteReady(
+        String(savedDraft.tallerId ?? input.tallerId ?? '').trim(),
+        {
+          draftQuoteId: savedDraft.id,
+          conversationId: input.conversationId,
+          messageId: input.messageId,
+          damageAnalysis: input.analysis,
+          draftQuote: draftQuoteForClient,
+          estimateAmount: input.estimateAmount,
+          isAutoPilotActive: true,
+        },
+      );
 
       return { savedDraft, priorMessageId: priorMessageId ?? null };
     }
@@ -509,15 +512,18 @@ export class QuoteCartService {
     });
     const savedDraft = await this.draftQuoteRepository.save(row);
 
-    this.chatGateway.emitDraftQuoteReady({
-      draftQuoteId: savedDraft.id,
-      conversationId: input.conversationId,
-      messageId: input.messageId,
-      damageAnalysis: input.analysis,
-      draftQuote: draftQuoteForClient,
-      estimateAmount: input.estimateAmount,
-      isAutoPilotActive: true,
-    });
+    this.chatGateway.emitDraftQuoteReady(
+      String(savedDraft.tallerId ?? input.tallerId ?? '').trim(),
+      {
+        draftQuoteId: savedDraft.id,
+        conversationId: input.conversationId,
+        messageId: input.messageId,
+        damageAnalysis: input.analysis,
+        draftQuote: draftQuoteForClient,
+        estimateAmount: input.estimateAmount,
+        isAutoPilotActive: true,
+      },
+    );
 
     return { savedDraft, priorMessageId: null };
   }
@@ -742,15 +748,18 @@ export class QuoteCartService {
       tallerId,
     );
 
-    this.chatGateway.emitDraftQuoteReady({
-      draftQuoteId: saved.id,
-      conversationId: saved.conversationId,
-      messageId: saved.messageId ?? '',
-      damageAnalysis: saved.damageAnalysis,
-      draftQuote: saved.quotePayload,
-      estimateAmount: saved.estimateAmount,
-      isAutoPilotActive: false,
-    });
+    this.chatGateway.emitDraftQuoteReady(
+      String(saved.tallerId ?? tallerId ?? '').trim(),
+      {
+        draftQuoteId: saved.id,
+        conversationId: saved.conversationId,
+        messageId: saved.messageId ?? '',
+        damageAnalysis: saved.damageAnalysis,
+        draftQuote: saved.quotePayload,
+        estimateAmount: saved.estimateAmount,
+        isAutoPilotActive: false,
+      },
+    );
 
     return saved;
   }
@@ -1073,15 +1082,18 @@ export class QuoteCartService {
     const finalRow = reloaded ?? saved;
     finalRow.items?.sort((a, b) => a.sortOrder - b.sortOrder);
 
-    this.chatGateway.emitDraftQuoteReady({
-      draftQuoteId: finalRow.id,
-      conversationId: finalRow.conversationId,
-      messageId: finalRow.messageId ?? '',
-      damageAnalysis: finalRow.damageAnalysis,
-      draftQuote: finalRow.quotePayload,
-      estimateAmount: finalRow.estimateAmount,
-      isAutoPilotActive: true,
-    });
+    this.chatGateway.emitDraftQuoteReady(
+      String(finalRow.tallerId ?? tallerId ?? '').trim(),
+      {
+        draftQuoteId: finalRow.id,
+        conversationId: finalRow.conversationId,
+        messageId: finalRow.messageId ?? '',
+        damageAnalysis: finalRow.damageAnalysis,
+        draftQuote: finalRow.quotePayload,
+        estimateAmount: finalRow.estimateAmount,
+        isAutoPilotActive: true,
+      },
+    );
 
     return finalRow;
   }

@@ -1,74 +1,126 @@
-import { WebSocketGateway, WebSocketServer, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
+import {
+  OnGatewayConnection,
+  OnGatewayDisconnect,
+  OnGatewayInit,
+  WebSocketGateway,
+  WebSocketServer,
+} from '@nestjs/websockets';
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
+import { createSocketAuthMiddleware } from './chat-socket-auth';
 import {
   appointmentSocketRoom,
   type AppointmentRealtimePayload,
 } from './crm-appointment';
 
+type WorkshopSocketEvent =
+  | 'newMessage'
+  | 'imageDamageAnalysis'
+  | 'draftQuoteReady'
+  | 'draftPeritajeAwaitingVehicle'
+  | 'conversationLeadUpdated'
+  | 'aiSuggestion'
+  | 'appointmentCreated'
+  | 'appointmentUpdated';
+
+type DraftQuoteReadyPayload = {
+  draftQuoteId: string;
+  conversationId: string;
+  messageId: string;
+  damageAnalysis: unknown;
+  draftQuote: unknown;
+  estimateAmount: number;
+  isAutoPilotActive?: boolean;
+  awaitingVehicleForBanio?: boolean;
+};
+
+type ConversationLeadPayload = {
+  conversationId: string;
+  status: string;
+  contactName?: string;
+  lastMessageAt?: string | null;
+  lastMessage?: string | null;
+  isAutoPilotActive?: boolean;
+};
+
 @WebSocketGateway({
-  cors: { origin: '*',
-          methods: ['GET', 'POST'], },
+  cors: { origin: '*', methods: ['GET', 'POST'] },
 })
-export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class ChatGateway
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
   @WebSocketServer()
   server: Server;
 
   constructor(private readonly jwtService: JwtService) {}
 
+  afterInit(server: Server) {
+    server.use(
+      createSocketAuthMiddleware((token) =>
+        this.jwtService.verifyAsync<{ tallerId?: string }>(token),
+      ),
+    );
+  }
+
   async handleConnection(client: Socket) {
-    const raw = client.handshake?.auth?.token ?? client.handshake?.query?.token;
-    const token = Array.isArray(raw) ? raw[0] : raw;
-    if (!token || typeof token !== 'string') return;
-    try {
-      const payload = await this.jwtService.verifyAsync<{ tallerId?: string }>(
-        token,
-      );
-      const room = appointmentSocketRoom(payload?.tallerId);
-      if (room) await client.join(room);
-    } catch {
-      // Sin sala: no recibe eventos de citas de ningún taller.
+    const tallerId = String(client.data?.tallerId ?? '').trim();
+    const room = appointmentSocketRoom(tallerId);
+    if (!room) {
+      client.disconnect(true);
+      return;
     }
+    await client.join(room);
   }
 
   handleDisconnect(_client: Socket) {
     /* conexión cerrada */
   }
 
-  emitNewMessage(message: any) {
-    this.server.emit('newMessage', message);
+  emitNewMessage(tallerId: string, message: unknown) {
+    this.emitToTaller(tallerId, 'newMessage', message);
   }
 
-  emitImageDamageAnalysis(payload: {
-    messageId: string;
-    conversationId: string;
-    damageAnalysis: unknown;
-    draftQuote?: unknown;
-  }) {
-    this.server.emit('imageDamageAnalysis', payload);
+  emitImageDamageAnalysis(
+    tallerId: string,
+    payload: {
+      messageId: string;
+      conversationId: string;
+      damageAnalysis: unknown;
+      draftQuote?: unknown;
+    },
+  ) {
+    this.emitToTaller(tallerId, 'imageDamageAnalysis', payload);
   }
 
-  emitDraftQuoteReady(payload: {
-    draftQuoteId: string;
-    conversationId: string;
-    messageId: string;
-    damageAnalysis: unknown;
-    draftQuote: unknown;
-    estimateAmount: number;
-    isAutoPilotActive?: boolean;
-    awaitingVehicleForBanio?: boolean;
-  }) {
-    this.server.emit('draftQuoteReady', payload);
+  emitDraftQuoteReady(tallerId: string, payload: DraftQuoteReadyPayload) {
+    this.emitToTaller(tallerId, 'draftQuoteReady', payload);
   }
 
-  emitDraftPeritajeAwaitingVehicle(payload: {
-    draftQuoteId: string;
-    conversationId: string;
-    messageId: string;
-    damageAnalysis: unknown;
-    isAutoPilotActive?: boolean;
-  }) {
-    this.server.emit('draftPeritajeAwaitingVehicle', payload);
+  emitDraftPeritajeAwaitingVehicle(
+    tallerId: string,
+    payload: {
+      draftQuoteId: string;
+      conversationId: string;
+      messageId: string;
+      damageAnalysis: unknown;
+      isAutoPilotActive?: boolean;
+    },
+  ) {
+    this.emitToTaller(tallerId, 'draftPeritajeAwaitingVehicle', payload);
+  }
+
+  emitConversationLeadUpdated(
+    tallerId: string,
+    payload: ConversationLeadPayload,
+  ) {
+    this.emitToTaller(tallerId, 'conversationLeadUpdated', payload);
+  }
+
+  emitAiSuggestion(
+    tallerId: string,
+    payload: { conversationId?: string; suggestion: string },
+  ) {
+    this.emitToTaller(tallerId, 'aiSuggestion', payload);
   }
 
   emitAppointmentCreated(
@@ -85,21 +137,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.emitToTaller(tallerId, 'appointmentUpdated', payload);
   }
 
-  emitConversationLeadUpdated(payload: {
-    conversationId: string;
-    status: string;
-    contactName?: string;
-    lastMessageAt?: string | null;
-    lastMessage?: string | null;
-    isAutoPilotActive?: boolean;
-  }) {
-    this.server.emit('conversationLeadUpdated', payload);
-  }
-
   private emitToTaller(
     tallerId: string,
-    event: 'appointmentCreated' | 'appointmentUpdated',
-    payload: AppointmentRealtimePayload,
+    event: WorkshopSocketEvent,
+    payload: unknown,
   ) {
     const room = appointmentSocketRoom(tallerId);
     if (!room || !this.server) return;

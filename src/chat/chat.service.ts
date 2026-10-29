@@ -2703,7 +2703,10 @@ export class ChatService implements OnModuleDestroy {
     }
 
     if (!suppressRealtimeNotify) {
-      this.chatGateway.emitNewMessage(saved);
+      this.chatGateway.emitNewMessage(
+        String(conversation.tallerId ?? saved.tallerId ?? '').trim(),
+        saved,
+      );
     }
 
     if (
@@ -3575,13 +3578,16 @@ export class ChatService implements OnModuleDestroy {
       { isAutoPilotActive: true },
     );
 
-    this.chatGateway.emitDraftPeritajeAwaitingVehicle({
-      draftQuoteId: saved.id,
-      conversationId,
-      messageId,
-      damageAnalysis: analysisWithGate,
-      isAutoPilotActive: true,
-    });
+    this.chatGateway.emitDraftPeritajeAwaitingVehicle(
+      String(tallerId ?? saved.tallerId ?? '').trim(),
+      {
+        draftQuoteId: saved.id,
+        conversationId,
+        messageId,
+        damageAnalysis: analysisWithGate,
+        isAutoPilotActive: true,
+      },
+    );
 
     console.log(
       '[BanioVehicleGate] Peritaje guardado sin precio; SOLICITAR_MODELO_BANIO activo',
@@ -3703,15 +3709,18 @@ export class ChatService implements OnModuleDestroy {
       );
     }
 
-    this.chatGateway.emitDraftQuoteReady({
-      draftQuoteId: saved.id,
-      conversationId,
-      messageId: row.messageId ?? '',
-      damageAnalysis: analysis,
-      draftQuote: draftQuoteForClient,
-      estimateAmount,
-      isAutoPilotActive: true,
-    });
+    this.chatGateway.emitDraftQuoteReady(
+      String(tallerId ?? saved.tallerId ?? '').trim(),
+      {
+        draftQuoteId: saved.id,
+        conversationId,
+        messageId: row.messageId ?? '',
+        damageAnalysis: analysis,
+        draftQuote: draftQuoteForClient,
+        estimateAmount,
+        isAutoPilotActive: true,
+      },
+    );
 
     const convForSend = await this.conversationRepository.findOne({
       where: { id: conversationId },
@@ -7315,16 +7324,19 @@ ${catalogAppend}`;
           toAppointmentRealtimePayload(existingTallerId, existingActive),
         );
       }
-      this.chatGateway.emitConversationLeadUpdated({
-        conversationId: conversation.id,
-        status: conversation.status,
-        contactName: conversation.contactName,
-        lastMessageAt: conversation.lastMessageAt
-          ? conversation.lastMessageAt.toISOString()
-          : null,
-        lastMessage: conversation.lastMessage ?? null,
-        isAutoPilotActive: Boolean(conversation.isAutoPilotActive),
-      });
+      this.chatGateway.emitConversationLeadUpdated(
+        String(conversation.tallerId ?? existingTallerId).trim(),
+        {
+          conversationId: conversation.id,
+          status: conversation.status,
+          contactName: conversation.contactName,
+          lastMessageAt: conversation.lastMessageAt
+            ? conversation.lastMessageAt.toISOString()
+            : null,
+          lastMessage: conversation.lastMessage ?? null,
+          isAutoPilotActive: Boolean(conversation.isAutoPilotActive),
+        },
+      );
       return {
         success: true,
         appointmentId: existingActive.id,
@@ -7389,16 +7401,19 @@ ${catalogAppend}`;
       );
     }
 
-    this.chatGateway.emitConversationLeadUpdated({
-      conversationId: conversation.id,
-      status: conversation.status,
-      contactName: conversation.contactName,
-      lastMessageAt: conversation.lastMessageAt
-        ? conversation.lastMessageAt.toISOString()
-        : null,
-      lastMessage: conversation.lastMessage ?? null,
-      isAutoPilotActive: Boolean(conversation.isAutoPilotActive),
-    });
+    this.chatGateway.emitConversationLeadUpdated(
+      String(conversation.tallerId ?? createdTallerId).trim(),
+      {
+        conversationId: conversation.id,
+        status: conversation.status,
+        contactName: conversation.contactName,
+        lastMessageAt: conversation.lastMessageAt
+          ? conversation.lastMessageAt.toISOString()
+          : null,
+        lastMessage: conversation.lastMessage ?? null,
+        isAutoPilotActive: Boolean(conversation.isAutoPilotActive),
+      },
+    );
 
     return {
       success: true,
@@ -8110,7 +8125,10 @@ ${catalogAppend}`;
     conversation.lastMessage = preview;
     await this.conversationRepository.save(conversation);
 
-    this.chatGateway.emitNewMessage(savedOut);
+    this.chatGateway.emitNewMessage(
+      String(conversation.tallerId ?? savedOut.tallerId ?? '').trim(),
+      savedOut,
+    );
     this.dispatchOutboundChannelMessage(conversation, text, false);
   }
 
@@ -8677,7 +8695,10 @@ ${catalogAppend}`;
     conversation.lastMessage = preview;
     await this.conversationRepository.save(conversation);
 
-    this.chatGateway.emitNewMessage(savedOut);
+    this.chatGateway.emitNewMessage(
+      String(conversation.tallerId ?? savedOut.tallerId ?? '').trim(),
+      savedOut,
+    );
 
     this.dispatchOutboundChannelMessage(conversation, text, false);
   }
@@ -8700,11 +8721,15 @@ ${catalogAppend}`;
       const suggestion = await this.buildInboundSuggestionFromHistory(turns);
       if (!suggestion) return;
 
-      this.chatGateway.server.emit('aiSuggestion', {
-        conversationId:
-          message.conversation?.id || (message as { conversationId?: string }).conversationId,
-        suggestion,
-      });
+      const suggestionTallerId = String(message.tallerId ?? '').trim();
+      if (suggestionTallerId) {
+        this.chatGateway.emitAiSuggestion(suggestionTallerId, {
+          conversationId:
+            message.conversation?.id ||
+            (message as { conversationId?: string }).conversationId,
+          suggestion,
+        });
+      }
     } catch (error) {
       console.error('Error con OpenAI:', (error as Error).message);
     }
@@ -8867,7 +8892,7 @@ ${catalogAppend}`;
     const status = fresh?.status ?? newStatus;
     const isAutoPilotActive = Boolean(fresh?.isAutoPilotActive);
 
-    this.chatGateway.emitConversationLeadUpdated({
+    this.chatGateway.emitConversationLeadUpdated(tallerId, {
       conversationId: cid,
       status,
       contactName: fresh?.contactName ?? row.contactName,
