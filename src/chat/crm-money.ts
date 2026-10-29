@@ -1,3 +1,8 @@
+import {
+  parseCrmLineSnapshot,
+  type CrmLineSnapshot,
+} from '../catalog/crm-catalog-offer';
+
 /** Pesos enteros que ya usa `quotedAmount`. El desglose nuevo vive en centavos. */
 export const MAX_QUOTED_PESOS = 10_000_000;
 export const MAX_LINE_CENTS = MAX_QUOTED_PESOS * 100;
@@ -10,7 +15,7 @@ export type ParsedServiceLine = {
   quantityHundredths: number;
   unitPriceCents: number;
   subtotalCents: number;
-};
+} & CrmLineSnapshot;
 
 export function lineSubtotalCents(
   quantityHundredths: number,
@@ -99,12 +104,15 @@ export function parseServiceLines(
     const id = normalizeLineId(record.id) ?? ids();
     if (seen.has(id)) return { ok: false, error: 'Hay servicios repetidos.' };
     seen.add(id);
+    const snapshot = parseCrmLineSnapshot(record);
+    if (!snapshot.ok) return snapshot;
     lines.push({
       id,
       name,
       quantityHundredths: quantity.amount,
       unitPriceCents: price.amount,
       subtotalCents: subtotal,
+      ...snapshot.value,
     });
   }
   const total = lines.reduce((sum, line) => sum + line.subtotalCents, 0);

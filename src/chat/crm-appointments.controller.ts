@@ -10,6 +10,8 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
+import { CatalogService } from '../catalog/catalog.service';
+import { buildCrmCatalogOffer } from '../catalog/crm-catalog-offer';
 import { ChatService } from './chat.service';
 import { ManualAppointmentService } from './manual-appointment.service';
 
@@ -19,11 +21,18 @@ export class CrmAppointmentsController {
   constructor(
     private readonly manualAppointments: ManualAppointmentService,
     private readonly chatService: ChatService,
+    private readonly catalog: CatalogService,
   ) {}
 
   @Get('suggestions')
   suggestions(@CurrentUser() user: AuthenticatedUser) {
     return this.manualAppointments.suggestions(user.tallerId);
+  }
+
+  @Get('catalog-offer')
+  async catalogOffer(@CurrentUser() user: AuthenticatedUser) {
+    const catalog = await this.catalog.getPieceBaseCatalog(user.tallerId);
+    return buildCrmCatalogOffer(catalog);
   }
 
   @Get()

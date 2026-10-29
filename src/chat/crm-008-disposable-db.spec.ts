@@ -16,12 +16,12 @@ import { AiConfigEntity } from './entities/ai-config.entity';
 import { LlmCall } from './entities/llm-call.entity';
 import { LeadEventEntity } from './entities/lead-event.entity';
 import { PriceMatrix } from '../catalog/entities/price-matrix.entity';
-import { resolveDbSynchronize } from '../config/db-synchronize';
+import { isLocalDatabaseUrl, resolveDbSynchronize } from '../config/db-synchronize';
 import { listAppointmentsForTaller } from './appointment-directory';
 import { ManualAppointmentService } from './manual-appointment.service';
 
 const databaseUrl = String(process.env.CRM008_DATABASE_URL ?? '').trim();
-const localDisposable = /@(localhost|127\.0\.0\.1)(?::|\/)/.test(databaseUrl);
+const localDisposable = isLocalDatabaseUrl(databaseUrl);
 const describeDisposable = localDisposable ? describe : describe.skip;
 
 const entities = [
@@ -225,6 +225,20 @@ describeDisposable('CRM-008 base PostgreSQL 18 desechable', () => {
     );
     expect(constraints).toHaveLength(4);
 
+    const sql006 = readFileSync(
+      join(__dirname, 'migrations/006_crm_catalog_snapshot.sql'),
+      'utf8',
+    );
+    await ds.query(sql006);
+    await ds.query(sql006);
+    expect(await businessSnapshot(ds, historical.id)).toEqual(snapshot);
+    expect(await columnExists(ds, 'appointment_service_lines', 'catalogPieceCode')).toBe(
+      true,
+    );
+    expect(await columnExists(ds, 'appointment_service_lines', 'catalogUnitPriceCents')).toBe(
+      true,
+    );
+
     const created = await manual.create(tallerA.id, '00000000-0000-4000-8000-000000000001', {
       clientRequestId: 'crm-008-multi',
       clientName: 'Carla',
@@ -312,6 +326,33 @@ describeDisposable('CRM-008 base PostgreSQL 18 desechable', () => {
     expect(suggestionsA.services).toContain('Pintura de salpicadera');
     expect(suggestionsB.campaigns).not.toContain('Primavera');
     expect(suggestionsB.services).not.toContain('Pintura de salpicadera');
+
+    const snapped = await manual.saveCommercial(tallerA.id, created.id, {
+      lines: [
+        {
+          id: edited.lines[0].id,
+          name: 'Reparación y pintura · Salpicadera izquierda',
+          quantityHundredths: 100,
+          unitPriceCents: 460000,
+          catalogPieceCode: 'SI',
+          catalogOperations: 'reparar+pintar',
+          tariffKind: 'reparacion_pintura',
+          catalogMatrixRowId: '11111111-1111-4111-8111-111111111111',
+          catalogUnitPriceCents: 450000,
+        },
+      ],
+    });
+    expect(snapped.lines[0].unitPriceCents).toBe(460000);
+    expect(snapped.lines[0].catalogUnitPriceCents).toBe(450000);
+    expect(snapped.quotedAmount).not.toBe(contract.contractedAmount);
+    const visible = await listAppointmentsForTaller(ds.manager, tallerA.id, {
+      source: 'manual',
+    });
+    const storedSnap = visible.find((row) => row.id === created.id)?.lines[0];
+    expect(storedSnap?.tariffKind).toBe('reparacion_pintura');
+    expect(storedSnap?.catalogPieceCode).toBe('SI');
+    expect(storedSnap?.catalogOperations).toBe('reparar+pintar');
+    expect(await businessSnapshot(ds, historical.id)).toEqual(snapshot);
 
     await expect(
       manual.saveCommercial(tallerB.id, created.id, { campaignName: 'Ajena' }),

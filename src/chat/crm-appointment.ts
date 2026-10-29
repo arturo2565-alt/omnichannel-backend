@@ -28,6 +28,11 @@ export type CrmServiceLine = {
   quantityHundredths: number;
   unitPriceCents: number;
   subtotalCents: number;
+  catalogPieceCode?: string | null;
+  tariffKind?: string | null;
+  catalogOperations?: string | null;
+  catalogMatrixRowId?: string | null;
+  catalogUnitPriceCents?: number | null;
 };
 
 export const VISIT_STATUSES = [

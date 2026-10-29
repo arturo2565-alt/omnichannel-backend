@@ -16,7 +16,7 @@ import { AiConfigEntity } from './entities/ai-config.entity';
 import { LlmCall } from './entities/llm-call.entity';
 import { LeadEventEntity } from './entities/lead-event.entity';
 import { PriceMatrix } from '../catalog/entities/price-matrix.entity';
-import { resolveDbSynchronize } from '../config/db-synchronize';
+import { isLocalDatabaseUrl, resolveDbSynchronize } from '../config/db-synchronize';
 import {
   insertLegacyAppointmentRow,
   listAppointmentsForTaller,
@@ -26,7 +26,7 @@ import { ManualAppointmentService } from './manual-appointment.service';
 import { LeadEventsService } from './lead-events.service';
 
 const databaseUrl = String(process.env.CRM003_DATABASE_URL ?? '').trim();
-const localDisposable = /@(localhost|127\.0\.0\.1)(?::|\/)/.test(databaseUrl);
+const localDisposable = isLocalDatabaseUrl(databaseUrl);
 const describeDisposable = localDisposable ? describe : describe.skip;
 
 const entities = [

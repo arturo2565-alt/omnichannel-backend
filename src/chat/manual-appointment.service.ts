@@ -164,7 +164,13 @@ export class ManualAppointmentService {
         }
         const stored = await manager.getRepository(AppointmentEntity).save(row);
         if (input.lines && input.lines.length > 0) {
-          await this.replaceLines(manager, tallerId, stored.id, input.lines);
+          await this.replaceLines(
+            manager,
+            tallerId,
+            stored.id,
+            input.lines,
+            schema.snapshot,
+          );
         }
         if (schema.attribution) {
           await this.writeAttribution(manager, tallerId, stored.id, input);
@@ -271,7 +277,7 @@ export class ManualAppointmentService {
     }
     await this.appointments.manager.transaction(async (manager) => {
       if (lines) {
-        await this.replaceLines(manager, tallerId, row.id, lines);
+        await this.replaceLines(manager, tallerId, row.id, lines, schema.snapshot);
         const summary = serviceSummary(lines);
         row.serviceRequested = summary;
         row.quoteSummary = summary;
@@ -364,6 +370,7 @@ export class ManualAppointmentService {
     tallerId: string,
     appointmentId: string,
     lines: ParsedServiceLine[],
+    snapshotReady: boolean,
   ): Promise<void> {
     const repo = manager.getRepository(AppointmentServiceLine);
     const existing = await repo.find({
@@ -394,6 +401,44 @@ export class ManualAppointmentService {
           sortOrder: index,
         }),
       );
+      if (snapshotReady) {
+        await this.writeLineSnapshot(manager, tallerId, appointmentId, line);
+      }
+    }
+  }
+
+  private async writeLineSnapshot(
+    manager: EntityManager,
+    tallerId: string,
+    appointmentId: string,
+    line: ParsedServiceLine,
+  ): Promise<void> {
+    const updated = await manager.query(
+      `
+        UPDATE appointment_service_lines
+        SET "catalogPieceCode" = $1,
+            "tariffKind" = $2,
+            "catalogOperations" = $3,
+            "catalogMatrixRowId" = $4,
+            "catalogUnitPriceCents" = $5
+        WHERE id = $6
+          AND "tallerId" = $7
+          AND "appointmentId" = $8
+        RETURNING id
+      `,
+      [
+        line.catalogPieceCode,
+        line.tariffKind,
+        line.catalogOperations,
+        line.catalogMatrixRowId,
+        line.catalogUnitPriceCents,
+        line.id,
+        tallerId,
+        appointmentId,
+      ],
+    );
+    if (!Array.isArray(updated) || updated.length === 0) {
+      throw new NotFoundException(`Servicio no encontrado: ${line.id}`);
     }
   }
 

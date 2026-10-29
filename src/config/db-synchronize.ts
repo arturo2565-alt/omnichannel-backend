@@ -37,6 +37,11 @@ export function redactDatabaseUrl(text: string): string {
   return text.replace(/postgres(?:ql)?:\/\/\S+/gi, 'postgresql://***');
 }
 
+export function isLocalDatabaseUrl(databaseUrl: string | undefined): boolean {
+  const host = postgresHostname(databaseUrl);
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
 function postgresHostname(databaseUrl: string | undefined): string | null {
   const url = String(databaseUrl ?? '').trim();
   if (!url) return null;

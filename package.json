@@ -26,6 +26,7 @@
     "migrate:llm-calls-prompt-versions": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/apply-llm-calls-prompt-versions.ts",
     "migrate:crm-001a": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/apply-crm-001a.ts",
     "migrate:crm-008": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/apply-crm-008.ts",
+    "migrate:crm-010": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/apply-crm-010.ts",
     "report:montaje-pintura": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register src/catalog/montaje-pintura-migration-report.ts"
   },
   "dependencies": {

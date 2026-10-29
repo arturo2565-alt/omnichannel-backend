@@ -27,6 +27,7 @@ export type AppointmentStorage = 'legacy' | 'partial' | 'ready';
 export type CrmCommercialSchema = {
   attribution: boolean;
   lines: boolean;
+  snapshot: boolean;
 };
 
 type SqlRunner = Pick<EntityManager, 'query'>;
@@ -82,19 +83,29 @@ export async function readCrmCommercialSchema(
         FROM information_schema.tables
         WHERE table_schema = current_schema()
           AND table_name = 'appointment_service_lines'
-      ) AS "hasLines"
+      ) AS "hasLines",
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'appointment_service_lines'
+          AND column_name = 'catalogPieceCode'
+      ) AS "hasSnapshot"
   `);
   const row = (Array.isArray(rows) ? rows[0] : null) as
     | (StorageRow & {
         hasAttribution?: boolean | string;
         hasLines?: boolean | string;
+        hasSnapshot?: boolean | string;
         hasattribution?: boolean | string;
         haslines?: boolean | string;
+        hassnapshot?: boolean | string;
       })
     | null;
   return {
     attribution: isSqlFlag(row?.hasAttribution ?? row?.hasattribution),
     lines: isSqlFlag(row?.hasLines ?? row?.haslines),
+    snapshot: isSqlFlag(row?.hasSnapshot ?? row?.hassnapshot),
   };
 }
 
@@ -182,6 +193,14 @@ export async function listAppointmentsForTaller(
   const rows = await manager.query(sql, params);
   const items = mapAppointmentRows(rows, true);
   if (!commercial.lines || items.length === 0) return items;
+  const snapshotSelect = commercial.snapshot
+    ? `,
+        "catalogPieceCode" AS "catalogPieceCode",
+        "tariffKind" AS "tariffKind",
+        "catalogOperations" AS "catalogOperations",
+        "catalogMatrixRowId" AS "catalogMatrixRowId",
+        "catalogUnitPriceCents" AS "catalogUnitPriceCents"`
+    : '';
   const lineRows = await manager.query(
     `
       SELECT
@@ -191,6 +210,7 @@ export async function listAppointmentsForTaller(
         "quantityHundredths" AS "quantityHundredths",
         "unitPriceCents" AS "unitPriceCents",
         "subtotalCents" AS "subtotalCents"
+        ${snapshotSelect}
       FROM appointment_service_lines
       WHERE "tallerId" = $1 AND "appointmentId" = ANY($2)
       ORDER BY "sortOrder" ASC, "createdAt" ASC
@@ -314,6 +334,20 @@ function mapAppointmentRows(
   });
 }
 
+function nullableTariff(value: unknown): string | null {
+  const text = nullableString(value);
+  if (
+    text === 'reparacion_pintura' ||
+    text === 'montaje' ||
+    text === 'montaje_pintura' ||
+    text === 'integral' ||
+    text === 'manual'
+  ) {
+    return text;
+  }
+  return null;
+}
+
 function nullableString(value: unknown): string | null {
   if (value == null) return null;
   const text = String(value);
@@ -335,6 +369,14 @@ function attachServiceLines(
       quantityHundredths: Number(record.quantityHundredths),
       unitPriceCents: Number(record.unitPriceCents),
       subtotalCents: Number(record.subtotalCents),
+      catalogPieceCode: nullableString(record.catalogPieceCode),
+      tariffKind: nullableTariff(record.tariffKind),
+      catalogOperations: nullableString(record.catalogOperations),
+      catalogMatrixRowId: nullableString(record.catalogMatrixRowId),
+      catalogUnitPriceCents:
+        record.catalogUnitPriceCents == null || record.catalogUnitPriceCents === ''
+          ? null
+          : Number(record.catalogUnitPriceCents),
     };
     const bucket = grouped.get(appointmentId) ?? [];
     bucket.push(line);

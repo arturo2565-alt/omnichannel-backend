@@ -14,6 +14,7 @@ import {
   migrationUsesSsl,
   redactDatabaseUrl,
 } from '../src/config/db-synchronize';
+import { assertCrmMigrationAllowed } from '../src/config/migration-target';
 
 const REQUIRED_COLUMNS = [
   'campaignName',
@@ -31,6 +32,7 @@ async function main() {
     console.error(MISSING_DATABASE_URL_MESSAGE);
     process.exit(1);
   }
+  assertCrmMigrationAllowed(url, process.env);
 
   const useSsl = migrationUsesSsl(url, process.env.DATABASE_SSL);
   const sql = readFileSync(

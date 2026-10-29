@@ -326,6 +326,28 @@ describe('ManualAppointmentService', () => {
     expect(appointments.rows).toHaveLength(0);
   });
 
+  it('rechaza reparar y montar la misma pieza sin guardar la cita', async () => {
+    const { service, appointments, lines } = build();
+    enableCommercial(appointments);
+    await expect(
+      service.create('taller-a', 'user-1', {
+        ...request,
+        lines: [
+          {
+            name: 'Salpicadera izquierda',
+            quantityHundredths: 100,
+            unitPriceCents: 450000,
+            catalogPieceCode: 'SI',
+            catalogOperations: 'reparar+montar',
+            tariffKind: 'manual',
+          },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(appointments.rows).toHaveLength(0);
+    expect(lines.rows).toHaveLength(0);
+  });
+
   it('no mueve un servicio al taller contrario', async () => {
     const { service, appointments } = build();
     enableCommercial(appointments);
