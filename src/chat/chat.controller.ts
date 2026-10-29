@@ -18,6 +18,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { isStagingRuntime } from '../config/staging-guard';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
 import type {
@@ -50,6 +51,9 @@ export class ChatController {
     @Query('hub.challenge') challenge: string,
     @Res() res: Response,
   ) {
+    if (isStagingRuntime()) {
+      throw new ForbiddenException('Staging no valida webhooks de Meta.');
+    }
     const verifyToken = getWhatsAppVerifyToken();
     if (!verifyToken) {
       console.warn('[webhook GET] WHATSAPP_VERIFY_TOKEN no configurado');
@@ -117,6 +121,10 @@ export class ChatController {
   @Public()
   @Post()
   receiveMessage(@Req() req: Request, @Res() res: Response) {
+    if (isStagingRuntime()) {
+      res.status(HttpStatus.OK).type('text/plain').send('EVENT_RECEIVED');
+      return;
+    }
     const body = req.body;
 
     void Sentry.withScope(async (scope) => {

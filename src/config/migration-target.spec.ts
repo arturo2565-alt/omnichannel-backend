@@ -38,7 +38,26 @@ describe('assertCrmMigrationAllowed', () => {
         CRM_MIGRATE_TARGET: 'staging',
         CRM_STAGING_MIGRATE: 'yes',
       }),
+    ).toThrow(/STAGING_DB_HOST/);
+    expect(() =>
+      assertCrmMigrationAllowed(remote, {
+        CRM_MIGRATE_TARGET: 'staging',
+        CRM_STAGING_MIGRATE: 'yes',
+        STAGING_DB_HOST: 'db.example.test',
+      }),
     ).not.toThrow();
+    try {
+      assertCrmMigrationAllowed(remote, {
+        CRM_MIGRATE_TARGET: 'staging',
+        CRM_STAGING_MIGRATE: 'yes',
+        STAGING_DB_HOST: 'otro.example.test',
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      expect(message).toMatch(/no coincide/);
+      expect(message).not.toContain('db.example.test');
+      expect(message).not.toContain('secret');
+    }
   });
 
   it('producción exige autorización explícita', () => {

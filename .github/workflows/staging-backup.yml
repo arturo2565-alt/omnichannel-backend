@@ -1,0 +1,53 @@
+# Volcado de staging y restauración de prueba en Postgres desechable.
+# No restaura encima de la base remota. Apagado hasta STAGING_BACKUP_ENABLED=true.
+name: Staging backup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backup:
+    if: vars.STAGING_BACKUP_ENABLED == 'true'
+    environment: staging
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - run: npm ci
+      - name: Comprobar el destino y volcar
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          CRM_MIGRATE_TARGET: staging
+          CRM_STAGING_MIGRATE: yes
+          STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
+        run: |
+          npm run check:staging-target
+          pg_dump --format=custom --no-owner --file=staging.dump --dbname="$DATABASE_URL"
+      - name: Restaurar en Postgres desechable
+        env:
+          LOCAL_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
+        run: |
+          pg_restore --no-owner --dbname="$LOCAL_DATABASE_URL" --exit-on-error staging.dump
+          psql "$LOCAL_DATABASE_URL" --command='SELECT 1'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staging-backup
+          path: staging.dump
+          retention-days: 14

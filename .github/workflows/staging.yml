@@ -1,0 +1,92 @@
+# Publica genesis/staging en el servicio Railway de staging.
+# Permanece apagado hasta STAGING_DEPLOY_ENABLED=true.
+# No usa el servicio ni la base de producción.
+name: Staging
+
+on:
+  push:
+    branches:
+      - genesis/staging
+  workflow_dispatch:
+
+concurrency:
+  group: pegazuz-staging-backend
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/crm-verify.yml
+
+  deploy:
+    needs: verify
+    if: vars.STAGING_DEPLOY_ENABLED == 'true'
+    environment: staging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Rechazar un destino de producción
+        env:
+          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          PRODUCTION_RAILWAY_SERVICE: ${{ vars.PRODUCTION_RAILWAY_SERVICE }}
+          STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
+          STAGING_PUBLIC_HOST: ${{ vars.STAGING_PUBLIC_HOST }}
+        run: node --input-type=module <<'NODE'
+          function required(name, value) {
+            const text = String(value ?? '').trim();
+            if (!text) {
+              console.error(`falta ${name}`);
+              process.exit(1);
+            }
+            return text;
+          }
+          function rejectProduction(name, value) {
+            const text = required(name, value).toLowerCase();
+            if (text.includes('production') || text === 'prod' || text === 'main') {
+              console.error(`${name} no puede apuntar a producción`);
+              process.exit(1);
+            }
+            return text;
+          }
+          const service = required('RAILWAY_SERVICE', process.env.RAILWAY_SERVICE);
+          const production = required(
+            'PRODUCTION_RAILWAY_SERVICE',
+            process.env.PRODUCTION_RAILWAY_SERVICE,
+          );
+          if (service === production) {
+            console.error('el servicio de staging coincide con producción');
+            process.exit(1);
+          }
+          rejectProduction('RAILWAY_ENVIRONMENT', process.env.RAILWAY_ENVIRONMENT);
+          rejectProduction('STAGING_DB_HOST', process.env.STAGING_DB_HOST);
+          rejectProduction('STAGING_PUBLIC_HOST', process.env.STAGING_PUBLIC_HOST);
+          NODE
+      - name: Publicar el backend de staging
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "falta el token de staging"
+            exit 1
+          fi
+          npx --yes @railway/cli up --detach --service "$RAILWAY_SERVICE" --environment "$RAILWAY_ENVIRONMENT"
+      - name: Migrar y sembrar staging
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          CRM_MIGRATE_TARGET: staging
+          CRM_STAGING_MIGRATE: yes
+          STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
+          PEGAZUZ_ENV: staging
+        run: npm run migrate:crm-001a && npm run migrate:crm-008 && npm run migrate:crm-010 && npm run seed:staging
+      - name: Humo
+        env:
+          SMOKE_URL: ${{ vars.STAGING_SMOKE_URL }}
+          STAGING_PUBLIC_HOST: ${{ vars.STAGING_PUBLIC_HOST }}
+        run: npm run smoke:staging

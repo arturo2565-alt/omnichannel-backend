@@ -1,0 +1,48 @@
+# Producción solo con aprobación del entorno de GitHub y la variable encendida.
+# Esta rama no puede publicarla: el trabajo exige main.
+# No ejecuta la migración 006.
+name: Production
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: vars.PRODUCTION_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Solo main, y nunca el servicio de staging
+        env:
+          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          STAGING_RAILWAY_SERVICE: ${{ vars.STAGING_RAILWAY_SERVICE }}
+        run: |
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            echo "producción solo sale de main"
+            exit 1
+          fi
+          if [ "$RAILWAY_ENVIRONMENT" != "production" ]; then
+            echo "RAILWAY_ENVIRONMENT tiene que ser production"
+            exit 1
+          fi
+          if [ -z "$RAILWAY_SERVICE" ] || [ -z "$STAGING_RAILWAY_SERVICE" ]; then
+            echo "faltan los identificadores de servicio"
+            exit 1
+          fi
+          if [ "$RAILWAY_SERVICE" = "$STAGING_RAILWAY_SERVICE" ]; then
+            echo "el servicio de producción coincide con staging"
+            exit 1
+          fi
+      - name: Publicar el backend de producción
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "falta el token de producción"
+            exit 1
+          fi
+          npx --yes @railway/cli up --detach --service "$RAILWAY_SERVICE" --environment "$RAILWAY_ENVIRONMENT"

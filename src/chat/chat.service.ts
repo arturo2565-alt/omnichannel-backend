@@ -1701,6 +1701,9 @@ export class ChatService implements OnModuleDestroy {
     last_name?: string;
     profile_pic?: string;
   } | null> {
+    if (String(process.env.PEGAZUZ_ENV ?? '').trim().toLowerCase() === 'staging') {
+      return null;
+    }
     const token = process.env.FB_PAGE_ACCESS_TOKEN?.trim();
     const id = String(psid ?? '').trim();
     if (!token || !id) return null;

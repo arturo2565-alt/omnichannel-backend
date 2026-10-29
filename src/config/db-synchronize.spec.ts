@@ -1,4 +1,5 @@
 import {
+  assertRemoteSynchronizeAllowed,
   migrationUsesSsl,
   redactDatabaseUrl,
   resolveDbSynchronize,
@@ -42,5 +43,45 @@ describe('resolveDbSynchronize', () => {
 
   it('no deja una URL de base en un mensaje de error', () => {
     expect(redactDatabaseUrl(`falló ${remote}`)).toBe('falló postgresql://***');
+  });
+});
+
+describe('assertRemoteSynchronizeAllowed', () => {
+  const remote = 'postgresql://user:secret@db.example.railway.app:5432/railway';
+
+  it('deja pasar producción con synchronize apagado', () => {
+    expect(() =>
+      assertRemoteSynchronizeAllowed('false', remote, {}),
+    ).not.toThrow();
+  });
+
+  it('bloquea synchronize remoto y no revela el host ni la clave', () => {
+    expect(() => assertRemoteSynchronizeAllowed('true', remote, {})).toThrow(
+      /no puede quedar activo/,
+    );
+    try {
+      assertRemoteSynchronizeAllowed('true', remote, {
+        PEGAZUZ_ENV: 'staging',
+        STAGING_SCHEMA_BOOTSTRAP: 'yes',
+        STAGING_DB_HOST: 'otro.example.test',
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      expect(message).not.toContain('db.example.railway.app');
+      expect(message).not.toContain('secret');
+    }
+  });
+
+  it('permite el bootstrap solo con el host de staging fijado', () => {
+    expect(() =>
+      assertRemoteSynchronizeAllowed('true', remote, {
+        PEGAZUZ_ENV: 'staging',
+        STAGING_SCHEMA_BOOTSTRAP: 'yes',
+        STAGING_DB_HOST: 'db.example.railway.app',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertRemoteSynchronizeAllowed('true', 'postgres://u:p@127.0.0.1:5432/app', {}),
+    ).not.toThrow();
   });
 });

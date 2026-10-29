@@ -29,6 +29,17 @@ export function assertCrmMigrationAllowed(
         'migrate ERROR: la migración de staging requiere CRM_STAGING_MIGRATE=yes.',
       );
     }
+    const pinned = String(env.STAGING_DB_HOST ?? '').trim().toLowerCase();
+    if (!pinned || pinned.includes('production')) {
+      throw new Error(
+        'migrate ERROR: staging requiere STAGING_DB_HOST y no puede ser un host de producción.',
+      );
+    }
+    if (host !== pinned) {
+      throw new Error(
+        'migrate ERROR: el host no coincide con STAGING_DB_HOST.',
+      );
+    }
     return;
   }
 

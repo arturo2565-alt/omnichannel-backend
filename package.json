@@ -27,6 +27,10 @@
     "migrate:crm-001a": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/apply-crm-001a.ts",
     "migrate:crm-008": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/apply-crm-008.ts",
     "migrate:crm-010": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/apply-crm-010.ts",
+    "seed:staging": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/apply-staging-synthetic.ts",
+    "seed:staging-owner": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/create-staging-owner.ts",
+    "smoke:staging": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/smoke-staging.ts",
+    "check:staging-target": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/check-staging-target.ts",
     "report:montaje-pintura": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register src/catalog/montaje-pintura-migration-report.ts"
   },
   "dependencies": {

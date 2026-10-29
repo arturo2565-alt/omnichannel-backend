@@ -10,7 +10,10 @@ import { TallerModule } from './taller/taller.module';
 import { MessagingQueueModule } from './messaging-queue/messaging-queue.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { DebugController } from './sentry/debug.controller';
-import { resolveDbSynchronize } from './config/db-synchronize';
+import {
+  assertRemoteSynchronizeAllowed,
+  resolveDbSynchronize,
+} from './config/db-synchronize';
 import {
   buildBullMqRedisConnection,
   validateEnv,
@@ -41,6 +44,11 @@ const isCloudDatabase = Boolean(databaseUrl);
 const dbSynchronize = resolveDbSynchronize(
   process.env.DB_SYNCHRONIZE,
   databaseUrl,
+);
+assertRemoteSynchronizeAllowed(
+  process.env.DB_SYNCHRONIZE,
+  databaseUrl,
+  process.env,
 );
 
 @Module({
