@@ -16,6 +16,27 @@ export function resolveDbSynchronize(
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
+/**
+ * La migración CRM usa SSL en hosts que no son locales.
+ * DATABASE_SSL=false lo apaga; DATABASE_SSL=true o sslmode=require lo encienden.
+ */
+export function migrationUsesSsl(
+  databaseUrl: string,
+  databaseSslFlag: string | undefined,
+): boolean {
+  const flag = String(databaseSslFlag ?? '').trim().toLowerCase();
+  if (flag === 'true' || flag === '1' || flag === 'yes') return true;
+  if (flag === 'false' || flag === '0' || flag === 'no') return false;
+  if (/sslmode=require/i.test(databaseUrl)) return true;
+  const host = postgresHostname(databaseUrl);
+  if (!host) return true;
+  return host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
+}
+
+export function redactDatabaseUrl(text: string): string {
+  return text.replace(/postgres(?:ql)?:\/\/\S+/gi, 'postgresql://***');
+}
+
 function postgresHostname(databaseUrl: string | undefined): string | null {
   const url = String(databaseUrl ?? '').trim();
   if (!url) return null;

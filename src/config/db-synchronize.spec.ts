@@ -1,4 +1,8 @@
-import { resolveDbSynchronize } from './db-synchronize';
+import {
+  migrationUsesSsl,
+  redactDatabaseUrl,
+  resolveDbSynchronize,
+} from './db-synchronize';
 
 describe('resolveDbSynchronize', () => {
   const remote = 'postgresql://user:secret@db.example.railway.app:5432/railway';
@@ -23,5 +27,20 @@ describe('resolveDbSynchronize', () => {
 
   it('no sincroniza una URL que no se puede interpretar', () => {
     expect(resolveDbSynchronize(undefined, 'not a url')).toBe(false);
+  });
+
+  it('usa SSL contra un host remoto y no contra localhost', () => {
+    expect(migrationUsesSsl(remote, undefined)).toBe(true);
+    expect(migrationUsesSsl('postgres://u:p@127.0.0.1:5432/pegazuz', undefined)).toBe(
+      false,
+    );
+    expect(migrationUsesSsl('postgres://u:p@127.0.0.1:5432/pegazuz', 'true')).toBe(
+      true,
+    );
+    expect(migrationUsesSsl(remote, 'false')).toBe(false);
+  });
+
+  it('no deja una URL de base en un mensaje de error', () => {
+    expect(redactDatabaseUrl(`falló ${remote}`)).toBe('falló postgresql://***');
   });
 });
