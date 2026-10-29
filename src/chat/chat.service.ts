@@ -31,6 +31,12 @@ import {
   AppointmentEntity,
   type AppointmentStatus,
 } from './entities/appointment.entity';
+import { listAppointmentsForTaller } from './appointment-directory';
+import {
+  isAppointmentVisibleToTaller,
+  resolveAppointmentDbStatus,
+  toAppointmentRealtimePayload,
+} from './crm-appointment';
 import { ChatGateway } from './chat.gateway';
 import { OpenAI } from 'openai';
 import { v2 as cloudinary } from 'cloudinary';
@@ -7462,16 +7468,15 @@ ${catalogAppend}`;
     if (existingActive) {
       await this.mergeAppointmentClientFields(existingActive, fields);
       await this.syncContactFromAppointmentFields(conversation, fields);
-      this.chatGateway.emitAppointmentCreated({
-        id: existingActive.id,
-        conversationId: conversation.id,
-        clientName: existingActive.clientName,
-        vehicle: existingActive.vehicle,
-        phone: existingActive.phone,
-        quoteSummary: existingActive.quoteSummary,
-        scheduledAt: existingActive.scheduledAt.toISOString(),
-        status: existingActive.status,
-      });
+      const existingTallerId = String(
+        existingActive.tallerId ?? conversation.tallerId ?? '',
+      ).trim();
+      if (existingTallerId) {
+        this.chatGateway.emitAppointmentCreated(
+          existingTallerId,
+          toAppointmentRealtimePayload(existingTallerId, existingActive),
+        );
+      }
       this.chatGateway.emitConversationLeadUpdated({
         conversationId: conversation.id,
         status: conversation.status,
@@ -7491,12 +7496,15 @@ ${catalogAppend}`;
 
     const row = this.appointmentRepository.create({
       conversationId: conversation.id,
+      tallerId: conversation.tallerId ?? null,
+      contactId: conversation.contactId ?? null,
       clientName: fields.clientName,
       vehicle: fields.vehicle,
       phone: fields.phone,
       quoteSummary: fields.quoteSummary,
       scheduledAt: d,
       status: 'confirmada',
+      source: 'autopilot',
     });
     const saved = await this.appointmentRepository.save(row);
 
@@ -7507,16 +7515,15 @@ ${catalogAppend}`;
     });
     conversation.status = 'agendado';
 
-    this.chatGateway.emitAppointmentCreated({
-      id: saved.id,
-      conversationId: conversation.id,
-      clientName: saved.clientName,
-      vehicle: saved.vehicle,
-      phone: saved.phone,
-      quoteSummary: saved.quoteSummary,
-      scheduledAt: saved.scheduledAt.toISOString(),
-      status: saved.status,
-    });
+    const createdTallerId = String(
+      saved.tallerId ?? conversation.tallerId ?? '',
+    ).trim();
+    if (createdTallerId) {
+      this.chatGateway.emitAppointmentCreated(
+        createdTallerId,
+        toAppointmentRealtimePayload(createdTallerId, saved),
+      );
+    }
 
     this.chatGateway.emitConversationLeadUpdated({
       conversationId: conversation.id,
@@ -9090,69 +9097,51 @@ ${catalogAppend}`;
     await this.conversationRepository.delete({ id: conversationId });
   }
 
-  async findAllAppointments(tallerId: string): Promise<
-    {
-      id: string;
-      clientName: string;
-      vehicle: string | null;
-      phone: string | null;
-      quoteSummary: string | null;
-      scheduledAt: string;
-      status: AppointmentStatus;
-      conversationId: string | null;
-    }[]
-  > {
-    const rows = await this.appointmentRepository
-      .createQueryBuilder('a')
-      .innerJoin('a.conversation', 'c')
-      .where('c.tallerId = :tallerId', { tallerId })
-      .orderBy('a.scheduledAt', 'ASC')
-      .getMany();
-    return rows.map((a) => ({
-      id: a.id,
-      clientName: a.clientName,
-      vehicle: a.vehicle,
-      phone: a.phone,
-      quoteSummary: a.quoteSummary ?? null,
-      scheduledAt: a.scheduledAt.toISOString(),
-      status: a.status,
-      conversationId: a.conversationId,
-    }));
+  async findAllAppointments(tallerId: string) {
+    return listAppointmentsForTaller(this.appointmentRepository.manager, tallerId);
   }
 
   async patchAppointmentStatus(
     id: string,
-    body: { status?: string },
+    body: { status?: string; visitStatus?: string },
     tallerId: string,
-  ): Promise<{ id: string; status: AppointmentStatus }> {
-    const allowed: AppointmentStatus[] = [
-      'pendiente',
-      'confirmada',
-      'finalizada',
-    ];
+  ): Promise<{ id: string; status: AppointmentStatus; visitStatus: string }> {
     const row = await this.appointmentRepository.findOne({
       where: { id },
       relations: ['conversation'],
     });
-    if (!row || row.conversation?.tallerId !== tallerId) {
+    if (
+      !row ||
+      !isAppointmentVisibleToTaller(
+        row,
+        row.conversation ? { tallerId: row.conversation.tallerId } : null,
+        tallerId,
+      )
+    ) {
       throw new NotFoundException(`Cita no encontrada: ${id}`);
     }
-    const raw = String(body.status ?? '').toLowerCase().trim();
-    if (!allowed.includes(raw as AppointmentStatus)) {
+    const next = resolveAppointmentDbStatus(body ?? {});
+    if (!next) {
       throw new BadRequestException(
-        `status debe ser uno de: ${allowed.join(', ')}`,
+        'status debe ser agendada, realizada, cancelada o no_asistio',
       );
     }
-    row.status = raw as AppointmentStatus;
+    row.status = next;
     await this.appointmentRepository.save(row);
 
-    if (raw === 'finalizada' && row.conversationId) {
-      await this.leadEventsService.logTransition(row.conversationId, 'atendido');
-      if (row.conversation) {
-        row.conversation.status = 'atendido';
+    if (row.conversationId && row.conversation) {
+      const leadStatus =
+        next === 'finalizada'
+          ? 'atendido'
+          : next === 'no_asistio'
+            ? 'no_asistio'
+            : null;
+      if (leadStatus) {
+        await this.leadEventsService.logTransition(row.conversationId, leadStatus);
+        row.conversation.status = leadStatus;
         this.chatGateway.emitConversationLeadUpdated({
           conversationId: row.conversationId,
-          status: 'atendido',
+          status: leadStatus,
           contactName: row.conversation.contactName,
           lastMessageAt: row.conversation.lastMessageAt
             ? row.conversation.lastMessageAt.toISOString()
@@ -9163,7 +9152,19 @@ ${catalogAppend}`;
       }
     }
 
-    return { id: row.id, status: row.status };
+    const owner = String(row.tallerId ?? row.conversation?.tallerId ?? '').trim();
+    if (owner) {
+      this.chatGateway.emitAppointmentUpdated(
+        owner,
+        toAppointmentRealtimePayload(owner, row),
+      );
+    }
+
+    return {
+      id: row.id,
+      status: row.status,
+      visitStatus: toAppointmentRealtimePayload(owner || tallerId, row).visitStatus,
+    };
   }
 
   async findAllMessages() {

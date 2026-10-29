@@ -9,6 +9,7 @@ import { Message } from './entities/chat.entity';
 import { OutgoingMessageProducer } from '../messaging-queue/outgoing-message.producer';
 import { LeadEventsService } from './lead-events.service';
 import { WORKSHOP_TIMEZONE } from './appointment-intent';
+import { shouldAttemptAppointmentReminder } from './crm-appointment';
 import {
   normalizeWhatsAppMessageBody,
   normalizeWhatsAppRecipientWaId,
@@ -96,11 +97,32 @@ export class AppointmentReminderService {
   }
 
   private async processAppointment(apt: AppointmentEntity): Promise<boolean> {
+    if (
+      !shouldAttemptAppointmentReminder({
+        status: apt.status,
+        conversationId: apt.conversationId,
+      })
+    ) {
+      this.logger.debug(
+        `recordatorio omitido appointment=${apt.id}: sin conversación de canal`,
+      );
+      return false;
+    }
     const conversation = apt.conversation;
     const conversationId = String(
       apt.conversationId ?? conversation?.id ?? '',
     ).trim();
     if (!conversation || !conversationId) return false;
+    if (
+      apt.tallerId &&
+      conversation.tallerId &&
+      apt.tallerId !== conversation.tallerId
+    ) {
+      this.logger.warn(
+        `recordatorio omitido appointment=${apt.id}: el taller de la cita no coincide con la conversación`,
+      );
+      return false;
+    }
 
     if (await this.hasRecentReminder(conversationId)) {
       return false;

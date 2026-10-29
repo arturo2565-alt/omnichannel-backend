@@ -13,6 +13,7 @@ import { Contact } from './entities/contact.entity';
 import { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { DraftQuoteItem } from './entities/draft-quote-item.entity';
 import { AppointmentEntity } from './entities/appointment.entity';
+import { ContractedWork } from './entities/contracted-work.entity';
 import { AiConfigEntity } from './entities/ai-config.entity';
 import { LlmCall } from './entities/llm-call.entity';
 import { LeadEventEntity } from './entities/lead-event.entity';
@@ -25,6 +26,8 @@ import { LlmCallTrackerService } from './llm-call-tracker.service';
 import { LeadEventsService } from './lead-events.service';
 import { AppointmentReminderService } from './appointment-reminder.service';
 import { AppointmentReminderController } from './appointment-reminder.controller';
+import { CrmAppointmentsController } from './crm-appointments.controller';
+import { ManualAppointmentService } from './manual-appointment.service';
 import { CatalogModule } from '../catalog/catalog.module';
 import { TallerModule } from '../taller/taller.module';
 import { AuthModule } from '../auth/auth.module';
@@ -44,6 +47,7 @@ import { RefaccionMarketModule } from './refaccion-market/refaccion-market.modul
       DraftQuoteEntity,
       DraftQuoteItem,
       AppointmentEntity,
+      ContractedWork,
       AiConfigEntity,
       LlmCall,
       LeadEventEntity,
@@ -53,6 +57,7 @@ import { RefaccionMarketModule } from './refaccion-market/refaccion-market.modul
     ChatController,
     ConversationTransitionController,
     AppointmentReminderController,
+    CrmAppointmentsController,
     ArrivalAlarmController,
     LlmMetricsController,
   ],
@@ -65,6 +70,7 @@ import { RefaccionMarketModule } from './refaccion-market/refaccion-market.modul
     LlmCallTrackerService,
     LeadEventsService,
     AppointmentReminderService,
+    ManualAppointmentService,
   ],
   exports: [
     ChatService,

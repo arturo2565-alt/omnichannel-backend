@@ -22,6 +22,7 @@ import { Contact } from './chat/entities/contact.entity';
 import { DraftQuoteEntity } from './chat/entities/draft-quote.entity';
 import { DraftQuoteItem } from './chat/entities/draft-quote-item.entity';
 import { AppointmentEntity } from './chat/entities/appointment.entity';
+import { ContractedWork } from './chat/entities/contracted-work.entity';
 import { AiConfigEntity } from './chat/entities/ai-config.entity';
 import { LlmCall } from './chat/entities/llm-call.entity';
 import { LeadEventEntity } from './chat/entities/lead-event.entity';
@@ -63,6 +64,7 @@ const dbSynchronize =
         DraftQuoteEntity,
         DraftQuoteItem,
         AppointmentEntity,
+        ContractedWork,
         AiConfigEntity,
         LlmCall,
         LeadEventEntity,

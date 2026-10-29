@@ -1,23 +1,40 @@
 import { WebSocketGateway, WebSocketServer, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
-import { Server } from 'socket.io';
+import { JwtService } from '@nestjs/jwt';
+import { Server, Socket } from 'socket.io';
+import {
+  appointmentSocketRoom,
+  type AppointmentRealtimePayload,
+} from './crm-appointment';
 
 @WebSocketGateway({
-  cors: { origin: '*', // Permite que cualquier sitio (como tu Vercel) se conecte
-          methods: ['GET', 'POST'], }, // Permitir que React se conecte
+  cors: { origin: '*',
+          methods: ['GET', 'POST'], },
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
-  handleConnection(client: any) {
-    console.log('Navegador conectado vía Socket:', client.id);
+  constructor(private readonly jwtService: JwtService) {}
+
+  async handleConnection(client: Socket) {
+    const raw = client.handshake?.auth?.token ?? client.handshake?.query?.token;
+    const token = Array.isArray(raw) ? raw[0] : raw;
+    if (!token || typeof token !== 'string') return;
+    try {
+      const payload = await this.jwtService.verifyAsync<{ tallerId?: string }>(
+        token,
+      );
+      const room = appointmentSocketRoom(payload?.tallerId);
+      if (room) await client.join(room);
+    } catch {
+      // Sin sala: no recibe eventos de citas de ningún taller.
+    }
   }
 
-  handleDisconnect(client: any) {
-    console.log('Navegador desconectado');
+  handleDisconnect(_client: Socket) {
+    /* conexión cerrada */
   }
 
-  // Esta función la llamaremos desde el Service cuando llegue un mensaje
   emitNewMessage(message: any) {
     this.server.emit('newMessage', message);
   }
@@ -31,7 +48,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.emit('imageDamageAnalysis', payload);
   }
 
-  /** Nueva cotización persistida en `draft_quotes`, lista para revisión en el panel */
   emitDraftQuoteReady(payload: {
     draftQuoteId: string;
     conversationId: string;
@@ -39,14 +55,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     damageAnalysis: unknown;
     draftQuote: unknown;
     estimateAmount: number;
-    /** El bot cotiza en autónomo; el panel solo monitorea. */
     isAutoPilotActive?: boolean;
     awaitingVehicleForBanio?: boolean;
   }) {
     this.server.emit('draftQuoteReady', payload);
   }
 
-  /** Peritaje visual guardado; falta marca/modelo antes de cotizar (sin precios en panel). */
   emitDraftPeritajeAwaitingVehicle(payload: {
     draftQuoteId: string;
     conversationId: string;
@@ -57,20 +71,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.emit('draftPeritajeAwaitingVehicle', payload);
   }
 
-  emitAppointmentCreated(payload: {
-    id: string;
-    conversationId: string | null;
-    clientName: string;
-    vehicle: string | null;
-    phone: string | null;
-    quoteSummary?: string | null;
-    scheduledAt: string;
-    status: string;
-  }) {
-    this.server.emit('appointmentCreated', payload);
+  emitAppointmentCreated(
+    tallerId: string,
+    payload: AppointmentRealtimePayload,
+  ) {
+    this.emitToTaller(tallerId, 'appointmentCreated', payload);
   }
 
-  /** Actualización de estado de lead / bandeja sin nuevo mensaje */
+  emitAppointmentUpdated(
+    tallerId: string,
+    payload: AppointmentRealtimePayload,
+  ) {
+    this.emitToTaller(tallerId, 'appointmentUpdated', payload);
+  }
+
   emitConversationLeadUpdated(payload: {
     conversationId: string;
     status: string;
@@ -80,5 +94,15 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     isAutoPilotActive?: boolean;
   }) {
     this.server.emit('conversationLeadUpdated', payload);
+  }
+
+  private emitToTaller(
+    tallerId: string,
+    event: 'appointmentCreated' | 'appointmentUpdated',
+    payload: AppointmentRealtimePayload,
+  ) {
+    const room = appointmentSocketRoom(tallerId);
+    if (!room || !this.server) return;
+    this.server.to(room).emit(event, payload);
   }
 }
