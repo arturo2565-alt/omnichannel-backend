@@ -4,15 +4,18 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { randomBytes } from 'node:crypto';
 import {
   assertCustomDump,
   assertDisposableRestoreUrl,
   assertPostgres18,
+  assertRestoredIntegrity,
   assertSyntheticWorkshop,
   rowsFromPsql,
   STAGING_TALLER_ID,
   STAGING_TALLER_NAME,
 } from './assert-staging-restore.mjs';
+import { decryptDump, encryptDump } from './staging-backup-crypto.mjs';
 
 const workflows = join(import.meta.dirname, '../.github/workflows');
 const pg18 = process.env.PG18_BIN || '/opt/homebrew/opt/postgresql@18/bin';
@@ -104,6 +107,14 @@ test('el workflow fija el cliente 18, restaura solo en loopback y exige la marca
   assert.match(backup, /127\.0\.0\.1/);
   assert.match(backup, /assert-staging-restore\.mjs marker/);
   assert.match(backup, /STAGING_BACKUP_ENABLED == 'true'/);
+  assert.match(backup, /refs\/heads\/genesis\/staging/);
+  assert.doesNotMatch(backup, /refs\/heads\/main/);
+  assert.match(backup, /PGSSLMODE: verify-full/);
+  assert.match(backup, /path: staging\.dump\.enc/);
+  assert.doesNotMatch(backup, /path: staging\.dump\n/);
+  assert.match(backup, /retention-days: 30/);
+  assert.match(backup, /rm -f staging\.dump/);
+  assert.ok(backup.indexOf('rm -f staging.dump') < backup.indexOf('upload-artifact'));
   assert.match(backup, /actions\/checkout@v5/);
   assert.match(backup, /actions\/setup-node@v5/);
   assert.match(backup, /actions\/upload-artifact@v6/);
@@ -191,6 +202,11 @@ test(
           dias_entrega integer NOT NULL,
           is_instant_service boolean NOT NULL
         );
+        CREATE TABLE appointments (id uuid PRIMARY KEY);
+        CREATE TABLE appointment_service_lines (
+          id uuid PRIMARY KEY,
+          "catalogPieceCode" character varying(32)
+        );
         `,
       );
       psql('ensayo', ['--file', schema, '--file', join(import.meta.dirname, 'staging-synthetic.sql')]);
@@ -209,6 +225,37 @@ test(
         `SELECT id, nombre FROM talleres WHERE id = '${STAGING_TALLER_ID}'`,
       ]);
       assertSyntheticWorkshop(rowsFromPsql(marker));
+      const integrity = psql('restaurado', [
+        '--no-align',
+        '--tuples-only',
+        '--file',
+        join(import.meta.dirname, 'staging-backup-integrity.sql'),
+      ]);
+      assertRestoredIntegrity(integrity);
+      const key = randomBytes(32);
+      const encrypted = encryptDump(readFileSync(dump), key);
+      const decryptedPath = join(root, 'descifrado.dump');
+      writeFileSync(decryptedPath, decryptDump(encrypted, key));
+      assertCustomDump(readFileSync(decryptedPath));
+      run(join(pg18, 'createdb'), ['--host=127.0.0.1', `--port=${port}`, '--username=postgres', 'descifrado']);
+      run(join(pg18, 'pg_restore'), [
+        '--no-owner',
+        '--exit-on-error',
+        `--dbname=postgres://postgres@127.0.0.1:${port}/descifrado`,
+        decryptedPath,
+      ]);
+      assertRestoredIntegrity(
+        psql('descifrado', [
+          '--no-align',
+          '--tuples-only',
+          '--file',
+          join(import.meta.dirname, 'staging-backup-integrity.sql'),
+        ]),
+      );
+      const corrupt = Buffer.from(encrypted);
+      corrupt[corrupt.length - 1] ^= 0xff;
+      assert.throws(() => decryptDump(corrupt, key), /no se pudo descifrar/);
+      assert.throws(() => decryptDump(encrypted, randomBytes(32)), /no se pudo descifrar/);
       run(pgDump18, [
         '--format=custom',
         '--no-owner',

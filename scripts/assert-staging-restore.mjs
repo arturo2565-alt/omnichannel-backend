@@ -50,6 +50,30 @@ export function rowsFromPsql(text) {
     });
 }
 
+const INTEGRITY_LINES = [
+  `taller|${STAGING_TALLER_ID}|${STAGING_TALLER_NAME}`,
+  'price|01000000-0000-4000-8000-000000000011',
+  'price|01000000-0000-4000-8000-000000000012',
+  'price|01000000-0000-4000-8000-000000000013',
+  'table|talleres',
+  'table|price_matrix',
+  'table|appointments',
+  'table|appointment_service_lines',
+  'column|catalogPieceCode',
+];
+
+export function assertRestoredIntegrity(text) {
+  const lines = new Set(
+    String(text ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean),
+  );
+  if (!INTEGRITY_LINES.every((line) => lines.has(line))) {
+    throw new Error('backup ERROR: la restauración no conserva el esquema ni los datos sintéticos.');
+  }
+}
+
 export function assertSyntheticWorkshop(rows) {
   const found = (Array.isArray(rows) ? rows : []).some(
     (row) =>
@@ -100,6 +124,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const input = await readStdin();
       assertSyntheticWorkshop(rowsFromPsql(input));
       console.log('OK: la restauración contiene el taller de ensayo.');
+    } else if (mode === 'integrity') {
+      const input = await readStdin();
+      assertRestoredIntegrity(input);
+      console.log('OK: el esquema y los datos sintéticos están en la restauración.');
     } else {
       console.error('backup ERROR: falta el modo de comprobación.');
       process.exit(1);

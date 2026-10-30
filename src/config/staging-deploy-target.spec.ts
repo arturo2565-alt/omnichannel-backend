@@ -165,44 +165,55 @@ describe('assertRailwayProjectToken', () => {
 });
 
 describe('assertStagingBackupUrl', () => {
+  const cert = '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----';
   const flags = {
-    CRM_MIGRATE_TARGET: 'staging',
-    CRM_STAGING_MIGRATE: 'yes',
-    STAGING_DB_HOST: 'db.example.test',
+    STAGING_DB_HOST: 'postgres.railway.internal',
+    STAGING_DB_PUBLIC_HOST: 'staging-pg.proxy.example.test',
+    PRODUCTION_DB_PUBLIC_HOST: 'prod-pg.proxy.example.test',
+    PGSSLMODE: 'verify-full',
+    STAGING_DB_ROOT_CERT: cert,
   };
+  const source = 'postgres://user:secret@staging-pg.proxy.example.test:5432/app';
 
-  it('rechaza la red privada y un host de producción', () => {
+  it('acepta el proxy público de staging con verify-full y la CA', () => {
+    expect(() => assertStagingBackupUrl(source, flags)).not.toThrow();
+  });
+
+  it('rechaza el hostname privado, producción, TLS débil y una CA con clave', () => {
     expect(() =>
       assertStagingBackupUrl(
         'postgres://user:secret@postgres.railway.internal:5432/app',
-        {
-          ...flags,
-          STAGING_DB_HOST: 'postgres.railway.internal',
-        },
+        flags,
       ),
     ).toThrow(/red privada/);
     expect(() =>
       assertStagingBackupUrl(
-        'postgres://user:secret@db.production.internal:5432/app',
-        {
-          ...flags,
-          STAGING_DB_HOST: 'db.production.internal',
-        },
+        'postgres://user:secret@prod-pg.proxy.example.test:5432/app',
+        flags,
       ),
-    ).toThrow(/producción/);
-  });
-
-  it('un proxy público de staging pasa el candado y el error no revela la clave', () => {
+    ).toThrow(/proxy público de staging/);
     expect(() =>
-      assertStagingBackupUrl('postgres://user:secret@db.example.test:5432/app', flags),
-    ).not.toThrow();
+      assertStagingBackupUrl(`${source}?sslmode=require`, flags),
+    ).toThrow(/debilitar TLS/);
+    expect(() =>
+      assertStagingBackupUrl(source, { ...flags, PGSSLMODE: 'require' }),
+    ).toThrow(/verify-full/);
+    expect(() =>
+      assertStagingBackupUrl(source, {
+        ...flags,
+        STAGING_DB_ROOT_CERT: '-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----',
+      }),
+    ).toThrow(/certificado público/);
+    let thrown = false;
     try {
       assertStagingBackupUrl('postgres://user:secret@otro.example.test:5432/app', flags);
     } catch (err) {
+      thrown = true;
       const message = err instanceof Error ? err.message : String(err);
       expect(message).not.toContain('secret');
       expect(message).not.toContain('otro.example.test');
     }
+    expect(thrown).toBe(true);
   });
 });
 

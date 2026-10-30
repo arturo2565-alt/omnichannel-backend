@@ -1,5 +1,3 @@
-import { assertCrmMigrationAllowed } from './migration-target';
-
 /**
  * Candado del job que publica staging.
  * No abre bases ni imprime identificadores.
@@ -101,20 +99,60 @@ function readProjectToken(payload: unknown): { projectId?: string; environmentId
 }
 
 /**
- * El volcado desde GitHub no puede usar el hostname privado de Railway.
- * La comparación con el host fijado sigue en assertCrmMigrationAllowed.
+ * El volcado sale por el proxy público de staging, con TLS verify-full.
+ * STAGING_DB_HOST sigue siendo el hostname privado y no se usa como origen.
+ * No abre la conexión y no imprime la URL.
  */
 export function assertStagingBackupUrl(
   databaseUrl: string,
   env: NodeJS.ProcessEnv,
 ): void {
-  assertCrmMigrationAllowed(databaseUrl, env);
+  const privateHost = backupText(env.STAGING_DB_HOST, 'STAGING_DB_HOST');
+  const publicHost = backupText(env.STAGING_DB_PUBLIC_HOST, 'STAGING_DB_PUBLIC_HOST');
+  const productionHost = backupText(
+    env.PRODUCTION_DB_PUBLIC_HOST,
+    'PRODUCTION_DB_PUBLIC_HOST',
+  );
+  if (
+    !privateHost.endsWith('.railway.internal') ||
+    looksLikeProduction(privateHost)
+  ) {
+    throw new Error('backup ERROR: STAGING_DB_HOST tiene que ser el hostname privado.');
+  }
+  if (
+    publicHost.endsWith('.internal') ||
+    publicHost.endsWith('.railway.internal') ||
+    looksLikeProduction(publicHost) ||
+    publicHost === privateHost ||
+    publicHost === productionHost
+  ) {
+    throw new Error('backup ERROR: el host público de staging no está separado.');
+  }
   const host = postgresHostname(databaseUrl);
   if (!host || host.endsWith('.internal') || host.endsWith('.railway.internal')) {
     throw new Error(
       'backup ERROR: el host es de la red privada. No se vuelca desde GitHub.',
     );
   }
+  if (host !== publicHost || looksLikeProduction(host) || host === productionHost) {
+    throw new Error('backup ERROR: el origen no es el proxy público de staging.');
+  }
+  if (/sslmode=(disable|allow|prefer|require|verify-ca)\b/i.test(databaseUrl)) {
+    throw new Error('backup ERROR: la URL no puede debilitar TLS.');
+  }
+  if (String(env.PGSSLMODE ?? '').trim().toLowerCase() !== 'verify-full') {
+    throw new Error('backup ERROR: la conexión tiene que usar verify-full.');
+  }
+  const cert = String(env.STAGING_DB_ROOT_CERT ?? '');
+  if (!cert.includes('BEGIN CERTIFICATE') || cert.includes('PRIVATE KEY')) {
+    throw new Error('backup ERROR: falta el certificado público de la base de staging.');
+  }
+}
+
+function backupText(value: string | undefined, name: string): string {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (!text) throw new Error(`backup ERROR: falta ${name}.`);
+  return text;
 }
 
 function assertSmokeUrl(value: string | undefined, publicHost: string): void {
