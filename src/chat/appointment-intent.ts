@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { createOpenAiClient } from '../config/staging-openai';
 import { openAiChatCompletionParams } from './openai-model-config';
 import { createTrackedChatCompletion } from './tracked-chat-completion';
 import {
@@ -320,8 +321,7 @@ export async function parseAppointmentIntent(
     return { isBookingIntent: false, needsClarification: false };
   }
 
-  const openai =
-    openaiClient ?? new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const openai = openaiClient ?? createOpenAiClient();
 
   const refYmd = ymdInTimezone(referenceDate, WORKSHOP_TIMEZONE);
   const refIso = referenceDate.toISOString();

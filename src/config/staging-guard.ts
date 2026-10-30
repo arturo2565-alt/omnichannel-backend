@@ -5,3 +5,6 @@ export function isStagingRuntime(env: NodeJS.ProcessEnv = process.env): boolean 
 
 export const STAGING_OUTBOUND_BLOCKED =
   'staging: el envío real a Meta está apagado.';
+
+export const STAGING_EXTERNAL_BLOCKED =
+  'staging: los servicios externos están apagados.';

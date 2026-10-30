@@ -2,6 +2,7 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import axios from 'axios';
+import { isStagingRuntime, STAGING_EXTERNAL_BLOCKED } from '../config/staging-guard';
 import { Conversation } from './entities/conversation.entity';
 
 const ARRIVAL_ALARM_INTERVAL_MS = 2 * 60 * 1000;
@@ -50,6 +51,10 @@ export class TwilioService implements OnModuleDestroy {
     callSid?: string;
     error?: string;
   }> {
+    if (isStagingRuntime()) {
+      console.warn('[TwilioService] staging: llamadas reales apagadas');
+      return { ok: false, error: STAGING_EXTERNAL_BLOCKED };
+    }
     const cfg = this.getTwilioConfig();
     if (!cfg) {
       const msg =
@@ -97,6 +102,10 @@ export class TwilioService implements OnModuleDestroy {
    * `cliente_esperando_afuera` siga en true en BD.
    */
   async startArrivalAlarmLoop(conversationId: string): Promise<void> {
+    if (isStagingRuntime()) {
+      console.warn('[TwilioService] staging: llamadas reales apagadas');
+      return;
+    }
     await this.triggerArrivalCall();
 
     if (this.arrivalAlarmIntervals.has(conversationId)) {

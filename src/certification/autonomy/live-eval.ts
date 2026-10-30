@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import OpenAI from 'openai';
+import { createOpenAiClient } from '../../config/staging-openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { createVisionDamageAnalysisCompletion } from '../../chat/openai-vision-completion';
 import { parseVisionModelJsonResponse } from '../../chat/vision-json-parse';
@@ -338,7 +339,7 @@ export async function runLiveAutonomyEvaluation(opts?: {
   const userSchemaHint =
     opts?.userSchemaHint ?? 'Responde únicamente JSON con items[].';
   const visionPromptVersion = hashPromptText(`${systemPrompt}\n${userSchemaHint}`);
-  const openai = opts?.openai ?? new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const openai = opts?.openai ?? createOpenAiClient();
 
   const results: LiveCaseResult[] = [];
   for (const meta of cases) {

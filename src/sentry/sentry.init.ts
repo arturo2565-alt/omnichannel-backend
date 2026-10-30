@@ -1,4 +1,5 @@
 import * as Sentry from '@sentry/node';
+import { isStagingRuntime } from '../config/staging-guard';
 
 let sentryEnabled = false;
 
@@ -11,6 +12,11 @@ export function isSentryEnabled(): boolean {
  * Sin `SENTRY_DSN` no inicializa (local/CI seguro).
  */
 export function initSentry(): void {
+  if (isStagingRuntime()) {
+    console.warn('[Sentry] staging: captura externa apagada.');
+    sentryEnabled = false;
+    return;
+  }
   const dsn = String(process.env.SENTRY_DSN ?? '').trim();
   if (!dsn) {
     console.warn(

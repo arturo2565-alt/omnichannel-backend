@@ -9,6 +9,8 @@ import { AuthModule } from './auth/auth.module';
 import { TallerModule } from './taller/taller.module';
 import { MessagingQueueModule } from './messaging-queue/messaging-queue.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
 import { DebugController } from './sentry/debug.controller';
 import {
   assertRemoteSynchronizeAllowed,
@@ -68,6 +70,7 @@ assertRemoteSynchronizeAllowed(
     MessagingQueueModule,
     DashboardModule,
   ],
-  controllers: [DebugController],
+  controllers: [AppController, DebugController],
+  providers: [AppService],
 })
 export class AppModule {}

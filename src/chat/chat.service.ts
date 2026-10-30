@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ServiceUnavailableException,
   OnModuleDestroy,
   Inject,
   forwardRef,
@@ -44,6 +45,11 @@ import {
 import { patchAppointmentVisit } from './appointment-visit';
 import { ChatGateway } from './chat.gateway';
 import { OpenAI } from 'openai';
+import { createOpenAiClient } from '../config/staging-openai';
+import {
+  isStagingRuntime,
+  STAGING_EXTERNAL_BLOCKED,
+} from '../config/staging-guard';
 import { v2 as cloudinary } from 'cloudinary';
 import {
   AUTO_FIX_CURRENCY,
@@ -758,9 +764,7 @@ export class ChatService implements OnModuleDestroy {
 
     private readonly leadEventsService: LeadEventsService,
   ) {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY, 
-    });
+    this.openai = createOpenAiClient();
   }
 
   onModuleDestroy(): void {
@@ -1439,6 +1443,9 @@ export class ChatService implements OnModuleDestroy {
    * Configura y envía el buffer del archivo a la nube.
    */
   async uploadImage(file: Express.Multer.File): Promise<string> {
+    if (isStagingRuntime()) {
+      throw new ServiceUnavailableException(STAGING_EXTERNAL_BLOCKED);
+    }
     // 1. Forzamos la configuración con los valores de las variables de entorno
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -1484,6 +1491,9 @@ export class ChatService implements OnModuleDestroy {
    * Sube un buffer de imagen a Cloudinary (misma carpeta que adjuntos del chat).
    */
   private async uploadImageBuffer(buffer: Buffer): Promise<string> {
+    if (isStagingRuntime()) {
+      throw new ServiceUnavailableException(STAGING_EXTERNAL_BLOCKED);
+    }
     cloudinary.config({
       cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
       api_key: process.env.CLOUDINARY_API_KEY,
@@ -1512,6 +1522,9 @@ export class ChatService implements OnModuleDestroy {
     if (!raw.trim()) return raw;
     if (raw.includes('res.cloudinary.com') || raw.includes('cloudinary.com')) {
       return raw;
+    }
+    if (isStagingRuntime()) {
+      throw new ServiceUnavailableException(STAGING_EXTERNAL_BLOCKED);
     }
 
     cloudinary.config({
@@ -1701,7 +1714,7 @@ export class ChatService implements OnModuleDestroy {
     last_name?: string;
     profile_pic?: string;
   } | null> {
-    if (String(process.env.PEGAZUZ_ENV ?? '').trim().toLowerCase() === 'staging') {
+    if (isStagingRuntime()) {
       return null;
     }
     const token = process.env.FB_PAGE_ACCESS_TOKEN?.trim();

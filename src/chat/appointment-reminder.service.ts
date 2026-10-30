@@ -6,6 +6,7 @@ import { AppointmentEntity } from './entities/appointment.entity';
 import { Conversation } from './entities/conversation.entity';
 import { LeadEventEntity } from './entities/lead-event.entity';
 import { Message } from './entities/chat.entity';
+import { isStagingRuntime } from '../config/staging-guard';
 import { OutgoingMessageProducer } from '../messaging-queue/outgoing-message.producer';
 import { LeadEventsService } from './lead-events.service';
 import { WORKSHOP_TIMEZONE } from './appointment-intent';
@@ -60,6 +61,10 @@ export class AppointmentReminderService {
       skipped: 0,
       failed: 0,
     };
+    if (isStagingRuntime()) {
+      this.logger.log('staging: recordatorios reales apagados');
+      return result;
+    }
     if (this.running) {
       this.logger.warn('barrido omitido: ya hay uno en curso');
       return result;

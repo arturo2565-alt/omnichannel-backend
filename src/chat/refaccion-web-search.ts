@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { isStagingRuntime } from '../config/staging-guard';
 import {
   openAiResponsesParams,
 } from './openai-model-config';
@@ -136,6 +137,7 @@ function organicsFromRows(
 }
 
 export async function searchSerperOrganics(query: string): Promise<WebOrganicHit[]> {
+  if (isStagingRuntime()) return [];
   const key = String(process.env.SERPER_API_KEY ?? '').trim();
   if (!key) return [];
   const res = await fetch('https://google.serper.dev/search', {
@@ -179,6 +181,7 @@ async function searchSerper(query: string): Promise<WebPriceHit[]> {
 }
 
 export async function searchTavilyOrganics(query: string): Promise<WebOrganicHit[]> {
+  if (isStagingRuntime()) return [];
   const key = String(process.env.TAVILY_API_KEY ?? '').trim();
   if (!key) return [];
   const res = await fetch('https://api.tavily.com/search', {
@@ -221,6 +224,7 @@ async function searchTavily(query: string): Promise<WebPriceHit[]> {
 }
 
 export async function searchOpenAiWeb(query: string): Promise<WebPriceHit[]> {
+  if (isStagingRuntime()) return [];
   const key = String(process.env.OPENAI_API_KEY ?? '').trim();
   if (!key) return [];
   const openai = new OpenAI({ apiKey: key });

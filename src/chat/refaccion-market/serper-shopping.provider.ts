@@ -13,6 +13,8 @@ import type {
 } from './refaccion-market.types';
 import { inferLampType } from './variant-cluster';
 import { extractPrimaryPartNumber } from './part-number';
+import { isStagingRuntime } from '../../config/staging-guard';
+import { isSerperConfigured } from './serper-config';
 
 export type SerperShoppingRow = {
   title?: string;
@@ -61,6 +63,7 @@ export async function searchSerperShopping(
   query: string,
   num = 20,
 ): Promise<SerperShoppingRow[]> {
+  if (isStagingRuntime()) return [];
   const key = String(process.env.SERPER_API_KEY ?? '').trim();
   if (!key || !query) return [];
   const res = await fetch('https://google.serper.dev/shopping', {
@@ -84,7 +87,7 @@ export class SerperShoppingProvider implements RefaccionPriceProvider {
   lastError?: string;
 
   isConfigured(): boolean {
-    return Boolean(String(process.env.SERPER_API_KEY ?? '').trim());
+    return isSerperConfigured();
   }
 
   async search(identity: VehiclePartIdentity): Promise<RawProviderHit[]> {
