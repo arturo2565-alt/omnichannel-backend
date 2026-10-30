@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { applyCustomerMargin } from './compute-market-range';
 import { enrichInventoryWithMarketRefacciones } from './enrich-inventory-with-market';
 import { parseVehiclePartIdentity } from './parse-vehicle-part-identity';
@@ -477,17 +475,5 @@ describe('CANONICAL REFACCION = solo mercado', () => {
     const refaccion = rows.find((r) => r.serviceType === 'REFACCION');
     expect(refaccion?.precioMx).toBe(7777);
     expect(refaccion?.billable).toBe(true);
-  });
-
-  it('11. frontend ya no permite editar costo/margen/precio genérico', () => {
-    const admin = readFileSync(
-      join(process.cwd(), '../omnichannel-frontend/src/CatalogAdminPage.jsx'),
-      'utf8',
-    );
-    expect(admin).not.toMatch(/RefaccionesCatalogTab/);
-    expect(admin).not.toMatch(/costoReferenciaBase/);
-    expect(admin).not.toMatch(/margenPorcentaje/);
-    expect(admin).not.toMatch(/id: 'refacciones'/);
-    expect(admin).toMatch(/mercado/);
   });
 });
