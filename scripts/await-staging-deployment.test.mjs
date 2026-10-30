@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { deploymentIdFromUp, verdictForDeployment } from './await-staging-deployment.mjs';
+import {
+  assertDetachedUpload,
+  deploymentIdFromUp,
+  verdictForDeployment,
+} from './await-staging-deployment.mjs';
 
 const current = '11111111-1111-4111-8111-111111111111';
 const newer = '22222222-2222-4222-8222-222222222222';
@@ -19,6 +23,38 @@ test('un SUCCESS ajeno no acredita esta ejecución', () => {
   assert.equal(
     verdictForDeployment([{ id: current, status: 'SUCCESS' }, { id: newer, status: 'FAILED' }], current),
     'success',
+  );
+});
+
+test('la subida tiene que ser el servicio staging del proyecto compartido', () => {
+  const project = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const environment = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const service = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const text = JSON.stringify({
+    deploymentId: current,
+    logsUrl: `https://railway.com/project/${project}/service/${service}?environmentId=${environment}`,
+  });
+  assert.equal(
+    assertDetachedUpload(text, { projectId: project, environmentId: environment, serviceId: service }),
+    current,
+  );
+  assert.throws(
+    () =>
+      assertDetachedUpload(text, {
+        projectId: project,
+        environmentId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        serviceId: service,
+      }),
+    /entorno staging/,
+  );
+  assert.throws(
+    () =>
+      assertDetachedUpload(text, {
+        projectId: project,
+        environmentId: environment,
+        serviceId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      }),
+    /servicio de staging/,
   );
 });
 

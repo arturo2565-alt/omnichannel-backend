@@ -32,6 +32,7 @@
     "smoke:staging": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/smoke-staging.ts",
     "check:staging-target": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/check-staging-target.ts",
     "check:staging-deploy": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/assert-staging-deploy.ts",
+    "check:railway-token": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/assert-railway-token.ts",
     "check:staging-backup": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/assert-staging-backup.ts",
     "bootstrap:staging": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/bootstrap-staging.ts",
     "report:montaje-pintura": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register src/catalog/montaje-pintura-migration-report.ts"

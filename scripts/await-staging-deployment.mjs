@@ -6,6 +6,32 @@ import { pathToFileURL } from 'node:url';
 
 const FAILURES = new Set(['FAILED', 'CRASHED', 'REMOVED', 'REMOVING', 'SKIPPED']);
 
+export function assertDetachedUpload(text, expected) {
+  const id = deploymentIdFromUp(text);
+  const matches = String(text ?? '').match(/\{[^{}]*"deploymentId"\s*:\s*"[^"]+"[^{}]*\}/g);
+  const payload = JSON.parse(matches[matches.length - 1]);
+  const logs = String(payload.logsUrl ?? '');
+  const project = logs.match(/\/project\/([0-9a-f-]{36})/i)?.[1] ?? String(payload.projectId ?? '');
+  const service =
+    logs.match(/\/service\/([0-9a-f-]{36})/i)?.[1] ?? String(payload.serviceId ?? '');
+  const environment =
+    logs.match(/[?&]environmentId=([0-9a-f-]{36})/i)?.[1] ?? String(payload.environmentId ?? '');
+  if (!same(project, expected.projectId)) {
+    throw new Error('deploy ERROR: la subida no apunta al proyecto fijado.');
+  }
+  if (!same(service, expected.serviceId)) {
+    throw new Error('deploy ERROR: la subida no apunta al servicio de staging.');
+  }
+  if (environment && !same(environment, expected.environmentId)) {
+    throw new Error('deploy ERROR: la subida no apunta al entorno staging.');
+  }
+  return id;
+}
+
+function same(left, right) {
+  return String(left ?? '').trim().toLowerCase() === String(right ?? '').trim().toLowerCase() && String(left ?? '').trim() !== '';
+}
+
 export function deploymentIdFromUp(text) {
   const matches = String(text ?? '').match(/\{[^{}]*"deploymentId"\s*:\s*"[^"]+"[^{}]*\}/g);
   if (!matches) {
@@ -54,6 +80,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     if (mode === 'id') {
       process.stdout.write(deploymentIdFromUp(input));
+    } else if (mode === 'target') {
+      process.stdout.write(
+        assertDetachedUpload(input, {
+          projectId: process.env.RAILWAY_PROJECT_ID,
+          environmentId: process.env.RAILWAY_STAGING_ENVIRONMENT_ID,
+          serviceId: process.env.RAILWAY_STAGING_SERVICE_ID,
+        }),
+      );
     } else if (mode === 'check') {
       const verdict = verdictForDeployment(input, process.argv[3]);
       if (verdict === 'success') process.exit(0);

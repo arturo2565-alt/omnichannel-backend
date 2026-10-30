@@ -35,6 +35,40 @@ export function assertExplicitStagingMigration(env, databaseUrl) {
   if (host !== pinned) {
     throw new Error('migrate ERROR: el host no coincide con STAGING_DB_HOST.');
   }
+  assertStagingContainer(env);
+}
+
+function assertStagingContainer(env) {
+  const expectedService = String(env.EXPECTED_RAILWAY_SERVICE_ID ?? '').trim();
+  const expectedEnvironment = String(env.EXPECTED_RAILWAY_ENVIRONMENT_ID ?? '').trim();
+  const expectedProject = String(env.EXPECTED_RAILWAY_PROJECT_ID ?? '').trim();
+  if (!expectedService && !expectedEnvironment && !expectedProject) return;
+
+  const serviceName = String(env.RAILWAY_SERVICE_NAME ?? '').trim();
+  const environmentName = String(env.RAILWAY_ENVIRONMENT_NAME ?? '').trim();
+  if (serviceName === 'omnichannel-backend' || environmentName === 'production') {
+    throw new Error('migrate ERROR: el contenedor es de producción.');
+  }
+  if (serviceName && serviceName !== 'pegazuz-backend-staging') {
+    throw new Error('migrate ERROR: el contenedor no es pegazuz-backend-staging.');
+  }
+  if (environmentName && environmentName !== 'staging') {
+    throw new Error('migrate ERROR: el contenedor no es el entorno staging.');
+  }
+
+  const serviceId = String(env.RAILWAY_SERVICE_ID ?? '').trim();
+  const environmentId = String(env.RAILWAY_ENVIRONMENT_ID ?? '').trim();
+  const projectId = String(env.RAILWAY_PROJECT_ID ?? '').trim();
+  if (!serviceId || !environmentId || !projectId) {
+    throw new Error('migrate ERROR: el contenedor no identificó el destino de staging.');
+  }
+  if (
+    serviceId.toLowerCase() !== expectedService.toLowerCase() ||
+    environmentId.toLowerCase() !== expectedEnvironment.toLowerCase() ||
+    projectId.toLowerCase() !== expectedProject.toLowerCase()
+  ) {
+    throw new Error('migrate ERROR: el contenedor no es la base de staging.');
+  }
 }
 
 function hostname(databaseUrl) {

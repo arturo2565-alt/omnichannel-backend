@@ -14,6 +14,52 @@ test('acepta el host fijado de staging', () => {
   assert.doesNotThrow(() => assertExplicitStagingMigration(ready, url));
 });
 
+test('dentro del contenedor exige el servicio staging del proyecto compartido', () => {
+  const container = {
+    ...ready,
+    EXPECTED_RAILWAY_PROJECT_ID: '11111111-1111-4111-8111-111111111111',
+    EXPECTED_RAILWAY_ENVIRONMENT_ID: '33333333-3333-4333-8333-333333333333',
+    EXPECTED_RAILWAY_SERVICE_ID: '44444444-4444-4444-8444-444444444444',
+    RAILWAY_PROJECT_ID: '11111111-1111-4111-8111-111111111111',
+    RAILWAY_ENVIRONMENT_ID: '33333333-3333-4333-8333-333333333333',
+    RAILWAY_ENVIRONMENT_NAME: 'staging',
+    RAILWAY_SERVICE_ID: '44444444-4444-4444-8444-444444444444',
+    RAILWAY_SERVICE_NAME: 'pegazuz-backend-staging',
+  };
+  assert.doesNotThrow(() => assertExplicitStagingMigration(container, url));
+  assert.throws(
+    () =>
+      assertExplicitStagingMigration(
+        { ...container, RAILWAY_SERVICE_NAME: 'omnichannel-backend' },
+        url,
+      ),
+    /producción/,
+  );
+  assert.throws(
+    () =>
+      assertExplicitStagingMigration(
+        { ...container, RAILWAY_ENVIRONMENT_NAME: 'production' },
+        url,
+      ),
+    /producción/,
+  );
+  assert.throws(
+    () =>
+      assertExplicitStagingMigration(
+        {
+          ...container,
+          RAILWAY_SERVICE_ID: '55555555-5555-4555-8555-555555555555',
+        },
+        url,
+      ),
+    (err) => {
+      assert.match(err.message, /base de staging/);
+      assert.equal(err.message.includes('55555555'), false);
+      return true;
+    },
+  );
+});
+
 test('rechaza producción, synchronize y un host distinto sin revelarlos', () => {
   assert.throws(
     () =>

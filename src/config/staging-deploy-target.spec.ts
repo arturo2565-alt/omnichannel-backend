@@ -1,16 +1,23 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  assertRailwayProjectToken,
   assertStagingBackupUrl,
   assertStagingDeployTarget,
 } from './staging-deploy-target';
 
+const project = '11111111-1111-4111-8111-111111111111';
+const environmentId = '33333333-3333-4333-8333-333333333333';
+const serviceId = '44444444-4444-4444-8444-444444444444';
+
 const ready = {
   RAILWAY_ENVIRONMENT: 'staging',
-  RAILWAY_PROJECT_ID: '11111111-1111-4111-8111-111111111111',
-  PRODUCTION_RAILWAY_PROJECT_ID: '22222222-2222-4222-8222-222222222222',
+  RAILWAY_PROJECT_ID: project,
+  PRODUCTION_RAILWAY_PROJECT_ID: project,
+  RAILWAY_STAGING_ENVIRONMENT_ID: environmentId,
+  RAILWAY_STAGING_SERVICE_ID: serviceId,
   RAILWAY_SERVICE: 'pegazuz-backend-staging',
-  PRODUCTION_RAILWAY_SERVICE: 'omnichannel-backend-production',
+  PRODUCTION_RAILWAY_SERVICE: 'omnichannel-backend',
   STAGING_DB_HOST: 'postgres.railway.internal',
   STAGING_PUBLIC_HOST: 'api.staging.example.test',
   STAGING_SMOKE_URL: 'https://api.staging.example.test/api/health',
@@ -20,8 +27,14 @@ const ready = {
 };
 
 describe('assertStagingDeployTarget', () => {
-  it('acepta el servicio de staging separado de producción', () => {
+  it('acepta el mismo proyecto cuando el entorno y el servicio son los de staging', () => {
     expect(() => assertStagingDeployTarget(ready)).not.toThrow();
+    expect(() =>
+      assertStagingDeployTarget({
+        ...ready,
+        PRODUCTION_RAILWAY_PROJECT_ID: '22222222-2222-4222-8222-222222222222',
+      }),
+    ).not.toThrow();
   });
 
   it('rechaza producción, el mismo servicio y el autodeploy nativo', () => {
@@ -29,18 +42,23 @@ describe('assertStagingDeployTarget', () => {
       assertStagingDeployTarget({ ...ready, RAILWAY_ENVIRONMENT: 'production' }),
     ).toThrow(/staging/);
     expect(() =>
-      assertStagingDeployTarget({
-        ...ready,
-        RAILWAY_SERVICE: 'omnichannel-backend-production',
-        PRODUCTION_RAILWAY_SERVICE: 'otro-servicio',
-      }),
-    ).toThrow(/servicio/);
+      assertStagingDeployTarget({ ...ready, RAILWAY_SERVICE: 'omnichannel-backend' }),
+    ).toThrow(/producción/);
+    expect(() =>
+      assertStagingDeployTarget({ ...ready, RAILWAY_SERVICE: 'otro-staging' }),
+    ).toThrow(/pegazuz-backend-staging/);
     expect(() =>
       assertStagingDeployTarget({
         ...ready,
         PRODUCTION_RAILWAY_SERVICE: ready.RAILWAY_SERVICE,
       }),
     ).toThrow(/separado/);
+    expect(() =>
+      assertStagingDeployTarget({ ...ready, RAILWAY_STAGING_ENVIRONMENT_ID: serviceId }),
+    ).toThrow(/UUID/);
+    expect(() =>
+      assertStagingDeployTarget({ ...ready, RAILWAY_STAGING_SERVICE_ID: '' }),
+    ).toThrow(/RAILWAY_STAGING_SERVICE_ID/);
     expect(() =>
       assertStagingDeployTarget({ ...ready, STAGING_NATIVE_DEPLOY: 'on' }),
     ).toThrow(/autodeploy nativo/);
@@ -51,14 +69,8 @@ describe('assertStagingDeployTarget', () => {
       assertStagingDeployTarget({ ...ready, STAGING_NATIVE_DEPLOY: 'off ' }),
     ).toThrow(/autodeploy nativo/);
     expect(() =>
-      assertStagingDeployTarget({
-        ...ready,
-        RAILWAY_PROJECT_ID: ready.PRODUCTION_RAILWAY_PROJECT_ID,
-      }),
-    ).toThrow(/proyecto de Railway/);
-    expect(() =>
       assertStagingDeployTarget({ ...ready, RAILWAY_PROJECT_ID: 'pegazuz-staging' }),
-    ).toThrow(/proyecto de Railway/);
+    ).toThrow(/UUID del proyecto/);
     expect(() =>
       assertStagingDeployTarget({ ...ready, DB_SYNCHRONIZE: 'true' }),
     ).toThrow(/DB_SYNCHRONIZE/);
@@ -94,6 +106,61 @@ describe('assertStagingDeployTarget', () => {
         STAGING_SMOKE_URL: 'https://api.staging.example.test/',
       }),
     ).toThrow(/\/api\/health/);
+  });
+});
+
+describe('assertRailwayProjectToken', () => {
+  const scope = {
+    RAILWAY_PROJECT_ID: project,
+    RAILWAY_STAGING_ENVIRONMENT_ID: environmentId,
+  };
+  const payload = {
+    data: { projectToken: { projectId: project, environmentId } },
+  };
+
+  it('acepta el project token del entorno staging del mismo proyecto', () => {
+    expect(() => assertRailwayProjectToken(payload, scope)).not.toThrow();
+  });
+
+  it('rechaza un token de cuenta, el entorno production y otro proyecto', () => {
+    expect(() => assertRailwayProjectToken({ data: {} }, scope)).toThrow(/project token/);
+    expect(() => assertRailwayProjectToken({ errors: [{ message: 'Unauthorized' }] }, scope)).toThrow(
+      /project token/,
+    );
+    let thrown = false;
+    try {
+      assertRailwayProjectToken(
+        {
+          data: {
+            projectToken: {
+              projectId: project,
+              environmentId: '55555555-5555-4555-8555-555555555555',
+            },
+          },
+        },
+        scope,
+      );
+    } catch (err) {
+      thrown = true;
+      const message = err instanceof Error ? err.message : String(err);
+      expect(message).toMatch(/entorno staging fijado/);
+      expect(message).not.toContain(project);
+      expect(message).not.toContain(environmentId);
+    }
+    expect(thrown).toBe(true);
+    expect(() =>
+      assertRailwayProjectToken(
+        {
+          data: {
+            projectToken: {
+              projectId: '22222222-2222-4222-8222-222222222222',
+              environmentId,
+            },
+          },
+        },
+        scope,
+      ),
+    ).toThrow(/entorno staging fijado/);
   });
 });
 
@@ -154,6 +221,14 @@ describe('workflows de staging', () => {
     expect(staging).toContain('await-staging-deployment.mjs');
     expect(staging).toContain('deployment list --json');
     expect(staging).toContain('--project "$RAILWAY_PROJECT_ID"');
+    expect(staging).toContain('--service "$RAILWAY_STAGING_SERVICE_ID"');
+    expect(staging).toContain('--environment "$RAILWAY_STAGING_ENVIRONMENT_ID"');
+    expect(staging).toContain('pegazuz-backend-staging');
+    expect(staging).toContain('omnichannel-backend');
+    expect(staging).toContain('Project-Access-Token');
+    expect(staging).toContain('projectToken');
+    expect(staging).toContain('check:railway-token');
+    expect(staging).toContain('await-staging-deployment.mjs target');
     expect(staging.indexOf('await-staging-deployment.mjs')).toBeLessThan(
       staging.indexOf('smoke:staging'),
     );
@@ -173,6 +248,12 @@ describe('workflows de staging', () => {
     expect(migrate).toContain('STAGING_MIGRATE_ENABLED');
     expect(migrate).toContain('railway ssh');
     expect(migrate).toContain('--project "$RAILWAY_PROJECT_ID"');
+    expect(migrate).toContain('--service "$RAILWAY_STAGING_SERVICE_ID"');
+    expect(migrate).toContain('--environment "$RAILWAY_STAGING_ENVIRONMENT_ID"');
+    expect(migrate).toContain('EXPECTED_RAILWAY_SERVICE_ID');
+    expect(migrate).toContain('pegazuz-backend-staging');
+    expect(migrate).toContain('omnichannel-backend');
+    expect(migrate).toContain('check:railway-token');
     expect(migrate).toContain('check:staging-deploy');
     expect(migrate).toContain('apply-explicit-staging-migrations.mjs');
     expect(migrate).not.toContain('railway run');
@@ -184,7 +265,10 @@ describe('workflows de staging', () => {
     expect(production).toContain('workflow_dispatch');
     expect(production).not.toContain('push:');
     expect(production).toContain("refs/heads/main");
+    expect(production).toContain('tiene que ser production');
+    expect(production).toContain('coincide con staging');
     expect(production).not.toContain('migrate:');
+    expect(production).not.toContain('RAILWAY_STAGING_SERVICE_ID');
     expect(verify).not.toContain('railway up');
     expect(verify).not.toContain('vercel deploy');
   });

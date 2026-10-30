@@ -4,7 +4,9 @@
 # STAGING_DEPLOY_ENABLED y STAGING_NATIVE_DEPLOY son variables del repositorio.
 # Una variable de entorno de GitHub no llega a la condición del job.
 # El job sigue apagado hasta que la primera sea true y la segunda sea off.
-# El token de Railway es un token de proyecto limitado al entorno staging.
+# Staging y producción comparten el proyecto amused-possibility.
+# El aislamiento es el entorno staging, el servicio pegazuz-backend-staging
+# y un project token creado en ese entorno. Un token de cuenta no sirve.
 # No migra y no siembra.
 name: Staging
 
@@ -39,6 +41,8 @@ jobs:
           RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
           RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
           PRODUCTION_RAILWAY_PROJECT_ID: ${{ vars.PRODUCTION_RAILWAY_PROJECT_ID }}
+          RAILWAY_STAGING_ENVIRONMENT_ID: ${{ vars.RAILWAY_STAGING_ENVIRONMENT_ID }}
+          RAILWAY_STAGING_SERVICE_ID: ${{ vars.RAILWAY_STAGING_SERVICE_ID }}
           RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
           PRODUCTION_RAILWAY_SERVICE: ${{ vars.PRODUCTION_RAILWAY_SERVICE }}
           STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
@@ -48,22 +52,53 @@ jobs:
           DB_SYNCHRONIZE: 'false'
           PEGAZUZ_ENV: staging
         run: npm run check:staging-deploy
+      - name: Comprobar que el token está limitado a staging
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_STAGING_ENVIRONMENT_ID: ${{ vars.RAILWAY_STAGING_ENVIRONMENT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RAILWAY_TOKEN" ] || [ -z "$RAILWAY_PROJECT_ID" ] || [ -z "$RAILWAY_STAGING_ENVIRONMENT_ID" ]; then
+            echo "falta el token o el entorno fijado"
+            exit 1
+          fi
+          token_file="${RUNNER_TEMP}/railway-scope.json"
+          curl --fail --silent --show-error \
+            --request POST \
+            --url https://backboard.railway.com/graphql/v2 \
+            --header "Project-Access-Token: ${RAILWAY_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --output "$token_file" \
+            --data '{"query":"query { projectToken { projectId environmentId } }"}'
+          npm run check:railway-token -- "$token_file"
+          rm -f "$token_file"
       - name: Publicar y esperar SUCCESS de esta ejecución
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_STAGING_ENVIRONMENT_ID: ${{ vars.RAILWAY_STAGING_ENVIRONMENT_ID }}
+          RAILWAY_STAGING_SERVICE_ID: ${{ vars.RAILWAY_STAGING_SERVICE_ID }}
           RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
           RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
         run: |
           set -euo pipefail
-          if [ -z "$RAILWAY_TOKEN" ] || [ -z "$RAILWAY_PROJECT_ID" ]; then
-            echo "falta el token o el proyecto de staging"
+          if [ -z "$RAILWAY_TOKEN" ] || [ -z "$RAILWAY_PROJECT_ID" ] || [ -z "$RAILWAY_STAGING_ENVIRONMENT_ID" ] || [ -z "$RAILWAY_STAGING_SERVICE_ID" ]; then
+            echo "falta el token o el destino de staging"
             exit 1
           fi
-          up_json="$(npx --yes @railway/cli up --detach --json --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE" --environment "$RAILWAY_ENVIRONMENT")"
-          deployment_id="$(printf '%s\n' "$up_json" | node scripts/await-staging-deployment.mjs id)"
+          if [ "$RAILWAY_ENVIRONMENT" != "staging" ] || [ "$RAILWAY_SERVICE" != "pegazuz-backend-staging" ]; then
+            echo "el destino no es staging"
+            exit 1
+          fi
+          if [ "$RAILWAY_ENVIRONMENT" = "production" ] || [ "$RAILWAY_SERVICE" = "omnichannel-backend" ]; then
+            echo "producción queda fuera"
+            exit 1
+          fi
+          up_json="$(npx --yes @railway/cli up --detach --json --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_STAGING_SERVICE_ID" --environment "$RAILWAY_STAGING_ENVIRONMENT_ID")"
+          deployment_id="$(printf '%s\n' "$up_json" | node scripts/await-staging-deployment.mjs target)"
           for _ in $(seq 1 60); do
-            list_json="$(npx --yes @railway/cli deployment list --json --limit 20 --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE" --environment "$RAILWAY_ENVIRONMENT")"
+            list_json="$(npx --yes @railway/cli deployment list --json --limit 20 --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_STAGING_SERVICE_ID" --environment "$RAILWAY_STAGING_ENVIRONMENT_ID")"
             set +e
             printf '%s\n' "$list_json" | node scripts/await-staging-deployment.mjs check "$deployment_id"
             code=$?
