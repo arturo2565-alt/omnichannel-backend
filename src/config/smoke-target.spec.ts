@@ -26,4 +26,12 @@ describe('assertSmokeTarget', () => {
       expect(message).not.toContain('api.staging.example.test');
     }
   });
+
+  it('exige el health y no otra ruta del mismo host', () => {
+    expect(() =>
+      assertSmokeTarget('https://api.staging.example.test/', {
+        STAGING_PUBLIC_HOST: 'api.staging.example.test',
+      }),
+    ).toThrow(/\/api\/health/);
+  });
 });

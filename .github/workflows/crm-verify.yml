@@ -8,9 +8,6 @@ on:
   pull_request:
   workflow_dispatch:
   workflow_call:
-  push:
-    branches:
-      - genesis/crm-010
 
 jobs:
   verify:
@@ -37,5 +34,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: node --test scripts/explicit-staging-migration.test.mjs scripts/await-staging-deployment.test.mjs
       - run: npm test -- --runInBand --testPathIgnorePatterns='/node_modules/|/dist/|chat\.service\.spec|chat\.controller\.spec|resume-pending-quote-pricing|vehicle-pricing-profile\.spec|incoming-message\.debounce'
       - run: npm run build

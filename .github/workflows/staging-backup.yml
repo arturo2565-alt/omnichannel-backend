@@ -38,7 +38,7 @@ jobs:
           CRM_STAGING_MIGRATE: yes
           STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
         run: |
-          npm run check:staging-target
+          npm run check:staging-backup
           pg_dump --format=custom --no-owner --file=staging.dump --dbname="$DATABASE_URL"
       - name: Restaurar en Postgres desechable
         env:

@@ -1,6 +1,11 @@
-# Publica genesis/staging en el servicio Railway de staging.
-# Permanece apagado hasta STAGING_DEPLOY_ENABLED=true.
-# No usa el servicio ni la base de producción.
+# Único publicador del backend de staging.
+# Railway → pegazuz-backend-staging → Settings → Deploy → Disable.
+# No actives Wait for CI: eso volvería a publicar el mismo push.
+# STAGING_DEPLOY_ENABLED y STAGING_NATIVE_DEPLOY son variables del repositorio.
+# Una variable de entorno de GitHub no llega a la condición del job.
+# El job sigue apagado hasta que la primera sea true y la segunda sea off.
+# El token de Railway es un token de proyecto limitado al entorno staging.
+# No migra y no siembra.
 name: Staging
 
 on:
@@ -19,7 +24,7 @@ jobs:
 
   deploy:
     needs: verify
-    if: vars.STAGING_DEPLOY_ENABLED == 'true'
+    if: vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_NATIVE_DEPLOY == 'off'
     environment: staging
     runs-on: ubuntu-latest
     steps:
@@ -32,59 +37,47 @@ jobs:
       - name: Rechazar un destino de producción
         env:
           RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          PRODUCTION_RAILWAY_PROJECT_ID: ${{ vars.PRODUCTION_RAILWAY_PROJECT_ID }}
           RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
           PRODUCTION_RAILWAY_SERVICE: ${{ vars.PRODUCTION_RAILWAY_SERVICE }}
           STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
           STAGING_PUBLIC_HOST: ${{ vars.STAGING_PUBLIC_HOST }}
-        run: node --input-type=module <<'NODE'
-          function required(name, value) {
-            const text = String(value ?? '').trim();
-            if (!text) {
-              console.error(`falta ${name}`);
-              process.exit(1);
-            }
-            return text;
-          }
-          function rejectProduction(name, value) {
-            const text = required(name, value).toLowerCase();
-            if (text.includes('production') || text === 'prod' || text === 'main') {
-              console.error(`${name} no puede apuntar a producción`);
-              process.exit(1);
-            }
-            return text;
-          }
-          const service = required('RAILWAY_SERVICE', process.env.RAILWAY_SERVICE);
-          const production = required(
-            'PRODUCTION_RAILWAY_SERVICE',
-            process.env.PRODUCTION_RAILWAY_SERVICE,
-          );
-          if (service === production) {
-            console.error('el servicio de staging coincide con producción');
-            process.exit(1);
-          }
-          rejectProduction('RAILWAY_ENVIRONMENT', process.env.RAILWAY_ENVIRONMENT);
-          rejectProduction('STAGING_DB_HOST', process.env.STAGING_DB_HOST);
-          rejectProduction('STAGING_PUBLIC_HOST', process.env.STAGING_PUBLIC_HOST);
-          NODE
-      - name: Publicar el backend de staging
+          STAGING_SMOKE_URL: ${{ vars.STAGING_SMOKE_URL }}
+          STAGING_NATIVE_DEPLOY: ${{ vars.STAGING_NATIVE_DEPLOY }}
+          DB_SYNCHRONIZE: 'false'
+          PEGAZUZ_ENV: staging
+        run: npm run check:staging-deploy
+      - name: Publicar y esperar SUCCESS de esta ejecución
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
           RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
           RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
         run: |
-          if [ -z "$RAILWAY_TOKEN" ]; then
-            echo "falta el token de staging"
+          set -euo pipefail
+          if [ -z "$RAILWAY_TOKEN" ] || [ -z "$RAILWAY_PROJECT_ID" ]; then
+            echo "falta el token o el proyecto de staging"
             exit 1
           fi
-          npx --yes @railway/cli up --detach --service "$RAILWAY_SERVICE" --environment "$RAILWAY_ENVIRONMENT"
-      - name: Migrar y sembrar staging
-        env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-          CRM_MIGRATE_TARGET: staging
-          CRM_STAGING_MIGRATE: yes
-          STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
-          PEGAZUZ_ENV: staging
-        run: npm run migrate:crm-001a && npm run migrate:crm-008 && npm run migrate:crm-010 && npm run seed:staging
+          up_json="$(npx --yes @railway/cli up --detach --json --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE" --environment "$RAILWAY_ENVIRONMENT")"
+          deployment_id="$(printf '%s\n' "$up_json" | node scripts/await-staging-deployment.mjs id)"
+          for _ in $(seq 1 60); do
+            list_json="$(npx --yes @railway/cli deployment list --json --limit 20 --project "$RAILWAY_PROJECT_ID" --service "$RAILWAY_SERVICE" --environment "$RAILWAY_ENVIRONMENT")"
+            set +e
+            printf '%s\n' "$list_json" | node scripts/await-staging-deployment.mjs check "$deployment_id"
+            code=$?
+            set -e
+            if [ "$code" -eq 0 ]; then
+              exit 0
+            fi
+            if [ "$code" -ne 10 ]; then
+              exit "$code"
+            fi
+            sleep 15
+          done
+          echo "el despliegue de esta ejecución no llegó a SUCCESS"
+          exit 1
       - name: Humo
         env:
           SMOKE_URL: ${{ vars.STAGING_SMOKE_URL }}

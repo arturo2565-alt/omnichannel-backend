@@ -8,7 +8,7 @@ async function main() {
   const url = String(process.env.SMOKE_URL ?? '').trim();
   assertSmokeTarget(url, process.env);
   let detail = 'sin respuesta';
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
       const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
       const body = (await response.json()) as { ok?: boolean; staging?: boolean };

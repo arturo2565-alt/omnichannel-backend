@@ -15,4 +15,13 @@ export function assertSmokeTarget(url: string, env: NodeJS.ProcessEnv): void {
       'smoke ERROR: el destino no coincide con STAGING_PUBLIC_HOST.',
     );
   }
+  let pathname = '';
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    pathname = '';
+  }
+  if (pathname !== '/api/health') {
+    throw new Error('smoke ERROR: el destino tiene que ser /api/health.');
+  }
 }

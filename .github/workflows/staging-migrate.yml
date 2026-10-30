@@ -1,0 +1,80 @@
+# Migración explícita de staging. No corre en un push.
+# railway ssh ejecuta el script dentro del contenedor, en la red privada.
+# El comando local del CLI solo inyecta variables en GitHub, donde el
+# hostname privado no resuelve.
+# STAGING_MIGRATE_ENABLED es una variable del repositorio: la condición
+# del job no ve las variables del entorno de GitHub.
+# Permanece apagado hasta STAGING_MIGRATE_ENABLED=true.
+# Primero publica el commit y espera el humo: el script que corre es el del contenedor.
+name: Staging migrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Escribe migrate-staging para continuar
+        required: true
+        type: string
+
+concurrency:
+  group: pegazuz-staging-migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    if: vars.STAGING_MIGRATE_ENABLED == 'true' && inputs.confirm == 'migrate-staging'
+    environment: staging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Rechazar un destino de producción
+        env:
+          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          PRODUCTION_RAILWAY_PROJECT_ID: ${{ vars.PRODUCTION_RAILWAY_PROJECT_ID }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          PRODUCTION_RAILWAY_SERVICE: ${{ vars.PRODUCTION_RAILWAY_SERVICE }}
+          STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
+          STAGING_PUBLIC_HOST: ${{ vars.STAGING_PUBLIC_HOST }}
+          STAGING_SMOKE_URL: ${{ vars.STAGING_SMOKE_URL }}
+          STAGING_NATIVE_DEPLOY: ${{ vars.STAGING_NATIVE_DEPLOY }}
+          DB_SYNCHRONIZE: 'false'
+          PEGAZUZ_ENV: staging
+        run: npm run check:staging-deploy
+      - name: Aplicar 004, 005 y 006 dentro del servicio
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+          RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE }}
+          RAILWAY_ENVIRONMENT: ${{ vars.RAILWAY_ENVIRONMENT }}
+          STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RAILWAY_TOKEN" ] || [ -z "$RAILWAY_PROJECT_ID" ] || [ "$RAILWAY_ENVIRONMENT" != "staging" ]; then
+            echo "el destino no es el servicio de staging"
+            exit 1
+          fi
+          case "$RAILWAY_SERVICE" in
+            *production*|*prod*) echo "el servicio no puede ser de producción"; exit 1 ;;
+            *staging*) ;;
+            *) echo "el servicio no es el de staging"; exit 1 ;;
+          esac
+          if [ -z "$STAGING_DB_HOST" ] || [[ "$STAGING_DB_HOST" == *production* ]]; then
+            echo "falta el host de staging"
+            exit 1
+          fi
+          npx --yes @railway/cli ssh \
+            --project "$RAILWAY_PROJECT_ID" \
+            --service "$RAILWAY_SERVICE" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            -- env \
+              CRM_MIGRATE_TARGET=staging \
+              CRM_STAGING_MIGRATE=yes \
+              DB_SYNCHRONIZE=false \
+              STAGING_DB_HOST="$STAGING_DB_HOST" \
+              node scripts/apply-explicit-staging-migrations.mjs
