@@ -269,6 +269,8 @@ describe('workflows de staging', () => {
     expect(production).toContain('coincide con staging');
     expect(production).not.toContain('migrate:');
     expect(production).not.toContain('RAILWAY_STAGING_SERVICE_ID');
+    expect(production).toContain('actions/checkout@v4');
+    expect(production).not.toContain('actions/checkout@v5');
     expect(verify).not.toContain('railway up');
     expect(verify).not.toContain('vercel deploy');
   });

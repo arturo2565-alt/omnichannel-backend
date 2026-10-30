@@ -1,4 +1,6 @@
 # Volcado de staging y restauración de prueba en Postgres desechable.
+# El cliente es PostgreSQL 18, no el que traiga el runner.
+# La restauración solo acepta 127.0.0.1 y exige el taller de ensayo.
 # No restaura encima de la base remota. Apagado hasta STAGING_BACKUP_ENABLED=true.
 name: Staging backup
 
@@ -24,12 +26,20 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
-      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Instalar el cliente PostgreSQL 18
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-18
       - run: npm ci
       - name: Comprobar el destino y volcar
         env:
@@ -37,16 +47,26 @@ jobs:
           CRM_MIGRATE_TARGET: staging
           CRM_STAGING_MIGRATE: yes
           STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
+          PG_DUMP: /usr/lib/postgresql/18/bin/pg_dump
+          PG_RESTORE: /usr/lib/postgresql/18/bin/pg_restore
         run: |
+          set -euo pipefail
           npm run check:staging-backup
-          pg_dump --format=custom --no-owner --file=staging.dump --dbname="$DATABASE_URL"
+          node scripts/assert-staging-restore.mjs client "$("$PG_DUMP" --version)" "$("$PG_RESTORE" --version)"
+          "$PG_DUMP" --format=custom --no-owner --file=staging.dump --dbname="$DATABASE_URL"
+          node scripts/assert-staging-restore.mjs dump staging.dump
       - name: Restaurar en Postgres desechable
         env:
           LOCAL_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
+          PG_RESTORE: /usr/lib/postgresql/18/bin/pg_restore
+          PSQL: /usr/lib/postgresql/18/bin/psql
         run: |
-          pg_restore --no-owner --dbname="$LOCAL_DATABASE_URL" --exit-on-error staging.dump
-          psql "$LOCAL_DATABASE_URL" --command='SELECT 1'
-      - uses: actions/upload-artifact@v4
+          set -euo pipefail
+          node scripts/assert-staging-restore.mjs target
+          "$PG_RESTORE" --no-owner --dbname="$LOCAL_DATABASE_URL" --exit-on-error staging.dump
+          marker="$("$PSQL" "$LOCAL_DATABASE_URL" --no-align --tuples-only --field-separator='|' --command="SELECT id, nombre FROM talleres WHERE id = '01000000-0000-4000-8000-000000000010'")"
+          printf '%s\n' "$marker" | node scripts/assert-staging-restore.mjs marker
+      - uses: actions/upload-artifact@v6
         with:
           name: staging-backup
           path: staging.dump

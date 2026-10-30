@@ -28,12 +28,12 @@ jobs:
     env:
       CRM008_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: node --test scripts/explicit-staging-migration.test.mjs scripts/await-staging-deployment.test.mjs
+      - run: node --test scripts/explicit-staging-migration.test.mjs scripts/await-staging-deployment.test.mjs scripts/assert-staging-restore.test.mjs
       - run: npm test -- --runInBand --testPathIgnorePatterns='/node_modules/|/dist/|chat\.service\.spec|chat\.controller\.spec|resume-pending-quote-pricing|vehicle-pricing-profile\.spec|incoming-message\.debounce'
       - run: npm run build
