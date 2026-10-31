@@ -1,0 +1,68 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowConditionalPut",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::pegazuz-staging-postgres/staging/postgres/*",
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "true",
+          "s3:ObjectCreationOperation": "true"
+        },
+        "Null": {
+          "s3:if-none-match": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyExceptPut",
+      "Effect": "Deny",
+      "NotAction": "s3:PutObject",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyPutOutsidePrefix",
+      "Effect": "Deny",
+      "Action": "s3:PutObject",
+      "NotResource": "arn:aws:s3:::pegazuz-staging-postgres/staging/postgres/*"
+    },
+    {
+      "Sid": "DenyMultipartPut",
+      "Effect": "Deny",
+      "Action": "s3:PutObject",
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "s3:ObjectCreationOperation": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyPutWithoutIfNoneMatch",
+      "Effect": "Deny",
+      "Action": "s3:PutObject",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "s3:if-none-match": "true"
+        },
+        "Bool": {
+          "s3:ObjectCreationOperation": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DenyPutWithoutTls",
+      "Effect": "Deny",
+      "Action": "s3:PutObject",
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "false"
+        }
+      }
+    }
+  ]
+}

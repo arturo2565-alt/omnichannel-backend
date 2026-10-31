@@ -107,9 +107,8 @@ export function assertObjectName(name) {
   }
 }
 
-export function stageExternalObject(name, bytes) {
-  assertObjectName(name);
-  return { name, body: assertCiphertextObject(bytes), canDelete: false };
+export function stageExternalObject() {
+  fail('backup ERROR: la carga solo acepta un archivo sellado.');
 }
 
 export const BACKUP_ROLE_SQL = [

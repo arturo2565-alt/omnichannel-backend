@@ -190,6 +190,7 @@ test('el plan privado acepta solo el cron de staging y no ejecuta el volcado', (
   assert.equal(plan.sslmode, 'verify-full');
   const source = readFileSync(new URL('./staging-private-backup.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /child_process|net\.connect|tls\.connect|spawn\(|node:net|node:tls|node:http/);
+  assert.doesNotMatch(source, /staging-backup-put-contract|staging-backup-seal|reapAbandonedSeals|@aws-sdk/);
   assert.match(source, /writeSync\(1/);
   const refused = spawnSync(process.execPath, ['scripts/staging-private-backup.mjs', 'refuse-github'], {
     cwd: join(import.meta.dirname, '..'),
@@ -292,7 +293,10 @@ test('exige un certificado del hostname privado y un bucket que el worker no pue
   );
   assert.throws(() => assertObjectName('staging.dump'), /objeto externo/);
   assert.throws(() => assertObjectName('../production/postgres/20261030T081500Z.dump.enc'), /objeto externo/);
-  assert.throws(() => stageExternalObject('staging/postgres/20261030T081500Z.dump.enc', Buffer.from('PGDMP')), /cifrado/);
+  assert.throws(
+    () => stageExternalObject('staging/postgres/20261030T081500Z.dump.enc', Buffer.from('PGDMP')),
+    /archivo sellado/,
+  );
 });
 
 test('el sobre se abre solo con la privada y no acepta una clave corta', () => {

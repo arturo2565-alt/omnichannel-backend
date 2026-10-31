@@ -1,0 +1,72 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::pegazuz-staging-postgres",
+        "arn:aws:s3:::pegazuz-staging-postgres/*"
+      ],
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyWriterExceptPut",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": "arn:aws:iam::461253922612:user/pegazuz-staging-backup-writer"
+      },
+      "NotAction": "s3:PutObject",
+      "Resource": [
+        "arn:aws:s3:::pegazuz-staging-postgres",
+        "arn:aws:s3:::pegazuz-staging-postgres/*"
+      ]
+    },
+    {
+      "Sid": "DenyWriterPutOutsidePrefix",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": "arn:aws:iam::461253922612:user/pegazuz-staging-backup-writer"
+      },
+      "Action": "s3:PutObject",
+      "NotResource": "arn:aws:s3:::pegazuz-staging-postgres/staging/postgres/*"
+    },
+    {
+      "Sid": "DenyWriterMultipartOperations",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": "arn:aws:iam::461253922612:user/pegazuz-staging-backup-writer"
+      },
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::pegazuz-staging-postgres/staging/postgres/*",
+      "Condition": {
+        "Bool": {
+          "s3:ObjectCreationOperation": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyWriterUnconditionalWrite",
+      "Effect": "Deny",
+      "Principal": {
+        "AWS": "arn:aws:iam::461253922612:user/pegazuz-staging-backup-writer"
+      },
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::pegazuz-staging-postgres/staging/postgres/*",
+      "Condition": {
+        "Null": {
+          "s3:if-none-match": "true"
+        },
+        "Bool": {
+          "s3:ObjectCreationOperation": "true"
+        }
+      }
+    }
+  ]
+}

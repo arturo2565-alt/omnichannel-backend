@@ -250,10 +250,12 @@ test(
       const publicPem = pair.publicKey.export({ type: 'spki', format: 'pem' });
       const privatePem = pair.privateKey.export({ type: 'pkcs8', format: 'pem' });
       const sealed = sealDump(readFileSync(dump), publicPem);
-      const staged = stageExternalObject('staging/postgres/20261030T081500Z.dump.enc', sealed);
-      assert.equal(staged.canDelete, false);
+      assert.throws(
+        () => stageExternalObject('staging/postgres/20261030T081500Z.dump.enc', sealed),
+        /archivo sellado/,
+      );
       const openedPath = join(root, 'sobre.dump');
-      writeFileSync(openedPath, openDump(staged.body, privatePem));
+      writeFileSync(openedPath, openDump(sealed, privatePem));
       assertCustomDump(readFileSync(openedPath));
       run(join(pg18, 'createdb'), ['--host=127.0.0.1', `--port=${port}`, '--username=postgres', 'sobre']);
       run(join(pg18, 'pg_restore'), [

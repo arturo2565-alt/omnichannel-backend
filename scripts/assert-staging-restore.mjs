@@ -9,9 +9,19 @@ import { pathToFileURL } from 'node:url';
 export const STAGING_TALLER_ID = '01000000-0000-4000-8000-000000000010';
 export const STAGING_TALLER_NAME = 'Taller de ensayo';
 
+const CLIENT_BANNER = /^(pg_dump|pg_restore) \(PostgreSQL\) 18\.\d+(?: \([^)\r\n]+\))?$/;
+
+export function assertServerVersionNum(text) {
+  const value = String(text ?? '').replace(/\r\n/g, '\n');
+  if (!/^18\d{4}\n?$/.test(value)) {
+    throw new Error('backup ERROR: el servidor tiene que ser PostgreSQL 18.');
+  }
+}
+
 export function assertPostgres18(versionText, tool) {
-  const match = String(versionText ?? '').match(/\(PostgreSQL\)\s+(\d+)\./);
-  if (!match || match[1] !== '18') {
+  const text = String(versionText ?? '').replace(/\r\n/g, '\n').trim();
+  const match = CLIENT_BANNER.exec(text);
+  if ((tool !== 'pg_dump' && tool !== 'pg_restore') || !match || match[1] !== tool) {
     throw new Error(`backup ERROR: ${tool} tiene que ser PostgreSQL 18.`);
   }
 }
@@ -50,7 +60,7 @@ export function rowsFromPsql(text) {
     });
 }
 
-const INTEGRITY_LINES = [
+export const INTEGRITY_LINES = Object.freeze([
   `taller|${STAGING_TALLER_ID}|${STAGING_TALLER_NAME}`,
   'price|01000000-0000-4000-8000-000000000011',
   'price|01000000-0000-4000-8000-000000000012',
@@ -60,16 +70,15 @@ const INTEGRITY_LINES = [
   'table|appointments',
   'table|appointment_service_lines',
   'column|catalogPieceCode',
-];
+]);
 
 export function assertRestoredIntegrity(text) {
-  const lines = new Set(
-    String(text ?? '')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean),
-  );
-  if (!INTEGRITY_LINES.every((line) => lines.has(line))) {
+  const lines = String(text ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const seen = new Set(lines);
+  if (lines.length !== INTEGRITY_LINES.length || seen.size !== lines.length || !INTEGRITY_LINES.every((line) => seen.has(line))) {
     throw new Error('backup ERROR: la restauración no conserva el esquema ni los datos sintéticos.');
   }
 }

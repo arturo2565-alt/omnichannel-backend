@@ -1,0 +1,19 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PutStagingPrefixOnly",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::pegazuz-staging-postgres/staging/postgres/*",
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "true"
+        },
+        "Null": {
+          "s3:if-none-match": "false"
+        }
+      }
+    }
+  ]
+}

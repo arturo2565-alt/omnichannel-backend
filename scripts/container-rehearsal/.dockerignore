@@ -1,0 +1,5 @@
+# Docker no lee este archivo: no está en la raíz del contexto.
+# Un build del árbol del backend no está autorizado.
+# build-context.mjs materializa el contexto y escribe allí su propio .dockerignore.
+*
+**

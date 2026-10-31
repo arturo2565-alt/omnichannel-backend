@@ -3,7 +3,7 @@
  * El worker solo recibe la clave pública. La privada no entra en este módulo al cifrar.
  */
 import { constants, createPublicKey, privateDecrypt, publicEncrypt, randomBytes } from 'node:crypto';
-import { decryptDump, encryptDump } from './staging-backup-crypto.mjs';
+import { beginDumpCipher, decryptDump, INNER_MAGIC } from './staging-backup-crypto.mjs';
 
 const MAGIC = Buffer.from('PGZ2');
 const VERSION = 1;
@@ -21,22 +21,67 @@ export function assertPublicOnly(pem) {
   return text;
 }
 
+export function encodeEnvelopePrefix(wrapped, iv) {
+  if (!Buffer.isBuffer(wrapped) || !Buffer.isBuffer(iv) || iv.length !== 12) {
+    throw new Error('backup ERROR: el archivo cifrado no es válido.');
+  }
+  if (wrapped.length !== 256 && wrapped.length !== 384 && wrapped.length !== 512) {
+    throw new Error('backup ERROR: el worker solo acepta la clave pública.');
+  }
+  const prefix = Buffer.alloc(7 + wrapped.length + 4 + 12 + 16);
+  MAGIC.copy(prefix, 0);
+  prefix[4] = VERSION;
+  prefix.writeUInt16BE(wrapped.length, 5);
+  wrapped.copy(prefix, 7);
+  INNER_MAGIC.copy(prefix, 7 + wrapped.length);
+  iv.copy(prefix, 7 + wrapped.length + 4);
+  return { prefix, tagOffset: 7 + wrapped.length + 16 };
+}
+
 export function sealDump(plain, publicPem) {
   const pem = assertPublicOnly(publicPem);
   const key = randomBytes(32);
-  const inner = encryptDump(plain, key);
+  const { cipher, iv } = beginDumpCipher(key);
+  const ciphertext = Buffer.concat([cipher.update(plain), cipher.final()]);
+  const tag = cipher.getAuthTag();
   const wrapped = publicEncrypt(
     { key: pem, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
     key,
   );
-  if (wrapped.length > MAX_WRAPPED) {
-    throw new Error('backup ERROR: el worker solo acepta la clave pública.');
+  key.fill(0);
+  const { prefix, tagOffset } = encodeEnvelopePrefix(wrapped, iv);
+  tag.copy(prefix, tagOffset);
+  return Buffer.concat([prefix, ciphertext]);
+}
+
+/** Comprueba el prefijo PGZ2. totalBytes incluye el ciphertext y exige al menos un byte. */
+export function assertSealedPrefix(prefix, totalBytes) {
+  const buffer = Buffer.isBuffer(prefix) ? prefix : Buffer.from(prefix);
+  if (buffer.length < 8 || !buffer.subarray(0, 4).equals(MAGIC) || buffer[4] !== VERSION) {
+    throw new Error('backup ERROR: el archivo cifrado no es válido.');
   }
-  const header = Buffer.alloc(7);
-  MAGIC.copy(header, 0);
-  header[4] = VERSION;
-  header.writeUInt16BE(wrapped.length, 5);
-  return Buffer.concat([header, wrapped, inner]);
+  const wrappedLen = buffer.readUInt16BE(5);
+  const prefixNeed = 7 + wrappedLen + 4 + 12 + 16;
+  if (
+    (wrappedLen !== 256 && wrappedLen !== 384 && wrappedLen !== 512) ||
+    buffer.length < prefixNeed ||
+    !Number.isSafeInteger(totalBytes) ||
+    totalBytes < prefixNeed + 1
+  ) {
+    throw new Error('backup ERROR: el archivo cifrado no es válido.');
+  }
+  if (!buffer.subarray(7 + wrappedLen, 11 + wrappedLen).equals(INNER_MAGIC)) {
+    throw new Error('backup ERROR: el archivo cifrado no es válido.');
+  }
+  return { wrappedLen, prefixNeed, tagOffset: 7 + wrappedLen + 16 };
+}
+
+/** Comprueba la estructura PGZ2. No descifra y no recibe la clave privada. */
+export function assertSealedEnvelope(bytes) {
+  const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  const head = buffer.subarray(0, Math.min(buffer.length, 7 + MAX_WRAPPED + 32));
+  assertSealedPrefix(head, buffer.length);
+  return buffer;
 }
 
 export function openDump(blob, privatePem) {
