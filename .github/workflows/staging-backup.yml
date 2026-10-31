@@ -1,13 +1,9 @@
-# Volcado cifrado del proxy público de Postgres-9yd6.
-# STAGING_DB_HOST es el hostname privado y no se usa desde GitHub.
-# El origen es STAGING_DB_PUBLIC_HOST, con TLS verify-full y la CA del servicio.
-# El artefacto es staging.dump.enc. La clave vive en el entorno staging de GitHub
-# y una copia fuera de GitHub. Sin esa clave el archivo no se descifra.
-# Para rotar: genera otra clave, conserva la anterior hasta que venzan los
-# artefactos de 30 días y después bórrala de los dos sitios.
-# La restauración solo acepta 127.0.0.1. No hay restauración hacia Railway.
-# Se dispara a mano en genesis/staging. No corre en main ni en un push.
-# Apagado hasta STAGING_BACKUP_ENABLED=true.
+# GitHub no extrae el volcado.
+# Postgres-9yd6 no tiene proxy público. El túnel SSH de Railway no publica
+# una clave de host estable, así que no se usa y no se relaja su verificación.
+# Cuando un respaldo esté autorizado, lo hará pegazuz-backup-staging dentro
+# de la red privada de staging y solo saldrá el sobre PGZ2.
+# Este flujo sigue apagado. Si alguien lo enciende, termina sin conectar.
 name: Staging backup
 
 on:
@@ -19,92 +15,15 @@ concurrency:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   backup:
     if: vars.STAGING_BACKUP_ENABLED == 'true' && github.ref == 'refs/heads/genesis/staging'
     environment: staging
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
-      - name: Instalar el cliente PostgreSQL 18
-        run: |
-          set -euo pipefail
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client-18
-      - run: npm ci
-      - name: Comprobar origen, TLS y clave
-        env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-          STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
-          STAGING_DB_PUBLIC_HOST: ${{ vars.STAGING_DB_PUBLIC_HOST }}
-          PRODUCTION_DB_PUBLIC_HOST: ${{ vars.PRODUCTION_DB_PUBLIC_HOST }}
-          PGSSLMODE: verify-full
-          STAGING_DB_ROOT_CERT: ${{ secrets.STAGING_DB_ROOT_CERT }}
-          STAGING_BACKUP_KEY: ${{ secrets.STAGING_BACKUP_KEY }}
-        run: |
-          set -euo pipefail
-          npm run check:staging-backup
-          node scripts/staging-backup-crypto.mjs key
-      - name: Volcar, cifrar y comprobar que descifra
-        env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-          STAGING_DB_HOST: ${{ vars.STAGING_DB_HOST }}
-          STAGING_DB_PUBLIC_HOST: ${{ vars.STAGING_DB_PUBLIC_HOST }}
-          PRODUCTION_DB_PUBLIC_HOST: ${{ vars.PRODUCTION_DB_PUBLIC_HOST }}
-          PGSSLMODE: verify-full
-          STAGING_DB_ROOT_CERT: ${{ secrets.STAGING_DB_ROOT_CERT }}
-          STAGING_BACKUP_KEY: ${{ secrets.STAGING_BACKUP_KEY }}
-          PG_DUMP: /usr/lib/postgresql/18/bin/pg_dump
-          PG_RESTORE: /usr/lib/postgresql/18/bin/pg_restore
-          PSQL: /usr/lib/postgresql/18/bin/psql
-        run: |
-          set -euo pipefail
-          node scripts/assert-staging-restore.mjs client "$("$PG_DUMP" --version)" "$("$PG_RESTORE" --version)"
-          node scripts/dump-staging-database.mjs staging.dump
-          node scripts/staging-backup-crypto.mjs encrypt staging.dump staging.dump.enc
-          rm -f staging.dump
-          node scripts/staging-backup-crypto.mjs decrypt staging.dump.enc staging.restored.dump
-          node scripts/assert-staging-restore.mjs dump staging.restored.dump
-      - name: Restaurar el descifrado en Postgres desechable
-        env:
-          LOCAL_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
-          PG_RESTORE: /usr/lib/postgresql/18/bin/pg_restore
-          PSQL: /usr/lib/postgresql/18/bin/psql
-        run: |
-          set -euo pipefail
-          node scripts/assert-staging-restore.mjs target
-          "$PG_RESTORE" --no-owner --dbname="$LOCAL_DATABASE_URL" --exit-on-error staging.restored.dump
-          marker="$("$PSQL" "$LOCAL_DATABASE_URL" --no-align --tuples-only --field-separator='|' --command="SELECT id, nombre FROM talleres WHERE id = '01000000-0000-4000-8000-000000000010'")"
-          printf '%s\n' "$marker" | node scripts/assert-staging-restore.mjs marker
-          shape="$("$PSQL" "$LOCAL_DATABASE_URL" --no-align --tuples-only --file=scripts/staging-backup-integrity.sql)"
-          printf '%s\n' "$shape" | node scripts/assert-staging-restore.mjs integrity
-          rm -f staging.restored.dump
-      - uses: actions/upload-artifact@v6
-        with:
-          name: staging-backup
-          path: staging.dump.enc
-          if-no-files-found: error
-          retention-days: 30
+      - run: node scripts/staging-private-backup.mjs refuse-github

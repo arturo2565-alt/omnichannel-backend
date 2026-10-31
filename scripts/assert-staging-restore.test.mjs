@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import {
   assertCustomDump,
   assertDisposableRestoreUrl,
@@ -16,6 +16,8 @@ import {
   STAGING_TALLER_NAME,
 } from './assert-staging-restore.mjs';
 import { decryptDump, encryptDump } from './staging-backup-crypto.mjs';
+import { openDump, sealDump } from './staging-backup-envelope.mjs';
+import { stageExternalObject } from './staging-private-backup.mjs';
 
 const workflows = join(import.meta.dirname, '../.github/workflows');
 const pg18 = process.env.PG18_BIN || '/opt/homebrew/opt/postgresql@18/bin';
@@ -94,32 +96,20 @@ test('el cliente 16 del PATH no sirve y el binario 18 sí', () => {
   }
 });
 
-test('el workflow fija el cliente 18, restaura solo en loopback y exige la marca', () => {
+test('el workflow de GitHub no extrae y la restauración local exige la marca', () => {
   const backup = readFileSync(join(workflows, 'staging-backup.yml'), 'utf8');
   const production = readFileSync(join(workflows, 'production.yml'), 'utf8');
   const synthetic = readFileSync(join(import.meta.dirname, 'staging-synthetic.sql'), 'utf8');
   assert.match(synthetic, new RegExp(STAGING_TALLER_ID));
   assert.match(synthetic, new RegExp(STAGING_TALLER_NAME));
-  assert.match(backup, /postgresql-client-18/);
-  assert.doesNotMatch(backup, /install -y postgresql-client(?!-18)/);
-  assert.match(backup, /\/usr\/lib\/postgresql\/18\/bin\/pg_dump/);
-  assert.match(backup, /\/usr\/lib\/postgresql\/18\/bin\/pg_restore/);
-  assert.match(backup, /127\.0\.0\.1/);
-  assert.match(backup, /assert-staging-restore\.mjs marker/);
   assert.match(backup, /STAGING_BACKUP_ENABLED == 'true'/);
   assert.match(backup, /refs\/heads\/genesis\/staging/);
+  assert.match(backup, /refuse-github/);
   assert.doesNotMatch(backup, /refs\/heads\/main/);
-  assert.match(backup, /PGSSLMODE: verify-full/);
-  assert.match(backup, /path: staging\.dump\.enc/);
-  assert.doesNotMatch(backup, /path: staging\.dump\n/);
-  assert.match(backup, /retention-days: 30/);
-  assert.match(backup, /rm -f staging\.dump/);
-  assert.ok(backup.indexOf('rm -f staging.dump') < backup.indexOf('upload-artifact'));
+  assert.doesNotMatch(backup, /pg_dump|pg_restore|upload-artifact|DATABASE_URL|StrictHostKeyChecking|retention-days/);
   assert.match(backup, /actions\/checkout@v5/);
   assert.match(backup, /actions\/setup-node@v5/);
-  assert.match(backup, /actions\/upload-artifact@v6/);
   assert.match(backup, /node-version: 22/);
-  assert.ok(backup.indexOf('pg_restore') < backup.indexOf('assert-staging-restore.mjs marker'));
   assert.match(production, /actions\/checkout@v4/);
   assert.doesNotMatch(production, /actions\/checkout@v5/);
   for (const name of ['staging.yml', 'staging-migrate.yml', 'crm-verify.yml']) {
@@ -256,6 +246,35 @@ test(
       corrupt[corrupt.length - 1] ^= 0xff;
       assert.throws(() => decryptDump(corrupt, key), /no se pudo descifrar/);
       assert.throws(() => decryptDump(encrypted, randomBytes(32)), /no se pudo descifrar/);
+      const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+      const publicPem = pair.publicKey.export({ type: 'spki', format: 'pem' });
+      const privatePem = pair.privateKey.export({ type: 'pkcs8', format: 'pem' });
+      const sealed = sealDump(readFileSync(dump), publicPem);
+      const staged = stageExternalObject('staging/postgres/20261030T081500Z.dump.enc', sealed);
+      assert.equal(staged.canDelete, false);
+      const openedPath = join(root, 'sobre.dump');
+      writeFileSync(openedPath, openDump(staged.body, privatePem));
+      assertCustomDump(readFileSync(openedPath));
+      run(join(pg18, 'createdb'), ['--host=127.0.0.1', `--port=${port}`, '--username=postgres', 'sobre']);
+      run(join(pg18, 'pg_restore'), [
+        '--no-owner',
+        '--exit-on-error',
+        `--dbname=postgres://postgres@127.0.0.1:${port}/sobre`,
+        openedPath,
+      ]);
+      assertRestoredIntegrity(
+        psql('sobre', [
+          '--no-align',
+          '--tuples-only',
+          '--file',
+          join(import.meta.dirname, 'staging-backup-integrity.sql'),
+        ]),
+      );
+      const other = generateKeyPairSync('rsa', { modulusLength: 2048 });
+      assert.throws(
+        () => openDump(sealed, other.privateKey.export({ type: 'pkcs8', format: 'pem' })),
+        /no se pudo abrir el sobre/,
+      );
       run(pgDump18, [
         '--format=custom',
         '--no-owner',
