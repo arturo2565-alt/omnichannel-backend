@@ -3,8 +3,13 @@
  * No abre conexiones, no llama a pg_dump y no imprime secretos.
  * execution queda en plan-only hasta un respaldo real autorizado.
  */
+import { writeSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { assertPostgres18 } from './assert-staging-restore.mjs';
+
+/** Railway Logs V2 no alcanza a leer un proceso que sale en el mismo instante. */
+export const INERT_LOG_HOLD_MS = 5000;
+const INERT_LOG_HOLD_CAP_MS = 15000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OBJECT_NAME = /^staging\/postgres\/[0-9]{8}T[0-9]{6}Z\.dump\.enc$/;
@@ -305,25 +310,39 @@ export function assertPrivateBackupContext(env, clientVersion) {
   };
 }
 
-function failCli(err) {
-  console.error(err instanceof Error ? err.message : 'backup ERROR');
-  process.exit(1);
+export function inertHoldMs(env = {}) {
+  const raw = env.PEGAZUZ_INERT_HOLD_MS;
+  if (raw == null || !/^\d+$/.test(String(raw).trim())) return INERT_LOG_HOLD_MS;
+  return Math.min(Number(raw), INERT_LOG_HOLD_CAP_MS);
+}
+
+function proveAndExit(message, env = process.env) {
+  const wait = inertHoldMs(env);
+  const tail = wait === 0 ? 0 : Math.min(wait, 1000);
+  const line = `${message}\n`;
+  setTimeout(() => {
+    writeSync(1, line);
+    writeSync(2, line);
+    setTimeout(() => {
+      writeSync(1, line);
+      writeSync(2, line);
+      process.exit(1);
+    }, tail);
+  }, wait);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const mode = process.argv[2];
   if (mode === 'refuse-github') {
-    console.error('backup ERROR: GitHub no extrae el volcado de staging.');
-    process.exit(1);
-  }
-  if (mode === 'startup' || mode === 'probe-tls') {
+    proveAndExit('backup ERROR: GitHub no extrae el volcado de staging.');
+  } else if (mode === 'startup' || mode === 'probe-tls') {
     try {
       assertWorkerStartup(process.env);
+      proveAndExit('backup ERROR: plan-only. No se abre ninguna conexión.');
     } catch (err) {
-      failCli(err);
+      proveAndExit(err instanceof Error ? err.message : 'backup ERROR');
     }
-    console.error('backup ERROR: plan-only. No se abre ninguna conexión.');
-    process.exit(1);
+  } else {
+    proveAndExit('backup ERROR: este build no ejecuta el volcado.');
   }
-  failCli(new Error('backup ERROR: este build no ejecuta el volcado.'));
 }

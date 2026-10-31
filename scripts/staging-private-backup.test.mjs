@@ -21,6 +21,8 @@ import {
   assertWriterPolicy,
   BACKUP_ROLE_SQL,
   BUILD_EXECUTION,
+  INERT_LOG_HOLD_MS,
+  inertHoldMs,
   backupPhases,
   nextRemoteOperation,
   planWorkerTlsProbe,
@@ -93,27 +95,34 @@ test('el plan privado acepta solo el cron de staging y no ejecuta el volcado', (
     encoding: 'utf8',
     env: {
       PATH: process.env.PATH,
+      PEGAZUZ_INERT_HOLD_MS: '0',
       BACKUP_EXECUTE: 'yes',
       STAGING_BACKUP_AUTHORIZED: 'yes',
       RAILWAY_CRON_SCHEDULE: '15 8 * * *',
     },
   });
   assert.equal(started.status, 1);
-  assert.match(started.stderr, /plan-only/);
+  assert.match(started.stdout, /plan-only\. No se abre ninguna conexión/);
+  assert.match(started.stderr, /plan-only\. No se abre ninguna conexión/);
   const poisoned = spawnSync(process.execPath, ['scripts/staging-private-backup.mjs', 'startup'], {
     cwd: join(import.meta.dirname, '..'),
     encoding: 'utf8',
     env: {
       PATH: process.env.PATH,
+      PEGAZUZ_INERT_HOLD_MS: '0',
       DATABASE_URL: 'postgres://postgres:secret@caboose.proxy.rlwy.net:12497/railway',
       RAILWAY_TOKEN: 'account-token-value',
       STAGING_BACKUP_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----',
     },
   });
   assert.equal(poisoned.status, 1);
-  assert.equal(poisoned.stderr.includes('secret'), false);
-  assert.equal(poisoned.stderr.includes('account-token-value'), false);
-  assert.equal(poisoned.stderr.includes('BEGIN PRIVATE'), false);
+  assert.match(poisoned.stderr, /no admite esa credencial/);
+  for (const stream of [poisoned.stdout, poisoned.stderr]) {
+    assert.equal(stream.includes('secret'), false);
+    assert.equal(stream.includes('account-token-value'), false);
+    assert.equal(stream.includes('BEGIN PRIVATE'), false);
+    assert.equal(stream.includes('plan-only'), false);
+  }
   const accidentalCron = assertCronCannotDump(
     '15 8 * * *',
     'node scripts/staging-private-backup.mjs startup',
@@ -168,9 +177,10 @@ test('el plan privado acepta solo el cron de staging y no ejecuta el volcado', (
   const probed = spawnSync(process.execPath, ['scripts/staging-private-backup.mjs', 'probe-tls'], {
     cwd: join(import.meta.dirname, '..'),
     encoding: 'utf8',
-    env: { PATH: process.env.PATH },
+    env: { PATH: process.env.PATH, PEGAZUZ_INERT_HOLD_MS: '0' },
   });
   assert.equal(probed.status, 1);
+  assert.match(probed.stdout, /plan-only/);
   assert.match(probed.stderr, /plan-only/);
   const remote = nextRemoteOperation();
   assert.equal(remote.verdict, 'NO-GO');
@@ -179,13 +189,36 @@ test('el plan privado acepta solo el cron de staging y no ejecuta el volcado', (
   assert.equal(plan.role, 'pegazuz_backup');
   assert.equal(plan.sslmode, 'verify-full');
   const source = readFileSync(new URL('./staging-private-backup.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /child_process|net\.connect|tls\.connect|spawn\(/);
+  assert.doesNotMatch(source, /child_process|net\.connect|tls\.connect|spawn\(|node:net|node:tls|node:http/);
+  assert.match(source, /writeSync\(1/);
   const refused = spawnSync(process.execPath, ['scripts/staging-private-backup.mjs', 'refuse-github'], {
     cwd: join(import.meta.dirname, '..'),
     encoding: 'utf8',
+    env: { PATH: process.env.PATH, PEGAZUZ_INERT_HOLD_MS: '0' },
   });
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /GitHub no extrae el volcado/);
+  assert.equal(INERT_LOG_HOLD_MS, 5000);
+  assert.equal(inertHoldMs({}), 5000);
+  assert.equal(inertHoldMs({ PEGAZUZ_INERT_HOLD_MS: 'no' }), 5000);
+  assert.equal(inertHoldMs({ PEGAZUZ_INERT_HOLD_MS: '999999' }), 15000);
+  assert.equal(inertHoldMs({ PEGAZUZ_INERT_HOLD_MS: '0' }), 0);
+  const heldAt = Date.now();
+  const held = spawnSync(process.execPath, ['scripts/staging-private-backup.mjs', 'startup'], {
+    cwd: join(import.meta.dirname, '..'),
+    encoding: 'utf8',
+    env: {
+      PATH: process.env.PATH,
+      PEGAZUZ_INERT_HOLD_MS: '400',
+      RAILWAY_ENVIRONMENT_NAME: 'staging',
+      RAILWAY_SERVICE_NAME: 'pegazuz-backup-staging',
+    },
+  });
+  assert.ok(Date.now() - heldAt >= 700);
+  assert.equal(held.status, 1);
+  assert.match(held.stdout, /plan-only\. No se abre ninguna conexión/);
+  assert.match(held.stderr, /plan-only\. No se abre ninguna conexión/);
+  assert.equal(held.stdout.includes('postgres'), false);
 });
 
 test('rechaza producción, el proxy público, loopback, SSH relajado y la clave privada', () => {
