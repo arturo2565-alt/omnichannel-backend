@@ -8,6 +8,8 @@ import {
   type OutgoingMessageChannel,
   type OutgoingMessageJobData,
 } from './outgoing-message.constants';
+import { isStagingRuntime, STAGING_OUTBOUND_BLOCKED } from '../config/staging-guard';
+import { decideStagingOutbound } from '../config/staging-sandbox';
 import { pegLogger } from '../observability/pegazuz-logger';
 import { getPegazuzContext } from '../observability/pegazuz-context';
 import { markOutboundEnqueued } from '../observability/turn-log';
@@ -37,6 +39,16 @@ export class OutgoingMessageProducer {
     }
     if (!metaPayload || typeof metaPayload !== 'object') {
       throw new Error('enqueueOutboundMessage: metaPayload inválido');
+    }
+    if (isStagingRuntime()) {
+      const decision = decideStagingOutbound({
+        channel: ch,
+        tallerId: tid,
+        metaPayload,
+      });
+      if (!decision.send) {
+        throw new Error(STAGING_OUTBOUND_BLOCKED);
+      }
     }
 
     const data: OutgoingMessageJobData = {

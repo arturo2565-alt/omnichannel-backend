@@ -76,6 +76,43 @@ describe('meta-whatsapp-webhook', () => {
     });
   });
 
+  it('conserva image.id sin tratar un enlace ajeno como medio descargado', () => {
+    const payload = {
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          id: 'WABA-12345',
+          changes: [
+            {
+              field: 'messages',
+              value: {
+                messaging_product: 'whatsapp',
+                metadata: {
+                  display_phone_number: '15550001111',
+                  phone_number_id: 'PHONE-NUM-ID-99',
+                },
+                messages: [
+                  {
+                    from: '16315551181',
+                    id: 'wamid.IMG',
+                    type: 'image',
+                    image: { id: '99887766', mime_type: 'image/jpeg', caption: 'fascia' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const events = extractMetaWhatsAppInboundEvents(payload);
+    expect(events[0]).toMatchObject({
+      mediaId: '99887766',
+      text: 'fascia',
+      imageUrl: '',
+    });
+  });
+
   it('ignora cambios de statuses sin messages', () => {
     const statusOnly = {
       object: 'whatsapp_business_account',

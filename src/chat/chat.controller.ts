@@ -19,6 +19,10 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { isStagingRuntime } from '../config/staging-guard';
+import {
+  readStagingSandbox,
+  verifyMetaWebhookSignature,
+} from '../config/staging-sandbox';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
 import type {
@@ -28,6 +32,7 @@ import type {
 } from './chat.service';
 import { AiConfigService } from './ai-config.service';
 import { getWhatsAppVerifyToken } from './whatsapp-config';
+import { isMetaWhatsAppWebhook } from './meta-whatsapp-webhook';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -52,6 +57,17 @@ export class ChatController {
     @Res() res: Response,
   ) {
     if (isStagingRuntime()) {
+      const sandbox = readStagingSandbox();
+      if (
+        sandbox.active &&
+        mode === 'subscribe' &&
+        token === sandbox.config.verifyToken
+      ) {
+        return res
+          .status(200)
+          .type('text/plain')
+          .send(String(challenge ?? ''));
+      }
       throw new ForbiddenException('Staging no valida webhooks de Meta.');
     }
     const verifyToken = getWhatsAppVerifyToken();
@@ -120,8 +136,31 @@ export class ChatController {
   /** Webhook Meta (Messenger / WhatsApp) + envío plano del panel (sin JWT). */
   @Public()
   @Post()
-  receiveMessage(@Req() req: Request, @Res() res: Response) {
+  async receiveMessage(@Req() req: Request, @Res() res: Response) {
     if (isStagingRuntime()) {
+      const sandbox = readStagingSandbox();
+      if (!sandbox.active) {
+        res.status(HttpStatus.OK).type('text/plain').send('EVENT_RECEIVED');
+        return;
+      }
+      const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+      const signature = req.header('x-hub-signature-256') ?? undefined;
+      if (
+        !rawBody ||
+        !verifyMetaWebhookSignature(rawBody, signature, sandbox.config.appSecret)
+      ) {
+        throw new ForbiddenException('Firma de webhook inválida.');
+      }
+      if (!isMetaWhatsAppWebhook(req.body)) {
+        throw new ForbiddenException(
+          'Staging solo acepta WhatsApp del número de ensayo.',
+        );
+      }
+      try {
+        await this.chatService.ingestWebhookPayload(req.body ?? {});
+      } catch {
+        pegLogger.error('WEBHOOK', { message: 'sandbox ingest failed' });
+      }
       res.status(HttpStatus.OK).type('text/plain').send('EVENT_RECEIVED');
       return;
     }

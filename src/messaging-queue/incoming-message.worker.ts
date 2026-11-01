@@ -8,6 +8,7 @@ import {
   type IncomingMessageJobData,
 } from './incoming-message.constants';
 import { isStagingRuntime } from '../config/staging-guard';
+import { decideStagingInboundJob } from '../config/staging-sandbox';
 import { pegLogger } from '../observability/pegazuz-logger';
 
 @Processor(INCOMING_MESSAGES_QUEUE)
@@ -21,16 +22,17 @@ export class IncomingMessageWorker extends WorkerHost {
   }
 
   async process(job: Job<IncomingMessageJobData>): Promise<void> {
-    if (isStagingRuntime()) {
+    const conversationId = String(job.data?.conversationId ?? job.id ?? '').trim();
+    const tallerId = String(job.data?.tallerId ?? '').trim();
+    const channel = job.data?.channel ?? 'unknown';
+
+    if (isStagingRuntime() && !decideStagingInboundJob({ tallerId, channel })) {
       pegLogger.info('INBOUND', {
         status: 'staging_skipped',
         job: job.id,
       });
       return;
     }
-    const conversationId = String(job.data?.conversationId ?? job.id ?? '').trim();
-    const tallerId = String(job.data?.tallerId ?? '').trim();
-    const channel = job.data?.channel ?? 'unknown';
 
     pegLogger.debug('INBOUND', {
       status: 'process_start',

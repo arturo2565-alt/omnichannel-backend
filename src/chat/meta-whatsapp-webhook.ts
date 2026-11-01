@@ -16,6 +16,8 @@ export type MetaWhatsAppInboundEvent = {
   buttonPayload: string;
   /** URL directa si el payload ya trae enlace (p. ej. reenvío legacy). */
   imageUrl: string;
+  /** `image.id` de WhatsApp Cloud API. Vacío si el mensaje no trae medio. */
+  mediaId: string;
   /** Stickers WhatsApp (webp): persistir, no mandar a visión. */
   isSticker?: boolean;
   mimeType?: string;
@@ -70,6 +72,7 @@ function contactNameFromMap(
 function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
   text: string;
   imageUrl: string;
+  mediaId: string;
   buttonPayload: string;
   isSticker: boolean;
   mimeType: string;
@@ -82,7 +85,14 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
       (msg.text as Record<string, unknown>).body != null
         ? String((msg.text as Record<string, unknown>).body).trim()
         : '';
-    return { text: body, imageUrl: '', buttonPayload: '', isSticker: false, mimeType: '' };
+    return {
+      text: body,
+      imageUrl: '',
+      mediaId: '',
+      buttonPayload: '',
+      isSticker: false,
+      mimeType: '',
+    };
   }
   if (type === 'sticker') {
     const sticker =
@@ -94,6 +104,7 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
     return {
       text: link ? '' : 'Sticker',
       imageUrl: link,
+      mediaId: '',
       buttonPayload: '',
       isSticker: true,
       mimeType: mime || 'image/webp',
@@ -110,6 +121,7 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
     return {
       text: caption,
       imageUrl: link,
+      mediaId: pickTrimmed(image?.id),
       buttonPayload: '',
       isSticker: false,
       mimeType: mime,
@@ -124,6 +136,7 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
     return {
       text: pickTrimmed(button?.text, button?.payload),
       imageUrl: '',
+      mediaId: '',
       buttonPayload,
       isSticker: false,
       mimeType: '',
@@ -153,12 +166,20 @@ function parseWhatsAppMessageContent(msg: Record<string, unknown>): {
         listReply?.id,
       ),
       imageUrl: '',
+      mediaId: '',
       buttonPayload,
       isSticker: false,
       mimeType: '',
     };
   }
-  return { text: '', imageUrl: '', buttonPayload: '', isSticker: false, mimeType: '' };
+  return {
+    text: '',
+    imageUrl: '',
+    mediaId: '',
+    buttonPayload: '',
+    isSticker: false,
+    mimeType: '',
+  };
 }
 
 /** Metadatos del primer change (validación de cuenta / número). */
@@ -273,9 +294,9 @@ export function extractMetaWhatsAppInboundEvents(
         if (!threadWaId) continue;
 
         const messageId = pickTrimmed(msg.id);
-        const { text, imageUrl, buttonPayload, isSticker, mimeType } =
+        const { text, imageUrl, mediaId, buttonPayload, isSticker, mimeType } =
           parseWhatsAppMessageContent(msg);
-        if (!text && !imageUrl) continue;
+        if (!text && !imageUrl && !mediaId) continue;
 
         out.push({
           wabaId,
@@ -288,6 +309,7 @@ export function extractMetaWhatsAppInboundEvents(
           text,
           buttonPayload,
           imageUrl,
+          mediaId,
           isSticker,
           mimeType,
         });

@@ -15,6 +15,7 @@ import {
   isStagingRuntime,
   STAGING_OUTBOUND_BLOCKED,
 } from '../config/staging-guard';
+import { decideStagingOutbound } from '../config/staging-sandbox';
 import { pegLogger } from '../observability/pegazuz-logger';
 import { runWithPegazuzContext } from '../observability/pegazuz-context';
 
@@ -75,9 +76,16 @@ export class OutgoingMessageWorker extends WorkerHost {
 
     try {
       if (isStagingRuntime()) {
-        throw new UnrecoverableError(STAGING_OUTBOUND_BLOCKED);
-      }
-      if (channel === 'whatsapp') {
+        const decision = decideStagingOutbound({
+          channel,
+          tallerId: String(job.data?.tallerId ?? ''),
+          metaPayload: payload,
+        });
+        if (!decision.send || channel !== 'whatsapp') {
+          throw new UnrecoverableError(STAGING_OUTBOUND_BLOCKED);
+        }
+        await this.postWhatsApp(payload, decision);
+      } else if (channel === 'whatsapp') {
         await this.postWhatsApp(payload);
       } else if (channel === 'messenger' || channel === 'facebook') {
         await this.postMessenger(payload);
@@ -122,9 +130,12 @@ export class OutgoingMessageWorker extends WorkerHost {
     });
   }
 
-  private async postWhatsApp(metaPayload: Record<string, unknown>): Promise<void> {
-    const phoneNumberId = getWhatsAppPhoneNumberId();
-    const token = getWhatsAppAccessToken();
+  private async postWhatsApp(
+    metaPayload: Record<string, unknown>,
+    credentials?: { accessToken: string; phoneNumberId: string },
+  ): Promise<void> {
+    const phoneNumberId = credentials?.phoneNumberId ?? getWhatsAppPhoneNumberId();
+    const token = credentials?.accessToken ?? getWhatsAppAccessToken();
     if (!phoneNumberId) {
       throw new UnrecoverableError(
         'sendWhatsApp: falta WHATSAPP_PHONE_NUMBER_ID en entorno',

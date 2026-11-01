@@ -50,6 +50,12 @@ import {
   isStagingRuntime,
   STAGING_EXTERNAL_BLOCKED,
 } from '../config/staging-guard';
+import {
+  decideStagingOutbound,
+  downloadStagingWhatsAppMedia,
+  evaluateStagingSandboxInbound,
+  readStagingSandbox,
+} from '../config/staging-sandbox';
 import { v2 as cloudinary } from 'cloudinary';
 import {
   AUTO_FIX_CURRENCY,
@@ -1691,6 +1697,15 @@ export class ChatService implements OnModuleDestroy {
 
     if (!channel || !metaPayload) return;
 
+    if (isStagingRuntime()) {
+      const decision = decideStagingOutbound({
+        channel,
+        tallerId,
+        metaPayload,
+      });
+      if (!decision.send) return;
+    }
+
     markOutboundEnqueued();
     pegLogger.info('OUTBOUND', { status: 'enqueued', channel });
 
@@ -1791,6 +1806,9 @@ export class ChatService implements OnModuleDestroy {
     processed: number;
     lastMessageId?: string;
   }> {
+    if (isStagingRuntime()) {
+      return this.ingestStagingSandboxWebhook(body);
+    }
     if (isMetaPageWebhook(body)) {
       logWebhookPayloadTrace('messenger', body);
       return this.processMetaMessengerWebhook(body);
@@ -1816,6 +1834,59 @@ export class ChatService implements OnModuleDestroy {
     }
     const saved = await this.saveMessage(body ?? {});
     return { processed: 1, lastMessageId: saved.id };
+  }
+
+  /**
+   * WhatsApp del número de ensayo. El taller es el UUID sintético fijo.
+   * El cuerpo no puede elegir otro tallerId. Sin sandbox completo no persiste nada.
+   */
+  private async ingestStagingSandboxWebhook(body: unknown): Promise<{
+    processed: number;
+    lastMessageId?: string;
+  }> {
+    const sandbox = readStagingSandbox();
+    if (!sandbox.active) return { processed: 0 };
+    const decision = evaluateStagingSandboxInbound(body, sandbox.config);
+    if (!decision.ok) return { processed: 0 };
+
+    let processed = 0;
+    let lastMessageId: string | undefined;
+    for (const evt of decision.events) {
+      const base = {
+        externalId: evt.threadWaId,
+        wa_id: evt.threadWaId,
+        from: evt.threadWaId,
+        tallerId: evt.tallerId,
+        platform: 'whatsapp',
+        direction: 'inbound',
+        contactName: evt.contactName,
+        phoneNumberId: sandbox.config.phoneNumberId,
+        ...(evt.buttonPayload ? { buttonPayload: evt.buttonPayload } : {}),
+      };
+      if (evt.text) {
+        const saved = await this.saveMessage({
+          ...base,
+          message: evt.text,
+          ...(evt.messageId ? { metaMessageId: evt.messageId } : {}),
+        });
+        lastMessageId = saved.id;
+        processed += 1;
+      }
+      if (!evt.mediaId) continue;
+      const media = await downloadStagingWhatsAppMedia(
+        evt.mediaId,
+        sandbox.config,
+      );
+      if (!('dataUrl' in media)) continue;
+      const savedImage = await this.saveMessage({
+        ...base,
+        message: media.dataUrl,
+        ...(evt.messageId ? { metaMessageId: `${evt.messageId}:img:0` } : {}),
+      });
+      lastMessageId = savedImage.id;
+      processed += 1;
+    }
+    return { processed, lastMessageId };
   }
 
   /** Evita duplicados cuando Meta reenvía el mismo ID persistido (coincidencia exacta). */

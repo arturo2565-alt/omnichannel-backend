@@ -1,14 +1,22 @@
 import { OpenAI } from 'openai';
 import { isStagingRuntime, STAGING_EXTERNAL_BLOCKED } from './staging-guard';
+import { readStagingSandbox, stagingOpenAiFetch } from './staging-sandbox';
 
 /**
- * En staging el cliente se construye sin OPENAI_API_KEY y cualquier
- * solicitud se rechaza antes de salir a la red. Producción conserva
- * la clave del entorno.
+ * Producción usa OPENAI_API_KEY. Staging permanece inerte hasta que el sandbox
+ * esté completo; entonces usa solo STAGING_OPENAI_API_KEY y el presupuesto del proceso.
  */
 export function createOpenAiClient(env: NodeJS.ProcessEnv = process.env): OpenAI {
   if (!isStagingRuntime(env)) {
     return new OpenAI({ apiKey: env.OPENAI_API_KEY });
+  }
+  const sandbox = readStagingSandbox(env);
+  if (sandbox.active) {
+    return new OpenAI({
+      apiKey: sandbox.config.openAiApiKey,
+      maxRetries: 0,
+      fetch: stagingOpenAiFetch(sandbox.config),
+    });
   }
   return new OpenAI({
     apiKey: 'staging-disabled',

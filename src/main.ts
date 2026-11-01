@@ -8,6 +8,7 @@ import { SentryExceptionFilter } from './sentry/sentry-exception.filter';
 import { AppModule } from './app.module';
 import { pegLogger } from './observability/pegazuz-logger';
 import { resolveDbSynchronize } from './config/db-synchronize';
+import { readStagingSandbox, rememberRawBody } from './config/staging-sandbox';
 import {
   getLogLevel,
   getPegLogFormat,
@@ -23,8 +24,10 @@ async function bootstrap() {
     logger: nestFactoryLoggerLevels(),
   });
 
+  const sandbox = readStagingSandbox();
   pegLogger.info('STARTUP', {
     serperConfigured: Boolean(process.env.SERPER_API_KEY?.trim()),
+    stagingSandbox: sandbox.active ? 'on' : sandbox.reason,
     logLevel: getLogLevel(),
     traceMode: getPegTraceMode(),
     logFormat: getPegLogFormat(),
@@ -36,7 +39,7 @@ async function bootstrap() {
     schemaMigrations: 'manual',
   });
 
-  app.use(json({ limit: '50mb' }));
+  app.use(json({ limit: '50mb', verify: rememberRawBody }));
 
   app.use(
     urlencoded({
