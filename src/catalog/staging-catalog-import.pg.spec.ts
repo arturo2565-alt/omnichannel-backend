@@ -15,35 +15,54 @@ import {
 
 const PORT = 55444;
 const OTHER_TALLER = '99999999-0000-4000-8000-000000000099';
+const SERVICE_URL = process.env.CRM008_DATABASE_URL;
 
 jest.setTimeout(120_000);
 
 describe('importador contra PostgreSQL desechable', () => {
-  const dataDir = mkdtempSync(join(tmpdir(), 'catalog-002b-'));
+  let dataDir = '';
+  let serviceDatabase = '';
   let dataSource: DataSource;
 
   beforeAll(async () => {
-    const locale = { ...process.env, LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' };
-    const init = spawnSync('initdb', ['-D', dataDir, '-U', 'pegazuz', '--auth=trust', '-E', 'UTF8'], {
-      env: locale,
-      stdio: 'ignore',
-    });
-    if (init.status !== 0) throw new Error('no se pudo crear la base desechable');
-    const start = spawnSync(
-      'pg_ctl',
-      ['-D', dataDir, '-l', join(dataDir, 'server.log'), '-o', `-p ${PORT} -h 127.0.0.1`, 'start'],
-      { env: locale, stdio: 'ignore' },
-    );
-    if (start.status !== 0) throw new Error('no se pudo arrancar la base desechable');
-    dataSource = new DataSource({
-      type: 'postgres',
-      host: '127.0.0.1',
-      port: PORT,
-      username: 'pegazuz',
-      database: 'postgres',
-      synchronize: false,
-      logging: false,
-    });
+    if (SERVICE_URL) {
+      const admin = new DataSource({ type: 'postgres', url: SERVICE_URL, logging: false });
+      await admin.initialize();
+      serviceDatabase = `catalog002b${Date.now().toString(36)}`;
+      await admin.query(`CREATE DATABASE ${serviceDatabase}`);
+      await admin.destroy();
+      const url = new URL(SERVICE_URL);
+      url.pathname = `/${serviceDatabase}`;
+      dataSource = new DataSource({
+        type: 'postgres',
+        url: url.toString(),
+        synchronize: false,
+        logging: false,
+      });
+    } else {
+      dataDir = mkdtempSync(join(tmpdir(), 'catalog-002b-'));
+      const locale = { ...process.env, LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' };
+      const init = spawnSync('initdb', ['-D', dataDir, '-U', 'pegazuz', '--auth=trust', '-E', 'UTF8'], {
+        env: locale,
+        stdio: 'ignore',
+      });
+      if (init.status !== 0) throw new Error('no se pudo crear la base desechable');
+      const start = spawnSync(
+        'pg_ctl',
+        ['-D', dataDir, '-l', join(dataDir, 'server.log'), '-o', `-p ${PORT} -h 127.0.0.1`, 'start'],
+        { env: locale, stdio: 'ignore' },
+      );
+      if (start.status !== 0) throw new Error('no se pudo arrancar la base desechable');
+      dataSource = new DataSource({
+        type: 'postgres',
+        host: '127.0.0.1',
+        port: PORT,
+        username: 'pegazuz',
+        database: 'postgres',
+        synchronize: false,
+        logging: false,
+      });
+    }
     await dataSource.initialize();
     await dataSource.query(`
       CREATE TABLE talleres (
@@ -77,8 +96,17 @@ describe('importador contra PostgreSQL desechable', () => {
 
   afterAll(async () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
-    spawnSync('pg_ctl', ['-D', dataDir, 'stop', '-m', 'fast'], { stdio: 'ignore' });
-    rmSync(dataDir, { recursive: true, force: true });
+    if (serviceDatabase && SERVICE_URL) {
+      const admin = new DataSource({ type: 'postgres', url: SERVICE_URL, logging: false });
+      await admin.initialize();
+      await admin.query(`DROP DATABASE IF EXISTS ${serviceDatabase} WITH (FORCE)`);
+      await admin.destroy();
+      return;
+    }
+    if (dataDir) {
+      spawnSync('pg_ctl', ['-D', dataDir, 'stop', '-m', 'fast'], { stdio: 'ignore' });
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   function db(): PgCatalogDb {
