@@ -9,6 +9,8 @@ import {
   stagingAccountMismatchField,
   verifyMetaWebhookSignature,
   type StagingAccountField,
+  type StagingMediaResult,
+  type StagingMediaStage,
   type StagingSandboxConfig,
 } from '../config/staging-sandbox';
 import {
@@ -94,6 +96,49 @@ export function logStagingSandboxDecision(
     return;
   }
   pegLogger.info('WEBHOOK', { event: 'decision', result: decision.reason });
+}
+
+const MEDIA_REASONS = new Set([
+  'invalid',
+  'type',
+  'too_large',
+  'timeout',
+  'failed',
+]);
+const MEDIA_STAGES = new Set<StagingMediaStage>(['metadata', 'binary']);
+
+/**
+ * Resultado de la descarga de un medio de staging.
+ * Solo enumeraciones y el estado HTTP. No recibe el id, la URL ni el binario.
+ */
+export function logStagingMediaDownload(result: StagingMediaResult): void {
+  if (!isStagingRuntime()) return;
+  if ('dataUrl' in result) {
+    pegLogger.info('WEBHOOK', { event: 'media_download', result: 'success' });
+    return;
+  }
+  const data: {
+    event: 'media_download';
+    result: 'failed';
+    reason?: string;
+    stage?: StagingMediaStage;
+    httpStatus?: number;
+  } = {
+    event: 'media_download',
+    result: 'failed',
+  };
+  if (MEDIA_REASONS.has(result.error)) data.reason = result.error;
+  if (MEDIA_STAGES.has(result.stage)) data.stage = result.stage;
+  const httpStatus = result.httpStatus;
+  if (
+    typeof httpStatus === 'number' &&
+    Number.isInteger(httpStatus) &&
+    httpStatus >= 100 &&
+    httpStatus <= 599
+  ) {
+    data.httpStatus = httpStatus;
+  }
+  pegLogger.info('WEBHOOK', data);
 }
 
 export function logStagingWebhookPersist(input: {

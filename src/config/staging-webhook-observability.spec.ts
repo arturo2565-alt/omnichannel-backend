@@ -24,6 +24,7 @@ import { pegLogger } from '../observability/pegazuz-logger';
 import {
   classifyStagingWebhookSignature,
   logStagingSandboxDecision,
+  logStagingMediaDownload,
   logStagingWebhookHttpIn,
   logStagingWebhookPersist,
 } from '../observability/staging-webhook-log';
@@ -478,6 +479,12 @@ describe('observabilidad del webhook de staging', () => {
       outcome: 'saved',
       errorName: 'QueryFailedError',
     });
+    logStagingMediaDownload({
+      error: 'failed',
+      stage: 'metadata',
+      httpStatus: 401,
+    });
+    logStagingMediaDownload({ dataUrl: 'data:image/jpeg;base64,QUIET' });
     expect(events()).toEqual([]);
     expect(classifyStagingWebhookSignature(undefined, 'sha256=ab', APP_SECRET)).toBe(
       'invalid',

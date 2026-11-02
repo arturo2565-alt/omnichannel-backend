@@ -76,9 +76,26 @@ export type StagingOutboundDecision =
   | { send: false }
   | { send: true; accessToken: string; phoneNumberId: string };
 
+export type StagingMediaFailureReason =
+  | 'invalid'
+  | 'type'
+  | 'too_large'
+  | 'timeout'
+  | 'failed';
+
+export type StagingMediaStage = 'metadata' | 'binary';
+
 export type StagingMediaResult =
   | { dataUrl: string }
-  | { error: 'invalid' | 'type' | 'too_large' | 'timeout' | 'failed' };
+  | {
+      error: StagingMediaFailureReason;
+      stage: StagingMediaStage;
+      httpStatus?: number;
+    };
+
+/** Aviso único al cliente. No incluye códigos, tokens ni el identificador del medio. */
+export const STAGING_IMAGE_UNAVAILABLE_NOTICE =
+  'No pude abrir esa fotografía. Envíala otra vez en JPG, PNG o WEBP.';
 
 type OpenAiBudget = {
   maxRequests: number;
@@ -406,13 +423,27 @@ function mediaHostAllowed(rawUrl: string): boolean {
   }
 }
 
+function mediaFailure(
+  error: StagingMediaFailureReason,
+  stage: StagingMediaStage,
+  httpStatus?: number,
+): StagingMediaResult {
+  if (!Number.isInteger(httpStatus)) return { error, stage };
+  return { error, stage, httpStatus };
+}
+
+/**
+ * Bearer de `STAGING_WHATSAPP_ACCESS_TOKEN`, el mismo del envío de staging.
+ * Graph exige ese token sobre el Phone Number ID del sandbox para leer el medio.
+ */
 export async function downloadStagingWhatsAppMedia(
   mediaId: string,
   config: StagingSandboxConfig,
   fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<StagingMediaResult> {
-  if (!MEDIA_ID_PATTERN.test(mediaId)) return { error: 'invalid' };
+  if (!MEDIA_ID_PATTERN.test(mediaId)) return mediaFailure('invalid', 'metadata');
   const signal = AbortSignal.timeout(config.mediaTimeoutMs);
+  let stage: StagingMediaStage = 'metadata';
   try {
     const metaResponse = await fetchImpl(
       `https://graph.facebook.com/v21.0/${mediaId}`,
@@ -422,41 +453,48 @@ export async function downloadStagingWhatsAppMedia(
         signal,
       },
     );
-    if (!metaResponse.ok) return { error: 'failed' };
+    if (!metaResponse.ok) {
+      return mediaFailure('failed', 'metadata', metaResponse.status);
+    }
     const meta = (await metaResponse.json()) as {
       url?: unknown;
       mime_type?: unknown;
       file_size?: unknown;
     };
     const mime = trim(meta.mime_type);
-    if (!config.allowedMediaTypes.includes(mime)) return { error: 'type' };
+    if (!config.allowedMediaTypes.includes(mime)) {
+      return mediaFailure('type', 'metadata');
+    }
     const declaredSize = Number(meta.file_size ?? 0);
     if (Number.isFinite(declaredSize) && declaredSize > config.mediaMaxBytes) {
-      return { error: 'too_large' };
+      return mediaFailure('too_large', 'metadata');
     }
     const mediaUrl = trim(meta.url);
     if (!mediaUrl.startsWith('https://') || !mediaHostAllowed(mediaUrl)) {
-      return { error: 'invalid' };
+      return mediaFailure('invalid', 'metadata');
     }
+    stage = 'binary';
     const binary = await fetchImpl(mediaUrl, {
       headers: { Authorization: `Bearer ${config.accessToken}` },
       redirect: 'manual',
       signal,
     });
-    if (!binary.ok) return { error: 'failed' };
+    if (!binary.ok) return mediaFailure('failed', 'binary', binary.status);
     const advertised = Number(binary.headers.get('content-length') ?? 0);
     if (Number.isFinite(advertised) && advertised > config.mediaMaxBytes) {
-      return { error: 'too_large' };
+      return mediaFailure('too_large', 'binary');
     }
     const bytes = Buffer.from(await binary.arrayBuffer());
     if (!bytes.length || bytes.length > config.mediaMaxBytes) {
-      return { error: 'too_large' };
+      return mediaFailure('too_large', 'binary');
     }
     return { dataUrl: `data:${mime};base64,${bytes.toString('base64')}` };
   } catch (err) {
     const name = err instanceof Error ? err.name : '';
-    if (name === 'AbortError' || name === 'TimeoutError') return { error: 'timeout' };
-    return { error: 'failed' };
+    if (name === 'AbortError' || name === 'TimeoutError') {
+      return mediaFailure('timeout', stage);
+    }
+    return mediaFailure('failed', stage);
   }
 }
 

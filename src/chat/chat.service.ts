@@ -55,7 +55,9 @@ import {
   downloadStagingWhatsAppMedia,
   evaluateStagingSandboxInbound,
   readStagingSandbox,
+  STAGING_IMAGE_UNAVAILABLE_NOTICE,
 } from '../config/staging-sandbox';
+import { logStagingMediaDownload } from '../observability/staging-webhook-log';
 import { v2 as cloudinary } from 'cloudinary';
 import {
   AUTO_FIX_CURRENCY,
@@ -1877,7 +1879,11 @@ export class ChatService implements OnModuleDestroy {
         evt.mediaId,
         sandbox.config,
       );
-      if (!('dataUrl' in media)) continue;
+      logStagingMediaDownload(media);
+      if (!('dataUrl' in media)) {
+        await this.notifyStagingImageUnavailable(evt);
+        continue;
+      }
       const savedImage = await this.saveMessage({
         ...base,
         message: media.dataUrl,
@@ -1887,6 +1893,35 @@ export class ChatService implements OnModuleDestroy {
       processed += 1;
     }
     return { processed, lastMessageId };
+  }
+
+  /**
+   * Un aviso por id de mensaje. Meta puede reentregar el webhook; el segundo no se envía.
+   * Si el guardado falla, el POST sigue pudiendo responder 200.
+   */
+  private async notifyStagingImageUnavailable(evt: {
+    messageId: string;
+    threadWaId: string;
+    tallerId: string;
+  }): Promise<void> {
+    const messageId = String(evt.messageId ?? '').trim();
+    if (!messageId) return;
+    const noticeId = `${messageId}:media-unavailable`;
+    try {
+      if (await this.findMessageByMetaMid(noticeId)) return;
+      await this.saveMessage({
+        externalId: evt.threadWaId,
+        wa_id: evt.threadWaId,
+        from: evt.threadWaId,
+        tallerId: evt.tallerId,
+        platform: 'whatsapp',
+        direction: 'outbound',
+        message: STAGING_IMAGE_UNAVAILABLE_NOTICE,
+        metaMessageId: noticeId,
+      });
+    } catch {
+      /* El aviso no cambia la respuesta del webhook. */
+    }
   }
 
   /** Evita duplicados cuando Meta reenvía el mismo ID persistido (coincidencia exacta). */

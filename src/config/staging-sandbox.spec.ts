@@ -15,6 +15,8 @@ import request from 'supertest';
 import { ChatController } from '../chat/chat.controller';
 import { AiConfigService } from '../chat/ai-config.service';
 import { ChatService } from '../chat/chat.service';
+import { pegLogger } from '../observability/pegazuz-logger';
+import { logStagingMediaDownload } from '../observability/staging-webhook-log';
 import { createOpenAiClient } from './staging-openai';
 import { STAGING_TALLER_ID } from './staging-synthetic';
 import { IncomingMessageWorker } from '../messaging-queue/incoming-message.worker';
@@ -28,6 +30,7 @@ import {
   downloadStagingWhatsAppMedia,
   evaluateStagingSandboxInbound,
   readStagingSandbox,
+  STAGING_IMAGE_UNAVAILABLE_NOTICE,
   rememberRawBody,
   resetStagingOpenAiBudgetForTests,
   stagingWhatsAppPayloadForMeta,
@@ -544,13 +547,13 @@ describe('staging sandbox', () => {
         );
       }) as typeof fetch,
     );
-    expect(gif).toEqual({ error: 'type' });
+    expect(gif).toEqual({ error: 'type', stage: 'metadata' });
     expect(gifCalls).toHaveLength(1);
     expect(JSON.stringify(gif)).not.toContain(ACCESS_TOKEN);
 
     expect(
       await downloadStagingWhatsAppMedia('no-es-id', config, fetchImpl),
-    ).toEqual({ error: 'invalid' });
+    ).toEqual({ error: 'invalid', stage: 'metadata' });
     expect(
       await downloadStagingWhatsAppMedia(
         '123456789012',
@@ -561,7 +564,7 @@ describe('staging sandbox', () => {
           throw err;
         },
       ),
-    ).toEqual({ error: 'timeout' });
+    ).toEqual({ error: 'timeout', stage: 'metadata' });
     expect(
       await downloadStagingWhatsAppMedia(
         '123456789012',
@@ -576,8 +579,210 @@ describe('staging sandbox', () => {
             { status: 200 },
           ),
       ),
-    ).toEqual({ error: 'invalid' });
+    ).toEqual({ error: 'invalid', stage: 'metadata' });
     expect(calls.some((url) => url.includes('evil.example'))).toBe(false);
+  });
+
+  const MEDIA_ID = '123456789012';
+  const PRIVATE_URL =
+    'https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=secret';
+
+  function jpegMeta(fileSize = 4): Response {
+    return new Response(
+      JSON.stringify({
+        url: PRIVATE_URL,
+        mime_type: 'image/jpeg',
+        file_size: fileSize,
+      }),
+      { status: 200 },
+    );
+  }
+
+  function imageBody(image: Record<string, unknown> = {}) {
+    return whatsAppBody(ALLOWED, {
+      type: 'image',
+      image: { id: MEDIA_ID, mime_type: 'image/jpeg', ...image },
+    });
+  }
+
+  function stagingReceiver() {
+    const service = Object.create(ChatService.prototype) as ChatService;
+    const saved: Array<Record<string, unknown>> = [];
+    (service as unknown as { saveMessage: (data: Record<string, unknown>) => Promise<unknown> }).saveMessage =
+      jest.fn(async (data: Record<string, unknown>) => {
+        const row = { id: `row-${saved.length + 1}`, ...data };
+        saved.push(row);
+        return row;
+      });
+    (service as unknown as { findMessageByMetaMid: (id: string) => Promise<unknown> }).findMessageByMetaMid =
+      jest.fn(async (id: string) => saved.find((row) => row.metaMessageId === id) ?? null);
+    return { service, saved };
+  }
+
+  function mediaLogs(spy: jest.SpiedFunction<typeof pegLogger.info>) {
+    return spy.mock.calls
+      .filter((call) => call[0] === 'WEBHOOK')
+      .map((call) => call[1])
+      .filter((data) => data?.event === 'media_download');
+  }
+
+  it('registra 401 de metadatos y avisa una sola vez sin guardar la foto', async () => {
+    process.env = { ...completeEnv(), LOG_LEVEL: 'info', PEG_LOG_FORMAT: 'pretty' };
+    const lines: string[] = [];
+    jest.spyOn(console, 'log').mockImplementation((line) => {
+      lines.push(String(line));
+    });
+    const info = jest.spyOn(pegLogger, 'info');
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }));
+    const { service, saved } = stagingReceiver();
+
+    await expect(service.ingestWebhookPayload(imageBody())).resolves.toEqual({
+      processed: 0,
+    });
+    await expect(service.ingestWebhookPayload(imageBody())).resolves.toEqual({
+      processed: 0,
+    });
+
+    expect(saved).toEqual([
+      expect.objectContaining({
+        direction: 'outbound',
+        message: STAGING_IMAGE_UNAVAILABLE_NOTICE,
+        metaMessageId: 'wamid.ENSAYO:media-unavailable',
+      }),
+    ]);
+    expect(JSON.stringify(saved)).not.toContain('data:image');
+    expect(mediaLogs(info)).toEqual([
+      {
+        event: 'media_download',
+        result: 'failed',
+        reason: 'failed',
+        stage: 'metadata',
+        httpStatus: 401,
+      },
+      {
+        event: 'media_download',
+        result: 'failed',
+        reason: 'failed',
+        stage: 'metadata',
+        httpStatus: 401,
+      },
+    ]);
+    const rendered = lines.join('\n');
+    expect(rendered).toContain('event=media_download');
+    expect(rendered).toContain('result=failed');
+    expect(rendered).toContain('reason=failed');
+    expect(rendered).toContain('stage=metadata');
+    expect(rendered).toContain('httpStatus=401');
+    expect(rendered).not.toContain(MEDIA_ID);
+    expect(rendered).not.toContain(ACCESS_TOKEN);
+    expect(rendered).not.toContain(ALLOWED);
+    expect(rendered).not.toContain('lookaside');
+    expect(rendered).not.toContain('data:image');
+    expect(rendered).not.toContain('base64');
+  });
+
+  it('distingue el 401 del binario y un archivo demasiado grande', async () => {
+    const config = activeConfig({ STAGING_MEDIA_MAX_BYTES: '8' });
+    await expect(
+      downloadStagingWhatsAppMedia(
+        MEDIA_ID,
+        config,
+        async (input) => {
+          if (String(input).includes('/v21.0/')) return jpegMeta();
+          return new Response('no', { status: 401 });
+        },
+      ),
+    ).resolves.toEqual({ error: 'failed', stage: 'binary', httpStatus: 401 });
+
+    await expect(
+      downloadStagingWhatsAppMedia(
+        MEDIA_ID,
+        config,
+        async () => jpegMeta(9),
+      ),
+    ).resolves.toEqual({ error: 'too_large', stage: 'metadata' });
+
+    await expect(
+      downloadStagingWhatsAppMedia(
+        MEDIA_ID,
+        config,
+        async (input) => {
+          if (String(input).includes('/v21.0/')) return jpegMeta();
+          return new Response(Buffer.from('0123456789'), {
+            status: 200,
+            headers: { 'content-length': '10' },
+          });
+        },
+      ),
+    ).resolves.toEqual({ error: 'too_large', stage: 'binary' });
+  });
+
+  it('un timeout del binario conserva la etapa y no incluye la URL', async () => {
+    const config = activeConfig();
+    const result = await downloadStagingWhatsAppMedia(
+      MEDIA_ID,
+      config,
+      async (input) => {
+        if (String(input).includes('/v21.0/')) return jpegMeta();
+        const err = new Error('agotado');
+        err.name = 'TimeoutError';
+        throw err;
+      },
+    );
+    expect(result).toEqual({ error: 'timeout', stage: 'binary' });
+    expect(JSON.stringify(result)).not.toContain('lookaside');
+    expect(JSON.stringify(result)).not.toContain(ACCESS_TOKEN);
+  });
+
+  it('guarda la imagen válida y el pie de foto sin el aviso', async () => {
+    process.env = { ...completeEnv(), LOG_LEVEL: 'info' };
+    const info = jest.spyOn(pegLogger, 'info').mockImplementation(() => undefined);
+    jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('/v21.0/')) return jpegMeta();
+      return new Response(Buffer.from('jpeg'), { status: 200 });
+    });
+    const { service, saved } = stagingReceiver();
+    const dataUrl = `data:image/jpeg;base64,${Buffer.from('jpeg').toString('base64')}`;
+
+    await expect(
+      service.ingestWebhookPayload(imageBody({ caption: 'golpe en la fascia' })),
+    ).resolves.toEqual({ processed: 2, lastMessageId: 'row-2' });
+
+    expect(saved.map((row) => row.message)).toEqual(['golpe en la fascia', dataUrl]);
+    expect(saved.every((row) => row.direction === 'inbound')).toBe(true);
+    expect(mediaLogs(info)).toEqual([{ event: 'media_download', result: 'success' }]);
+    expect(JSON.stringify(mediaLogs(info))).not.toContain('data:image');
+    expect(JSON.stringify(mediaLogs(info))).not.toContain(MEDIA_ID);
+    expect(JSON.stringify(mediaLogs(info))).not.toContain(ACCESS_TOKEN);
+    expect(JSON.stringify(mediaLogs(info))).not.toContain(ALLOWED);
+    expect(JSON.stringify(mediaLogs(info))).not.toContain('lookaside');
+  });
+
+  it('producción no descarga el medio ni emite media_download', async () => {
+    process.env = {
+      PEGAZUZ_ENV: 'production',
+      LOG_LEVEL: 'info',
+      WHATSAPP_PHONE_NUMBER_ID: 'phone-production-999',
+      WHATSAPP_BUSINESS_ACCOUNT_ID: 'waba-production-999',
+      WHATSAPP_NUMBER: '5215550190000',
+    };
+    const info = jest.spyOn(pegLogger, 'info').mockImplementation(() => undefined);
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    logStagingMediaDownload({
+      error: 'failed',
+      stage: 'metadata',
+      httpStatus: 401,
+    });
+    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('no'));
+    const { service, saved } = stagingReceiver();
+
+    await expect(service.ingestWebhookPayload(imageBody())).resolves.toEqual({
+      processed: 0,
+    });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(saved).toEqual([]);
+    expect(mediaLogs(info)).toEqual([]);
   });
 
   it('el worker de entrada no procesa otro taller ni el sandbox apagado', async () => {

@@ -314,6 +314,9 @@ const STAGING_WEBHOOK_FIELDS = [
   'processed',
   'outcome',
   'errorName',
+  'reason',
+  'stage',
+  'httpStatus',
 ] as const;
 
 function renderWebhook(record: PegazuzLogRecord): string {
@@ -324,7 +327,12 @@ function renderWebhook(record: PegazuzLogRecord): string {
     return `${EMOJI.inbound} Webhook · echo ignorado${mid}`;
   }
   const stage = String(record.data.event ?? '');
-  if (stage !== 'http_in' && stage !== 'decision' && stage !== 'persist') {
+  if (
+    stage !== 'http_in' &&
+    stage !== 'decision' &&
+    stage !== 'persist' &&
+    stage !== 'media_download'
+  ) {
     return `${EMOJI.inbound} Webhook`;
   }
   const bits = STAGING_WEBHOOK_FIELDS.filter((key) => {
