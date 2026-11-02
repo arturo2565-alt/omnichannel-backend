@@ -367,6 +367,19 @@ export function decideStagingOutbound(
   };
 }
 
+/**
+ * Meta rechaza en el sandbox el wa_id mexicano que llega como `521` y 10 dígitos.
+ * El POST usa `52` y esos mismos 10 dígitos. Otro patrón se deja igual.
+ * No muta el payload ni el `externalId` persistido: la allowlist sigue viendo el original.
+ */
+export function stagingWhatsAppPayloadForMeta(
+  metaPayload: Record<string, unknown>,
+): Record<string, unknown> {
+  const to = metaPayload.to;
+  if (typeof to !== 'string' || !/^521\d{10}$/.test(to)) return metaPayload;
+  return { ...metaPayload, to: `52${to.slice(3)}` };
+}
+
 export function decideStagingInboundJob(
   input: { tallerId: string; channel: string },
   env: NodeJS.ProcessEnv = process.env,

@@ -15,7 +15,10 @@ import {
   isStagingRuntime,
   STAGING_OUTBOUND_BLOCKED,
 } from '../config/staging-guard';
-import { decideStagingOutbound } from '../config/staging-sandbox';
+import {
+  decideStagingOutbound,
+  stagingWhatsAppPayloadForMeta,
+} from '../config/staging-sandbox';
 import { pegLogger } from '../observability/pegazuz-logger';
 import { runWithPegazuzContext } from '../observability/pegazuz-context';
 
@@ -84,7 +87,7 @@ export class OutgoingMessageWorker extends WorkerHost {
         if (!decision.send || channel !== 'whatsapp') {
           throw new UnrecoverableError(STAGING_OUTBOUND_BLOCKED);
         }
-        await this.postWhatsApp(payload, decision);
+        await this.postWhatsApp(stagingWhatsAppPayloadForMeta(payload), decision);
       } else if (channel === 'whatsapp') {
         await this.postWhatsApp(payload);
       } else if (channel === 'messenger' || channel === 'facebook') {

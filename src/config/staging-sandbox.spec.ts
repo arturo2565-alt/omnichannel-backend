@@ -30,6 +30,7 @@ import {
   readStagingSandbox,
   rememberRawBody,
   resetStagingOpenAiBudgetForTests,
+  stagingWhatsAppPayloadForMeta,
   verifyMetaWebhookSignature,
   type StagingSandboxConfig,
 } from './staging-sandbox';
@@ -305,6 +306,142 @@ describe('staging sandbox', () => {
       }),
     );
     expect(JSON.stringify(post.mock.calls[0]?.[2])).not.toContain(OPENAI_OTHER);
+    expect(post.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ to: '525550100005' }),
+    );
+    post.mockRestore();
+  });
+
+  it('el POST de staging reescribe solo el 521 mexicano y conserva el identificador original', async () => {
+    const mxWebhook = '5215550100005';
+    const mxListed = '525555010010';
+    const international = '14155550100';
+    const stored = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: mxWebhook,
+      type: 'text',
+      text: { body: 'hola' },
+    };
+    const rewritten = stagingWhatsAppPayloadForMeta(stored);
+    expect(rewritten.to).toBe('525550100005');
+    expect(stored.to).toBe(mxWebhook);
+    const listedPayload = { ...stored, to: mxListed };
+    const internationalPayload = { ...stored, to: international };
+    expect(stagingWhatsAppPayloadForMeta(listedPayload)).toBe(listedPayload);
+    expect(stagingWhatsAppPayloadForMeta(internationalPayload)).toBe(
+      internationalPayload,
+    );
+    expect(stagingWhatsAppPayloadForMeta({ ...stored, to: '521555010099' }).to).toBe(
+      '521555010099',
+    );
+
+    process.env = {
+      ...completeEnv({
+        STAGING_WHATSAPP_ALLOWLIST: `${mxWebhook},${mxListed},${international}`,
+      }),
+    };
+    const post = jest.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} });
+    const worker = new OutgoingMessageWorker();
+
+    await worker.process({
+      id: 'mx-521',
+      attemptsMade: 0,
+      opts: { attempts: 1 },
+      data: {
+        channel: 'whatsapp',
+        tallerId: STAGING_TALLER_ID,
+        conversationId: 'conv-ensayo',
+        metaPayload: stored,
+      },
+    } as never);
+    expect(stored.to).toBe(mxWebhook);
+    expect(post.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        to: '525550100005',
+        type: 'text',
+        messaging_product: 'whatsapp',
+      }),
+    );
+    expect(String(post.mock.calls[0]?.[0])).toContain('phone-ensayo-100');
+    expect(String(post.mock.calls[0]?.[0])).not.toContain('phone-production-999');
+    expect(post.mock.calls[0]?.[2]).toEqual(
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: `Bearer ${ACCESS_TOKEN}`,
+        }),
+      }),
+    );
+
+    await worker.process({
+      id: 'mx-52',
+      attemptsMade: 0,
+      opts: { attempts: 1 },
+      data: {
+        channel: 'whatsapp',
+        tallerId: STAGING_TALLER_ID,
+        conversationId: 'conv-ensayo',
+        metaPayload: { ...stored, to: mxListed },
+      },
+    } as never);
+    expect(post.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ to: mxListed }));
+
+    await worker.process({
+      id: 'intl',
+      attemptsMade: 0,
+      opts: { attempts: 1 },
+      data: {
+        channel: 'whatsapp',
+        tallerId: STAGING_TALLER_ID,
+        conversationId: 'conv-ensayo',
+        metaPayload: { ...stored, to: international },
+      },
+    } as never);
+    expect(post.mock.calls[2]?.[1]).toEqual(
+      expect.objectContaining({ to: international }),
+    );
+
+    await expect(
+      worker.process({
+        id: 'blocked-twin',
+        attemptsMade: 0,
+        opts: { attempts: 1 },
+        data: {
+          channel: 'whatsapp',
+          tallerId: STAGING_TALLER_ID,
+          conversationId: 'conv-ensayo',
+          metaPayload: { ...stored, to: '525550100005' },
+        },
+      } as never),
+    ).rejects.toBeInstanceOf(UnrecoverableError);
+    expect(post).toHaveBeenCalledTimes(3);
+
+    process.env = {
+      PEGAZUZ_ENV: 'production',
+      WHATSAPP_PHONE_NUMBER_ID: 'phone-production-999',
+      WHATSAPP_ACCESS_TOKEN: 'production-token-ensayo',
+    };
+    await worker.process({
+      id: 'prod-521',
+      attemptsMade: 0,
+      opts: { attempts: 1 },
+      data: {
+        channel: 'whatsapp',
+        tallerId: STAGING_TALLER_ID,
+        conversationId: 'conv-ensayo',
+        metaPayload: { ...stored },
+      },
+    } as never);
+    expect(post.mock.calls[3]?.[1]).toEqual(expect.objectContaining({ to: mxWebhook }));
+    expect(String(post.mock.calls[3]?.[0])).toContain('phone-production-999');
+    expect(post.mock.calls[3]?.[2]).toEqual(
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer production-token-ensayo',
+        }),
+      }),
+    );
+    post.mockRestore();
   });
 
   it('OpenAI inerte por defecto y el presupuesto corta sin otra clave', async () => {
