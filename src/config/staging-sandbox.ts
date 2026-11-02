@@ -257,6 +257,31 @@ function accountMatches(
   );
 }
 
+export type StagingAccountField = 'phone_number_id' | 'waba' | 'display';
+
+/**
+ * Primer campo que impide `accountMatches`, en el mismo orden de la conjunción.
+ * Null si la cuenta coincide o si falta identidad. No altera la decisión.
+ */
+export function stagingAccountMismatchField(
+  fields: {
+    phoneNumberId?: string;
+    wabaId?: string;
+    displayPhoneNumber?: string;
+  },
+  config: StagingSandboxConfig,
+): StagingAccountField | null {
+  if (accountMatches(fields, config)) return null;
+  const phoneNumberId = trim(fields.phoneNumberId);
+  const wabaId = trim(fields.wabaId);
+  const display = normalizeWhatsAppDigits(trim(fields.displayPhoneNumber));
+  if (!phoneNumberId || !wabaId || !display) return null;
+  if (phoneNumberId !== config.phoneNumberId) return 'phone_number_id';
+  if (wabaId !== config.businessAccountId) return 'waba';
+  if (display !== config.displayNumber) return 'display';
+  return null;
+}
+
 export function evaluateStagingSandboxInbound(
   body: unknown,
   config: StagingSandboxConfig,

@@ -304,6 +304,18 @@ function renderTurnComplete(record: PegazuzLogRecord): string {
   return joinPrettyBlock([body, SEPARATOR]);
 }
 
+const STAGING_WEBHOOK_FIELDS = [
+  'event',
+  'method',
+  'bodyKind',
+  'signature',
+  'result',
+  'accountField',
+  'processed',
+  'outcome',
+  'errorName',
+] as const;
+
 function renderWebhook(record: PegazuzLogRecord): string {
   if (record.data.echo) {
     const mid = record.data.mid
@@ -311,7 +323,18 @@ function renderWebhook(record: PegazuzLogRecord): string {
       : '';
     return `${EMOJI.inbound} Webhook · echo ignorado${mid}`;
   }
-  return `${EMOJI.inbound} Webhook`;
+  const stage = String(record.data.event ?? '');
+  if (stage !== 'http_in' && stage !== 'decision' && stage !== 'persist') {
+    return `${EMOJI.inbound} Webhook`;
+  }
+  const bits = STAGING_WEBHOOK_FIELDS.filter((key) => {
+    const value = record.data[key];
+    return value !== undefined && value !== null && value !== '';
+  }).map((key) => `${key}=${String(record.data[key])}`);
+  return joinPrettyBlock([
+    `${EMOJI.inbound} Webhook`,
+    ...bits.map((row) => `   ${row}`),
+  ]);
 }
 
 function renderError(record: PegazuzLogRecord): string {

@@ -23,6 +23,13 @@ import {
   readStagingSandbox,
   verifyMetaWebhookSignature,
 } from '../config/staging-sandbox';
+import {
+  classifyStagingWebhookBody,
+  classifyStagingWebhookSignature,
+  logStagingSandboxDecision,
+  logStagingWebhookHttpIn,
+  logStagingWebhookPersist,
+} from '../observability/staging-webhook-log';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ChatService } from './chat.service';
 import type {
@@ -145,21 +152,45 @@ export class ChatController {
       }
       const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
       const signature = req.header('x-hub-signature-256') ?? undefined;
+      logStagingWebhookHttpIn({
+        method: req.method,
+        bodyKind: classifyStagingWebhookBody(req.body),
+        signature: classifyStagingWebhookSignature(
+          rawBody,
+          signature,
+          sandbox.config.appSecret,
+        ),
+      });
       if (
         !rawBody ||
         !verifyMetaWebhookSignature(rawBody, signature, sandbox.config.appSecret)
       ) {
         throw new ForbiddenException('Firma de webhook inválida.');
       }
+      logStagingSandboxDecision(req.body, sandbox.config);
       if (!isMetaWhatsAppWebhook(req.body)) {
         throw new ForbiddenException(
           'Staging solo acepta WhatsApp del número de ensayo.',
         );
       }
       try {
-        await this.chatService.ingestWebhookPayload(req.body ?? {});
-      } catch {
-        pegLogger.error('WEBHOOK', { message: 'sandbox ingest failed' });
+        const result = await this.chatService.ingestWebhookPayload(req.body ?? {});
+        const processed =
+          result &&
+          Number.isSafeInteger(result.processed) &&
+          result.processed >= 0
+            ? result.processed
+            : 0;
+        logStagingWebhookPersist({
+          processed,
+          outcome: processed > 0 ? 'saved' : 'skipped',
+        });
+      } catch (err) {
+        logStagingWebhookPersist({
+          processed: 0,
+          outcome: 'failed',
+          errorName: err instanceof Error ? err.name : 'Error',
+        });
       }
       res.status(HttpStatus.OK).type('text/plain').send('EVENT_RECEIVED');
       return;
