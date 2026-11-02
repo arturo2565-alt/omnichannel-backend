@@ -4,6 +4,7 @@ import { openAiChatCompletionParams } from './openai-model-config';
 import { createTrackedChatCompletion } from './tracked-chat-completion';
 import { resolvePiezaDisplayLabel } from './draft-quote-resume';
 import { pegLogger } from '../observability/pegazuz-logger';
+import { projectNarrativeHistory } from './narrative-history';
 import {
   HIDDEN_DAMAGE_CLIENT_DISCLAIMER,
   narrativeRespectsStructuredLines,
@@ -211,12 +212,7 @@ export async function composeDraftClientMessageWithLlm(
   options?: { temperature?: number },
 ): Promise<string> {
   const payload = buildDraftClientMessageStructuredPayload(input);
-  const history = conversationTurns.filter(
-    (m) =>
-      (m.role === 'user' || m.role === 'assistant') &&
-      typeof m.content === 'string' &&
-      String(m.content).trim().length > 0,
-  );
+  const history = projectNarrativeHistory(conversationTurns);
 
   const temperature = Math.max(0.5, Number(options?.temperature) || 0.7);
 

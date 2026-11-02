@@ -22,6 +22,7 @@ import {
   type NarrativeObservabilityEvent,
 } from '../domain/peritaje-v1/quote-narrative';
 import { traceFinalClientMessageSummary } from './canonical-trace';
+import { projectNarrativeHistory, projectNarrativeText } from './narrative-history';
 import type { QuoteSendSnapshot } from './autofix-config';
 import type { ClientMessageSource, ClientMessageMode, CtaType, QuoteDelta } from './client-message-ux';
 import {
@@ -172,12 +173,7 @@ export async function composeCanonicalLlmNarrativeParts(
     },
   };
 
-  const history = conversationTurns.filter(
-    (m) =>
-      (m.role === 'user' || m.role === 'assistant') &&
-      typeof m.content === 'string' &&
-      String(m.content).trim().length > 0,
-  );
+  const history = projectNarrativeHistory(conversationTurns);
 
   const completion = await createTrackedChatCompletion(
     openai,
@@ -267,8 +263,13 @@ export async function composeModernClientQuoteMessage(
     throw new Error('composeModernClientQuoteMessage: CanonicalQuoteV1 inválido');
   }
 
+  const narrativeTurns = projectNarrativeHistory(input.conversationTurns);
+  const explicitUserText =
+    input.userText == null ? '' : projectNarrativeText(input.userText);
   const userText =
-    input.userText ?? extractLastUserText(input.conversationTurns);
+    input.userText == null
+      ? extractLastUserText(narrativeTurns)
+      : explicitUserText;
   const ux = resolveClientMessageUx({
     quote: input.canonicalQuote,
     peritaje: input.peritaje,
@@ -372,7 +373,7 @@ export async function composeModernClientQuoteMessage(
         input.openai,
         input.chatAppointmentSystemPrompt,
         { ...input, ux },
-        input.conversationTurns ?? [],
+        narrativeTurns,
       );
     } catch (err) {
       return useFallback(
