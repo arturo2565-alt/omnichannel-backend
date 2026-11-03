@@ -209,12 +209,15 @@ function renderMarket(record: PegazuzLogRecord): string {
 }
 
 function renderQuote(record: PegazuzLogRecord): string {
+  const pendingCount = Number(record.data.pending ?? 0);
   const estado =
     record.data.partial === true
       ? 'Estado: parcial'
-      : record.data.partial === false
-        ? `Estado: ${EMOJI.success} completa`
-        : undefined;
+      : pendingCount > 0
+        ? 'Estado: con partidas pendientes'
+        : record.data.partial === false
+          ? `Estado: ${EMOJI.success} completa`
+          : undefined;
   return indentLines(`${EMOJI.quote} Cotización`, [
     formatMoney(record.data.total) ? `Total: ${formatMoney(record.data.total)}` : undefined,
     record.data.billable != null ? `Cobrables: ${record.data.billable}` : undefined,
@@ -271,6 +274,15 @@ function renderOutbound(record: PegazuzLogRecord): string {
   return indentLines(`${EMOJI.outbound} Outbound`, [
     `Estado: ${outboundLabel(record.data.status)}`,
   ]);
+}
+
+function renderTurnFailed(record: PegazuzLogRecord): string {
+  const turn = shortTurnId(record.correlation.turnId) ?? shortId(record.correlation.turnId);
+  const reason = typeof record.data.failure === 'string' ? record.data.failure : 'error';
+  const body = indentLines(`${EMOJI.error} TURN FAILED · ${turn ?? '—'}`, [
+    `Motivo: ${reason}`,
+  ]);
+  return joinPrettyBlock([body, SEPARATOR]);
 }
 
 function renderTurnComplete(record: PegazuzLogRecord): string {
@@ -406,7 +418,9 @@ export function renderPrettyLog(record: PegazuzLogRecord): string {
     case 'OUTBOUND':
       return renderOutbound(record);
     case 'TURN':
-      return renderTurnComplete(record);
+      return record.data.phase === 'FAILED'
+        ? renderTurnFailed(record)
+        : renderTurnComplete(record);
     case 'WEBHOOK':
       return renderWebhook(record);
     case 'VISION':

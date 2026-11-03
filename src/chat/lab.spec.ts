@@ -295,7 +295,17 @@ describe('laboratorio interno', () => {
         items: queued,
       }),
     ).rejects.toThrow('model down');
-    expect(messages.rows).toHaveLength(before);
+    const failure = messages.rows.filter(
+      (row) =>
+        row.conversationId === first.id &&
+        row.direction === 'outbound' &&
+        String(row.content).includes('expediente sigue guardado'),
+    );
+    expect(failure).toHaveLength(1);
+    expect(String(failure[0]?.content)).not.toMatch(/cotización actualizada|qued[oó] agendada/i);
+    expect(messages.rows).toHaveLength(before + 1);
+    expect(of(first.id).map((row) => row.content).join('\n')).toContain('Beetle 2015');
+    expect(of(second.id)).toHaveLength(2);
     expect((service as any).analyzeDamageImageInSequentialChunks).toHaveBeenCalledTimes(1);
     expect((service as any).analyzeDamageImageInSequentialChunks.mock.calls[0][0]).toHaveLength(2);
     expect(fetchSpy).not.toHaveBeenCalled();

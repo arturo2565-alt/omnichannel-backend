@@ -497,16 +497,37 @@ export async function downloadStagingWhatsAppMedia(
   }
 }
 
-function blockedOpenAiResponse(): Response {
+export const STAGING_TURN_NOT_DELIVERED_REPLY =
+  'No pude completar este turno. El expediente sigue guardado y esta respuesta no confirma ninguna cita.';
+
+export type StagingBudgetReason = 'requests' | 'tokens';
+
+function blockedOpenAiResponse(reason: StagingBudgetReason): Response {
   return new Response(
     JSON.stringify({
       error: {
         message: STAGING_EXTERNAL_BLOCKED,
         type: 'staging_sandbox_budget',
+        reason,
       },
     }),
     { status: 503, headers: { 'content-type': 'application/json' } },
   );
+}
+
+export function isStagingSandboxBudgetError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const record = err as {
+    type?: unknown;
+    status?: unknown;
+    message?: unknown;
+    error?: { type?: unknown; message?: unknown; reason?: unknown };
+  };
+  if (record.type === 'staging_sandbox_budget') return true;
+  if (record.error?.type === 'staging_sandbox_budget') return true;
+  const message = typeof record.message === 'string' ? record.message : '';
+  if (message.includes('staging_sandbox_budget')) return true;
+  return record.status === 503 && message.includes(STAGING_EXTERNAL_BLOCKED);
 }
 
 export function resetStagingOpenAiBudgetForTests(): void {
@@ -532,7 +553,19 @@ export function stagingOpenAiFetch(
   const budget = openAiBudget;
   return async (input, init) => {
     if (budget.requests >= budget.maxRequests || budget.tokens >= budget.maxTotalTokens) {
-      return blockedOpenAiResponse();
+      const reason: StagingBudgetReason =
+        budget.requests >= budget.maxRequests ? 'requests' : 'tokens';
+      console.warn(
+        JSON.stringify({
+          event: 'staging_sandbox_budget',
+          reason,
+          requests: budget.requests,
+          maxRequests: budget.maxRequests,
+          tokens: budget.tokens,
+          maxTotalTokens: budget.maxTotalTokens,
+        }),
+      );
+      return blockedOpenAiResponse(reason);
     }
     budget.requests += 1;
     const response = await inner(input, init);

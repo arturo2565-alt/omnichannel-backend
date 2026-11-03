@@ -505,6 +505,93 @@ describe('staging sandbox', () => {
     }
   });
 
+  it('una llamada que falla consume la solicitud y bloquea la siguiente', async () => {
+    process.env = completeEnv({
+      STAGING_OPENAI_MAX_REQUESTS: '1',
+      STAGING_OPENAI_MAX_TOTAL_TOKENS: '1000',
+    });
+    resetStagingOpenAiBudgetForTests();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = jest.fn(async () => {
+      calls += 1;
+      throw new Error('red');
+    }) as typeof fetch;
+    try {
+      const client = createOpenAiClient();
+      await expect(
+        client.chat.completions.create({
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: 'hola' }],
+        }),
+      ).rejects.toThrow(/Connection error/);
+      await expect(
+        client.chat.completions.create({
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: 'otra' }],
+        }),
+      ).rejects.toThrow(/apagados/);
+      expect(calls).toBe(1);
+      const logged = warn.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('"reason":"requests"');
+      expect(logged).not.toContain('hola');
+      expect(logged).not.toContain('data:image');
+    } finally {
+      globalThis.fetch = originalFetch;
+      warn.mockRestore();
+    }
+  });
+
+  it('el tope de tokens bloquea el turno siguiente sin repetir la llamada', async () => {
+    process.env = completeEnv({
+      STAGING_OPENAI_MAX_REQUESTS: '5',
+      STAGING_OPENAI_MAX_TOTAL_TOKENS: '50',
+    });
+    resetStagingOpenAiBudgetForTests();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = jest.fn(async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          id: 'chatcmpl-ensayo',
+          object: 'chat.completion',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'ok' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { total_tokens: 130000 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    try {
+      const client = createOpenAiClient();
+      await client.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'turno' }],
+      });
+      await expect(
+        client.chat.completions.create({
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: 'foto nueva' }],
+        }),
+      ).rejects.toThrow(/apagados/);
+      expect(calls).toBe(1);
+      const logged = warn.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('"reason":"tokens"');
+      expect(logged).not.toContain('foto nueva');
+    } finally {
+      globalThis.fetch = originalFetch;
+      warn.mockRestore();
+    }
+  });
+
   it('descarga solo medios Meta autorizados y no conserva la URL ni el token', async () => {
     const config = activeConfig({ STAGING_MEDIA_MAX_BYTES: '8' });
     const calls: string[] = [];

@@ -536,4 +536,39 @@ describe('Production Logging v1.1 pretty', () => {
     expect(vehicle).not.toContain('Reparar:');
     cap.restore();
   });
+
+  it('partidas pendientes no se etiquetan como cotización completa', () => {
+    process.env.LOG_LEVEL = 'info';
+    process.env.PEG_LOG_FORMAT = 'pretty';
+    const cap = captureStd();
+    pegCanonicalTrace(CANONICAL_TRACE_EVENTS.CANONICAL_QUOTE, {
+      quoteId: 'quo_pendientes',
+      total: 3400,
+      isPartial: false,
+      lines: [{ billable: true }, { billable: false }],
+    });
+    const joined = cap.logs.join('\n');
+    expect(joined).toContain('Pendientes: 1');
+    expect(joined).toContain('Estado: con partidas pendientes');
+    expect(joined).not.toContain('completa');
+    cap.restore();
+  });
+
+  it('un turno fallido no se presenta como respuesta entregada', () => {
+    process.env.LOG_LEVEL = 'info';
+    process.env.PEG_LOG_FORMAT = 'pretty';
+    const cap = captureStd();
+    runWithPegazuzContext(
+      {
+        turnId: 'turn_aafad2',
+        turnSummary: { outbound: 'FAILED', failure: 'budget' },
+      },
+      () => emitTurnComplete(Date.now() - 1000),
+    );
+    const joined = cap.logs.join('\n');
+    expect(joined).toContain('TURN FAILED');
+    expect(joined).toContain('Motivo: budget');
+    expect(joined).not.toContain('TURN COMPLETE');
+    cap.restore();
+  });
 });

@@ -9,6 +9,7 @@ export type TurnSummary = {
   quoteTotal?: number;
   partial?: boolean;
   outbound?: string;
+  failure?: string;
   channel?: string;
   inboundType?: string;
   visionMs?: number;

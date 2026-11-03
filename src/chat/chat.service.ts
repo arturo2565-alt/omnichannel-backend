@@ -69,8 +69,10 @@ import {
   decideStagingOutbound,
   downloadStagingWhatsAppMedia,
   evaluateStagingSandboxInbound,
+  isStagingSandboxBudgetError,
   readStagingSandbox,
   STAGING_IMAGE_UNAVAILABLE_NOTICE,
+  STAGING_TURN_NOT_DELIVERED_REPLY,
 } from '../config/staging-sandbox';
 import { logStagingMediaDownload } from '../observability/staging-webhook-log';
 import { v2 as cloudinary } from 'cloudinary';
@@ -191,6 +193,11 @@ import {
   vehicleHasRefaccionIdentity,
 } from '../domain/peritaje-v1/pending-quote-requirement';
 import { formatPendingCanonicalRequirementsContext } from '../domain/peritaje-v1';
+import {
+  ORCHESTRATOR_HISTORY_MESSAGE_CHARS,
+  projectNarrativeText,
+  projectOrchestratorDialogue,
+} from './narrative-history';
 import {
   applyXorTreatmentsToInventory,
   canonicalPhysicalPanelKey,
@@ -1028,8 +1035,10 @@ export class ChatService implements OnModuleDestroy {
   ): ChatCompletionMessageParam[] {
     const out: ChatCompletionMessageParam[] = [];
     for (const m of rows) {
-      const text = String(m.content ?? '').trim();
-      if (!text || text.includes('cloudinary')) continue;
+      const raw = String(m.content ?? '').trim();
+      if (!raw || isIncomingImage(raw)) continue;
+      const text = projectNarrativeText(raw, Number.POSITIVE_INFINITY);
+      if (!text) continue;
       const role: 'user' | 'assistant' =
         m.direction === 'inbound' ? 'user' : 'assistant';
       out.push({ role, content: text });
@@ -6055,12 +6064,36 @@ ${catalogAppend}`;
           await this.processDebouncedAutopilotTextReply(conversationId);
         }
       } catch (err) {
+        const budget = isStagingSandboxBudgetError(err);
+        patchTurnSummary({
+          outbound: 'FAILED',
+          failure: budget ? 'budget' : 'vision',
+        });
         pegLogger.error('TURN', {
           message: 'inbound burst failed',
+          failure: budget ? 'budget' : 'vision',
           conversationId,
           turnId,
-          err,
         });
+        if (input.channel === 'lab') {
+          try {
+            await this.saveMessage({
+              direction: 'outbound',
+              conversationId,
+              message: STAGING_TURN_NOT_DELIVERED_REPLY,
+              tallerId: input.tallerId,
+              platform: input.channel,
+              skipOutboundFacebookSend: true,
+            });
+          } catch {
+            pegLogger.error('TURN', {
+              message: 'no se pudo registrar el fallo del turno',
+              failure: budget ? 'budget' : 'vision',
+              conversationId,
+              turnId,
+            });
+          }
+        }
         throw err;
       } finally {
         emitTurnComplete(startedAt);
@@ -8536,7 +8569,7 @@ ${catalogAppend}`;
     conversation: Conversation,
     historyTurns: ReadonlyArray<{ role: string; text: string }>,
     currentUserText: string,
-  ): Promise<{ success: boolean; scheduledAt?: string }> {
+  ): Promise<{ success: boolean; scheduledAt?: string; analysisFailed?: boolean }> {
     const active = await this.loadActiveAppointmentForConversation(
       conversation.id,
     );
@@ -8586,7 +8619,14 @@ ${catalogAppend}`;
         return { success: true, scheduledAt: result.scheduledAt };
       }
     } catch (err) {
-      console.error('[createAppointment] fallback persist failed:', err);
+      console.warn(
+        JSON.stringify({
+          event: 'createAppointment_analysis_failed',
+          reason: isStagingSandboxBudgetError(err) ? 'staging_sandbox_budget' : 'error',
+          conversationId: conversation.id,
+        }),
+      );
+      return { success: false, analysisFailed: true };
     }
     return { success: false };
   }
@@ -8599,6 +8639,7 @@ ${catalogAppend}`;
     currentUserText: string,
   ): Promise<string> {
     let confirmedIso = lastConfirmedIso;
+    let analysisFailed = false;
 
     if (!confirmedIso) {
       const fallback = await this.tryPersistAppointmentFromChatContext(
@@ -8609,6 +8650,7 @@ ${catalogAppend}`;
       if (fallback.success && fallback.scheduledAt) {
         confirmedIso = fallback.scheduledAt;
       }
+      analysisFailed = fallback.analysisFailed === true;
     }
 
     let text = String(draftText ?? '').trim();
@@ -8631,6 +8673,11 @@ ${catalogAppend}`;
       if (!textClaimsAppointmentBooked(text)) {
         text = `${text}\n\n${confirmation}`;
       }
+    }
+
+    if (!text && analysisFailed) {
+      patchTurnSummary({ outbound: 'FAILED', failure: 'budget' });
+      return STAGING_TURN_NOT_DELIVERED_REPLY;
     }
 
     return text || AUTOPILOT_TECHNICAL_FALLBACK_REPLY;
@@ -8705,16 +8752,23 @@ ${catalogAppend}`;
         ? history.filter((m) => !batchIdSet.has(m.id))
         : history;
 
-      const interceptorTurns = historySansBatch.map((m) => ({
-        role:
-          String(m.direction ?? '').toLowerCase() === 'outbound'
-            ? ('assistant' as const)
-            : ('user' as const),
-        text: String(m.content ?? ''),
-      }));
+      const safeUserText = projectNarrativeText(
+        mergedForInstant,
+        ORCHESTRATOR_HISTORY_MESSAGE_CHARS,
+      );
+      const dialogue = projectOrchestratorDialogue(
+        this.messagesToChatCompletionTurns(historySansBatch),
+      );
+      const interceptorTurns = dialogue
+        .filter(
+          (turn): turn is { role: 'user' | 'assistant'; content: string } =>
+            (turn.role === 'user' || turn.role === 'assistant') &&
+            typeof turn.content === 'string',
+        )
+        .map((turn) => ({ role: turn.role, text: turn.content }));
       const instantDecision = getPlaygroundInstantInterceptorDecision({
         historyTurns: interceptorTurns,
-        currentUserText: mergedForInstant,
+        currentUserText: safeUserText,
       });
       const skipInstantQuoteInterceptors =
         instantDecision.skipInstantInterceptor;
@@ -8727,22 +8781,32 @@ ${catalogAppend}`;
         });
       }
 
-      const dialogue = this.messagesToChatCompletionTurns(historySansBatch);
-
       if (batchInbound?.length) {
         const merged = batchInbound
-          .map((m, i) => `(${i + 1}) ${String(m.content).trim()}`)
+          .map((message, index) => {
+            const text = projectNarrativeText(
+              message.content,
+              ORCHESTRATOR_HISTORY_MESSAGE_CHARS,
+            );
+            return text ? `(${index + 1}) ${text}` : '';
+          })
+          .filter(Boolean)
           .join('\n\n');
-        dialogue.push({
-          role: 'user',
-          content: `El cliente ha enviado varios mensajes seguidos (aún sin responder). Intégralos y respóndelos todos en un solo mensaje claro y ordenado:\n\n${merged}`,
-        });
+        const safeMerged = projectNarrativeText(
+          merged,
+          ORCHESTRATOR_HISTORY_MESSAGE_CHARS,
+        );
+        if (safeMerged) {
+          dialogue.push({
+            role: 'user',
+            content: `El cliente ha enviado varios mensajes seguidos (aún sin responder). Intégralos y respóndelos todos en un solo mensaje claro y ordenado:\n\n${safeMerged}`,
+          });
+        }
       } else if (dialogue.length === 0) {
-        const t = String(inboundMsg.content ?? '').trim();
-        if (!t || t.includes('cloudinary')) {
+        if (!safeUserText) {
           return { text: null, markQuoted: false };
         }
-        dialogue.push({ role: 'user', content: t });
+        dialogue.push({ role: 'user', content: safeUserText });
       }
 
       const responseDialogue: OpenAiDialogueTurn[] = dialogue
@@ -8767,7 +8831,7 @@ ${catalogAppend}`;
               postQuoteScheduling: true,
               userMentionedWeekday:
                 playgroundUserMessageMentionsWeekdayOnlyRough(
-                  mergedForInstant,
+                  safeUserText,
                 ),
             }
           : undefined,
@@ -8824,12 +8888,12 @@ ${catalogAppend}`;
       }),
       );
 
-      if (!lastConfirmedIso && (expressQuoted || userRequestsFullQuote(mergedForInstant))) {
+      if (!lastConfirmedIso && (expressQuoted || userRequestsFullQuote(safeUserText))) {
         const modern = await this.tryComposeModernMessageFromActiveCart(
           conversation,
           {
-            userText: mergedForInstant,
-            ...(userRequestsFullQuote(mergedForInstant)
+            userText: safeUserText,
+            ...(userRequestsFullQuote(safeUserText)
               ? { messageSource: 'user_requested_full_quote' as const }
               : {}),
           },
@@ -8840,7 +8904,7 @@ ${catalogAppend}`;
             modern,
             lastConfirmedIso,
             interceptorTurns,
-            mergedForInstant,
+            safeUserText,
           );
           return { text, markQuoted: true };
         }
@@ -8852,7 +8916,7 @@ ${catalogAppend}`;
           loop.assistantText.trim(),
           lastConfirmedIso,
           interceptorTurns,
-          mergedForInstant,
+          safeUserText,
         );
         return { text, markQuoted: expressQuoted };
       }
@@ -8862,11 +8926,25 @@ ${catalogAppend}`;
         null,
         lastConfirmedIso,
         interceptorTurns,
-        mergedForInstant,
+        safeUserText,
       );
       return { text, markQuoted: expressQuoted };
     } catch (err) {
-      console.error('composeAutopilotReplyWithTools:', err);
+      if (isStagingSandboxBudgetError(err)) {
+        console.warn(
+          JSON.stringify({
+            event: 'orchestrator_turn_not_delivered',
+            reason: 'staging_sandbox_budget',
+            conversationId: conversation.id,
+          }),
+        );
+        patchTurnSummary({ outbound: 'FAILED', failure: 'budget' });
+        return { text: STAGING_TURN_NOT_DELIVERED_REPLY, markQuoted: false };
+      }
+      console.error(
+        'composeAutopilotReplyWithTools:',
+        err instanceof Error ? err.name : 'error',
+      );
       return { text: AUTOPILOT_TECHNICAL_FALLBACK_REPLY, markQuoted: false };
     }
   }

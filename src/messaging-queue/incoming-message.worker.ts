@@ -8,7 +8,10 @@ import {
   type IncomingMessageJobData,
 } from './incoming-message.constants';
 import { isStagingRuntime } from '../config/staging-guard';
-import { decideStagingInboundJob } from '../config/staging-sandbox';
+import {
+  decideStagingInboundJob,
+  isStagingSandboxBudgetError,
+} from '../config/staging-sandbox';
 import { pegLogger } from '../observability/pegazuz-logger';
 
 @Processor(INCOMING_MESSAGES_QUEUE)
@@ -66,9 +69,10 @@ export class IncomingMessageWorker extends WorkerHost {
       });
     } catch (err) {
       pegLogger.error('INBOUND', {
-        message: `processQueuedInboundBurst falló job=${job.id}`,
+        message: 'processQueuedInboundBurst falló',
+        job: job.id,
         conversationId,
-        err,
+        failure: isStagingSandboxBudgetError(err) ? 'budget' : 'error',
       });
       throw err;
     }

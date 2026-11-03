@@ -68,24 +68,39 @@ function isTemporaryMediaUrl(token: string): boolean {
   return MEDIA_HOST.test(token) || MEDIA_EXTENSION.test(token);
 }
 
-export function projectNarrativeText(raw: unknown): string {
+export function projectNarrativeText(
+  raw: unknown,
+  maxChars = NARRATIVE_HISTORY_MESSAGE_CHARS,
+): string {
   const stripped = stripDataUrls(contentToText(raw));
   const kept = stripped
     .split(/\s+/)
     .filter((token) => token && !isTemporaryMediaUrl(token))
     .filter((token) => !/^[A-Za-z0-9+/=]{200,}$/.test(token));
   const text = kept.join(' ').replace(/[ \t]{2,}/g, ' ').trim();
-  if (text.length <= NARRATIVE_HISTORY_MESSAGE_CHARS) return text;
-  return `${text.slice(0, NARRATIVE_HISTORY_MESSAGE_CHARS - 1)}…`;
+  if (!Number.isFinite(maxChars) || text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 1)}…`;
 }
+
+export const ORCHESTRATOR_HISTORY_MESSAGE_CHARS = 4_000;
+export const ORCHESTRATOR_HISTORY_TURN_LIMIT = 15;
+export const ORCHESTRATOR_HISTORY_CHAR_BUDGET = 16_000;
 
 export function projectNarrativeHistory(
   turns: readonly ChatCompletionMessageParam[] | null | undefined,
+  options?: {
+    maxMessageChars?: number;
+    charBudget?: number;
+    turnLimit?: number;
+  },
 ): ChatCompletionMessageParam[] {
+  const maxMessageChars = options?.maxMessageChars ?? NARRATIVE_HISTORY_MESSAGE_CHARS;
+  const charBudget = options?.charBudget ?? NARRATIVE_HISTORY_CHAR_BUDGET;
+  const turnLimit = options?.turnLimit ?? NARRATIVE_HISTORY_TURN_LIMIT;
   const projected: NarrativeTurn[] = [];
   for (const [index, turn] of (turns ?? []).entries()) {
     if (turn?.role !== 'user' && turn?.role !== 'assistant') continue;
-    const content = projectNarrativeText(turn.content);
+    const content = projectNarrativeText(turn.content, maxMessageChars);
     if (!content) continue;
     projected.push({
       role: turn.role,
@@ -99,8 +114,8 @@ export function projectNarrativeHistory(
   let chars = 0;
   for (let index = projected.length - 1; index >= 0; index -= 1) {
     const turn = projected[index];
-    if (!turn.vehicle && selected.length >= NARRATIVE_HISTORY_TURN_LIMIT) continue;
-    if (!turn.vehicle && chars + turn.content.length > NARRATIVE_HISTORY_CHAR_BUDGET) continue;
+    if (!turn.vehicle && selected.length >= turnLimit) continue;
+    if (!turn.vehicle && chars + turn.content.length > charBudget) continue;
     selected.push(turn);
     chars += turn.content.length;
   }
@@ -109,7 +124,7 @@ export function projectNarrativeHistory(
     selected.push(turn);
   }
   selected.sort((a, b) => a.index - b.index);
-  while (selected.length > NARRATIVE_HISTORY_TURN_LIMIT) {
+  while (selected.length > turnLimit) {
     const nonVehicle = selected.findIndex((turn) => !turn.vehicle);
     const vehicleCount = selected.filter((turn) => turn.vehicle).length;
     if (nonVehicle >= 0) selected.splice(nonVehicle, 1);
@@ -117,4 +132,15 @@ export function projectNarrativeHistory(
     else break;
   }
   return selected.map((turn) => ({ role: turn.role, content: turn.content }));
+}
+
+/** Historial del orquestador: mismo recorte de medios, con espacio para la cotización. */
+export function projectOrchestratorDialogue(
+  turns: readonly ChatCompletionMessageParam[] | null | undefined,
+): ChatCompletionMessageParam[] {
+  return projectNarrativeHistory(turns, {
+    maxMessageChars: ORCHESTRATOR_HISTORY_MESSAGE_CHARS,
+    charBudget: ORCHESTRATOR_HISTORY_CHAR_BUDGET,
+    turnLimit: ORCHESTRATOR_HISTORY_TURN_LIMIT,
+  });
 }

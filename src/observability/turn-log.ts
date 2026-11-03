@@ -8,8 +8,10 @@ export function emitTurnComplete(startedAt: number): void {
   if (summary.ux) {
     pegLogger.info('UX', { ...summary.ux });
   }
+  const failed = summary.outbound === 'FAILED' || Boolean(summary.failure);
   pegLogger.info('TURN', {
-    phase: 'COMPLETE',
+    phase: failed ? 'FAILED' : 'COMPLETE',
+    failure: summary.failure,
     mode: summary.mode ?? summary.ux?.mode,
     vehicle: summary.vehicle,
     market: summary.market,
