@@ -26,6 +26,9 @@ export class IncomingMessageWorker extends WorkerHost {
     const tallerId = String(job.data?.tallerId ?? '').trim();
     const channel = job.data?.channel ?? 'unknown';
 
+    if (String(channel).toLowerCase() === 'lab' && !isStagingRuntime()) {
+      return;
+    }
     if (isStagingRuntime() && !decideStagingInboundJob({ tallerId, channel })) {
       pegLogger.info('INBOUND', {
         status: 'staging_skipped',

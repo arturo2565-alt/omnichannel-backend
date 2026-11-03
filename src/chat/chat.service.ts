@@ -3,6 +3,8 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  UnauthorizedException,
+  ConflictException,
   ServiceUnavailableException,
   OnModuleDestroy,
   Inject,
@@ -11,7 +13,20 @@ import {
 import { IncomingMessageProducer } from '../messaging-queue/incoming-message.producer';
 import { OutgoingMessageProducer } from '../messaging-queue/outgoing-message.producer';
 import { LeadEventsService } from './lead-events.service';
-import type { IncomingBufferItem } from '../messaging-queue/incoming-message.constants';
+import {
+  INCOMING_MESSAGE_DEBOUNCE_MS,
+  type IncomingBufferItem,
+} from '../messaging-queue/incoming-message.constants';
+import {
+  assertEmptyLabCreateBody,
+  createLabExternalId,
+  isLabPlatform,
+  labAccess,
+  labMessagePlan,
+  parseLabTurn,
+  readLabImageMaxBytes,
+} from './lab-channel';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
 import { In, IsNull, QueryFailedError, Repository } from 'typeorm';
@@ -459,13 +474,15 @@ function shouldDebounceAutopilotInboundText(
   if (!s) return false;
   return (
     isFacebookMessengerPlatform(s) ||
-    s.includes('whatsapp')
+    s.includes('whatsapp') ||
+    isLabPlatform(s)
   );
 }
 
 function inboundQueueChannel(
   platform: string | null | undefined,
 ): 'whatsapp' | 'messenger' | string {
+  if (isLabPlatform(platform)) return 'lab';
   if (isWhatsAppPlatform(platform)) return 'whatsapp';
   if (isFacebookMessengerPlatform(platform)) return 'messenger';
   return String(platform ?? 'unknown').trim() || 'unknown';
@@ -1672,7 +1689,13 @@ export class ChatService implements OnModuleDestroy {
     content: string,
     skipChannelSend: boolean,
   ): void {
-    if (skipChannelSend || isIncomingImage(content)) return;
+    if (
+      skipChannelSend ||
+      isIncomingImage(content) ||
+      isLabPlatform(conversation.platform)
+    ) {
+      return;
+    }
     const text = String(content ?? '').trim();
     if (!text) return;
 
@@ -2648,7 +2671,11 @@ export class ChatService implements OnModuleDestroy {
       looksLikeInboundStickerFlag(data) || isFacebookStickerUrl(contentToSave);
     const incomingIsImage =
       isIncomingImage(contentToSave) && !inboundIsSticker;
-    if (incomingIsImage) {
+    if (
+      incomingIsImage &&
+      !isLabPlatform(conversation.platform) &&
+      !isLabPlatform(data.platform)
+    ) {
       try {
         contentToSave = await this.ensureImageOnCloudinary(contentToSave);
       } catch (err) {
@@ -9144,6 +9171,118 @@ ${catalogAppend}`;
     });
 
     return { id: cid, status, isAutoPilotActive };
+  }
+
+  /**
+   * Conversación de laboratorio. El identificador externo lo genera el servidor.
+   * No hay borrado: reiniciar es crear otra conversación.
+   */
+  async createLabConversation(
+    user: AuthenticatedUser,
+    body?: unknown,
+  ): Promise<{ id: string; platform: 'lab' }> {
+    this.assertLabOperator(user);
+    assertEmptyLabCreateBody(body);
+    const externalId = createLabExternalId();
+    const tallerId = user.tallerId;
+    const conversation = await this.findOrCreateConversationByExternalId(
+      tallerId,
+      externalId,
+      async () => {
+        const contact = await this.findOrCreateContactForTaller(
+          tallerId,
+          externalId,
+          'Cliente de laboratorio',
+          null,
+          'lab',
+        );
+        return this.conversationRepository.create({
+          externalId,
+          tallerId,
+          contactId: contact.id,
+          contactName: 'Cliente de laboratorio',
+          avatarUrl: null,
+          platform: 'lab',
+          status: 'nuevo',
+          isAutoPilotActive: true,
+        });
+      },
+    );
+    if (
+      conversation.tallerId !== tallerId ||
+      !isLabPlatform(conversation.platform) ||
+      conversation.externalId !== externalId
+    ) {
+      throw new ConflictException('No se pudo abrir la conversación de laboratorio.');
+    }
+    return { id: conversation.id, platform: 'lab' };
+  }
+
+  /**
+   * Entrada del cliente de laboratorio. Persiste y encola la ráfaga real.
+   * La respuesta del agente llega después por el socket, sin envío a Meta.
+   */
+  async appendLabTurn(
+    conversationId: string,
+    body: unknown,
+    user: AuthenticatedUser,
+  ): Promise<{ conversationId: string; messageIds: string[]; debounceMs: number }> {
+    this.assertLabOperator(user);
+    const id = String(conversationId ?? '').trim();
+    if (!looksLikeConversationUuid(id)) {
+      throw new BadRequestException('Id de conversación inválido.');
+    }
+    const row = await this.conversationRepository.findOne({
+      where: { id, tallerId: user.tallerId },
+    });
+    if (
+      !row ||
+      row.tallerId !== user.tallerId ||
+      !isLabPlatform(row.platform) ||
+      !String(row.externalId ?? '').startsWith('lab:')
+    ) {
+      throw new NotFoundException();
+    }
+    const turn = parseLabTurn(body, readLabImageMaxBytes(process.env));
+    const idempotencyKey = turn.idempotencyKey ?? randomUUID();
+    const messageIds: string[] = [];
+    for (const part of labMessagePlan(row.id, idempotencyKey, turn)) {
+      const existing = await this.findMessageByMetaMid(part.externalId);
+      if (existing) {
+        if (existing.conversationId !== row.id || existing.tallerId !== row.tallerId) {
+          throw new ConflictException('El turno no se puede repetir.');
+        }
+        messageIds.push(existing.id);
+        continue;
+      }
+      const saved = await this.saveMessage({
+        direction: 'inbound',
+        conversationId: row.id,
+        tallerId: row.tallerId,
+        platform: 'lab',
+        message: part.content,
+        metaMessageId: part.externalId,
+        user: 'Cliente de laboratorio',
+        contactName: row.contactName,
+      });
+      messageIds.push(saved.id);
+    }
+    return {
+      conversationId: row.id,
+      messageIds,
+      debounceMs: INCOMING_MESSAGE_DEBOUNCE_MS,
+    };
+  }
+
+  private assertLabOperator(user: AuthenticatedUser | undefined): void {
+    if (!user?.userId) {
+      throw new UnauthorizedException();
+    }
+    const access = labAccess(process.env, user);
+    if (access === 'hidden') throw new NotFoundException();
+    if (access === 'forbidden') {
+      throw new ForbiddenException('Este usuario no puede usar el laboratorio.');
+    }
   }
 
   /** Cancela debounce Redis/BullMQ asociado a la conversación (evita trabajo tras borrar). */

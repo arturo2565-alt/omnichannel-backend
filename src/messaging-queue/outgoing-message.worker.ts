@@ -78,6 +78,9 @@ export class OutgoingMessageWorker extends WorkerHost {
     }
 
     try {
+      if (channel === 'lab') {
+        throw new UnrecoverableError('lab: el envío externo está apagado.');
+      }
       if (isStagingRuntime()) {
         const decision = decideStagingOutbound({
           channel,

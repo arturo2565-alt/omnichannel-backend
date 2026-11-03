@@ -6,6 +6,7 @@ import {
   ChatController,
   ConversationTransitionController,
 } from './chat.controller';
+import { LabController } from './lab.controller';
 import { Message } from './entities/chat.entity';
 import { ChatGateway } from './chat.gateway';
 import { Conversation } from './entities/conversation.entity';
@@ -56,6 +57,7 @@ import { RefaccionMarketModule } from './refaccion-market/refaccion-market.modul
     ]),
   ],
   controllers: [
+    LabController,
     ChatController,
     ConversationTransitionController,
     AppointmentReminderController,

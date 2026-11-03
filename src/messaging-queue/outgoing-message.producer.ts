@@ -40,6 +40,9 @@ export class OutgoingMessageProducer {
     if (!metaPayload || typeof metaPayload !== 'object') {
       throw new Error('enqueueOutboundMessage: metaPayload inválido');
     }
+    if (ch.toLowerCase() === 'lab') {
+      throw new Error('lab: el envío externo está apagado.');
+    }
     if (isStagingRuntime()) {
       const decision = decideStagingOutbound({
         channel: ch,

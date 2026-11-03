@@ -403,10 +403,9 @@ export function decideStagingInboundJob(
 ): boolean {
   const sandbox = readStagingSandbox(env);
   if (!sandbox.active) return false;
-  return (
-    trim(input.tallerId) === STAGING_TALLER_ID &&
-    trim(input.channel).toLowerCase() === 'whatsapp'
-  );
+  if (trim(input.tallerId) !== STAGING_TALLER_ID) return false;
+  const channel = trim(input.channel).toLowerCase();
+  return channel === 'whatsapp' || channel === 'lab';
 }
 
 function mediaHostAllowed(rawUrl: string): boolean {
