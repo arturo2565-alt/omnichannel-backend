@@ -683,12 +683,23 @@ export function llmNarrativeContainsForbiddenMoney(text: string): boolean {
   return extractMonetaryAmounts(text).length > 0;
 }
 
+const FORBIDDEN_COMMERCE_RE =
+  /\b(?:descuentos?|promoci[oó]n(?:es)?|garant[ií]a|iva|impuestos?|tiempo de entrega|sin costo|gratis|precio cerrado|disponib(?:le|ilidad))\b|entrega en\s+\d|\d+\s*%|\b2\s*x\s*1\b/i;
+
+/** Afirmaciones comerciales que el expediente no autoriza. No mira el bloque financiero. */
+export function llmNarrativeContainsForbiddenCommerce(text: string): boolean {
+  return FORBIDDEN_COMMERCE_RE.test(String(text ?? ''));
+}
+
 export function sanitizeLlmNarrativeParts(
   parts: LlmNarrativeParts,
 ): { ok: true; parts: LlmNarrativeParts } | { ok: false; reason: string } {
   const joined = `${parts.intro}\n${parts.technicalExplanation}\n${parts.cta}`;
   if (llmNarrativeContainsForbiddenMoney(joined)) {
     return { ok: false, reason: 'llm_monetary_amount' };
+  }
+  if (llmNarrativeContainsForbiddenCommerce(joined)) {
+    return { ok: false, reason: 'llm_commercial_invention' };
   }
   if (
     /inversi[oó]n total|subtotal parcial|:\s*\$\s*\d/i.test(joined) ||

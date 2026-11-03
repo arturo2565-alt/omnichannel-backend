@@ -20,6 +20,7 @@ import {
   buildControlledQuoteLineLabel,
   extractMonetaryAmounts,
   formatPartialQuoteFooter,
+  llmNarrativeContainsForbiddenCommerce,
   formatQuoteMoney,
   formatQuoteMoneyRange,
   isPendingReviewDamage,
@@ -1160,14 +1161,10 @@ export function buildModeAwareNarrativeAppendix(
 - PROHIBIDO saludar ("Hola", "¡Listo!", 👋).
 - PROHIBIDO decir que revisaste o analizaste las fotografías.
 - PROHIBIDO repetir el análisis visual ("Se observa", "Se aprecia", "El daño visible").
-- technicalExplanation DEBE ser "".
-- intro: 1-2 oraciones reconociendo el dato. Tono natural, no burocrático.
-- Preferido resume: "Perfecto, {nombre}. Ya actualicé la cotización con tu {vehículo}."
-- Preferido corrección: "Perfecto, {nombre}. Corregí el vehículo a {vehículo} y recalculé la cotización."
+- intro: máximo dos frases, reconociendo el dato con naturalidad.
 - PROHIBIDO: "gracias por confirmar", "con ese dato se puede continuar", "se puede continuar la actualización".`
     : `
-- intro: una sola frase, "Hola, {nombre}." SIN repetir el saludo del cliente y SIN describir las fotos.
-- technicalExplanation DEBE ser "".
+- intro: máximo dos frases. Puedes abrir con "Hola, {nombre}." y decir el vehículo y el criterio del golpe, sin describir las fotos.
 - PROHIBIDO: "Daños identificados", "Se observa", "Se aprecia", listas de piezas o párrafos periciales.`;
 
   return `
@@ -1179,8 +1176,13 @@ Contrato (no reconstruyas estado desde el historial):
 ${JSON.stringify(llmNarrativeContract(ctx))}
 
 Reglas:
-- El CTA lo puede reescribir el backend. Si escribes cta, SIN precios y SIN volver a ofrecer agendar si ctaType es CONTINUE_APPOINTMENT.
-- PROHIBIDO: $, pesos, MXN, "mil pesos", importes, desglose, serviceType, montos de montaje o refacción.
+- intro: máximo dos frases, sin pregunta. technicalExplanation: "".
+- cta: una sola pregunta, alineada al ctaType del contrato.
+- ASK_MISSING_VEHICLE_DATA: pregunta solo el dato que falta o hay que confirmar.
+- OFFER_APPOINTMENT: invita a agendar la revisión. No pidas marca, modelo ni año.
+- CONTINUE_APPOINTMENT: pide día y hora, o confirma la visita. No vuelvas a ofrecer agendar la cotización.
+- PROHIBIDO: $, pesos, MXN, importes, descuentos, garantías, promociones, impuestos, tiempos de entrega y disponibilidad.
+- PROHIBIDO afirmar un tratamiento incierto como definitivo, o una identidad inferida como confirmada.
 - PROHIBIDO explicar la causa de cotización parcial o mencionar "falta el precio de refacción".
 - PROHIBIDO incluir IDs internos de pieza (Calavera_Derecha, Faro_Izquierdo).
 ${extra}
@@ -1193,6 +1195,199 @@ function ensureHeader(text: string, header: string): string {
   if (!head) return body;
   if (body.includes(head)) return body;
   return [head, body].filter(Boolean).join('\n\n');
+}
+
+const PHOTO_OR_TECH_RE =
+  /ya revisamos|ya analizamos|se observa|se aprecia|da[nñ]os identificados|el da[nñ]o visible|dictamen|fotograf[ií]as|buen[ao]s\s+(?:d[ií]as|tardes|noches)/i;
+const BUREAUCRATIC_RE =
+  /gracias por confirmar|se puede continuar la actualizaci|con ese dato se puede/i;
+const CONFIRMATION_CLAIM_RE =
+  /confirm(?:o|amos|ado|ada)|queda confirmad|definitivamente es|identidad confirmada/i;
+const BRAND_IN_PROSE_RE =
+  /\b(?:nissan|volkswagen|vw|toyota|honda|mazda|ford|chevrolet|kia|hyundai|seat|bmw|audi|mercedes|jeep|dodge|renault|fiat|tesla|byd|suzuki|mitsubishi|subaru|peugeot|ram|jac|geely|changan)\b/i;
+
+function proseSentenceCount(text: string): number {
+  return String(text ?? '')
+    .split(/[.!?]+/)
+    .map((part) => part.trim())
+    .filter(Boolean).length;
+}
+
+function asksVehicleField(
+  text: string,
+  field: 'make' | 'model' | 'year',
+): boolean {
+  if (field === 'year') return /\ba[nñ]o\b/i.test(text);
+  if (field === 'model') return /\bmodelo\b/i.test(text);
+  return /\bmarca\b/i.test(text);
+}
+
+function confirmationValueCovers(
+  text: string,
+  field: 'make' | 'model' | 'year',
+  ctx: ClientQuoteMessageContext,
+): boolean {
+  if (field === 'year' && ctx.vehicleYear && text.includes(ctx.vehicleYear)) return true;
+  if (field === 'model' && ctx.vehicleModel && text.toLowerCase().includes(ctx.vehicleModel.toLowerCase())) {
+    return true;
+  }
+  if (field === 'make' && ctx.vehicleMake && text.toLowerCase().includes(ctx.vehicleMake.toLowerCase())) {
+    return true;
+  }
+  return false;
+}
+
+function claimsDefinitiveUncertainTreatment(
+  text: string,
+  peritaje: CanonicalPeritajeV1 | null | undefined,
+  lines: readonly QuoteLine[],
+): boolean {
+  for (const damage of peritaje?.damages ?? []) {
+    if (damage.treatment !== 'INCIERTO') continue;
+    const pricedAsRepair = lines.some(
+      (item) =>
+        item.damageItemId === damage.damageItemId &&
+        isChargeableQuoteLine(item) &&
+        (item.serviceType === 'REPARACION_PINTURA' ||
+          item.serviceType === 'MONTAJE_PINTURA'),
+    );
+    if (pricedAsRepair) continue;
+    const label = String(damage.pieceLabel ?? '').trim();
+    if (!label) continue;
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const claim = new RegExp(
+      `${escaped}.{0,48}(?:repar|sustitu|definitiv)|(?:repar|sustitu|definitiv).{0,48}${escaped}`,
+      'i',
+    );
+    if (claim.test(text)) return true;
+  }
+  return false;
+}
+
+function contradictsPendingQuote(text: string, quote: CanonicalQuoteV1): boolean {
+  const pendingPart = quote.lines.some(
+    (line) => line.serviceType === 'REFACCION' && !isChargeableQuoteLine(line),
+  );
+  if (
+    pendingPart &&
+    /refacci[oó]n.{0,40}(?:incluida|lista|cotizada)|incluye la refacci[oó]n|ya inclu[ií] la pieza/i.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  return (
+    quote.isPartial === true &&
+    /cotizaci[oó]n (?:final|completa|cerrada)|precio final|todo incluido/i.test(text)
+  );
+}
+
+export function acceptGeneratedIntro(input: {
+  text?: string | null;
+  ctx: ClientQuoteMessageContext;
+  peritaje?: CanonicalPeritajeV1 | null;
+}): boolean {
+  const text = String(input.text ?? '').trim();
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!text || text.length > 320 || words.length < 6) return false;
+  if (proseSentenceCount(text) < 1 || proseSentenceCount(text) > 2) return false;
+  if (/¿/.test(text)) return false;
+  if (!/[.!]/.test(text)) return false;
+  if (extractMonetaryAmounts(text).length > 0) return false;
+  if (llmNarrativeContainsForbiddenCommerce(text)) return false;
+  if (PHOTO_OR_TECH_RE.test(text) || BUREAUCRATIC_RE.test(text)) return false;
+  if (!input.ctx.shouldGreet && /\bhola\b|👋|¡\s*listo/i.test(text)) return false;
+  if (claimsDefinitiveUncertainTreatment(text, input.peritaje, input.ctx.quote.lines)) {
+    return false;
+  }
+  if (contradictsPendingQuote(text, input.ctx.quote)) return false;
+  const vehicle = input.peritaje?.vehicles?.[0];
+  const unsupported =
+    !vehicle ||
+    vehicle.vehicleId === 'veh_unknown' ||
+    UNSUPPORTED_VEHICLE.test(String(vehicle.model ?? vehicle.displayLabel ?? ''));
+  if (unsupported && (BRAND_IN_PROSE_RE.test(text) || /\b(?:19|20)\d{2}\b/.test(text))) {
+    return false;
+  }
+  if (vehicle && vehicle.confirmedByUser !== true && CONFIRMATION_CLAIM_RE.test(text)) {
+    return false;
+  }
+  const knownYear = String(vehicle?.year ?? '').replace(/\D/g, '').slice(0, 4);
+  if (!/^(?:19|20)\d{2}$/.test(knownYear) && /\b(?:19|20)\d{2}\b/.test(text)) {
+    return false;
+  }
+  if (input.ctx.mode === 'APPOINTMENT_FOLLOWUP' && !/\bcita\b|\bvisita\b/i.test(text)) {
+    return false;
+  }
+  if (!mentionsKnownVehicle(text, input.ctx, input.peritaje)) return false;
+  return true;
+}
+
+function mentionsKnownVehicle(
+  text: string,
+  ctx: ClientQuoteMessageContext,
+  peritaje?: CanonicalPeritajeV1 | null,
+): boolean {
+  if (ctx.mode === 'APPOINTMENT_FOLLOWUP') return true;
+  const label = supportedVehicleLine(peritaje);
+  if (!label) return true;
+  const vehicle = peritaje?.vehicles?.[0];
+  const model = String(vehicle?.model ?? '').trim().toLowerCase();
+  const year = String(vehicle?.year ?? '').replace(/\D/g, '').slice(0, 4);
+  const body = text.toLowerCase();
+  if (model && year && body.includes(model) && text.includes(year)) return true;
+  const plainLabel = String(ctx.vehicleLabel ?? '').trim().toLowerCase();
+  return Boolean(plainLabel) && body.includes(plainLabel);
+}
+
+export function acceptGeneratedCta(input: {
+  text?: string | null;
+  ctx: ClientQuoteMessageContext;
+  hasActiveAppointment?: boolean;
+}): boolean {
+  const text = String(input.text ?? '').trim();
+  const { ctx } = input;
+  if (ctx.ctaType === 'NONE') return false;
+  if (!text || text.length > 220) return false;
+  if (proseSentenceCount(text) > 2) return false;
+  if ((text.match(/¿/g) ?? []).length > 1) return false;
+  if (extractMonetaryAmounts(text).length > 0) return false;
+  if (llmNarrativeContainsForbiddenCommerce(text)) return false;
+  if (PHOTO_OR_TECH_RE.test(text)) return false;
+  if (/mapa|ubicaci[oó]n|\bllegar\b/i.test(text)) return false;
+
+  const fields = ['make', 'model', 'year'] as const;
+  if (ctx.ctaType === 'ASK_MISSING_VEHICLE_DATA') {
+    if (!/[¿?]/.test(text)) return false;
+    const missing = new Set(ctx.missingVehicleFields);
+    const confirming = new Set(ctx.confirmationVehicleFields ?? []);
+    for (const field of fields) {
+      const needed = missing.has(field) || confirming.has(field);
+      const covered =
+        asksVehicleField(text, field) ||
+        (confirming.has(field) && confirmationValueCovers(text, field, ctx));
+      if (needed && !covered) return false;
+      if (!needed && asksVehicleField(text, field)) return false;
+    }
+    return missing.size + confirming.size > 0;
+  }
+
+  const asksIdentity = fields.some((field) => asksVehicleField(text, field));
+  if (asksIdentity) return false;
+  if (ctx.ctaType === 'OFFER_APPOINTMENT') {
+    const offers = /agend|valoraci[oó]n|revisi[oó]n en el taller/i.test(text);
+    const continueOnly =
+      /qu[eé] d[ií]a|a qu[eé] hora/i.test(text) && !/agend|valoraci[oó]n/i.test(text);
+    return offers && !continueOnly;
+  }
+  if (ctx.ctaType === 'CONTINUE_APPOINTMENT') {
+    if (/quieres que agendemos|agendemos una valoraci[oó]n/i.test(text)) return false;
+    if (input.hasActiveAppointment) {
+      return /esperamos|visita|cita|d[ií]a acordado/i.test(text);
+    }
+    return /d[ií]a|hora/i.test(text);
+  }
+  return false;
 }
 
 export function assembleModeAwareClientQuoteParts(input: {
@@ -1217,6 +1412,8 @@ export function assembleModeAwareClientQuoteParts(input: {
   technicalExplanationRendered: boolean;
   postFilterInterventionsCount: number;
   preFilterClean: boolean;
+  introSource: 'model' | 'fallback';
+  ctaSource: 'model' | 'fallback';
 } {
   const { ctx } = input;
   const warnings = presentClientWarnings(ctx.warnings);
@@ -1239,40 +1436,58 @@ export function assembleModeAwareClientQuoteParts(input: {
     deltaRendered = true;
   }
 
-  const cta = renderDeterministicCta({
+  const deterministicCta = renderDeterministicCta({
     ctx,
     hasActiveAppointment: input.hasActiveAppointment,
     appointmentFormatted: input.appointmentFormatted,
     mapsUrl: ctx.shouldShareLocation ? input.mapsUrl : '',
   });
+  const ctaAccepted = acceptGeneratedCta({
+    text: input.llmCta,
+    ctx,
+    hasActiveAppointment: input.hasActiveAppointment,
+  });
+  let cta = ctaAccepted ? String(input.llmCta ?? '').trim() : deterministicCta;
+  if (
+    ctaAccepted &&
+    ctx.ctaType === 'OFFER_APPOINTMENT' &&
+    ctx.shouldShareLocation &&
+    input.mapsUrl &&
+    !cta.includes(input.mapsUrl)
+  ) {
+    cta = `📍 Estamos aquí, fácil de llegar: ${input.mapsUrl}\n\n${cta}`;
+  }
+  const ctaSource: 'model' | 'fallback' = ctaAccepted ? 'model' : 'fallback';
 
-  const deltaMode = ctx.presentation === 'DELTA';
-  let intro = String(input.llmIntro ?? '').trim();
-  let technicalExplanation = String(input.llmTechnicalExplanation ?? '').trim();
-
-  if (ctx.mode === 'APPOINTMENT_FOLLOWUP') {
+  const compactQuote =
+    ctx.presentation === 'FULL' &&
+    (ctx.mode === 'INITIAL_QUOTE' || ctx.mode === 'QUOTE_FULL_REFRESH');
+  const candidateIntro = String(input.llmIntro ?? '').trim();
+  let introAccepted = acceptGeneratedIntro({
+    text: candidateIntro,
+    ctx,
+    peritaje: input.peritaje,
+  });
+  let intro = '';
+  let introSource: 'model' | 'fallback' = 'fallback';
+  if (introAccepted) {
+    intro = candidateIntro;
+    introSource = 'model';
+  } else if (ctx.mode === 'APPOINTMENT_FOLLOWUP') {
     intro = 'Perfecto, seguimos con tu cita.';
-    technicalExplanation = '';
+  } else if (compactQuote) {
+    const vehicle = supportedVehicleLine(input.peritaje);
+    const greeting = ctx.shouldGreet ? briefGreeting(ctx.customerName) : '';
+    intro = [greeting, vehicle ? `*${vehicle}*` : ''].filter(Boolean).join('\n\n');
+  } else {
+    intro = deterministicAcknowledge(ctx);
+  }
+
+  let technicalExplanation = '';
+  if (ctx.mode === 'APPOINTMENT_FOLLOWUP') {
     financialBlock = '';
     fullQuoteRendered = false;
     deltaRendered = false;
-  } else if (deltaMode) {
-    const llm = intro;
-    intro = isCleanLlmTransitionPhrase(llm) ? llm : '';
-    technicalExplanation = '';
-  }
-
-  if (ctx.technicalExplanation === 'omitted') {
-    technicalExplanation = '';
-  }
-
-  if (!intro) {
-    intro = ctx.shouldGreet
-      ? deterministicInitialIntro(ctx, input.damageIntro)
-      : deterministicAcknowledge(ctx);
-  } else if (deltaMode && ctx.vehicleLabel && !intro.includes(ctx.vehicleLabel)) {
-    const ack = deterministicAcknowledge(ctx);
-    if (ack) intro = `${ack}\n\n${intro}`.trim();
   }
 
   const introBeforeFilter = intro;
@@ -1280,6 +1495,8 @@ export function assembleModeAwareClientQuoteParts(input: {
     const filtered = applyClientMessagePostFilter(intro, ctx.mode);
     if (filtered.intervened) {
       postFilterInterventionsCount += 1;
+      introSource = 'fallback';
+      introAccepted = false;
       traceClientMessagePostFilterIntervention({
         quoteId: ctx.quote.quoteId,
         mode: ctx.mode,
@@ -1287,6 +1504,8 @@ export function assembleModeAwareClientQuoteParts(input: {
     }
     intro = filtered.text;
     if (!intro) {
+      introSource = 'fallback';
+      introAccepted = false;
       intro =
         ctx.mode === 'APPOINTMENT_FOLLOWUP'
           ? 'Perfecto, seguimos con tu cita.'
@@ -1311,16 +1530,9 @@ export function assembleModeAwareClientQuoteParts(input: {
     normalizeForFilterCompare(introBeforeFilter) ===
       normalizeForFilterCompare(intro);
 
-  const compactQuote =
-    ctx.presentation === 'FULL' &&
-    (ctx.mode === 'INITIAL_QUOTE' || ctx.mode === 'QUOTE_FULL_REFRESH');
-
   let warningsBlock = warnings.text;
   let warningsRenderedCount = warnings.warningsRenderedCount;
   if (compactQuote) {
-    const vehicle = supportedVehicleLine(input.peritaje);
-    const greeting = ctx.shouldGreet ? briefGreeting(ctx.customerName) : '';
-    intro = [greeting, vehicle ? `*${vehicle}*` : ''].filter(Boolean).join('\n\n');
     technicalExplanation = '';
     const uncertainty = uncertainTreatmentNote(input.peritaje, ctx.quote.lines);
     if (uncertainty) {
@@ -1329,7 +1541,7 @@ export function assembleModeAwareClientQuoteParts(input: {
         : `⚠️ ${uncertainty}`;
       if (!warnings.text) warningsRenderedCount = 1;
     }
-  } else {
+  } else if (!introAccepted) {
     intro = ensureHeader(intro, modeHeader(ctx.mode));
     if (ctx.presentation === 'FULL') {
       const damages = renderIdentifiedDamages(input.peritaje, ctx.quote);
@@ -1364,6 +1576,8 @@ export function assembleModeAwareClientQuoteParts(input: {
       ctx.presentation === 'FULL',
     postFilterInterventionsCount,
     preFilterClean,
+    introSource,
+    ctaSource,
   };
 }
 
@@ -1418,17 +1632,6 @@ function uncertainTreatmentNote(
       ? labels[0]!
       : `${labels.slice(0, -1).join(', ')} y ${labels[labels.length - 1]}`;
   return `El tratamiento de ${list} queda por confirmar en revisión.`;
-}
-
-function deterministicInitialIntro(
-  ctx: ClientQuoteMessageContext,
-  damageIntro?: string,
-): string {
-  const name = ctx.customerName || 'Estimado cliente';
-  const vehicle = ctx.vehicleLabel ? ` de tu ${ctx.vehicleLabel}` : '';
-  const fallback = `Ya revisamos las fotos${vehicle} y preparamos una valoración inicial.`;
-  const intro = String(damageIntro ?? '').trim() || fallback;
-  return `Hola, ${name}. ${intro}`.replace(/\s+/g, ' ').trim();
 }
 
 export function traceClientMessageRendered(input: {

@@ -55,6 +55,8 @@ export type ComposedClientQuote = {
   deltaRendered?: boolean;
   postFilterInterventionsCount?: number;
   preFilterClean?: boolean;
+  introSource?: 'model' | 'fallback';
+  ctaSource?: 'model' | 'fallback';
 };
 
 export type ModernComposeInput = {
@@ -94,7 +96,7 @@ Reglas:
 - PROHIBIDO explicar la causa de cotización parcial o mencionar "falta el precio de refacción". El bloque financiero ya declara la razón.
 - Puedes mencionar piezas pendientes de revisión (desalineación o posible involucramiento) sin importes. PROHIBIDO presentarlas como cargo confirmado.
 - PROHIBIDO incluir IDs de plataforma o códigos internos de pieza.
-- Puedes mencionar el año del vehículo, una hora de cita o "garantía de 1 año" si aplica; eso no es un importe.
+- PROHIBIDO prometer garantías, descuentos, promociones, tiempos de entrega o disponibilidad.
 `.trim();
 
 function buildCanonicalNarrativeSystemPrompt(
@@ -361,6 +363,8 @@ export async function composeModernClientQuoteMessage(
         deltaRendered: packed.deltaRendered,
         postFilterInterventionsCount: packed.postFilterInterventionsCount,
         preFilterClean: packed.preFilterClean,
+        introSource: 'fallback',
+        ctaSource: 'fallback',
       } satisfies ComposedClientQuote,
       reason !== 'reconciliation_failed',
     );
@@ -440,6 +444,8 @@ export async function composeModernClientQuoteMessage(
       deltaRendered: packed.deltaRendered,
       postFilterInterventionsCount: packed.postFilterInterventionsCount,
       preFilterClean: packed.preFilterClean,
+      introSource: packed.introSource,
+      ctaSource: packed.ctaSource,
     },
     true,
   );
