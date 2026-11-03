@@ -3,6 +3,7 @@ import type { DraftQuote } from './autofix-config';
 import type { DetectedDamageItem, VehicleDamageAnalysis } from './entities/chat.entity';
 import type { DraftQuoteEntity } from './entities/draft-quote.entity';
 import { canonicalPhysicalPanelKey } from './piece-treatment';
+import type { DeclaredVehicleIdentity } from '../domain/peritaje-v1/declared-vehicle-identity';
 import {
   collectSingleVehicleIdentityMismatches,
   compareLegacyVsCanonical,
@@ -37,6 +38,7 @@ export type VisionShadowInput = {
   analysis?: Pick<VehicleDamageAnalysis, 'vehiculoDetectado' | 'quoteCartMeta'>;
   visionVehicleLabel?: string | null;
   userConfirmedVehicleLabel?: string | null;
+  declaredVehicle?: DeclaredVehicleIdentity | null;
   viability?: {
     peritajeViable?: boolean;
     motivoInviable?: string;
@@ -81,6 +83,7 @@ export function buildVisionShadowSafe(
         input.existingCart?.damageAnalysis?.vehiculoDetectado,
       cartVehicleSource: cartProfile?.tierSource,
       userConfirmedVehicleLabel: input.userConfirmedVehicleLabel,
+      declaredVehicle: input.declaredVehicle,
       pricingProfileLabel: cartProfile?.vehicleLabel,
       replaceInventory: isBanioPinturaCompletoVisionInventory(
         input.incomingInventory,

@@ -171,7 +171,10 @@ import {
   stampPendingRequirementsAfterQuote,
   attachPendingRequirementsToDraft,
 } from './resume-pending-quote-pricing';
-import { vehicleHasRefaccionIdentity } from '../domain/peritaje-v1/pending-quote-requirement';
+import {
+  refaccionIdentityGaps,
+  vehicleHasRefaccionIdentity,
+} from '../domain/peritaje-v1/pending-quote-requirement';
 import { formatPendingCanonicalRequirementsContext } from '../domain/peritaje-v1';
 import {
   applyXorTreatmentsToInventory,
@@ -234,6 +237,11 @@ import type {
   CanonicalPeritajeV1,
   CanonicalQuoteV1,
 } from '../domain/peritaje-v1';
+import {
+  applyDeclaredVehicleIdentity,
+  extractLatestDeclaredVehicleIdentity,
+  type DeclaredVehicleIdentity,
+} from '../domain/peritaje-v1/declared-vehicle-identity';
 import { detectCartPricingMode } from './quote-cart-inventory-mode';
 import {
   matchAdButtonAutoReply,
@@ -1866,15 +1874,24 @@ export class ChatService implements OnModuleDestroy {
         ...(evt.buttonPayload ? { buttonPayload: evt.buttonPayload } : {}),
       };
       if (evt.text) {
-        const saved = await this.saveMessage({
-          ...base,
-          message: evt.text,
-          ...(evt.messageId ? { metaMessageId: evt.messageId } : {}),
-        });
-        lastMessageId = saved.id;
-        processed += 1;
+        if (evt.messageId && (await this.findMessageByMetaMid(evt.messageId))) {
+          logWebhookDuplicate('wamid', evt.messageId);
+        } else {
+          const saved = await this.saveMessage({
+            ...base,
+            message: evt.text,
+            ...(evt.messageId ? { metaMessageId: evt.messageId } : {}),
+          });
+          lastMessageId = saved.id;
+          processed += 1;
+        }
       }
       if (!evt.mediaId) continue;
+      const imageMid = evt.messageId ? `${evt.messageId}:img:0` : '';
+      if (imageMid && (await this.findMessageByMetaMid(imageMid))) {
+        logWebhookDuplicate('wamid', imageMid);
+        continue;
+      }
       const media = await downloadStagingWhatsAppMedia(
         evt.mediaId,
         sandbox.config,
@@ -5997,10 +6014,15 @@ ${catalogAppend}`;
           const attachingMessageId =
             images[images.length - 1]?.messageId || images[0]!.messageId;
           const burst = images.map((it) => it.content);
+          const texts = input.items
+            .filter((it) => it.kind === 'text' && !isIncomingImage(it.content))
+            .map((it) => String(it.content ?? '').trim())
+            .filter(Boolean);
           await this.processConsolidatedInboundImages(
             conversationId,
             attachingMessageId,
             burst,
+            texts,
           );
         } else {
           await this.processDebouncedAutopilotTextReply(conversationId);
@@ -6026,6 +6048,7 @@ ${catalogAppend}`;
     conversationId: string,
     attachingMessageId: string,
     burstUrls: readonly string[],
+    burstTexts: readonly string[] = [],
   ): Promise<void> {
     this.consolidatedVisionInFlight.add(conversationId);
     try {
@@ -6033,6 +6056,7 @@ ${catalogAppend}`;
         conversationId,
         attachingMessageId,
         burstUrls,
+        burstTexts,
       );
     } finally {
       this.consolidatedVisionInFlight.delete(conversationId);
@@ -6043,6 +6067,7 @@ ${catalogAppend}`;
     conversationId: string,
     attachingMessageId: string,
     burstUrls: readonly string[],
+    burstTexts: readonly string[] = [],
   ): Promise<void> {
     const fromBurst = [
       ...new Set(
@@ -6195,6 +6220,10 @@ ${catalogAppend}`;
       }
     }
 
+    const declaredVehicle = await this.declaredVehicleForTurn(
+      conversationId,
+      burstTexts,
+    );
     const shadowPeritaje = buildVisionShadowSafe({
       conversationId,
       tallerId: visionTallerId,
@@ -6204,6 +6233,7 @@ ${catalogAppend}`;
       existingCart,
       analysis: analysisForQuote,
       visionVehicleLabel: visionResult.vehiculoDetectado,
+      declaredVehicle,
       viability: visionResult.viability,
     });
     analysisForQuote = stampAnalysisFromCanonicalPeritaje(
@@ -8254,6 +8284,87 @@ ${catalogAppend}`;
     this.dispatchOutboundChannelMessage(conversation, text, false);
   }
 
+  private async declaredVehicleForTurn(
+    conversationId: string,
+    burstTexts: readonly string[],
+  ): Promise<DeclaredVehicleIdentity | null> {
+    const rows = await this.messageRepository.find({
+      where: { conversationId, direction: 'inbound' },
+      order: { createdAt: 'DESC' },
+      take: 12,
+    });
+    const stored = rows
+      .map((row) => String(row.content ?? '').trim())
+      .filter((content) => content.length > 0 && !content.startsWith('data:'));
+    const texts = stored.reverse();
+    for (const text of burstTexts) {
+      const clean = String(text ?? '').trim();
+      if (clean && !texts.includes(clean)) texts.push(clean);
+    }
+    return extractLatestDeclaredVehicleIdentity(texts);
+  }
+
+  private async persistDeclaredVehicleTurn(
+    conversation: Conversation,
+    declared: DeclaredVehicleIdentity,
+  ): Promise<void> {
+    const complete = (['make', 'model', 'year'] as const).every((field) =>
+      declared.declaredFields.includes(field),
+    );
+    if (complete || (declared.correctsYear && declared.year)) {
+      await this.executeConfirmVehicleIdentityTool(
+        JSON.stringify(
+          complete
+            ? {
+                make: declared.make,
+                model: declared.model,
+                year: declared.year,
+              }
+            : { year: declared.year },
+        ),
+        conversation,
+      );
+      return;
+    }
+    const cart = await this.quoteCartService.resolveActiveCart(
+      conversation.id,
+      conversation.tallerId,
+    );
+    const peritaje = cart?.canonicalPeritajeV1;
+    const vehicle =
+      peritaje?.vehicles?.find((item) => item.vehicleId !== 'veh_unknown') ??
+      peritaje?.vehicles?.[0];
+    if (!cart || !peritaje || !vehicle) return;
+    const next = applyDeclaredVehicleIdentity(vehicle, declared);
+    cart.canonicalPeritajeV1 = {
+      ...peritaje,
+      vehicles: peritaje.vehicles.map((item) =>
+        item.vehicleId === vehicle.vehicleId ? next : item,
+      ),
+      updatedAt: new Date().toISOString(),
+    };
+    const gaps = refaccionIdentityGaps(next);
+    const pending = cart.quotePayload?.pendingRequirements;
+    if (cart.quotePayload && Array.isArray(pending)) {
+      cart.quotePayload = {
+        ...cart.quotePayload,
+        pendingRequirements: pending.map((req) =>
+          req.status === 'OPEN' &&
+          req.type === 'VEHICLE_DATA' &&
+          req.vehicleId === next.vehicleId
+            ? {
+                ...req,
+                missingFields: gaps.missingFields,
+                confirmationFields: gaps.confirmationFields,
+                requiredFields: gaps.requiredFields,
+              }
+            : req,
+        ),
+      };
+    }
+    await this.draftQuoteRepository.save(cart);
+  }
+
   private async processDebouncedAutopilotTextReply(
     conversationId: string,
   ): Promise<void> {
@@ -8277,6 +8388,11 @@ ${catalogAppend}`;
       const anchor = batch[batch.length - 1]!;
       await this.sendAdButtonAutoReply(anchor, conv, adButtonBatchHit);
       return;
+    }
+
+    const declared = extractLatestDeclaredVehicleIdentity(batchTexts);
+    if (declared) {
+      await this.persistDeclaredVehicleTurn(conv, declared);
     }
 
     const mergedText = batchTexts.join('\n\n');

@@ -17,6 +17,10 @@ import {
   singleNonUnknownVehicle,
 } from './vehicle-identity-enrich';
 import {
+  applyDeclaredVehicleIdentity,
+  type DeclaredVehicleIdentity,
+} from './declared-vehicle-identity';
+import {
   resolveVisionBurstVehiclePolicy,
   stampDamagesOntoVehicle,
 } from './case-vehicle-identity';
@@ -389,6 +393,7 @@ export function buildVisionCanonicalShadow(input: {
   cartVehicleLabel?: string | null;
   cartVehicleSource?: string | null;
   userConfirmedVehicleLabel?: string | null;
+  declaredVehicle?: DeclaredVehicleIdentity | null;
   pricingProfileLabel?: string | null;
   replaceInventory?: boolean;
   /** true solo con evidencia real de 2+ vehículos (express/carrito multi). */
@@ -420,12 +425,27 @@ export function buildVisionCanonicalShadow(input: {
     explicitMultiVehicle: input.explicitMultiVehicle === true,
   });
   const priorVehicle = singleNonUnknownVehicle(input.priorCanonical?.vehicles);
-  const rootVehicle =
-    burstPolicy.mode === 'SINGLE' && burstPolicy.canonical
-      ? burstPolicy.canonical
-      : priorVehicle
-        ? reusePriorVehicleIdentity(priorVehicle, computedRoot)
-        : computedRoot;
+  const declaredModel = (priorVehicle?.confirmedFields ?? []).some(
+    (field) => String(field).toLowerCase() === 'model',
+  );
+  const visionMakeConflicts =
+    declaredModel &&
+    priorVehicle?.make &&
+    computedRoot.make &&
+    priorVehicle.make.toLowerCase() !== computedRoot.make.toLowerCase();
+  const incomingRoot = visionMakeConflicts
+    ? {
+        ...computedRoot,
+        make: priorVehicle.make,
+        displayLabel: priorVehicle.displayLabel,
+      }
+    : computedRoot;
+  let rootVehicle = priorVehicle
+    ? reusePriorVehicleIdentity(priorVehicle, incomingRoot)
+    : computedRoot;
+  if (input.declaredVehicle) {
+    rootVehicle = applyDeclaredVehicleIdentity(rootVehicle, input.declaredVehicle);
+  }
 
   const adapt = (
     items: readonly LegacyDetectedDamageShape[],

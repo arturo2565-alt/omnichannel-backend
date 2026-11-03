@@ -197,22 +197,29 @@ export function derivePartialQuoteReasons(
           (v) => v.vehicleId === line.vehicleId,
         );
         const gaps = refaccionIdentityGaps(vehicle);
-        const needsModel =
-          gaps.confirmationFields.includes('model') ||
-          gaps.missingFields.includes('model');
-        const needsYear =
-          gaps.missingFields.includes('year') ||
-          gaps.confirmationFields.includes('year');
+        const knownLabel = [vehicle?.make, vehicle?.model, vehicle?.year]
+          .map((part) => String(part ?? '').trim())
+          .filter(Boolean)
+          .join(' ');
+        const missingMake = gaps.missingFields.includes('make');
+        const missingModel = gaps.missingFields.includes('model');
+        const missingYear = gaps.missingFields.includes('year');
         const text =
-          needsModel && needsYear
-            ? 'Para cotizar la refacción hay que confirmar modelo y año del vehículo.'
-            : needsModel
-              ? 'Para cotizar la refacción hay que confirmar el modelo del vehículo.'
-              : needsYear &&
-                  !gaps.confirmationFields.includes('make') &&
-                  !gaps.confirmationFields.includes('model')
+          missingModel && missingYear
+            ? 'Para cotizar la refacción faltan el modelo y el año del vehículo.'
+            : missingModel
+              ? 'Para cotizar la refacción falta el modelo del vehículo.'
+              : missingYear
                 ? 'Para cotizar la refacción falta el año del vehículo.'
-                : 'Para cotizar la refacción hay que confirmar la identidad del vehículo.';
+                : missingMake
+                  ? 'Para cotizar la refacción falta la marca del vehículo.'
+                  : gaps.confirmationFields.length === 1 &&
+                      gaps.confirmationFields[0] === 'make' &&
+                      vehicle?.make
+                    ? `Para cotizar la refacción hay que confirmar si la marca es ${vehicle.make}.`
+                    : knownLabel
+                      ? `Para cotizar la refacción hay que confirmar si el vehículo es ${knownLabel}.`
+                      : 'Para cotizar la refacción hay que confirmar la identidad del vehículo.';
         push(PARTIAL_QUOTE_REASON.AWAITING_VEHICLE_DATA, text);
         continue;
       }

@@ -749,6 +749,11 @@ describe('staging sandbox', () => {
     ).resolves.toEqual({ processed: 2, lastMessageId: 'row-2' });
 
     expect(saved.map((row) => row.message)).toEqual(['golpe en la fascia', dataUrl]);
+
+    await expect(
+      service.ingestWebhookPayload(imageBody({ caption: 'golpe en la fascia' })),
+    ).resolves.toEqual({ processed: 0 });
+    expect(saved).toHaveLength(2);
     expect(saved.every((row) => row.direction === 'inbound')).toBe(true);
     expect(mediaLogs(info)).toEqual([{ event: 'media_download', result: 'success' }]);
     expect(JSON.stringify(mediaLogs(info))).not.toContain('data:image');

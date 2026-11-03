@@ -93,6 +93,9 @@ export type ClientQuoteMessageContext = {
   mode: ClientMessageMode;
   shouldGreet: boolean;
   vehicleLabel: string;
+  vehicleMake?: string;
+  vehicleModel?: string;
+  vehicleYear?: string;
   customerName: string;
   quote: CanonicalQuoteV1;
   quoteDelta: QuoteDelta;
@@ -103,6 +106,7 @@ export type ClientQuoteMessageContext = {
   technicalExplanation: TechnicalExplanationPolicy;
   shouldShareLocation: boolean;
   missingVehicleFields: string[];
+  confirmationVehicleFields?: string[];
 };
 
 export type ResolveClientMessageModeInput = {
@@ -487,24 +491,45 @@ export function resolveCtaType(input: {
   peritaje?: CanonicalPeritajeV1 | null;
   hasActiveAppointment?: boolean;
   appointmentIntent?: boolean;
-}): { ctaType: CtaType; missingVehicleFields: string[] } {
+}): {
+  ctaType: CtaType;
+  missingVehicleFields: string[];
+  confirmationVehicleFields: string[];
+} {
   const vehicle = input.peritaje?.vehicles?.[0];
   const gaps = refaccionIdentityGaps(vehicle);
   const awaiting = (input.quote.warnings ?? []).includes('AWAITING_VEHICLE_DATA');
-  const missingVehicleFields = awaiting
-    ? [...new Set([...gaps.missingFields, ...gaps.confirmationFields])]
-    : [];
+  const missingVehicleFields = awaiting ? [...gaps.missingFields] : [];
+  const confirmationVehicleFields = awaiting ? [...gaps.confirmationFields] : [];
+  const identityGap =
+    missingVehicleFields.length > 0 || confirmationVehicleFields.length > 0;
 
   if (input.mode === 'APPOINTMENT_FOLLOWUP' || input.hasActiveAppointment) {
-    return { ctaType: 'CONTINUE_APPOINTMENT', missingVehicleFields };
+    return {
+      ctaType: 'CONTINUE_APPOINTMENT',
+      missingVehicleFields,
+      confirmationVehicleFields,
+    };
   }
-  if (input.quote.isPartial && awaiting && missingVehicleFields.length) {
-    return { ctaType: 'ASK_MISSING_VEHICLE_DATA', missingVehicleFields };
+  if (input.quote.isPartial && awaiting && identityGap) {
+    return {
+      ctaType: 'ASK_MISSING_VEHICLE_DATA',
+      missingVehicleFields,
+      confirmationVehicleFields,
+    };
   }
   if (input.appointmentIntent && !input.quote.isPartial) {
-    return { ctaType: 'CONTINUE_APPOINTMENT', missingVehicleFields };
+    return {
+      ctaType: 'CONTINUE_APPOINTMENT',
+      missingVehicleFields,
+      confirmationVehicleFields,
+    };
   }
-  return { ctaType: 'OFFER_APPOINTMENT', missingVehicleFields };
+  return {
+    ctaType: 'OFFER_APPOINTMENT',
+    missingVehicleFields,
+    confirmationVehicleFields,
+  };
 }
 
 export function resolveClientMessageMode(
@@ -649,6 +674,9 @@ export function resolveClientMessageUx(
     reason: resolved.reason,
     shouldGreet,
     vehicleLabel,
+    vehicleMake: String(input.peritaje?.vehicles?.[0]?.make ?? '').trim(),
+    vehicleModel: String(input.peritaje?.vehicles?.[0]?.model ?? '').trim(),
+    vehicleYear: String(input.peritaje?.vehicles?.[0]?.year ?? '').trim(),
     customerName: String(input.contactName ?? '').trim(),
     quote: input.quote,
     quoteDelta: delta,
@@ -664,6 +692,7 @@ export function resolveClientMessageUx(
     ),
     shouldShareLocation,
     missingVehicleFields: cta.missingVehicleFields,
+    confirmationVehicleFields: cta.confirmationVehicleFields,
     presentation,
     requiredQuoteLineIds,
   };
@@ -1045,6 +1074,26 @@ export function renderDeterministicCta(input: {
     }
     if (fields.includes('model')) {
       return '¿Me confirmas el *modelo* de tu vehículo para completar la refacción?';
+    }
+    if (fields.includes('make')) {
+      return '¿Me confirmas la *marca* de tu vehículo para completar la refacción?';
+    }
+    const pending = ctx.confirmationVehicleFields ?? [];
+    if (pending.length === 1 && pending[0] === 'make' && ctx.vehicleMake) {
+      return `¿Confirmas que la marca es *${ctx.vehicleMake}*?`;
+    }
+    if (pending.length === 1 && pending[0] === 'model' && ctx.vehicleModel) {
+      return `¿Confirmas que el modelo es *${ctx.vehicleModel}*?`;
+    }
+    if (pending.length === 1 && pending[0] === 'year' && ctx.vehicleYear) {
+      return `¿Confirmas que el año es *${ctx.vehicleYear}*?`;
+    }
+    const known = [ctx.vehicleMake, ctx.vehicleModel, ctx.vehicleYear]
+      .map((part) => String(part ?? '').trim())
+      .filter(Boolean)
+      .join(' ') || String(ctx.vehicleLabel ?? '').trim();
+    if (pending.length && known) {
+      return `¿Confirmas que es un *${known}*?`;
     }
     return '¿Me confirmas marca, modelo y año para completar la refacción?';
   }
