@@ -50,8 +50,12 @@ export function compareConversationUxCheck(
       push(failures, 'WRONG_MODE', actual.mode !== 'INITIAL_QUOTE');
       push(failures, 'MISSING_GREETING', actual.shouldGreet !== true);
       push(failures, 'FULL_QUOTE_UNEXPECTED', actual.fullQuoteRendered !== true);
-      push(failures, 'TECHNICAL_REPEAT', actual.technicalExplanationRendered !== true);
-      push(failures, 'MISSING_REQUIRED_COPY', !/cotizaci[oó]n preliminar/i.test(msg));
+      push(
+        failures,
+        'TECHNICAL_REPEAT',
+        actual.technicalExplanationRendered !== false || TECH_REPEAT_RE.test(msg),
+      );
+      push(failures, 'MISSING_REQUIRED_COPY', !GREETING_RE.test(msg));
       commonFinancial(actual, failures);
       break;
     }
