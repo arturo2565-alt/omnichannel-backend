@@ -102,7 +102,7 @@ export const CANONICAL_WARNING_COPY: Record<string, string> = {
 
 /** Copy comprimido de presentación. No altera CanonicalQuote.warnings. */
 export const PRESENTATION_HIDDEN_DAMAGE_COPY =
-  'Pueden existir daños internos o fijaciones comprometidas que solo podrán confirmarse al desmontar y revisar físicamente el vehículo.';
+  'Pueden existir daños internos; se confirman al desmontar.';
 
 export const PRESENTATION_PENDING_CONCEPTS_COPY =
   'Los conceptos pendientes no están incluidos en el subtotal.';

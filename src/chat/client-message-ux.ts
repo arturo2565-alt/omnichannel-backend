@@ -1166,8 +1166,9 @@ export function buildModeAwareNarrativeAppendix(
 - Preferido corrección: "Perfecto, {nombre}. Corregí el vehículo a {vehículo} y recalculé la cotización."
 - PROHIBIDO: "gracias por confirmar", "con ese dato se puede continuar", "se puede continuar la actualización".`
     : `
-- intro: saludo breve y contexto. Máximo 1–2 párrafos cortos. SIN precios.
-- technicalExplanation: breve, no financiera. PROHIBIDO listar líneas de cotización.`;
+- intro: una sola frase, "Hola, {nombre}." SIN repetir el saludo del cliente y SIN describir las fotos.
+- technicalExplanation DEBE ser "".
+- PROHIBIDO: "Daños identificados", "Se observa", "Se aprecia", listas de piezas o párrafos periciales.`;
 
   return `
 [Tarea: partes narrativas de cotización — SIN autoridad financiera]
@@ -1310,31 +1311,50 @@ export function assembleModeAwareClientQuoteParts(input: {
     normalizeForFilterCompare(introBeforeFilter) ===
       normalizeForFilterCompare(intro);
 
-  intro = ensureHeader(intro, modeHeader(ctx.mode));
+  const compactQuote =
+    ctx.presentation === 'FULL' &&
+    (ctx.mode === 'INITIAL_QUOTE' || ctx.mode === 'QUOTE_FULL_REFRESH');
 
-  if (ctx.presentation === 'FULL') {
-    const damages = renderIdentifiedDamages(input.peritaje, ctx.quote);
-    const estimateLabel = '💰 *Estimación*';
-    technicalExplanation = [damages, technicalExplanation, estimateLabel]
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .join('\n\n');
+  let warningsBlock = warnings.text;
+  let warningsRenderedCount = warnings.warningsRenderedCount;
+  if (compactQuote) {
+    const vehicle = supportedVehicleLine(input.peritaje);
+    const greeting = ctx.shouldGreet ? briefGreeting(ctx.customerName) : '';
+    intro = [greeting, vehicle ? `*${vehicle}*` : ''].filter(Boolean).join('\n\n');
+    technicalExplanation = '';
+    const uncertainty = uncertainTreatmentNote(input.peritaje, ctx.quote.lines);
+    if (uncertainty) {
+      warningsBlock = warningsBlock
+        ? `${warningsBlock} ${uncertainty}`
+        : `⚠️ ${uncertainty}`;
+      if (!warnings.text) warningsRenderedCount = 1;
+    }
+  } else {
+    intro = ensureHeader(intro, modeHeader(ctx.mode));
+    if (ctx.presentation === 'FULL') {
+      const damages = renderIdentifiedDamages(input.peritaje, ctx.quote);
+      const estimateLabel = '💰 *Estimación*';
+      technicalExplanation = [damages, technicalExplanation, estimateLabel]
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .join('\n\n');
+    }
   }
 
   const parts: ClientQuoteMessage = {
     intro,
     technicalExplanation,
     financialBlock,
-    warningsBlock: warnings.text,
+    warningsBlock,
     cta,
   };
 
   return {
     parts,
     financialBlock,
-    warningsBlock: warnings.text,
+    warningsBlock,
     shownWarnings: warnings.shownWarnings,
-    warningsRenderedCount: warnings.warningsRenderedCount,
+    warningsRenderedCount,
     fullQuoteRendered,
     deltaRendered,
     greetingRendered: ctx.shouldGreet && /\bhola\b|👋|¡\s*listo/i.test(parts.intro),
@@ -1345,6 +1365,59 @@ export function assembleModeAwareClientQuoteParts(input: {
     postFilterInterventionsCount,
     preFilterClean,
   };
+}
+
+const UNSUPPORTED_VEHICLE =
+  /no identificado|desconocido|unknown|^(veh[ií]culo|auto|coche|carro)$/i;
+
+function briefGreeting(name: string): string {
+  const clean = String(name ?? '').trim();
+  if (!clean || /estimado cliente/i.test(clean)) return 'Hola.';
+  return `Hola, ${clean}.`;
+}
+
+function supportedVehicleLine(
+  peritaje?: CanonicalPeritajeV1 | null,
+): string {
+  const vehicle = (peritaje?.vehicles ?? []).find(
+    (item) => item.vehicleId && item.vehicleId !== 'veh_unknown',
+  );
+  if (!vehicle) return '';
+  const model = String(vehicle.model ?? '').trim();
+  const year = String(vehicle.year ?? '').replace(/\D/g, '').slice(0, 4);
+  if (!model || UNSUPPORTED_VEHICLE.test(model) || !/^(?:19|20)\d{2}$/.test(year)) {
+    return '';
+  }
+  const make = String(vehicle.make ?? '').trim();
+  const label = [make, model, year].filter(Boolean).join(' ');
+  if (!label || UNSUPPORTED_VEHICLE.test(label)) return '';
+  return label;
+}
+
+function uncertainTreatmentNote(
+  peritaje: CanonicalPeritajeV1 | null | undefined,
+  lines: readonly QuoteLine[],
+): string {
+  const labels = (peritaje?.damages ?? [])
+    .filter((damage) => damage.treatment === 'INCIERTO')
+    .filter((damage) => {
+      const pricedAsRepair = lines.some(
+        (item) =>
+          item.damageItemId === damage.damageItemId &&
+          isChargeableQuoteLine(item) &&
+          (item.serviceType === 'REPARACION_PINTURA' ||
+            item.serviceType === 'MONTAJE_PINTURA'),
+      );
+      return !pricedAsRepair;
+    })
+    .map((damage) => String(damage.pieceLabel ?? '').trim())
+    .filter(Boolean);
+  if (!labels.length) return '';
+  const list =
+    labels.length === 1
+      ? labels[0]!
+      : `${labels.slice(0, -1).join(', ')} y ${labels[labels.length - 1]}`;
+  return `El tratamiento de ${list} queda por confirmar en revisión.`;
 }
 
 function deterministicInitialIntro(

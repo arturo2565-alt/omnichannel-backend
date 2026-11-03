@@ -144,7 +144,10 @@ export async function composeCanonicalLlmNarrativeParts(
 ): Promise<LlmNarrativeParts> {
   const omitVisualDump =
     input.ux &&
-    (input.ux.technicalExplanation === 'omitted' || !input.ux.shouldGreet);
+    (input.ux.technicalExplanation === 'omitted' ||
+      !input.ux.shouldGreet ||
+      input.ux.mode === 'INITIAL_QUOTE' ||
+      input.ux.mode === 'QUOTE_FULL_REFRESH');
   const payload = {
     reportePericial: omitVisualDump
       ? {

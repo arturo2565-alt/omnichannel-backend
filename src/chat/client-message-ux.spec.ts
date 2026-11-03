@@ -232,8 +232,11 @@ describe('Conversation UX / Client Message Composer v2', () => {
     });
     expect(composed.mode).toBe('INITIAL_QUOTE');
     expect(composed.shouldGreet).toBe(true);
-    expect(composed.finalMessage).toMatch(/Cotización preliminar/);
-    expect(composed.finalMessage).toMatch(/ya revisamos las fotografías/i);
+    expect(composed.finalMessage).toMatch(/^Hola, Arturo\./);
+    expect(composed.finalMessage).toContain('*Nissan Altima 2014*');
+    expect(composed.finalMessage).not.toMatch(/Cotización preliminar/);
+    expect(composed.finalMessage).not.toMatch(/Daños identificados/);
+    expect(composed.finalMessage).not.toMatch(/ya revisamos las fotografías/i);
     expect(composed.finalMessage).toContain(formatQuoteMoney(partialQuote.total));
   });
 
@@ -615,7 +618,8 @@ describe('Conversation UX / Client Message Composer v2', () => {
       hasActiveAppointment: false,
       llmParts: { intro: 'Hola Arturo', technicalExplanation: '', cta: '' },
     });
-    expect(composed.finalMessage).toMatch(/Fascia delantera — reparaci[oó]n y pintura/);
+    expect(composed.finalMessage).toMatch(/Reparación y pintura Fascia delantera/);
+    expect(composed.finalMessage).toContain('$4,500');
     expect(composed.finalMessage).not.toMatch(/por confirmar/i);
   });
 
