@@ -234,6 +234,7 @@ import {
 } from './canonical-trace';
 import { createTurnId, patchTurnSummary } from '../observability/pegazuz-context';
 import { pegLogger } from '../observability/pegazuz-logger';
+import { describeVisionFailure } from '../observability/vision-failure';
 import { emitTurnComplete, emitVisionSummary, markOutboundEnqueued } from '../observability/turn-log';
 import {
   logInboundReceived,
@@ -6065,15 +6066,18 @@ ${catalogAppend}`;
         }
       } catch (err) {
         const budget = isStagingSandboxBudgetError(err);
+        const visionFailure =
+          images.length > 0 ? describeVisionFailure(err) : undefined;
         patchTurnSummary({
           outbound: 'FAILED',
           failure: budget ? 'budget' : 'vision',
         });
         pegLogger.error('TURN', {
-          message: 'inbound burst failed',
+          message: visionFailure?.message || 'inbound burst failed',
           failure: budget ? 'budget' : 'vision',
           conversationId,
           turnId,
+          ...(visionFailure ?? {}),
         });
         if (input.channel === 'lab') {
           try {

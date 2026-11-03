@@ -29,6 +29,7 @@ import { OutgoingMessageWorker } from '../messaging-queue/outgoing-message.worke
 import { renderDeterministicCta } from './client-message-ux';
 import type { ClientQuoteMessageContext } from './client-message-ux';
 import { extractLatestDeclaredVehicleIdentity } from '../domain/peritaje-v1/declared-vehicle-identity';
+import { pegLogger } from '../observability/pegazuz-logger';
 
 const ALLOWED = '5215550100001';
 
@@ -283,7 +284,12 @@ describe('laboratorio interno', () => {
     expect(of(second.id).some((row) => String(row.content).includes('2017'))).toBe(false);
 
     const before = messages.rows.length;
-    (service as any).analyzeDamageImageInSequentialChunks.mockRejectedValue(new Error('model down'));
+    const providerError = new Error(
+      `model down data:image/jpeg;base64,${'A'.repeat(80)}`,
+    );
+    providerError.name = 'APIConnectionError';
+    (service as any).analyzeDamageImageInSequentialChunks.mockRejectedValue(providerError);
+    const errorSpy = jest.spyOn(pegLogger, 'error');
     const queued = (service as any).incomingMessageProducer.enqueueMessage.mock.calls
       .filter((call: any[]) => call[1] === first.id && call[3].kind === 'image')
       .map((call: any[]) => call[3]);
@@ -294,7 +300,7 @@ describe('laboratorio interno', () => {
         channel: 'lab',
         items: queued,
       }),
-    ).rejects.toThrow('model down');
+    ).rejects.toBe(providerError);
     const failure = messages.rows.filter(
       (row) =>
         row.conversationId === first.id &&
@@ -310,6 +316,18 @@ describe('laboratorio interno', () => {
     expect((service as any).analyzeDamageImageInSequentialChunks.mock.calls[0][0]).toHaveLength(2);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(messages.delete).not.toHaveBeenCalled();
+    const visionLog = errorSpy.mock.calls
+      .map((call) => call[1] as { stage?: string; message?: string; failure?: string })
+      .find((data) => data?.stage === 'vision_peritaje');
+    expect(visionLog).toMatchObject({
+      stage: 'vision_peritaje',
+      errorName: 'APIConnectionError',
+      failure: 'vision',
+    });
+    expect(visionLog?.message).toContain('model down');
+    expect(visionLog?.message).not.toContain('data:image');
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('data:image');
+    errorSpy.mockRestore();
   });
 
   it('guarda la respuesta de cotización parcial sin llamar a un proveedor externo', async () => {

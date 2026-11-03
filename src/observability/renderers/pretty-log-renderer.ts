@@ -359,9 +359,15 @@ function renderWebhook(record: PegazuzLogRecord): string {
 
 function renderError(record: PegazuzLogRecord): string {
   const turn = shortTurnId(record.correlation.turnId);
+  const conv = shortConvId(record.correlation.conversationId);
   const piece = humanPiece(record.data.piece);
   const rows = [
     turn ? `Turn: ${turn}` : undefined,
+    conv ? `Conversación: ${conv}` : undefined,
+    record.data.stage ? `Etapa: ${record.data.stage}` : undefined,
+    record.data.errorName ? `Nombre: ${record.data.errorName}` : undefined,
+    record.data.status != null ? `HTTP: ${record.data.status}` : undefined,
+    record.data.code ? `Código: ${record.data.code}` : undefined,
     piece ? `Pieza: ${piece}` : undefined,
     record.data.provider ? `Provider: ${record.data.provider}` : undefined,
     record.data.message ? `Error: ${record.data.message}` : undefined,
