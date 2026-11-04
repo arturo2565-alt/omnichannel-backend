@@ -68,6 +68,11 @@ export type AppointmentDraft = {
 export const APPOINTMENT_ASK_NAME = '¿Con qué nombre registro la cita?';
 export const APPOINTMENT_ASK_PHONE = '¿A qué teléfono te aviso de la cita?';
 
+export function appointmentPhoneRequest(fullName: string): string {
+  const first = String(fullName ?? '').trim().split(/\s+/)[0];
+  return `Gracias, ${first}. 😊 ¿Me compartes un teléfono de contacto para completar tu cita?`;
+}
+
 const WEEKDAY_INDEX: Record<string, number> = {
   domingo: 0,
   lunes: 1,
@@ -192,7 +197,11 @@ export function absorbClientMessage(
 ): AppointmentDraft {
   let next = cloneDraft(draft);
   next = applyChannelIdentity(next, input);
-  const declaredName = extractDeclaredName(input.text);
+  const declaredName =
+    extractDeclaredName(input.text) ||
+    (!isUsableAppointmentClientName(next.clientName?.value)
+      ? extractBareClientName(input.text)
+      : null);
   if (declaredName) {
     next.clientName = {
       value: declaredName,
@@ -466,7 +475,11 @@ export function currentMessageChangesSchedule(text: string): boolean {
 }
 
 export function currentMessageSuppliesIdentity(text: string): boolean {
-  return Boolean(extractDeclaredName(text) || extractDeclaredPhone(text));
+  return Boolean(
+    extractDeclaredName(text) ||
+      extractBareClientName(text) ||
+      extractDeclaredPhone(text),
+  );
 }
 
 export type AppointmentPersistenceDecision = {
@@ -601,6 +614,9 @@ export function guardClientReply(input: {
   }
   const stripped = stripAppointmentConfirmationClaims(model);
   if (!question) return stripped;
+  if (question === APPOINTMENT_ASK_PHONE && input.draft.clientName?.value) {
+    return replyWhenOnlyPhoneMissing(stripped, input.draft.clientName.value);
+  }
   if (
     !stripped ||
     DAY_HOUR_REASK.test(model) ||
@@ -767,6 +783,56 @@ function parseHourMinute(
   if (mark === 'am' && hour === 12) hour = 0;
   if (!mark && hour >= 1 && hour <= 7) hour += 12;
   return { hour, minute };
+}
+
+const NOT_A_CLIENT_NAME = new Set([
+  'buenas',
+  'buenos',
+  'claro',
+  'gracias',
+  'hola',
+  'listo',
+  'ok',
+  'okay',
+  'perfecto',
+  'sale',
+  'si',
+  'vale',
+]);
+
+const NAME_REASK = /con qu[eé] nombre|nombre registro la cita/i;
+
+function replyWhenOnlyPhoneMissing(modelText: string, fullName: string): string {
+  const cleaned = modelText
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence && !NAME_REASK.test(sentence))
+    .join(' ')
+    .trim();
+  const asksPhone = /tel[eé]fono/i.test(cleaned);
+  const echoesName = cleaned.toLowerCase().includes(fullName.trim().toLowerCase());
+  const mentionsWhen =
+    /\b(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|mañana|hoy)\b|\ba las\s+\d|\b\d{1,2}:\d{2}\b/i.test(
+      cleaned,
+    );
+  if (!cleaned || ((echoesName || !asksPhone) && !mentionsWhen)) {
+    return appointmentPhoneRequest(fullName);
+  }
+  if (!asksPhone) return `${cleaned}\n\n${appointmentPhoneRequest(fullName)}`;
+  return cleaned;
+}
+
+function extractBareClientName(text: string): string | null {
+  const trimmed = String(text ?? '').trim();
+  if (!trimmed || /[?\d]/.test(trimmed)) return null;
+  if (hasScheduleCue(fold(trimmed))) return null;
+  const tokens = trimmed.split(/\s+/);
+  if (tokens.length < 1 || tokens.length > 4) return null;
+  if (!tokens.every((token) => /^[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜáéíóúüÑñ.'-]*$/.test(token))) {
+    return null;
+  }
+  if (tokens.some((token) => NOT_A_CLIENT_NAME.has(fold(token)))) return null;
+  return isUsableAppointmentClientName(trimmed) ? trimmed : null;
 }
 
 function extractDeclaredName(text: string): string | null {

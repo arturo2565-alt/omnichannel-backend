@@ -11,6 +11,7 @@ import {
   APPOINTMENT_ASK_NAME,
   APPOINTMENT_ASK_PHONE,
   absorbClientMessage,
+  appointmentPhoneRequest,
   applyVehicle,
   bookingReadiness,
   confirmedVehicleLabel,
@@ -87,6 +88,62 @@ describe('appointment-draft', () => {
     expect(nextClientQuestion(draft, autofix, receivedAt, lab)).toBe(
       APPOINTMENT_ASK_PHONE,
     );
+  });
+
+  it('un nombre suelto no vuelve a pedirse y conserva la hora', () => {
+    const scheduled = absorbClientMessage(emptyAppointmentDraft(), {
+      text: '¿Puedo llevar mi auto mañana a las 9?',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    const named = absorbClientMessage(scheduled, {
+      text: 'Ana Ensayo',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(named.clientName?.value).toBe('Ana Ensayo');
+    expect(named.requestedDateTime).toBe(scheduled.requestedDateTime);
+    expect(nextClientQuestion(named, autofix, receivedAt, lab)).toBe(
+      APPOINTMENT_ASK_PHONE,
+    );
+    const reply = guardClientReply({
+      modelText:
+        'Ana Ensayo, ¿me compartes un teléfono de contacto para completar el registro de tu cita?',
+      confirmedIso: null,
+      persisted: false,
+      draft: named,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(reply).toBe(appointmentPhoneRequest('Ana Ensayo'));
+    expect(reply).toBe(
+      'Gracias, Ana. 😊 ¿Me compartes un teléfono de contacto para completar tu cita?',
+    );
+    expect(reply).not.toMatch(/nombre/i);
+    const kept = guardClientReply({
+      modelText: 'El miércoles a las 9 sigue apartado. ¿Me pasas tu teléfono?',
+      confirmedIso: null,
+      persisted: false,
+      draft: named,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(kept).toMatch(/miércoles a las 9/i);
+    expect(kept).not.toMatch(/nombre registro/i);
+    expect(
+      decideAppointmentPersistence({
+        draft: named,
+        activeScheduledAt: null,
+        currentText: 'Ana Ensayo',
+        policy: autofix,
+        now: receivedAt,
+        channel: lab,
+      }).confirmToClient,
+    ).toBe(false);
   });
 
   it('con nombre y teléfono registra sin repreguntar', () => {

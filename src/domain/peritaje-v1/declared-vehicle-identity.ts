@@ -150,6 +150,30 @@ function normalize(raw: string): string {
     .toLowerCase();
 }
 
+function isDiscarded(token: string): boolean {
+  return STOP.has(token) || PARTS.has(token);
+}
+
+/** El modelo es el tramo junto a la marca, no el resto de la pregunta. */
+function modelTokensBesideBrand(tokens: string[], brandIndex: number): string[] {
+  if (brandIndex >= 0) {
+    const beside: string[] = [];
+    for (let i = brandIndex + 1; i < tokens.length; i += 1) {
+      const token = tokens[i]!;
+      if (isDiscarded(token) || BRANDS.has(token)) break;
+      const singleDigit = /^\d$/.test(token);
+      if (!singleDigit && token.length < 2) break;
+      beside.push(token);
+      if (beside.length === 3) break;
+    }
+    return beside;
+  }
+  const loose = tokens.filter(
+    (token) => !isDiscarded(token) && token.length >= 2,
+  );
+  return loose.length <= 4 ? loose : [];
+}
+
 function labelToken(token: string): string {
   if (token === 'vw') return 'Volkswagen';
   if (/\d/.test(token) && token.length <= 4) return token.toUpperCase();
@@ -175,14 +199,9 @@ export function extractDeclaredVehicleIdentity(
     .replace(/\b(?:19|20)\d{2}\b/g, ' ')
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
-  const brands: string[] = [];
-  const models: string[] = [];
-  for (const token of tokens) {
-    if (STOP.has(token) || PARTS.has(token)) continue;
-    if (BRANDS.has(token)) brands.push(token);
-    else if (token.length >= 2) models.push(token);
-  }
-  const modelTokens = models.length <= 4 ? models : [];
+  const brandIndex = tokens.findIndex((token) => BRANDS.has(token));
+  const brands = brandIndex >= 0 ? [tokens[brandIndex]!] : [];
+  const modelTokens = modelTokensBesideBrand(tokens, brandIndex);
   const hasCue = Boolean(year || brands.length || /\b(?:es\s+un[ao]?|mi)\b/i.test(normalize(text)));
   if (!hasCue || (!year && !brands.length && !modelTokens.length)) return null;
   if (!year && !brands.length) return null;

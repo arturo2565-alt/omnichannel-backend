@@ -6,9 +6,12 @@ import { derivePartialQuoteReasons } from './quote-narrative';
 import { renderDeterministicCta } from '../../chat/client-message-ux';
 import type { ClientQuoteMessageContext } from '../../chat/client-message-ux';
 import {
+  applyDeclaredVehicleIdentity,
   extractDeclaredVehicleIdentity,
   extractLatestDeclaredVehicleIdentity,
 } from './declared-vehicle-identity';
+import { vehicleIdentityFromLegacyLabel } from './from-legacy';
+import { reusePriorVehicleIdentity } from './vehicle-identity-enrich';
 import type { LegacyDetectedDamageShape } from './from-legacy';
 
 const NOW = '2026-11-02T22:57:46.000Z';
@@ -230,5 +233,45 @@ describe('IDENTITY-001 declaración del cliente', () => {
     expect(vehicle.confirmedByUser).toBe(true);
     expect(vehicle.source).toBe('user');
     expect(refaccionIdentityGaps(vehicle).readyForMarket).toBe(true);
+  });
+
+  it('la pregunta comercial no sustituye un modelo numérico declarado', () => {
+    const declared = extractDeclaredVehicleIdentity(
+      'Cuanto me sale este golpe? Mazda 2 2024',
+    );
+    expect(declared).toMatchObject({
+      make: 'Mazda',
+      model: '2',
+      year: '2024',
+      declaredFields: ['make', 'model', 'year'],
+    });
+    expect(
+      extractDeclaredVehicleIdentity('¿Cuánto cuesta este golpe? Audi A4 2019'),
+    ).toMatchObject({ make: 'Audi', model: 'A4', year: '2019' });
+    const declaredVehicle = applyDeclaredVehicleIdentity(
+      vehicleIdentityFromLegacyLabel('Hyundai Grand i10', { source: 'vision' }),
+      declared!,
+    );
+    expect(declaredVehicle).toMatchObject({
+      make: 'Mazda',
+      model: '2',
+      year: '2024',
+      displayLabel: 'Mazda 2 2024',
+      source: 'user',
+    });
+    const later = reusePriorVehicleIdentity(
+      declaredVehicle,
+      vehicleIdentityFromLegacyLabel('Nissan Versa 2018', { source: 'vision' }),
+    );
+    expect(later.make).toBe('Mazda');
+    expect(later.model).toBe('2');
+    expect(later.year).toBe('2024');
+    const doc = shadow({
+      declaredText: 'Cuanto me sale este golpe? Mazda 2 2024',
+      vision: 'Hyundai Grand i10',
+    });
+    expect(doc.vehicles.map((vehicle) => vehicle.displayLabel).join(' ')).not.toMatch(
+      /cuanto/i,
+    );
   });
 });
