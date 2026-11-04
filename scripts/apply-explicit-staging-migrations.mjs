@@ -1,5 +1,5 @@
 /**
- * Aplica 004, 005 y 006 dentro del servicio de staging.
+ * Aplica 004, 005, 006 y 007 dentro del servicio de staging.
  * No siembra, no sincroniza y no acepta la confirmación de producción.
  * Se ejecuta con node, sin ts-node, para poder correr en la imagen publicada.
  */
@@ -11,6 +11,7 @@ const FILES = [
   '004_crm_manual_appointments.sql',
   '005_crm_service_lines.sql',
   '006_crm_catalog_snapshot.sql',
+  '007_appointment_draft.sql',
 ];
 
 export function assertExplicitStagingMigration(env, databaseUrl) {

@@ -7,11 +7,12 @@ import {
 } from './db-synchronize';
 import { TYPEORM_ENTITIES } from './typeorm-entities';
 
-/** 004, 005 y 006. El orden es el de producción: citas, desglose, snapshot. */
+/** 004 a 007. El orden es el de producción: citas, desglose, snapshot, borrador. */
 export const STAGING_MIGRATION_FILES = [
   '004_crm_manual_appointments.sql',
   '005_crm_service_lines.sql',
   '006_crm_catalog_snapshot.sql',
+  '007_appointment_draft.sql',
 ] as const;
 
 const IGNORED_TABLES = new Set(['spatial_ref_sys']);
