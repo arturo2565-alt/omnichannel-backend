@@ -33,11 +33,11 @@ type LlmExtract = {
   needsClarification?: boolean;
 };
 
-function ymdInTimezone(d: Date, timeZone: string): string {
+export function ymdInTimezone(d: Date, timeZone: string): string {
   return d.toLocaleDateString('en-CA', { timeZone });
 }
 
-function addCalendarDaysYmd(ymd: string, delta: number): string {
+export function addCalendarDaysYmd(ymd: string, delta: number): string {
   const [y, m, d] = ymd.split('-').map(Number);
   const u = Date.UTC(y, m - 1, d + delta);
   const nd = new Date(u);
@@ -48,7 +48,7 @@ function addCalendarDaysYmd(ymd: string, delta: number): string {
 }
 
 /** Día civil ISO (YYYY-MM-DD): weekday 0=Dom … 6=Sáb */
-function civilWeekdaySun0(ymd: string): number {
+export function civilWeekdaySun0(ymd: string): number {
   const [y, m, d] = ymd.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
 }
@@ -57,7 +57,7 @@ function civilWeekdaySun0(ymd: string): number {
  * Instante UTC equivalente a `ymd` HH:mm en México (offset fijo -06 para CDMX post-2022).
  * Evita dependencias extra; suficiente para citas del taller en MX central.
  */
-function mexicoCityLocalToUtc(
+export function mexicoCityLocalToUtc(
   ymd: string,
   hour: number,
   minute: number,

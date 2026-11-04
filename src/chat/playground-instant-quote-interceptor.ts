@@ -139,6 +139,9 @@ export function buildPlaygroundPostQuoteSchedulingSystemAppend(opts: {
     ? `Si el cliente mencionó un día de la semana **sin** hora exacta, responde en **máximo 2 frases**: confirma que ese día atendemos dentro de ${horario} y pide la **hora específica** que prefiera dentro de ese horario.`
     : `Si falta la hora exacta, pide una hora dentro de ${horario}`;
 
+  const draftNote =
+    'Si el bloque BORRADOR_DE_CITA ya trae solicitada_valida, no vuelvas a pedir día ni hora.';
+
   const persistNote = opts.forAutopilot
     ? '- **Prioridad absoluta de cierre:** si la cotización con montos ya salió en el historial, no vuelvas a imprimir plantillas ni totales; registra el turno con **createAppointment** en cuanto tengas fecha y hora válidas (ISO).'
     : '- En este simulador, **createAppointment** no persiste en base de datos: la herramienta devuelve solo vista previa si el horario es válido.';
@@ -150,5 +153,6 @@ export function buildPlaygroundPostQuoteSchedulingSystemAppend(opts: {
   return `\n\n[${channelLabel}]
 - Si el cliente **ya recibió precios** del catálogo en el historial y ahora muestra interés, propone día u hora, tu **única misión** es concretar la visita: usa **createAppointment** cuando tengas fecha y hora completas válidas en ISO. **No repitas** precios ni desgloses que ya enviaste, salvo que pida explícitamente otra cotización o servicio nuevo.
 - ${dosFrases}
+- ${draftNote}
 ${persistNote}`;
 }

@@ -355,6 +355,11 @@ export function formatPendingCanonicalRequirementsContext(input: {
       `- vehicle: ${vehicleLabel}`,
       `- missingFields: ${(req.missingFields ?? req.requiredFields).join(', ') || '—'}`,
       `- confirmationFields: ${(req.confirmationFields ?? []).join(', ') || '—'}`,
+      ...((req.confirmationFields ?? []).length
+        ? [
+            '- vehicleIdentity: la etiqueta de visión no está confirmada; no la presentes como el vehículo del cliente',
+          ]
+        : []),
     ].join('\n');
   });
   return `PENDING_CANONICAL_REQUIREMENTS:\n${lines.join('\n')}`;

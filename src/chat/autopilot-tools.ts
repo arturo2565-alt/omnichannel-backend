@@ -132,7 +132,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
     type: 'function',
     name: 'createAppointment',
     description:
-      'Registra una cita en la base de datos del taller con los datos completos del cliente. Úsala cuando el cliente haya confirmado explícitamente día y hora de visita válidos dentro del horario laboral. Requiere nombre real (no "cliente"/"desconocido"), teléfono de al menos 8 dígitos (en WhatsApp puede omitirse si ya hay wa_id) y vehicleInfo con marca o modelo. Si falta alguno, la herramienta devuelve success:false y error MISSING_REQUIRED_DATA: pide esos datos amablemente y reintenta. En Messenger pide el teléfono si aún no lo tienes. En el panel de simulación (playground) valida horario y datos, pero no persiste.',
+      'Registra una cita solo cuando el borrador ya tiene día y hora válidos, nombre real y teléfono (en WhatsApp puede omitirse si hay wa_id). No vuelvas a pedir día ni hora si BORRADOR_DE_CITA ya trae solicitada_valida. Si falta un dato, pregunta solo ese: primero el nombre, después el teléfono. vehicleInfo es opcional y no debe ser una etiqueta de visión: si el cliente no declaró el auto, no lo confirmes. No confirmes la cita salvo success:true. Si ya hay una cita y el cliente pide otra hora, la herramienta reagenda; no reutilices la hora anterior. En el panel de simulación valida, pero no persiste.',
     parameters: {
       type: 'object',
       properties: {
@@ -154,7 +154,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
         vehicleInfo: {
           type: 'string',
           description:
-            'Marca, modelo y año del vehículo (ej. Jetta 2018). Alias: vehicleDescription.',
+            'Solo el vehículo que el cliente declaró (ej. Jetta 2018). No envíes la etiqueta inferida por visión. Alias: vehicleDescription.',
         },
         phone: {
           type: 'string',
@@ -167,7 +167,7 @@ export const AUTOPILOT_RESPONSES_TOOLS: FunctionTool[] = [
             'Opcional. Resumen breve o total de la cotización activa (ej. "Hojalatería fascia $4,800").',
         },
       },
-      required: ['dateTime', 'clientName', 'vehicleInfo', 'phone'],
+      required: ['dateTime', 'clientName', 'phone'],
     },
     strict: false,
   },

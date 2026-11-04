@@ -82,6 +82,26 @@ export type AppointmentClientGuardInput = {
   waId?: string | null;
 };
 
+export type AppointmentContactField = 'clientName' | 'phone';
+
+/** Nombre primero, teléfono después. El vehículo no bloquea la recepción de la cita. */
+export function missingAppointmentContactFields(input: {
+  clientName: unknown;
+  phone: unknown;
+  platform?: string | null;
+  waId?: string | null;
+}): AppointmentContactField[] {
+  const missing: AppointmentContactField[] = [];
+  if (!isUsableAppointmentClientName(input.clientName)) {
+    missing.push('clientName');
+  }
+  const phoneOk =
+    isUsableAppointmentPhone(input.phone) ||
+    hasWhatsAppWaId(input.platform, input.waId);
+  if (!phoneOk) missing.push('phone');
+  return missing;
+}
+
 export function evaluateAppointmentRequiredClientData(
   input: AppointmentClientGuardInput,
 ):

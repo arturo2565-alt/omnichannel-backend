@@ -31,6 +31,12 @@ export class TallerService {
     return taller;
   }
 
+  async findById(id: string): Promise<Taller | null> {
+    const trimmed = String(id ?? '').trim();
+    if (!trimmed) return null;
+    return this.tallerRepository.findOne({ where: { id: trimmed } });
+  }
+
   /** Primer taller creado (fallback webhook / datos legacy). */
   async findDefaultTaller(): Promise<Taller> {
     const rows = await this.tallerRepository.find({

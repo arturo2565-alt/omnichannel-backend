@@ -13,6 +13,7 @@ import { Message } from './chat.entity';
 import { DraftQuoteEntity } from './draft-quote.entity';
 import { Taller } from '../../taller/entities/taller.entity';
 import { Contact } from './contact.entity';
+import type { AppointmentDraft } from '../appointment-draft';
 
 /** Estados de lead admitidos para `Conversation.status` y `lead_events.status`. */
 export const CONVERSATION_LEAD_STATUSES = [
@@ -104,4 +105,8 @@ export class Conversation {
 
   @Column({ nullable: true })
   lastMessage: string; // <--- Esta es la que lee el Sidebar
+
+  /** Borrador de cita. No es una cita confirmada. */
+  @Column({ type: 'jsonb', nullable: true })
+  appointmentDraft?: AppointmentDraft | null;
 }

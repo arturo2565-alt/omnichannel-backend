@@ -104,23 +104,40 @@ import {
   parseWorkshopScheduledAtIso,
   parseWorkshopScheduledAtIsoForBooking,
   validateWorkshopSlotUtcDetailed,
-  parseAppointmentIntent,
 } from './appointment-intent';
 import {
   buildLlmDynamicServerTimeBlock,
   type LlmPromptLayers,
 } from './llm-prompt-layers';
 import {
-  buildSchedulingContextFromTurns,
-  formatAppointmentConfirmedMessage,
-  stripAppointmentConfirmationClaims,
   textClaimsAppointmentBooked,
   workshopNaiveIsoFromUtc,
 } from './appointment-scheduling-helpers';
 import {
-  evaluateAppointmentRequiredClientData,
   isUsableAppointmentClientName,
+  isUsableAppointmentPhone,
+  missingAppointmentContactFields,
 } from './appointment-client-guard';
+import {
+  APPOINTMENT_ASK_NAME,
+  APPOINTMENT_ASK_PHONE,
+  absorbClientMessage,
+  applyVehicle,
+  bookingReadiness,
+  confirmedVehicleLabel,
+  decideAppointmentPersistence,
+  isOneActiveAppointmentConflict,
+  formatAppointmentDraftContext,
+  guardClientReply,
+  nextClientQuestion,
+  parseAppointmentDraft,
+  planConfirmedWrite,
+  rememberInterpretedInstant,
+  resolveWorkshopAppointmentPolicy,
+  withOfferedSlots,
+  type AppointmentDraft,
+  type WorkshopAppointmentPolicy,
+} from './appointment-draft';
 import { AI_CONFIG_KEYS } from './ai-config-keys';
 import { DEFAULT_CHAT_APPOINTMENT_PROMPT } from './ai-config-defaults';
 import { AiConfigService } from './ai-config.service';
@@ -7487,6 +7504,129 @@ ${catalogAppend}`;
     if (dirty) await this.contactRepository.save(contact);
   }
 
+  private appointmentChannel(conversation: Conversation): {
+    platform: string | null | undefined;
+    waId: string | null | undefined;
+  } {
+    return {
+      platform: conversation.platform,
+      waId: conversation.externalId,
+    };
+  }
+
+  private async appointmentPolicyFor(
+    conversation: Conversation,
+  ): Promise<WorkshopAppointmentPolicy> {
+    const id = String(conversation.tallerId ?? '').trim();
+    const taller = id ? await this.tallerService.findById(id) : null;
+    return resolveWorkshopAppointmentPolicy({
+      id,
+      nombre: taller?.nombre ?? null,
+    });
+  }
+
+  private async persistAppointmentDraft(
+    conversation: Conversation,
+    draft: AppointmentDraft,
+  ): Promise<void> {
+    conversation.appointmentDraft = draft;
+    await this.conversationRepository.save(conversation);
+  }
+
+  private async captureAppointmentDraftFromTurn(
+    conversation: Conversation,
+    text: string,
+    receivedAt: Date,
+  ): Promise<AppointmentDraft> {
+    const policy = await this.appointmentPolicyFor(conversation);
+    let contactPhone: string | null = null;
+    const contactId = String(conversation.contactId ?? '').trim();
+    if (contactId) {
+      const contact = await this.contactRepository.findOne({
+        where: { id: contactId },
+      });
+      const stored = String(contact?.phone ?? '').trim();
+      if (stored) contactPhone = stored;
+    }
+    const draft = withOfferedSlots(
+      absorbClientMessage(parseAppointmentDraft(conversation.appointmentDraft), {
+        text,
+        receivedAt,
+        policy,
+        platform: conversation.platform,
+        externalId: conversation.externalId,
+        contactPhone,
+        contactName: conversation.contactName,
+      }),
+      policy,
+      receivedAt,
+    );
+    await this.persistAppointmentDraft(conversation, draft);
+    return draft;
+  }
+
+  private isActiveAppointmentConflict(err: unknown): boolean {
+    if (!(err instanceof QueryFailedError)) return false;
+    const driver = (err as QueryFailedError).driverError as {
+      code?: string;
+      constraint?: string;
+    };
+    return isOneActiveAppointmentConflict(driver ?? null);
+  }
+
+  private async unchangedActiveAppointment(conversationId: string): Promise<{
+    success: true;
+    persisted: true;
+    unchanged: true;
+    appointmentId: string;
+    scheduledAt: string;
+  } | null> {
+    const existing = await this.loadActiveAppointmentForConversation(conversationId);
+    if (!existing) return null;
+    return {
+      success: true,
+      persisted: true,
+      unchanged: true,
+      appointmentId: existing.id,
+      scheduledAt: existing.scheduledAt.toISOString(),
+    };
+  }
+
+  private async rejectAppointmentTool(input: {
+    conversation: Conversation;
+    draft: AppointmentDraft;
+    policy: WorkshopAppointmentPolicy;
+    receivedAt: Date;
+    error: string;
+  }): Promise<{
+    success: false;
+    error: string;
+    message?: string;
+    missingFields?: string[];
+  }> {
+    const draft = withOfferedSlots(
+      input.draft,
+      input.policy,
+      input.receivedAt,
+    );
+    await this.persistAppointmentDraft(input.conversation, draft);
+    const channel = this.appointmentChannel(input.conversation);
+    const readiness = bookingReadiness(
+      draft,
+      input.policy,
+      input.receivedAt,
+      channel,
+    );
+    return {
+      success: false,
+      error: input.error,
+      message:
+        nextClientQuestion(draft, input.policy, input.receivedAt, channel) ??
+        undefined,
+      missingFields: readiness.missing,
+    };
+  }
+
   private async executeCreateAppointmentTool(
     argsJson: string,
     conversation: Conversation,
@@ -7494,8 +7634,13 @@ ${catalogAppend}`;
     success: boolean;
     appointmentId?: string;
     scheduledAt?: string;
+    previousScheduledAt?: string;
+    rescheduled?: boolean;
+    unchanged?: boolean;
+    persisted?: boolean;
     error?: string;
     message?: string;
+    missingFields?: string[];
   }> {
     let raw: Record<string, unknown>;
     try {
@@ -7508,29 +7653,153 @@ ${catalogAppend}`;
       };
     }
 
-    const resolved = this.resolveCreateAppointmentScheduledAt(raw);
-    if (!resolved.ok) {
-      return { success: false, error: resolved.error };
-    }
-    const d = resolved.date;
+    const receivedAt = new Date();
+    const policy = await this.appointmentPolicyFor(conversation);
     const fields = await this.extractAppointmentClientFields(raw, conversation);
+    let draft = parseAppointmentDraft(conversation.appointmentDraft);
+    if (isUsableAppointmentClientName(fields.clientName)) {
+      draft.clientName = {
+        value: fields.clientName,
+        source: 'client',
+        confirmed: true,
+      };
+    }
+    const suppliedPhone = String(fields.phone ?? '').trim();
+    if (isUsableAppointmentPhone(suppliedPhone)) {
+      const digits = suppliedPhone.replace(/\D/g, '');
+      const wa = String(conversation.externalId ?? '').replace(/\D/g, '');
+      const fromWhatsApp =
+        String(conversation.platform ?? '').toLowerCase().includes('whatsapp') &&
+        digits.length >= 8 &&
+        digits === wa;
+      draft.phone = {
+        value: suppliedPhone,
+        source: fromWhatsApp ? 'whatsapp' : 'client',
+        confirmed: true,
+      };
+    }
+    if (fields.vehicle) {
+      draft = applyVehicle(draft, { label: fields.vehicle, source: 'vision' });
+    }
+
+    const iso = pickFirstNonEmptyTrimmedString(
+      raw.dateTime,
+      raw.date_time,
+      raw.scheduledAtIso,
+      raw.scheduled_at_iso,
+      raw.scheduledAt,
+      raw.scheduled_at,
+    );
+    if (iso) {
+      const parsed = parseWorkshopScheduledAtIsoForBooking(iso);
+      if (!parsed.ok) {
+        await this.persistAppointmentDraft(conversation, draft);
+        return { success: false, error: parsed.error };
+      }
+      draft = rememberInterpretedInstant(draft, parsed.date, receivedAt, policy);
+    }
+
+    if (!policy.openAcceptance) {
+      return this.rejectAppointmentTool({
+        conversation,
+        draft,
+        policy,
+        receivedAt,
+        error: 'WORKSHOP_POLICY',
+      });
+    }
+    if (draft.scheduleStatus !== 'valid' || !draft.requestedDateTime) {
+      return this.rejectAppointmentTool({
+        conversation,
+        draft,
+        policy,
+        receivedAt,
+        error:
+          draft.scheduleStatus === 'past'
+            ? 'PAST_SLOT'
+            : draft.scheduleStatus === 'closed' ||
+                draft.scheduleStatus === 'outside_hours'
+              ? 'OUTSIDE_HOURS'
+              : 'MISSING_SCHEDULE',
+      });
+    }
 
     const existingActive = await this.loadActiveAppointmentForConversation(
       conversation.id,
     );
-    const clientGuard = evaluateAppointmentRequiredClientData({
-      clientName: fields.clientName || existingActive?.clientName,
-      phone: fields.phone || existingActive?.phone,
-      vehicleInfo: fields.vehicle || existingActive?.vehicle,
-      platform: conversation.platform,
-      waId: conversation.externalId,
-    });
-    if (!clientGuard.ok) {
-      return { ...clientGuard.payload };
+    if (
+      !draft.clientName &&
+      existingActive &&
+      isUsableAppointmentClientName(existingActive.clientName)
+    ) {
+      draft.clientName = {
+        value: existingActive.clientName,
+        source: 'client',
+        confirmed: true,
+      };
     }
-    if (existingActive) {
-      await this.mergeAppointmentClientFields(existingActive, fields);
-      await this.syncContactFromAppointmentFields(conversation, fields);
+    if (
+      !draft.phone &&
+      existingActive &&
+      isUsableAppointmentPhone(existingActive.phone)
+    ) {
+      draft.phone = {
+        value: String(existingActive.phone),
+        source: 'client',
+        confirmed: true,
+      };
+    }
+
+    const channel = this.appointmentChannel(conversation);
+    const readiness = bookingReadiness(draft, policy, receivedAt, channel);
+    if (!readiness.ready || !draft.requestedDateTime) {
+      return this.rejectAppointmentTool({
+        conversation,
+        draft,
+        policy,
+        receivedAt,
+        error: 'MISSING_REQUIRED_DATA',
+      });
+    }
+
+    const plan = planConfirmedWrite({
+      activeScheduledAt: existingActive?.scheduledAt.toISOString() ?? null,
+      requestedDateTime: draft.requestedDateTime,
+      ready: true,
+    });
+    if (plan.action === 'hold' || !plan.persistAt) {
+      return this.rejectAppointmentTool({
+        conversation,
+        draft,
+        policy,
+        receivedAt,
+        error: 'MISSING_REQUIRED_DATA',
+      });
+    }
+
+    const when = new Date(plan.persistAt);
+    const rowFields = {
+      clientName: draft.clientName?.value ?? fields.clientName,
+      vehicle: confirmedVehicleLabel(draft),
+      phone: draft.phone?.value ?? fields.phone,
+      quoteSummary: fields.quoteSummary,
+    };
+
+    if (existingActive && (plan.action === 'reschedule' || plan.action === 'same')) {
+      if (plan.action === 'reschedule') {
+        await this.appointmentRepository.manager.query(
+          `UPDATE appointments SET "scheduledAt" = $1, "updatedAt" = NOW() WHERE id = $2`,
+          [when.toISOString(), existingActive.id],
+        );
+        existingActive.scheduledAt = when;
+      }
+      await this.mergeAppointmentClientFields(existingActive, rowFields);
+      await this.syncContactFromAppointmentFields(conversation, rowFields);
+      draft.appointmentStatus =
+        plan.action === 'reschedule' ? 'rescheduled' : 'confirmed';
+      draft.appointmentId = existingActive.id;
+      draft.requestedDateTime = when.toISOString();
+      await this.persistAppointmentDraft(conversation, draft);
       const existingTallerId = String(
         existingActive.tallerId ?? conversation.tallerId ?? '',
       ).trim();
@@ -7555,31 +7824,37 @@ ${catalogAppend}`;
       );
       return {
         success: true,
+        persisted: true,
+        unchanged: plan.action === 'same',
+        rescheduled: plan.action === 'reschedule',
         appointmentId: existingActive.id,
-        scheduledAt: existingActive.scheduledAt.toISOString(),
+        scheduledAt: when.toISOString(),
+        previousScheduledAt: plan.previousScheduledAt ?? undefined,
       };
     }
 
+    const d = when;
     const storage = await readAppointmentStorage(this.appointmentRepository.manager);
     let saved: AppointmentEntity;
+    try {
     if (storage === 'legacy') {
       const id = randomUUID();
       await insertLegacyAppointmentRow(this.appointmentRepository.manager, {
         id,
         conversationId: conversation.id,
-        clientName: fields.clientName,
-        vehicle: fields.vehicle,
-        phone: fields.phone,
-        quoteSummary: fields.quoteSummary,
+        clientName: rowFields.clientName,
+        vehicle: rowFields.vehicle,
+        phone: rowFields.phone,
+        quoteSummary: rowFields.quoteSummary,
         scheduledAt: d,
       });
       saved = this.appointmentRepository.create({
         id,
         conversationId: conversation.id,
-        clientName: fields.clientName,
-        vehicle: fields.vehicle,
-        phone: fields.phone,
-        quoteSummary: fields.quoteSummary,
+        clientName: rowFields.clientName,
+        vehicle: rowFields.vehicle,
+        phone: rowFields.phone,
+        quoteSummary: rowFields.quoteSummary,
         scheduledAt: d,
         status: 'confirmada',
       });
@@ -7589,23 +7864,32 @@ ${catalogAppend}`;
           conversationId: conversation.id,
           tallerId: conversation.tallerId ?? null,
           contactId: conversation.contactId ?? null,
-          clientName: fields.clientName,
-          vehicle: fields.vehicle,
-          phone: fields.phone,
-          quoteSummary: fields.quoteSummary,
+          clientName: rowFields.clientName,
+          vehicle: rowFields.vehicle,
+          phone: rowFields.phone,
+          quoteSummary: rowFields.quoteSummary,
           scheduledAt: d,
           status: 'confirmada',
           source: 'autopilot',
         }),
       );
     }
+    } catch (err) {
+      if (!this.isActiveAppointmentConflict(err)) throw err;
+      const raced = await this.unchangedActiveAppointment(conversation.id);
+      if (!raced) throw err;
+      return raced;
+    }
 
-    await this.syncContactFromAppointmentFields(conversation, fields);
+    await this.syncContactFromAppointmentFields(conversation, rowFields);
 
     await this.leadEventsService.logTransition(conversation.id, 'agendado', {
       fecha: saved.scheduledAt.toISOString(),
     });
     conversation.status = 'agendado';
+    draft.appointmentStatus = 'confirmed';
+    draft.appointmentId = saved.id;
+    await this.persistAppointmentDraft(conversation, draft);
 
     const createdTallerId = String(
       saved.tallerId ?? conversation.tallerId ?? '',
@@ -7633,6 +7917,7 @@ ${catalogAppend}`;
 
     return {
       success: true,
+      persisted: true,
       appointmentId: saved.id,
       scheduledAt: saved.scheduledAt.toISOString(),
     };
@@ -7995,6 +8280,7 @@ ${catalogAppend}`;
     scheduledAt?: string;
     error?: string;
     message?: string;
+    missingFields?: string[];
     preview?: boolean;
   }> {
     let raw: Record<string, unknown>;
@@ -8019,24 +8305,29 @@ ${catalogAppend}`;
       raw.client_name,
       raw.nombre,
     );
-    const vehicleInfo = pickFirstNonEmptyTrimmedString(
-      raw.vehicleInfo,
-      raw.vehicle_info,
-      raw.vehicleDescription,
-      raw.vehicle,
-    );
     const phone = pickFirstNonEmptyTrimmedString(
       raw.phone,
       raw.customerPhone,
       raw.telefono,
     );
-    const clientGuard = evaluateAppointmentRequiredClientData({
-      clientName,
-      phone,
-      vehicleInfo,
-    });
-    if (!clientGuard.ok) {
-      return { ...clientGuard.payload };
+    if (d.getTime() <= Date.now()) {
+      return {
+        success: false,
+        error: 'PAST_SLOT',
+        message: 'Esa hora ya pasó. Pide otro horario dentro de la atención.',
+      };
+    }
+    const missing = missingAppointmentContactFields({ clientName, phone });
+    if (missing.length > 0) {
+      return {
+        success: false,
+        error: 'MISSING_REQUIRED_DATA',
+        missingFields: missing,
+        message:
+          missing[0] === 'clientName'
+            ? APPOINTMENT_ASK_NAME
+            : APPOINTMENT_ASK_PHONE,
+      };
     }
 
     return {
@@ -8534,7 +8825,26 @@ ${catalogAppend}`;
     }
     if (conversation.status === 'agendado') {
       dynamicParts.push(
-        '[Estado del lead: AGENDADO — El cliente ya tiene cita confirmada. Prioriza responder sus dudas sobre la visita, el taller o el vehículo. Cualquier pieza o servicio extra que cotices con obtenerCotizacionExpress debe presentarse como complemento de su orden para el día acordado; no presiones nueva agenda, no envíes ubicación del taller ni cierres de venta genéricos salvo que lo pida. Si solo agradece o saluda sin pregunta nueva, responde una frase cordial y cierra.]',
+        '[Estado del lead: AGENDADO — El cliente ya tiene cita confirmada. Prioriza responder sus dudas sobre la visita, el taller o el vehículo. Cualquier pieza o servicio extra que cotices con obtenerCotizacionExpress debe presentarse como complemento de su orden para el día acordado; no presiones nueva agenda, no envíes ubicación del taller ni cierres de venta genéricos salvo que lo pida. Si solo agradece o saluda sin pregunta nueva, responde una frase cordial y cierra. Si pide otra fecha, es un reagendamiento: no confirmes la hora anterior.]',
+      );
+    }
+    const appointmentPolicy = await this.appointmentPolicyFor(conversation);
+    const appointmentDraft = parseAppointmentDraft(conversation.appointmentDraft);
+    if (
+      appointmentDraft.wantsVisit ||
+      appointmentDraft.interpretedDateTime ||
+      appointmentDraft.requestedDateTime ||
+      appointmentDraft.scheduleStatus !== 'missing' ||
+      appointmentDraft.clientName ||
+      appointmentDraft.phone
+    ) {
+      dynamicParts.push(
+        formatAppointmentDraftContext(
+          appointmentDraft,
+          appointmentPolicy,
+          new Date(),
+          this.appointmentChannel(conversation),
+        ),
       );
     }
 
@@ -8568,59 +8878,60 @@ ${catalogAppend}`;
     return `${layers.stablePrefix}\n\n${layers.dynamicContext}`.trim();
   }
 
-  /** Fallback: extrae fecha/hora del chat y persiste cita si el LLM no llamó la tool. */
+  /** Usa el borrador ya guardado y solo el mensaje actual. No relee el historial. */
   private async tryPersistAppointmentFromChatContext(
     conversation: Conversation,
-    historyTurns: ReadonlyArray<{ role: string; text: string }>,
+    _historyTurns: ReadonlyArray<{ role: string; text: string }>,
     currentUserText: string,
-  ): Promise<{ success: boolean; scheduledAt?: string; analysisFailed?: boolean }> {
-    const active = await this.loadActiveAppointmentForConversation(
-      conversation.id,
-    );
-    if (active) {
-      return { success: true, scheduledAt: active.scheduledAt.toISOString() };
-    }
-
-    const context = buildSchedulingContextFromTurns([
-      ...historyTurns,
-      { role: 'user', text: currentUserText },
-    ]);
-    if (!context.trim()) {
+  ): Promise<{
+    success: boolean;
+    scheduledAt?: string;
+    confirmToClient?: boolean;
+    analysisFailed?: boolean;
+  }> {
+    const policy = await this.appointmentPolicyFor(conversation);
+    const draft = parseAppointmentDraft(conversation.appointmentDraft);
+    const active = await this.loadActiveAppointmentForConversation(conversation.id);
+    const decision = decideAppointmentPersistence({
+      draft,
+      activeScheduledAt: active?.scheduledAt.toISOString() ?? null,
+      currentText: currentUserText,
+      policy,
+      now: new Date(),
+      channel: this.appointmentChannel(conversation),
+    });
+    if (decision.action !== 'create' && decision.action !== 'reschedule') {
       return { success: false };
     }
-
+    if (!draft.requestedDateTime) return { success: false };
+    const naiveIso = workshopNaiveIsoFromUtc(new Date(draft.requestedDateTime));
+    if (!naiveIso) return { success: false };
     try {
-      const intent = await parseAppointmentIntent(
-        context,
-        new Date(),
-        this.openai,
-      );
-      if (
-        !intent.isBookingIntent ||
-        intent.needsClarification ||
-        !intent.confirmedDate
-      ) {
-        return { success: false };
-      }
-
-      const naiveIso = workshopNaiveIsoFromUtc(new Date(intent.confirmedDate));
-      if (!naiveIso) {
-        return { success: false };
-      }
-
       const result = await this.executeCreateAppointmentTool(
         JSON.stringify({
           dateTime: naiveIso,
-          clientName: conversation.contactName,
+          clientName: draft.clientName?.value ?? '',
+          phone: draft.phone?.value ?? '',
+          vehicleInfo: confirmedVehicleLabel(draft) ?? '',
         }),
         conversation,
       );
-      if (result.success && result.scheduledAt) {
+      if (
+        result.success &&
+        result.persisted &&
+        result.scheduledAt &&
+        result.unchanged !== true
+      ) {
         console.log('[createAppointment] fallback persist OK', {
           conversationId: conversation.id,
           scheduledAt: result.scheduledAt,
+          rescheduled: result.rescheduled === true,
         });
-        return { success: true, scheduledAt: result.scheduledAt };
+        return {
+          success: true,
+          scheduledAt: result.scheduledAt,
+          confirmToClient: true,
+        };
       }
     } catch (err) {
       console.warn(
@@ -8651,33 +8962,36 @@ ${catalogAppend}`;
         historyTurns,
         currentUserText,
       );
-      if (fallback.success && fallback.scheduledAt) {
+      if (
+        fallback.success &&
+        fallback.scheduledAt &&
+        fallback.confirmToClient === true
+      ) {
         confirmedIso = fallback.scheduledAt;
       }
       analysisFailed = fallback.analysisFailed === true;
     }
 
-    let text = String(draftText ?? '').trim();
-
-    if (text && textClaimsAppointmentBooked(text) && !confirmedIso) {
+    if (
+      draftText &&
+      textClaimsAppointmentBooked(draftText) &&
+      !confirmedIso
+    ) {
       console.warn('[createAppointment] bloqueada confirmación sin persistencia', {
         conversationId: conversation.id,
       });
-      text = stripAppointmentConfirmationClaims(text);
-      const tail =
-        'Para registrar tu cita en el sistema, ¿me confirmas el día y la hora exacta? (Por ejemplo: martes a las 3:30 PM)';
-      text = text ? `${text}\n\n${tail}` : tail;
     }
 
-    if (confirmedIso) {
-      const confirmation = formatAppointmentConfirmedMessage(confirmedIso);
-      if (!text) {
-        return confirmation;
-      }
-      if (!textClaimsAppointmentBooked(text)) {
-        text = `${text}\n\n${confirmation}`;
-      }
-    }
+    const policy = await this.appointmentPolicyFor(conversation);
+    const text = guardClientReply({
+      modelText: draftText,
+      confirmedIso,
+      persisted: Boolean(confirmedIso),
+      draft: parseAppointmentDraft(conversation.appointmentDraft),
+      policy,
+      now: new Date(),
+      channel: this.appointmentChannel(conversation),
+    });
 
     if (!text && analysisFailed) {
       patchTurnSummary({ outbound: 'FAILED', failure: 'budget' });
@@ -8760,6 +9074,13 @@ ${catalogAppend}`;
         mergedForInstant,
         ORCHESTRATOR_HISTORY_MESSAGE_CHARS,
       );
+      if (safeUserText.trim()) {
+        await this.captureAppointmentDraftFromTurn(
+          conversation,
+          safeUserText,
+          new Date(),
+        );
+      }
       const dialogue = projectOrchestratorDialogue(
         this.messagesToChatCompletionTurns(historySansBatch),
       );
@@ -8867,7 +9188,8 @@ ${catalogAppend}`;
           if (
             name === 'createAppointment' &&
             payload.success &&
-            payload.scheduledAt
+            payload.scheduledAt &&
+            payload.unchanged !== true
           ) {
             lastConfirmedIso = String(payload.scheduledAt);
           }
