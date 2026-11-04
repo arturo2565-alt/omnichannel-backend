@@ -32,7 +32,6 @@ import {
   readStagingSandbox,
   STAGING_IMAGE_UNAVAILABLE_NOTICE,
   rememberRawBody,
-  resetStagingOpenAiBudgetForTests,
   stagingWhatsAppPayloadForMeta,
   verifyMetaWebhookSignature,
   type StagingSandboxConfig,
@@ -114,7 +113,6 @@ describe('staging sandbox', () => {
 
   afterEach(() => {
     process.env = { ...previous };
-    resetStagingOpenAiBudgetForTests();
     jest.restoreAllMocks();
   });
 
@@ -132,9 +130,6 @@ describe('staging sandbox', () => {
     ).toBe('incomplete');
     expect(
       readStagingSandbox(completeEnv({ STAGING_OPENAI_API_KEY: '' })).reason,
-    ).toBe('incomplete');
-    expect(
-      readStagingSandbox(completeEnv({ STAGING_OPENAI_MAX_REQUESTS: '0' })).reason,
     ).toBe('incomplete');
     expect(
       readStagingSandbox(
@@ -447,7 +442,7 @@ describe('staging sandbox', () => {
     post.mockRestore();
   });
 
-  it('OpenAI inerte por defecto y el presupuesto corta sin otra clave', async () => {
+  it('OpenAI inerte sin sandbox y, con sandbox, no fabrica staging_sandbox_budget', async () => {
     const fetchSpy = jest.spyOn(globalThis, 'fetch');
     const inert = createOpenAiClient({ PEGAZUZ_ENV: 'staging' });
     await expect(
@@ -458,102 +453,15 @@ describe('staging sandbox', () => {
     ).rejects.toThrow(/apagados/);
     expect(fetchSpy).not.toHaveBeenCalled();
 
-    process.env = {
-      ...completeEnv({
-        STAGING_OPENAI_MAX_REQUESTS: '1',
-        STAGING_OPENAI_MAX_TOTAL_TOKENS: '10',
-      }),
-    };
-    resetStagingOpenAiBudgetForTests();
+    process.env = completeEnv({
+      STAGING_OPENAI_MAX_REQUESTS: '0',
+      STAGING_OPENAI_MAX_TOTAL_TOKENS: '0',
+    });
     const auths: string[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = jest.fn(async (_input, init) => {
       const headers = new Headers(init?.headers);
       auths.push(headers.get('authorization') ?? '');
-      return new Response(
-        JSON.stringify({
-          id: 'chatcmpl-ensayo',
-          object: 'chat.completion',
-          choices: [
-            {
-              index: 0,
-              message: { role: 'assistant', content: 'ok' },
-              finish_reason: 'stop',
-            },
-          ],
-          usage: { total_tokens: 20 },
-        }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      );
-    }) as typeof fetch;
-    try {
-      const client = createOpenAiClient();
-      await client.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: 'hola' }],
-      });
-      await expect(
-        client.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [{ role: 'user', content: 'otra' }],
-        }),
-      ).rejects.toThrow(/apagados/);
-      expect(auths).toEqual([`Bearer ${OPENAI_STAGING}`]);
-      expect(auths.join('')).not.toContain(OPENAI_OTHER);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('una llamada que falla consume la solicitud y bloquea la siguiente', async () => {
-    process.env = completeEnv({
-      STAGING_OPENAI_MAX_REQUESTS: '1',
-      STAGING_OPENAI_MAX_TOTAL_TOKENS: '1000',
-    });
-    resetStagingOpenAiBudgetForTests();
-    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const originalFetch = globalThis.fetch;
-    let calls = 0;
-    globalThis.fetch = jest.fn(async () => {
-      calls += 1;
-      throw new Error('red');
-    }) as typeof fetch;
-    try {
-      const client = createOpenAiClient();
-      await expect(
-        client.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [{ role: 'user', content: 'hola' }],
-        }),
-      ).rejects.toThrow(/Connection error/);
-      await expect(
-        client.chat.completions.create({
-          model: 'gpt-4o-mini',
-          messages: [{ role: 'user', content: 'otra' }],
-        }),
-      ).rejects.toThrow(/apagados/);
-      expect(calls).toBe(1);
-      const logged = warn.mock.calls.map((call) => String(call[0])).join('\n');
-      expect(logged).toContain('"reason":"requests"');
-      expect(logged).not.toContain('hola');
-      expect(logged).not.toContain('data:image');
-    } finally {
-      globalThis.fetch = originalFetch;
-      warn.mockRestore();
-    }
-  });
-
-  it('el tope de tokens bloquea el turno siguiente sin repetir la llamada', async () => {
-    process.env = completeEnv({
-      STAGING_OPENAI_MAX_REQUESTS: '5',
-      STAGING_OPENAI_MAX_TOTAL_TOKENS: '50',
-    });
-    resetStagingOpenAiBudgetForTests();
-    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const originalFetch = globalThis.fetch;
-    let calls = 0;
-    globalThis.fetch = jest.fn(async () => {
-      calls += 1;
       return new Response(
         JSON.stringify({
           id: 'chatcmpl-ensayo',
@@ -574,21 +482,54 @@ describe('staging sandbox', () => {
       const client = createOpenAiClient();
       await client.chat.completions.create({
         model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: 'turno' }],
+        messages: [{ role: 'user', content: 'hola' }],
       });
+      await client.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: 'otra' }],
+      });
+      expect(auths).toEqual([`Bearer ${OPENAI_STAGING}`, `Bearer ${OPENAI_STAGING}`]);
+      expect(auths.join('')).not.toContain(OPENAI_OTHER);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('un fallo de red no bloquea la llamada siguiente', async () => {
+    process.env = completeEnv();
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('red');
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: 'You exceeded your current quota.',
+            type: 'insufficient_quota',
+            code: 'insufficient_quota',
+          },
+        }),
+        { status: 429, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    try {
+      const client = createOpenAiClient();
       await expect(
         client.chat.completions.create({
           model: 'gpt-4o-mini',
-          messages: [{ role: 'user', content: 'foto nueva' }],
+          messages: [{ role: 'user', content: 'hola' }],
         }),
-      ).rejects.toThrow(/apagados/);
-      expect(calls).toBe(1);
-      const logged = warn.mock.calls.map((call) => String(call[0])).join('\n');
-      expect(logged).toContain('"reason":"tokens"');
-      expect(logged).not.toContain('foto nueva');
+      ).rejects.toThrow(/Connection error/);
+      await expect(
+        client.chat.completions.create({
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: 'otra' }],
+        }),
+      ).rejects.toThrow(/quota/);
+      expect(calls).toBe(2);
     } finally {
       globalThis.fetch = originalFetch;
-      warn.mockRestore();
     }
   });
 

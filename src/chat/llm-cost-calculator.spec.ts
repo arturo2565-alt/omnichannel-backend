@@ -16,6 +16,14 @@ describe('llm-cost-calculator', () => {
     expect(resolveLlmModelRates('gpt-5.6-sol')?.output).toBe(20.0);
     expect(resolveLlmModelRates('gpt-5.6-sol')?.cachedInput).toBe(0.4);
     expect(resolveLlmModelRates('gpt-5.6')?.input).toBe(4.0);
+    expect(resolveLlmModelRates('gpt-6.1-sol')?.input).toBe(2.0);
+    expect(resolveLlmModelRates('gpt-6.1-sol')?.output).toBe(10.0);
+    expect(resolveLlmModelRates('gpt-6.1-sol')?.cachedInput).toBe(0.1);
+    expect(resolveLlmModelRates('gpt-6.1-sol')?.cacheWrite).toBe(2.5);
+    expect(resolveLlmModelRates('gpt-6-luna')?.input).toBe(0.1);
+    expect(resolveLlmModelRates('gpt-6-luna')?.output).toBe(0.5);
+    expect(resolveLlmModelRates('gpt-6-luna')?.cacheWrite).toBe(0.125);
+    expect(resolveLlmModelRates('gpt-6.1-sol-2026-11')?.output).toBe(10.0);
   });
 
   it('calcula costo con cached tokens', () => {
@@ -27,6 +35,17 @@ describe('llm-cost-calculator', () => {
       cachedTokens: 500_000,
     });
     expect(cost).toBeCloseTo(2.5 * 0.5 + 1.25 * 0.5 + 10 * 0.1, 6);
+  });
+
+  it('separa lectura y escritura de caché en gpt-6.1-sol', () => {
+    const cost = estimateLlmCostUsd({
+      model: 'gpt-6.1-sol',
+      promptTokens: 1_000_000,
+      completionTokens: 100_000,
+      cachedTokens: 200_000,
+      cacheWriteTokens: 300_000,
+    });
+    expect(cost).toBeCloseTo(2 * 0.5 + 0.1 * 0.2 + 2.5 * 0.3 + 10 * 0.1, 6);
   });
 
   it('modelo desconocido → 0', () => {

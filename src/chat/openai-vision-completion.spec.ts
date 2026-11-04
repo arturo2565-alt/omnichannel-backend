@@ -17,6 +17,19 @@ describe('openai-vision-completion config', () => {
 });
 
 describe('openai-model-config vision tier', () => {
+  const env = process.env;
+
+  beforeEach(() => {
+    process.env = { ...env };
+    delete process.env.PEGAZUZ_ENV;
+    delete process.env.OPENAI_MODEL_VISION;
+    delete process.env.OPENAI_REASONING_EFFORT_VISION;
+  });
+
+  afterAll(() => {
+    process.env = env;
+  });
+
   it('visión usa reasoning high por defecto (no xhigh)', () => {
     delete process.env.OPENAI_REASONING_EFFORT_VISION;
     const p = openAiChatCompletionParams({ tier: 'vision', maxOutputTokens: 12_000 });

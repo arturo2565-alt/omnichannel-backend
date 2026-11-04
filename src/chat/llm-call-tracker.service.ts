@@ -63,6 +63,14 @@ export class LlmCallTrackerService implements OnModuleInit, OnModuleDestroy {
           : 0,
       ),
     );
+    const cacheWriteTokens = Math.max(
+      0,
+      Math.floor(
+        Number.isFinite(Number(input.cacheWriteTokens))
+          ? Number(input.cacheWriteTokens)
+          : 0,
+      ),
+    );
     const totalTokens = Math.max(
       0,
       Math.floor(
@@ -76,6 +84,7 @@ export class LlmCallTrackerService implements OnModuleInit, OnModuleDestroy {
       promptTokens,
       completionTokens,
       cachedTokens,
+      cacheWriteTokens,
     });
 
     const row = this.llmCallRepository.create({

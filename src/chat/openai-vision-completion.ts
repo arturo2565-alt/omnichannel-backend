@@ -2,7 +2,9 @@ import type OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import type { ReasoningEffort } from 'openai/resources/shared';
 import {
+  coerceReasoningEffort,
   openAiChatCompletionParams,
+  resolveOpenAiModel,
   resolveOpenAiReasoningEffort,
 } from './openai-model-config';
 import {
@@ -93,7 +95,11 @@ export async function createVisionDamageAnalysisCompletion(
   messages: readonly ChatCompletionMessageParam[],
 ): Promise<VisionCompletionAttemptMeta> {
   const maxOutputTokens = resolveOpenAiVisionMaxOutputTokens();
-  const primaryEffort = resolveOpenAiReasoningEffort('vision');
+  const model = resolveOpenAiModel('vision');
+  const primaryEffort = coerceReasoningEffort(
+    model,
+    resolveOpenAiReasoningEffort('vision'),
+  );
   const efforts = visionRetryEfforts(primaryEffort);
 
   let lastMeta: VisionCompletionAttemptMeta = {

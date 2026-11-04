@@ -44,8 +44,6 @@ export type StagingSandboxConfig = {
   displayNumber: string;
   allowlist: readonly string[];
   openAiApiKey: string;
-  maxRequests: number;
-  maxTotalTokens: number;
   mediaMaxBytes: number;
   mediaTimeoutMs: number;
   allowedMediaTypes: readonly string[];
@@ -96,15 +94,6 @@ export type StagingMediaResult =
 /** Aviso único al cliente. No incluye códigos, tokens ni el identificador del medio. */
 export const STAGING_IMAGE_UNAVAILABLE_NOTICE =
   'No pude abrir esa fotografía. Envíala otra vez en JPG, PNG o WEBP.';
-
-type OpenAiBudget = {
-  maxRequests: number;
-  maxTotalTokens: number;
-  requests: number;
-  tokens: number;
-};
-
-let openAiBudget: OpenAiBudget | null = null;
 
 function trim(value: unknown): string {
   return String(value ?? '').trim();
@@ -173,8 +162,6 @@ export function readStagingSandbox(
   const displayNumber = normalizeWhatsAppDigits(trim(env.STAGING_WHATSAPP_NUMBER));
   const openAiApiKey = trim(env.STAGING_OPENAI_API_KEY);
   const allowlist = parseAllowlist(env.STAGING_WHATSAPP_ALLOWLIST);
-  const maxRequests = positiveInt(env.STAGING_OPENAI_MAX_REQUESTS);
-  const maxTotalTokens = positiveInt(env.STAGING_OPENAI_MAX_TOTAL_TOKENS);
   const mediaMaxBytes = optionalBoundedInt(
     env.STAGING_MEDIA_MAX_BYTES,
     DEFAULT_MEDIA_MAX_BYTES,
@@ -200,8 +187,6 @@ export function readStagingSandbox(
   if (
     !secretsLookReal ||
     !allowlist ||
-    maxRequests == null ||
-    maxTotalTokens == null ||
     mediaMaxBytes == null ||
     mediaTimeoutMs == null ||
     collidesWithProduction(env) ||
@@ -222,8 +207,6 @@ export function readStagingSandbox(
       displayNumber,
       allowlist,
       openAiApiKey,
-      maxRequests,
-      maxTotalTokens,
       mediaMaxBytes,
       mediaTimeoutMs,
       allowedMediaTypes: ALLOWED_MEDIA_TYPES,
@@ -500,21 +483,7 @@ export async function downloadStagingWhatsAppMedia(
 export const STAGING_TURN_NOT_DELIVERED_REPLY =
   'No pude completar este turno. El expediente sigue guardado y esta respuesta no confirma ninguna cita.';
 
-export type StagingBudgetReason = 'requests' | 'tokens';
-
-function blockedOpenAiResponse(reason: StagingBudgetReason): Response {
-  return new Response(
-    JSON.stringify({
-      error: {
-        message: STAGING_EXTERNAL_BLOCKED,
-        type: 'staging_sandbox_budget',
-        reason,
-      },
-    }),
-    { status: 503, headers: { 'content-type': 'application/json' } },
-  );
-}
-
+/** Reconoce el 503 que fabricaba el techo acumulado. El fetch del sandbox ya no lo genera. */
 export function isStagingSandboxBudgetError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const record = err as {
@@ -530,51 +499,13 @@ export function isStagingSandboxBudgetError(err: unknown): boolean {
   return record.status === 503 && message.includes(STAGING_EXTERNAL_BLOCKED);
 }
 
-export function resetStagingOpenAiBudgetForTests(): void {
-  openAiBudget = null;
-}
-
+/**
+ * Fetch del sandbox. No cuenta solicitudes ni tokens y no fabrica
+ * `staging_sandbox_budget`. Cuota, facturación y fallos de OpenAI siguen
+ * siendo la respuesta original. Los topes por llamada viven en cada request.
+ */
 export function stagingOpenAiFetch(
-  config: Pick<StagingSandboxConfig, 'maxRequests' | 'maxTotalTokens'>,
   inner: typeof fetch = globalThis.fetch,
 ): typeof fetch {
-  if (
-    !openAiBudget ||
-    openAiBudget.maxRequests !== config.maxRequests ||
-    openAiBudget.maxTotalTokens !== config.maxTotalTokens
-  ) {
-    openAiBudget = {
-      maxRequests: config.maxRequests,
-      maxTotalTokens: config.maxTotalTokens,
-      requests: 0,
-      tokens: 0,
-    };
-  }
-  const budget = openAiBudget;
-  return async (input, init) => {
-    if (budget.requests >= budget.maxRequests || budget.tokens >= budget.maxTotalTokens) {
-      const reason: StagingBudgetReason =
-        budget.requests >= budget.maxRequests ? 'requests' : 'tokens';
-      console.warn(
-        JSON.stringify({
-          event: 'staging_sandbox_budget',
-          reason,
-          requests: budget.requests,
-          maxRequests: budget.maxRequests,
-          tokens: budget.tokens,
-          maxTotalTokens: budget.maxTotalTokens,
-        }),
-      );
-      return blockedOpenAiResponse(reason);
-    }
-    budget.requests += 1;
-    const response = await inner(input, init);
-    try {
-      const usage = Number((await response.clone().json())?.usage?.total_tokens ?? 0);
-      if (Number.isFinite(usage) && usage > 0) budget.tokens += usage;
-    } catch {
-      /* La respuesta no trae usage. El tope de solicitudes sigue vigente. */
-    }
-    return response;
-  };
+  return (input, init) => inner(input, init);
 }

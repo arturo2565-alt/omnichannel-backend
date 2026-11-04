@@ -4,7 +4,7 @@ import { readStagingSandbox, stagingOpenAiFetch } from './staging-sandbox';
 
 /**
  * Producción usa OPENAI_API_KEY. Staging permanece inerte hasta que el sandbox
- * esté completo; entonces usa solo STAGING_OPENAI_API_KEY y el presupuesto del proceso.
+ * esté completo; entonces usa solo STAGING_OPENAI_API_KEY, sin techo acumulado.
  */
 export function createOpenAiClient(env: NodeJS.ProcessEnv = process.env): OpenAI {
   if (!isStagingRuntime(env)) {
@@ -15,7 +15,7 @@ export function createOpenAiClient(env: NodeJS.ProcessEnv = process.env): OpenAI
     return new OpenAI({
       apiKey: sandbox.config.openAiApiKey,
       maxRetries: 0,
-      fetch: stagingOpenAiFetch(sandbox.config),
+      fetch: stagingOpenAiFetch(),
     });
   }
   return new OpenAI({
