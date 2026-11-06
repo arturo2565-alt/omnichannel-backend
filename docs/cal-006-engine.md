@@ -21,6 +21,14 @@ El motor exige además, para una cotización autorizada:
 
 El archivo real de Cloudinary no se invoca. El puerto de pruebas debe devolver el SHA-256 local y `verified: true`, que solo es cierto si un checksum descargado coincide. Sin esa confirmación el caso permanece `pending_private_archive` y no se escribe manifiesto. No se declara `chatgpt_upload`: este motor no extrae adjuntos de una conversación.
 
+## Errores de GitHub
+
+Un HTTP 422 crea otro identificador solo si el mensaje demuestra que el archivo ya existe (`sha` no enviado). Una validación 422, un 403 y un 429 no ocupan otro `AF-######`. El 429 y los 5xx reintentan el mismo caso, con espera exponencial y jitter, hasta tres veces más. Las colisiones reales siguen limitadas a cinco identificadores, y ese tope se puede bajar.
+
+## Fotografías huérfanas
+
+Si el manifiesto se guarda y falla el enlace con el caso, el caso sigue `pending_private_archive` y el manifiesto permanece. Un reintento de la misma cotización reutiliza ese manifiesto y no vuelve a subir la foto. `recoverOrphanManifests` enlaza solo un manifiesto verificado cuyo `case_id` y `photo_id` coinciden con la ruta y con un caso existente. Si esa prueba no se cumple, el archivo se queda. Este motor no borra fotografías ni manifiestos.
+
 ## Bloqueo de activación
 
-No hay credencial de GitHub ni de Cloudinary en este cambio. Conectar el servicio real exigiría una credencial de privilegio mínimo y una redescarga autenticada. Eso no se hizo. `CanonicalQuoteV1` no lee estos casos.
+No hay credencial de GitHub ni de Cloudinary en este cambio. Antes de una API de ingesta faltan: una credencial de privilegio mínimo solo para el repositorio privado, una redescarga autenticada que confirme el SHA-256, un endpoint protegido y apagado por defecto, y una prueba con un caso ficticio. No se listan manifiestos desconocidos en todo el repositorio. `CanonicalQuoteV1` no lee estos casos.

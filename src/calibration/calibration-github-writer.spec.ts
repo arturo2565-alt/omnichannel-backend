@@ -1,4 +1,8 @@
-import { CalibrationGithubWriter, CalibrationConflictError } from './calibration-github-writer';
+import {
+  CalibrationGithubWriter,
+  CalibrationConflictError,
+  classifyGithubFailure,
+} from './calibration-github-writer';
 
 function response(status: number, value: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => value } as Response;
@@ -64,6 +68,32 @@ describe('CAL-005 server-side GitHub writer', () => {
     });
     expect(transport).toHaveBeenCalledTimes(3);
     expect(String(transport.mock.calls[2][0])).toContain('data/index.json');
+  });
+
+  it('does not treat a validation 422 as an occupied case', async () => {
+    const index = { schema_version: '1.0.0', cases: {}, source_keys: {} };
+    const transport = jest.fn()
+      .mockResolvedValueOnce(response(200, { sha: 'index-sha', content: Buffer.from(JSON.stringify(index)).toString('base64') }))
+      .mockResolvedValueOnce(response(404, { message: 'Not Found' }))
+      .mockResolvedValueOnce(response(422, { message: 'Validation Failed' }));
+    const writer = new CalibrationGithubWriter('test-token', transport as unknown as typeof fetch);
+    await expect(writer.insert(input)).rejects.toMatchObject({ kind: 'validation', status: 422 });
+    expect(transport).toHaveBeenCalledTimes(3);
+  });
+
+  it('reports permission and rate-limit failures without creating another case id', async () => {
+    expect(classifyGithubFailure(422, 'Invalid request.\n\n"sha" wasn\'t supplied.')).toBe('occupied');
+    expect(classifyGithubFailure(403, 'Resource not accessible by integration')).toBe('forbidden');
+    expect(classifyGithubFailure(429, 'API rate limit exceeded')).toBe('rate_limit');
+    const index = { schema_version: '1.0.0', cases: {}, source_keys: {} };
+    const transport = jest.fn()
+      .mockResolvedValueOnce(response(200, { sha: 'index-sha', content: Buffer.from(JSON.stringify(index)).toString('base64') }))
+      .mockResolvedValueOnce(response(404, { message: 'Not Found' }))
+      .mockResolvedValueOnce(response(403, { message: 'Resource not accessible by integration' }));
+    const writer = new CalibrationGithubWriter('test-token', transport as unknown as typeof fetch);
+    await expect(writer.insert(input)).rejects.toMatchObject({ kind: 'forbidden', status: 403 });
+    expect(String(transport.mock.calls[2][0])).toContain('AF-000003');
+    expect(transport.mock.calls.some((call) => String(call[0]).includes('AF-000004'))).toBe(false);
   });
 
 });

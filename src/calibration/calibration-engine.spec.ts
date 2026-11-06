@@ -1,10 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CalibrationValidationError } from './calibration-case';
-import { confirmArchiveChecksum, CalibrationEngine } from './calibration-engine';
+import {
+  assessPhotoManifest,
+  confirmArchiveChecksum,
+  CalibrationEngine,
+  retryDelayMs,
+} from './calibration-engine';
 import {
   CalibrationConflictError,
   CalibrationGithubWriter,
+  CalibrationWriteError,
+  classifyGithubFailure,
 } from './calibration-github-writer';
 import { validateCalibrationImage } from './calibration-image-archive.service';
 
@@ -12,10 +19,18 @@ function response(status: number, value: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => value } as Response;
 }
 
-function memoryGithub(options?: { failIndexWrites?: number; failAll?: boolean }) {
+function memoryGithub(options?: {
+  failIndexWrites?: number;
+  failAll?: boolean;
+  rejectCaseCreate?: 'validation' | 'forbidden';
+  rateLimitCaseCreates?: number;
+  failArchivedUpdates?: number;
+}) {
   const files = new Map<string, { sha: string; text: string }>();
   let seq = 0;
   let indexFailures = options?.failIndexWrites ?? 0;
+  let rateLimits = options?.rateLimitCaseCreates ?? 0;
+  let archivedFailures = options?.failArchivedUpdates ?? 0;
   files.set(
     'data/index.json',
     {
@@ -43,7 +58,30 @@ function memoryGithub(options?: { failIndexWrites?: number; failAll?: boolean })
     const body = JSON.parse(String(init?.body)) as { content: string; sha?: string };
     const text = Buffer.from(body.content, 'base64').toString('utf8');
     const current = files.get(path);
-    if (!body.sha && current) return response(422, { message: 'sha required' });
+    const creatingCase = method === 'PUT' && path.startsWith('data/cases/') && !body.sha;
+    if (creatingCase && rateLimits > 0) {
+      rateLimits -= 1;
+      return response(429, { message: 'API rate limit exceeded' });
+    }
+    if (creatingCase && options?.rejectCaseCreate === 'validation') {
+      return response(422, { message: 'Validation Failed' });
+    }
+    if (creatingCase && options?.rejectCaseCreate === 'forbidden') {
+      return response(403, { message: 'Resource not accessible by integration' });
+    }
+    if (
+      method === 'PUT' &&
+      path.startsWith('data/cases/') &&
+      body.sha &&
+      text.includes('archived_private') &&
+      archivedFailures > 0
+    ) {
+      archivedFailures -= 1;
+      return response(500, { message: 'unavailable' });
+    }
+    if (!body.sha && current) {
+      return response(422, { message: 'Invalid request.\n\n"sha" wasn\'t supplied.' });
+    }
     if (body.sha && (!current || current.sha !== body.sha)) return response(409, { message: 'Conflict' });
     if (path === 'data/index.json' && indexFailures > 0) {
       indexFailures -= 1;
@@ -97,13 +135,19 @@ function verifiedStore() {
   };
 }
 
-function engineFor(github = memoryGithub(), photos?: ReturnType<typeof verifiedStore>) {
+function engineFor(
+  github = memoryGithub(),
+  photos?: ReturnType<typeof verifiedStore>,
+  options?: ConstructorParameters<typeof CalibrationEngine>[3],
+) {
   return {
     github,
     photos,
     engine: new CalibrationEngine(
       new CalibrationGithubWriter('test-token', github.transport),
       photos ?? null,
+      () => '2026-11-06T18:00:00.000Z',
+      options,
     ),
   };
 }
@@ -265,5 +309,141 @@ describe('CAL-006 calibration engine', () => {
     );
     expect(photoSchema.properties.content_sha256?.pattern).toBe('^[a-f0-9]{64}$');
     expect(photoSchema.properties.storage_status?.enum).toContain('verified');
+  });
+
+  it('classifies GitHub 422 validation separately from a real file collision', () => {
+    expect(classifyGithubFailure(422, 'Invalid request.\n\n"sha" wasn\'t supplied.')).toBe('occupied');
+    expect(classifyGithubFailure(422, 'Validation Failed')).toBe('validation');
+    expect(classifyGithubFailure(403, 'Resource not accessible by integration')).toBe('forbidden');
+    expect(classifyGithubFailure(429, 'API rate limit exceeded')).toBe('rate_limit');
+    expect(retryDelayMs(0, { baseDelayMs: 100, jitterRatio: 0.5 }, () => 0)).toBe(100);
+    expect(retryDelayMs(0, { baseDelayMs: 100, jitterRatio: 0.5 }, () => 1)).toBe(150);
+    expect(retryDelayMs(2, { baseDelayMs: 100, jitterRatio: 0 }, () => 0)).toBe(400);
+  });
+
+  it('does not allocate another id when GitHub returns 422 for validation', async () => {
+    const github = memoryGithub({ rejectCaseCreate: 'validation' });
+    const { engine } = engineFor(github);
+    await expect(engine.record(quote('case-test-invalid'))).rejects.toMatchObject({
+      kind: 'validation',
+      status: 422,
+    } satisfies Partial<CalibrationWriteError>);
+    expect(github.files.has('data/cases/AF-000002.json')).toBe(false);
+    expect(github.files.has('data/cases/AF-000003.json')).toBe(false);
+  });
+
+  it('allocates another id only when the case file is already occupied', async () => {
+    const github = memoryGithub();
+    const original = '{"locked":true}\n';
+    github.files.set('data/cases/AF-000002.json', { sha: 'occupied', text: original });
+    const { engine } = engineFor(github);
+    const result = await engine.record(quote('case-test-occupied'));
+    expect(result.caseId).toBe('AF-000003');
+    expect(github.files.get('data/cases/AF-000002.json')?.text).toBe(original);
+  });
+
+  it('does not allocate another id when GitHub returns 403', async () => {
+    const github = memoryGithub({ rejectCaseCreate: 'forbidden' });
+    const { engine } = engineFor(github);
+    await expect(engine.record(quote('case-test-forbidden'))).rejects.toMatchObject({
+      kind: 'forbidden',
+      status: 403,
+    });
+    expect([...github.files.keys()].some((path) => path.startsWith('data/cases/'))).toBe(false);
+  });
+
+  it('retries HTTP 429 against the same case id', async () => {
+    const github = memoryGithub({ rateLimitCaseCreates: 1 });
+    const waits: number[] = [];
+    const { engine } = engineFor(github, undefined, {
+      sleep: async (ms) => { waits.push(ms); },
+      random: () => 0,
+      retry: { baseDelayMs: 10, jitterRatio: 0.5 },
+    });
+    const result = await engine.record(quote('case-test-rate'));
+    expect(result.caseId).toBe('AF-000002');
+    expect(waits).toEqual([10]);
+    expect(github.files.has('data/cases/AF-000003.json')).toBe(false);
+  });
+
+  it('stops after the configured number of real collisions', async () => {
+    const github = memoryGithub();
+    github.files.set('data/cases/AF-000002.json', { sha: 'occupied', text: '{"locked":true}\n' });
+    const { engine } = engineFor(github, undefined, { retry: { maxAllocationAttempts: 1 } });
+    await expect(engine.record(quote('case-test-cap'))).rejects.toThrow(
+      'Concurrent case allocation was not resolved',
+    );
+    expect(github.files.has('data/cases/AF-000003.json')).toBe(false);
+    expect(github.files.get('data/cases/AF-000002.json')?.text).toBe('{"locked":true}\n');
+  });
+
+  it('retries the same quote without writing a second case', async () => {
+    const { engine, github } = engineFor();
+    const first = await engine.record(quote('case-test-retry'));
+    const second = await engine.record(quote('case-test-retry'));
+    expect(second).toMatchObject({ status: 'already_exists', caseId: first.caseId });
+    expect([...github.files.keys()].filter((path) => path.startsWith('data/cases/'))).toHaveLength(1);
+  });
+
+  it('keeps the case pending when linking fails after the manifest is stored', async () => {
+    const photos = verifiedStore();
+    const github = memoryGithub({ failArchivedUpdates: 1 });
+    const { engine } = engineFor(github, photos, { retry: { maxTransientAttempts: 0 } });
+    const first = await engine.record(quote('case-test-photo-crash'), [jpeg]);
+    expect(first.photoArchiveStatus).toBe('pending_private_archive');
+    expect(first.photoRefs).toEqual([]);
+    expect(first.orphanPhotoRefs).toEqual(['IMG-000001']);
+    expect(storedCase(github, first.caseId).photo_archive_status).toBe('pending_private_archive');
+    const second = await engine.record(quote('case-test-photo-crash'), [jpeg]);
+    expect(second.photoArchiveStatus).toBe('archived_private');
+    expect(second.photoRefs).toEqual(['IMG-000001']);
+    expect(photos.calls).toHaveLength(1);
+    expect(storedCase(github, first.caseId).photo_refs).toEqual(['IMG-000001']);
+  });
+
+  it('links a proven orphan manifest and leaves an unproven file untouched', async () => {
+    const { engine, github } = engineFor();
+    const created = await engine.record(quote('case-test-recover'));
+    const checksum = 'ab'.repeat(32);
+    const proven = {
+      schema_version: '1.0.0',
+      photo_id: 'IMG-000001',
+      case_id: created.caseId,
+      storage_status: 'verified',
+      content_sha256: checksum,
+    };
+    const foreign = {
+      schema_version: '1.0.0',
+      photo_id: 'IMG-000009',
+      case_id: 'AF-999999',
+      storage_status: 'verified',
+      content_sha256: checksum,
+    };
+    github.files.set(`data/photos/${created.caseId}/IMG-000001.json`, {
+      sha: 'manifest-proven',
+      text: JSON.stringify(proven),
+    });
+    github.files.set(`data/photos/${created.caseId}/IMG-000009.json`, {
+      sha: 'manifest-foreign',
+      text: JSON.stringify(foreign),
+    });
+    expect(assessPhotoManifest({
+      caseExists: false,
+      referenced: false,
+      pathCaseId: created.caseId,
+      pathPhotoId: 'IMG-000001',
+      manifest: proven,
+    })).toBe('unproven');
+    const recovered = await engine.recoverOrphanManifests(created.caseId, [
+      'IMG-000001',
+      'IMG-000009',
+    ]);
+    expect(recovered.linked).toEqual(['IMG-000001']);
+    expect(recovered.unproven).toEqual(['IMG-000009']);
+    expect(recovered.photoArchiveStatus).toBe('archived_private');
+    expect(github.files.get(`data/photos/${created.caseId}/IMG-000009.json`)?.text).toBe(
+      JSON.stringify(foreign),
+    );
+    expect(storedCase(github, created.caseId).photo_refs).toEqual(['IMG-000001']);
   });
 });

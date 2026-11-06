@@ -8,6 +8,7 @@ import {
 import {
   CalibrationConflictError,
   CalibrationGithubWriter,
+  CalibrationWriteError,
   type GitHubCaseWriteResult,
 } from './calibration-github-writer';
 
@@ -30,26 +31,144 @@ export type CalibrationRecordResult = {
   caseCommit: string;
   indexCommit: string;
   photoArchiveStatus: PhotoArchiveStatus;
+  /** Refs already linked on the case. Empty while the case is still pending. */
   photoRefs: string[];
+  /** Manifests stored for this case but not linked yet. They are not deleted. */
+  orphanPhotoRefs: string[];
 };
+
+export type CalibrationRetryPolicy = {
+  /** Collisions that allocate another case id. The default remains five. */
+  maxAllocationAttempts: number;
+  /** Extra attempts for 429 and 5xx. They reuse the same case id. */
+  maxTransientAttempts: number;
+  baseDelayMs: number;
+  jitterRatio: number;
+};
+
+export const DEFAULT_CALIBRATION_RETRY: CalibrationRetryPolicy = {
+  maxAllocationAttempts: 5,
+  maxTransientAttempts: 3,
+  baseDelayMs: 25,
+  jitterRatio: 0.2,
+};
+
+export type ManifestAssessment = 'linked' | 'orphan_recoverable' | 'unproven';
+
+export function retryDelayMs(
+  attempt: number,
+  policy: Pick<CalibrationRetryPolicy, 'baseDelayMs' | 'jitterRatio'>,
+  random: () => number = Math.random,
+): number {
+  const exponent = Math.max(0, attempt);
+  const base = policy.baseDelayMs * 2 ** exponent;
+  const ratio = Math.min(Math.max(policy.jitterRatio, 0), 1);
+  const sample = Math.min(Math.max(random(), 0), 1);
+  return Math.round(base + base * ratio * sample);
+}
+
+export function assessPhotoManifest(input: {
+  caseExists: boolean;
+  referenced: boolean;
+  pathCaseId: string;
+  pathPhotoId: string;
+  manifest: {
+    case_id?: unknown;
+    photo_id?: unknown;
+    content_sha256?: unknown;
+    storage_status?: unknown;
+  } | null;
+}): ManifestAssessment {
+  if (!input.caseExists || !input.manifest) return 'unproven';
+  if (input.referenced) return 'linked';
+  const checksum = input.manifest.content_sha256;
+  const proven =
+    input.manifest.case_id === input.pathCaseId &&
+    input.manifest.photo_id === input.pathPhotoId &&
+    input.manifest.storage_status === 'verified' &&
+    typeof checksum === 'string' &&
+    /^[a-f0-9]{64}$/.test(checksum);
+  return proven ? 'orphan_recoverable' : 'unproven';
+}
 
 const PHOTO_MIME = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' } as const;
 
+const delay = (ms: number) => new Promise<void>((resolve) => {
+  setTimeout(resolve, ms);
+});
+
 export class CalibrationEngine {
+  private readonly policy: CalibrationRetryPolicy;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly random: () => number;
+
   constructor(
     private readonly writer: CalibrationGithubWriter,
     private readonly photos: CalibrationPhotoStore | null = null,
     private readonly clock: () => string = () => '2026-11-06T18:00:00.000Z',
-  ) {}
+    options: {
+      retry?: Partial<CalibrationRetryPolicy>;
+      sleep?: (ms: number) => Promise<void>;
+      random?: () => number;
+    } = {},
+  ) {
+    this.policy = { ...DEFAULT_CALIBRATION_RETRY, ...options.retry };
+    this.sleep = options.sleep ?? delay;
+    this.random = options.random ?? Math.random;
+  }
 
   async record(input: unknown, images: readonly Buffer[] = []): Promise<CalibrationRecordResult> {
     const quote = validateHumanQuote(input);
     const uniqueImages = dedupeImages(images);
     const written = await this.commitQuote(quote, uniqueImages.length > 0);
-    if (written.status === 'already_exists' || uniqueImages.length === 0) {
+    if (uniqueImages.length === 0 || written.photoArchiveStatus === 'archived_private') {
       return written;
     }
     return this.archivePhotos(written, uniqueImages);
+  }
+
+  /**
+   * Links verified manifests that belong to the case and are not referenced.
+   * A manifest without that proof stays on disk. This method does not delete.
+   */
+  async recoverOrphanManifests(caseId: string, photoIds: readonly string[]): Promise<{
+    linked: string[];
+    unproven: string[];
+    photoArchiveStatus: PhotoArchiveStatus;
+  }> {
+    const stored = await this.withTransientRetry(() => this.writer.readCase(caseId));
+    if (!stored) {
+      return { linked: [], unproven: [...photoIds], photoArchiveStatus: 'not_provided' };
+    }
+    const referenced = new Set(photoRefsOf(stored));
+    const recoverable: string[] = [];
+    const unproven: string[] = [];
+    for (const photoId of photoIds) {
+      const manifest = await this.writer.readPhotoManifest(caseId, photoId);
+      const assessment = assessPhotoManifest({
+        caseExists: true,
+        referenced: referenced.has(photoId),
+        pathCaseId: caseId,
+        pathPhotoId: photoId,
+        manifest,
+      });
+      if (assessment === 'orphan_recoverable') recoverable.push(photoId);
+      else if (assessment !== 'linked') unproven.push(photoId);
+    }
+    if (recoverable.length === 0) {
+      return {
+        linked: [...referenced],
+        unproven,
+        photoArchiveStatus: photoStatusOf(stored),
+      };
+    }
+    const linked = [...referenced, ...recoverable];
+    await this.withTransientRetry(() => this.writer.updateVerifiedPhotos({
+      caseId,
+      photoRefs: linked,
+      updatedAt: this.clock(),
+    }));
+    return { linked, unproven, photoArchiveStatus: 'archived_private' };
   }
 
   private async commitQuote(
@@ -57,8 +176,9 @@ export class CalibrationEngine {
     hasPhotos: boolean,
   ): Promise<CalibrationRecordResult> {
     const occupied = new Set<string>();
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const index = await this.writer.readIndex();
+    let allocation = 0;
+    while (allocation < this.policy.maxAllocationAttempts) {
+      const index = await this.withTransientRetry(() => this.writer.readIndex());
       const existingId = index.source_keys[quote.source.source_case_key];
       if (existingId) {
         await this.assertSameObservation(existingId, quote);
@@ -70,6 +190,7 @@ export class CalibrationEngine {
           indexCommit: 'pre-existing',
           photoArchiveStatus: photoStatusOf(stored),
           photoRefs: photoRefsOf(stored),
+          orphanPhotoRefs: [],
         };
       }
       const caseId = nextCalibrationCaseId([...Object.keys(index.cases), ...occupied]);
@@ -85,9 +206,9 @@ export class CalibrationEngine {
         updated_at: this.clock(),
       };
       try {
-        const result = await this.writer.insert(document);
+        const result = await this.withTransientRetry(() => this.writer.insert(document));
         if (result.status === 'partial') {
-          const recovered = await this.writer.reconcile(result.caseId);
+          const recovered = await this.withTransientRetry(() => this.writer.reconcile(result.caseId));
           return resultOf(result, recovered, photoArchiveStatus, 'reconciled');
         }
         if (result.status === 'already_exists') {
@@ -100,6 +221,7 @@ export class CalibrationEngine {
             indexCommit: 'pre-existing',
             photoArchiveStatus: photoStatusOf(stored),
             photoRefs: photoRefsOf(stored),
+            orphanPhotoRefs: [],
           };
         }
         return {
@@ -109,15 +231,17 @@ export class CalibrationEngine {
           indexCommit: result.indexCommit,
           photoArchiveStatus,
           photoRefs: [],
+          orphanPhotoRefs: [],
         };
       } catch (err) {
-        const retryable =
+        const collision =
           err instanceof CalibrationConflictError &&
           (err.message === 'Case file already exists' ||
             err.message === 'Case ID already assigned' ||
             err.message === 'Existing unindexed case differs');
-        if (retryable) {
+        if (collision) {
           occupied.add(caseId);
+          allocation += 1;
           continue;
         }
         throw err;
@@ -130,18 +254,30 @@ export class CalibrationEngine {
     written: CalibrationRecordResult,
     images: readonly Buffer[],
   ): Promise<CalibrationRecordResult> {
-    if (!this.photos) return { ...written, photoArchiveStatus: 'pending_private_archive', photoRefs: [] };
+    if (!this.photos) {
+      return { ...written, photoArchiveStatus: 'pending_private_archive', photoRefs: [], orphanPhotoRefs: [] };
+    }
+    const refs: string[] = [];
     try {
-      const refs: string[] = [];
       for (let index = 0; index < images.length; index += 1) {
         const bytes = images[index]!;
         const local = validateCalibrationImage(bytes);
+        const photoId = `IMG-${String(index + 1).padStart(6, '0')}`;
+        const prior = await this.writer.readPhotoManifest(written.caseId, photoId);
+        if (prior?.content_sha256 === local.sha256 && prior.storage_status === 'verified') {
+          refs.push(photoId);
+          continue;
+        }
         const stored = await this.photos.store({ caseId: written.caseId, bytes });
         if (!stored.verified || stored.sha256 !== local.sha256) {
-          return { ...written, photoArchiveStatus: 'pending_private_archive', photoRefs: [] };
+          return {
+            ...written,
+            photoArchiveStatus: 'pending_private_archive',
+            photoRefs: [],
+            orphanPhotoRefs: refs,
+          };
         }
-        const photoId = `IMG-${String(index + 1).padStart(6, '0')}`;
-        await this.writer.saveVerifiedPhoto({
+        await this.withTransientRetry(() => this.writer.saveVerifiedPhoto({
           schema_version: '1.0.0',
           photo_id: photoId,
           case_id: written.caseId,
@@ -158,22 +294,44 @@ export class CalibrationEngine {
           linked_line_ids: [],
           verified_at: this.clock(),
           source_kind: 'manual_import',
-        });
+        }));
         refs.push(photoId);
       }
-      const caseCommit = await this.writer.updateVerifiedPhotos({
+      const caseCommit = await this.withTransientRetry(() => this.writer.updateVerifiedPhotos({
         caseId: written.caseId,
         photoRefs: refs,
         updatedAt: this.clock(),
-      });
+      }));
       return {
         ...written,
         caseCommit,
         photoArchiveStatus: 'archived_private',
         photoRefs: refs,
+        orphanPhotoRefs: [],
       };
     } catch {
-      return { ...written, photoArchiveStatus: 'pending_private_archive', photoRefs: [] };
+      return {
+        ...written,
+        photoArchiveStatus: 'pending_private_archive',
+        photoRefs: [],
+        orphanPhotoRefs: refs,
+      };
+    }
+  }
+
+  private async withTransientRetry<T>(operation: () => Promise<T>): Promise<T> {
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await operation();
+      } catch (err) {
+        const recoverable =
+          err instanceof CalibrationWriteError &&
+          (err.kind === 'rate_limit' || err.kind === 'transient');
+        if (!recoverable || attempt >= this.policy.maxTransientAttempts) throw err;
+        await this.sleep(retryDelayMs(attempt, this.policy, this.random));
+        attempt += 1;
+      }
     }
   }
 
@@ -238,6 +396,7 @@ function resultOf(
     indexCommit: recovered.status === 'created' ? recovered.indexCommit : 'pre-existing',
     photoArchiveStatus,
     photoRefs: [],
+    orphanPhotoRefs: [],
   };
 }
 

@@ -17,14 +17,49 @@ export type GitHubCaseWriteResult =
 type GithubFile = { content: string; sha: string };
 type GithubWrite = { commit: { sha: string } };
 
+export type GithubFailureKind =
+  | 'occupied'
+  | 'conflict'
+  | 'forbidden'
+  | 'validation'
+  | 'rate_limit'
+  | 'transient'
+  | 'rejected';
+
 export class CalibrationConflictError extends Error {}
 export class CalibrationWriteError extends Error {
   readonly status: number | null;
-  constructor(message: string, status: number | null = null) {
+  readonly kind: GithubFailureKind;
+  constructor(message: string, status: number | null = null, kind?: GithubFailureKind) {
     super(message);
     this.name = 'CalibrationWriteError';
     this.status = status;
+    this.kind = kind ?? classifyGithubFailure(status, message);
   }
+}
+
+/**
+ * A 422 is an occupied path only when GitHub says the SHA was required because
+ * the file already exists. Validation, permissions, and rate limits are not collisions.
+ */
+export function classifyGithubFailure(status: number | null, message: string): GithubFailureKind {
+  const text = message.toLowerCase();
+  if (status === 401 || status === 403) return 'forbidden';
+  if (status === 429) return 'rate_limit';
+  if (status === 408 || (status != null && status >= 500 && status <= 599)) return 'transient';
+  if (status === 409) return 'conflict';
+  if (status === 422) {
+    if (
+      text.includes("wasn't supplied") ||
+      text.includes('was not supplied') ||
+      text.includes('sha required') ||
+      text.includes('already exists')
+    ) {
+      return 'occupied';
+    }
+    return 'validation';
+  }
+  return 'rejected';
 }
 
 export type CalibrationIndex = {
@@ -66,10 +101,11 @@ export class CalibrationGithubWriter {
     );
     if (response.status === 404 && method === 'GET') return null;
     if (!response.ok) {
-      // Never log request body or authorization token. Fail closed on conflicts.
+      const detail = await readGithubErrorMessage(response);
       throw new CalibrationWriteError(
         `GitHub ${method} returned ${response.status}`,
         response.status,
+        classifyGithubFailure(response.status, detail),
       );
     }
     return await response.json() as T;
@@ -157,6 +193,13 @@ export class CalibrationGithubWriter {
     return this.save(path, canonical(document), `cal: verify photo ${document.case_id} ${document.photo_id}`);
   }
 
+  async readPhotoManifest(caseId: string, photoId: string): Promise<Record<string, unknown> | null> {
+    if (!CASE_PATTERN.test(caseId) || !/^IMG-[0-9]{6}$/.test(photoId)) return null;
+    const file = await this.read(`data/photos/${caseId}/${photoId}.json`);
+    if (!file) return null;
+    return JSON.parse(file.content) as Record<string, unknown>;
+  }
+
   /**
    * Records verified photo refs on an existing case. Refuses any status other
    * than a private archive that the caller has already checksum-verified.
@@ -200,12 +243,7 @@ export class CalibrationGithubWriter {
       if (!response?.commit?.sha) throw new CalibrationWriteError('Missing commit receipt');
       return response.commit.sha;
     } catch (err) {
-      // A create without SHA cannot overwrite an occupied path. The caller allocates another id.
-      if (
-        !sha &&
-        err instanceof CalibrationWriteError &&
-        (err.status === 409 || err.status === 422)
-      ) {
+      if (!sha && err instanceof CalibrationWriteError && err.kind === 'occupied') {
         throw new CalibrationConflictError('Case file already exists');
       }
       throw err;
@@ -253,9 +291,24 @@ export class CalibrationGithubWriter {
     try {
       const indexCommit = await this.save(indexPath, canonical(index), `cal: index ${id}`, idxFile.sha);
       return { status: 'created', caseId: id, caseCommit, indexCommit };
-    } catch {
-      return { status: 'partial', caseId: id, caseCommit, reason: 'Index update requires reconciliation' };
+    } catch (err) {
+      if (
+        err instanceof CalibrationWriteError &&
+        (err.kind === 'conflict' || err.kind === 'transient' || err.kind === 'rate_limit')
+      ) {
+        return { status: 'partial', caseId: id, caseCommit, reason: 'Index update requires reconciliation' };
+      }
+      throw err;
     }
+  }
+}
+
+async function readGithubErrorMessage(response: Response): Promise<string> {
+  try {
+    const payload = (await response.json()) as { message?: unknown };
+    return typeof payload.message === 'string' ? payload.message.slice(0, 300) : '';
+  } catch {
+    return '';
   }
 }
 
