@@ -22,6 +22,8 @@ export type CalibrationPhotoStore = {
   store(input: { caseId: string; bytes: Buffer }): Promise<{
     sha256: string;
     verified: boolean;
+    assetPublicId?: string | null;
+    assetVersion?: number | null;
   }>;
 };
 
@@ -269,7 +271,8 @@ export class CalibrationEngine {
           continue;
         }
         const stored = await this.photos.store({ caseId: written.caseId, bytes });
-        if (!stored.verified || stored.sha256 !== local.sha256) {
+        const asset = acceptedPrivateAsset(stored);
+        if (!stored.verified || stored.sha256 !== local.sha256 || !asset) {
           return {
             ...written,
             photoArchiveStatus: 'pending_private_archive',
@@ -283,8 +286,8 @@ export class CalibrationEngine {
           case_id: written.caseId,
           storage_provider: 'cloudinary',
           storage_status: 'verified',
-          asset_public_id: null,
-          asset_version: null,
+          asset_public_id: asset.assetPublicId,
+          asset_version: asset.assetVersion,
           delivery_type: 'authenticated',
           content_sha256: local.sha256,
           mime_type: PHOTO_MIME[local.format],
@@ -345,6 +348,20 @@ export class CalibrationEngine {
 
 export function confirmArchiveChecksum(localSha256: string, downloadedSha256: string | null): boolean {
   return downloadedSha256 !== null && /^[a-f0-9]{64}$/.test(downloadedSha256) && downloadedSha256 === localSha256;
+}
+
+const PRIVATE_ASSET_ID = /^[A-Za-z0-9_./-]{1,240}$/;
+
+/** A manifest may name the private asset. It never stores a delivery URL. */
+export function acceptedPrivateAsset(stored: {
+  assetPublicId?: string | null;
+  assetVersion?: number | null;
+}): { assetPublicId: string | null; assetVersion: number | null } | null {
+  const assetPublicId = stored.assetPublicId ?? null;
+  const assetVersion = stored.assetVersion ?? null;
+  if (assetPublicId != null && !PRIVATE_ASSET_ID.test(assetPublicId)) return null;
+  if (assetVersion != null && (!Number.isInteger(assetVersion) || assetVersion < 1)) return null;
+  return { assetPublicId, assetVersion };
 }
 
 function dedupeImages(images: readonly Buffer[]): Buffer[] {

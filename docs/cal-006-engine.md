@@ -31,4 +31,4 @@ Si el manifiesto se guarda y falla el enlace con el caso, el caso sigue `pending
 
 ## Bloqueo de activación
 
-No hay credencial de GitHub ni de Cloudinary en este cambio. Antes de una API de ingesta faltan: una credencial de privilegio mínimo solo para el repositorio privado, una redescarga autenticada que confirme el SHA-256, un endpoint protegido y apagado por defecto, y una prueba con un caso ficticio. No se listan manifiestos desconocidos en todo el repositorio. `CanonicalQuoteV1` no lee estos casos.
+CAL-007A deja preparados el proveedor de GitHub App, la redescarga autenticada y el endpoint. La ruta no está registrada en `AppModule` y `CALIBRATION_INGEST_ENABLED` sigue distinto de `true`. No hay escritura real ni credencial en el repositorio. `CanonicalQuoteV1` no lee estos casos. El detalle está en `docs/cal-007a-integration.md`.

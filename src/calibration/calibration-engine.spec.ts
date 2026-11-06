@@ -14,85 +14,7 @@ import {
   classifyGithubFailure,
 } from './calibration-github-writer';
 import { validateCalibrationImage } from './calibration-image-archive.service';
-
-function response(status: number, value: unknown) {
-  return { ok: status >= 200 && status < 300, status, json: async () => value } as Response;
-}
-
-function memoryGithub(options?: {
-  failIndexWrites?: number;
-  failAll?: boolean;
-  rejectCaseCreate?: 'validation' | 'forbidden';
-  rateLimitCaseCreates?: number;
-  failArchivedUpdates?: number;
-}) {
-  const files = new Map<string, { sha: string; text: string }>();
-  let seq = 0;
-  let indexFailures = options?.failIndexWrites ?? 0;
-  let rateLimits = options?.rateLimitCaseCreates ?? 0;
-  let archivedFailures = options?.failArchivedUpdates ?? 0;
-  files.set(
-    'data/index.json',
-    {
-      sha: 'index-0',
-      text: JSON.stringify({
-        schema_version: '1.0.0',
-        cases: { 'AF-000001': 'data/cases/AF-000001.json' },
-        source_keys: { 'seed-case-000001': 'AF-000001' },
-      }),
-    },
-  );
-  const transport = async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (options?.failAll) throw new Error('github unavailable');
-    const url = new URL(String(input));
-    const path = url.pathname.replace(/^\/repos\/[^/]+\/[^/]+\/contents\//, '');
-    const method = init?.method ?? 'GET';
-    if (method === 'GET') {
-      const file = files.get(path);
-      if (!file) return response(404, { message: 'Not Found' });
-      return response(200, {
-        sha: file.sha,
-        content: Buffer.from(file.text).toString('base64'),
-      });
-    }
-    const body = JSON.parse(String(init?.body)) as { content: string; sha?: string };
-    const text = Buffer.from(body.content, 'base64').toString('utf8');
-    const current = files.get(path);
-    const creatingCase = method === 'PUT' && path.startsWith('data/cases/') && !body.sha;
-    if (creatingCase && rateLimits > 0) {
-      rateLimits -= 1;
-      return response(429, { message: 'API rate limit exceeded' });
-    }
-    if (creatingCase && options?.rejectCaseCreate === 'validation') {
-      return response(422, { message: 'Validation Failed' });
-    }
-    if (creatingCase && options?.rejectCaseCreate === 'forbidden') {
-      return response(403, { message: 'Resource not accessible by integration' });
-    }
-    if (
-      method === 'PUT' &&
-      path.startsWith('data/cases/') &&
-      body.sha &&
-      text.includes('archived_private') &&
-      archivedFailures > 0
-    ) {
-      archivedFailures -= 1;
-      return response(500, { message: 'unavailable' });
-    }
-    if (!body.sha && current) {
-      return response(422, { message: 'Invalid request.\n\n"sha" wasn\'t supplied.' });
-    }
-    if (body.sha && (!current || current.sha !== body.sha)) return response(409, { message: 'Conflict' });
-    if (path === 'data/index.json' && indexFailures > 0) {
-      indexFailures -= 1;
-      return response(409, { message: 'Conflict' });
-    }
-    seq += 1;
-    files.set(path, { sha: `sha-${seq}`, text });
-    return response(201, { commit: { sha: `sha-${seq}` } });
-  };
-  return { transport: transport as typeof fetch, files };
-}
+import { memoryGithub } from '../../test/calibration-memory-github';
 
 function quote(key = 'case-test-000010', price = 1250) {
   return {
@@ -445,5 +367,45 @@ describe('CAL-006 calibration engine', () => {
       JSON.stringify(foreign),
     );
     expect(storedCase(github, created.caseId).photo_refs).toEqual(['IMG-000001']);
+  });
+
+  it('stores a private asset id only when the checksum and the id are safe', async () => {
+    const github = memoryGithub();
+    const engine = new CalibrationEngine(
+      new CalibrationGithubWriter('test-token', github.transport),
+      {
+        store: async ({ bytes }) => ({
+          sha256: validateCalibrationImage(bytes).sha256,
+          verified: true,
+          assetPublicId: 'pegazuz_calibration/AF-000002/0123456789abcdef0123456789abcdef',
+          assetVersion: 4,
+        }),
+      },
+    );
+    const saved = await engine.record(quote('case-test-asset'), [jpeg]);
+    const manifest = JSON.parse(
+      github.files.get(`data/photos/${saved.caseId}/IMG-000001.json`)!.text,
+    ) as Record<string, unknown>;
+    expect(manifest.asset_public_id).toBe(
+      'pegazuz_calibration/AF-000002/0123456789abcdef0123456789abcdef',
+    );
+    expect(manifest.asset_version).toBe(4);
+    expect(JSON.stringify(manifest)).not.toContain('https://');
+
+    const rejected = memoryGithub();
+    const blocked = new CalibrationEngine(
+      new CalibrationGithubWriter('test-token', rejected.transport),
+      {
+        store: async ({ bytes }) => ({
+          sha256: validateCalibrationImage(bytes).sha256,
+          verified: true,
+          assetPublicId: 'https://res.cloudinary.com/demo/image/upload/private.jpg',
+          assetVersion: 4,
+        }),
+      },
+    );
+    const pending = await blocked.record(quote('case-test-public-url'), [jpeg]);
+    expect(pending.photoArchiveStatus).toBe('pending_private_archive');
+    expect([...rejected.files.keys()].some((path) => path.includes('/photos/'))).toBe(false);
   });
 });

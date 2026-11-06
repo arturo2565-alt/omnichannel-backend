@@ -72,26 +72,49 @@ const CASE_PATTERN = /^AF-[0-9]{6}$/;
 const SOURCE_KEY_PATTERN = /^[a-zA-Z0-9_.:-]{4,150}$/;
 const TARGET_REPO = 'arturo2565-alt/pegazuz-calibration-data';
 
+/**
+ * Short-lived installation credential. A static string remains available for
+ * tests; the live path uses a GitHub App and can drop a rejected token once.
+ */
+export type CalibrationAccessToken = {
+  authorization(): Promise<string>;
+  invalidate(): void;
+};
+
 /** Encodes UTF-8 strings safely without external dependencies. */
 function b64(value: string): string { return Buffer.from(value, 'utf8').toString('base64'); }
 function canonical(value: unknown): string { return JSON.stringify(value, null, 2) + '\n'; }
 
 export class CalibrationGithubWriter {
   constructor(
-    private readonly token: string,
+    private readonly credential: string | CalibrationAccessToken,
     private readonly transport: typeof fetch = fetch,
     private readonly repository = TARGET_REPO,
   ) {
-    if (!token || !token.trim()) throw new Error('Missing calibration GitHub credential');
+    if (typeof credential === 'string' && !credential.trim()) {
+      throw new Error('Missing calibration GitHub credential');
+    }
+    if (this.repository !== TARGET_REPO) {
+      throw new Error('Calibration GitHub repository is not allowed');
+    }
   }
 
   private async request<T>(method: 'GET' | 'PUT', path: string, body?: object): Promise<T | null> {
+    return this.dispatch(method, path, body, false);
+  }
+
+  private async dispatch<T>(
+    method: 'GET' | 'PUT',
+    path: string,
+    body: object | undefined,
+    refreshed: boolean,
+  ): Promise<T | null> {
     const response = await this.transport(
       `https://api.github.com/repos/${this.repository}/contents/${path}`,
       {
         method,
         headers: {
-          Authorization: `Bearer ${this.token}`,
+          Authorization: await this.authorization(),
           Accept: 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28',
           'Content-Type': 'application/json',
@@ -99,6 +122,10 @@ export class CalibrationGithubWriter {
         body: body ? JSON.stringify(body) : undefined,
       },
     );
+    if (response.status === 401 && !refreshed && typeof this.credential !== 'string') {
+      this.credential.invalidate();
+      return this.dispatch(method, path, body, true);
+    }
     if (response.status === 404 && method === 'GET') return null;
     if (!response.ok) {
       const detail = await readGithubErrorMessage(response);
@@ -109,6 +136,15 @@ export class CalibrationGithubWriter {
       );
     }
     return await response.json() as T;
+  }
+
+  private async authorization(): Promise<string> {
+    const value = typeof this.credential === 'string'
+      ? this.credential
+      : await this.credential.authorization();
+    const token = value.trim();
+    if (!token || /\s/.test(token)) throw new Error('Missing calibration GitHub credential');
+    return `Bearer ${token}`;
   }
 
   async readIndex(): Promise<CalibrationIndex> {

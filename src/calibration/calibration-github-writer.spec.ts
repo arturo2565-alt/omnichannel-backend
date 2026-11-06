@@ -96,4 +96,39 @@ describe('CAL-005 server-side GitHub writer', () => {
     expect(transport.mock.calls.some((call) => String(call[0]).includes('AF-000004'))).toBe(false);
   });
 
+  it('renews a rejected installation token once and retries the same write', async () => {
+    let current = 'token_one_installation';
+    const credential = {
+      authorization: async () => current,
+      invalidate: () => {
+        current = 'token_two_installation';
+      },
+    };
+    const index = { schema_version: '1.0.0', cases: {}, source_keys: {} };
+    const encoded = Buffer.from(JSON.stringify(index)).toString('base64');
+    const transport = jest.fn()
+      .mockResolvedValueOnce(response(200, { sha: 'index-sha', content: encoded }))
+      .mockResolvedValueOnce(response(404, { message: 'Not Found' }))
+      .mockResolvedValueOnce(response(401, { message: 'Bad credentials' }))
+      .mockResolvedValueOnce(response(201, { commit: { sha: 'case-commit' } }))
+      .mockResolvedValueOnce(response(200, { commit: { sha: 'index-commit' } }));
+    const writer = new CalibrationGithubWriter(credential, transport as unknown as typeof fetch);
+    await expect(writer.insert(input)).resolves.toMatchObject({
+      status: 'created',
+      caseId: 'AF-000003',
+    });
+    const puts = transport.mock.calls.filter((call) => call[1].method === 'PUT' && String(call[0]).includes('AF-000003'));
+    expect(puts).toHaveLength(2);
+    expect(puts[0][1].headers.Authorization).toBe('Bearer token_one_installation');
+    expect(puts[1][1].headers.Authorization).toBe('Bearer token_two_installation');
+    expect(puts[0][1].body).toBe(puts[1][1].body);
+  });
+
+  it('does not retry a static credential after HTTP 401', async () => {
+    const transport = jest.fn().mockResolvedValue(response(401, { message: 'Bad credentials' }));
+    const writer = new CalibrationGithubWriter('test-token', transport as unknown as typeof fetch);
+    await expect(writer.readIndex()).rejects.toMatchObject({ status: 401, kind: 'forbidden' });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
 });
