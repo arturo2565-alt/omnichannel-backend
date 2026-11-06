@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pegazuz Calibration Case V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "case_id",
+    "source",
+    "vehicle",
+    "line_items",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "case_id": {
+      "type": "string",
+      "pattern": "^AF-[0-9]{6}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "source_case_key"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "autofix_human_quote"
+          ]
+        },
+        "source_case_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "quoted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "vehicle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "make",
+        "model",
+        "year"
+      ],
+      "properties": {
+        "make": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "year": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1900,
+          "maximum": 2100
+        },
+        "variant": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "line_items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "line_id",
+          "part",
+          "treatment",
+          "price_mxn",
+          "validation"
+        ],
+        "properties": {
+          "line_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "part": {
+            "type": "string",
+            "minLength": 1
+          },
+          "treatment": {
+            "enum": [
+              "repair_paint",
+              "paint",
+              "replace_paint",
+              "replace",
+              "other",
+              "uncertain"
+            ]
+          },
+          "price_mxn": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "damage_severity": {
+            "enum": [
+              "minor",
+              "moderate",
+              "severe",
+              "unknown"
+            ]
+          },
+          "validation": {
+            "enum": [
+              "human_confirmed",
+              "pending_review"
+            ]
+          }
+        }
+      }
+    },
+    "photo_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "human_verified",
+        "superseded"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
