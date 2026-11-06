@@ -79,6 +79,27 @@
             "string",
             "null"
           ]
+        },
+        "make_evidence": {
+          "enum": [
+            "customer_provided",
+            "visual_inference",
+            "unknown"
+          ]
+        },
+        "model_evidence": {
+          "enum": [
+            "customer_provided",
+            "visual_inference",
+            "unknown"
+          ]
+        },
+        "year_evidence": {
+          "enum": [
+            "customer_provided",
+            "visual_inference",
+            "unknown"
+          ]
         }
       }
     },
@@ -158,6 +179,19 @@
     "updated_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "visual_observations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "photo_archive_status": {
+      "enum": [
+        "not_provided",
+        "pending_private_archive",
+        "archived_private"
+      ]
     }
   }
 }

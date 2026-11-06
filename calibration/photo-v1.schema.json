@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pegazuz Photo Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "photo_id",
+    "case_id",
+    "storage_provider",
+    "storage_status",
+    "content_sha256",
+    "mime_type"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "photo_id": {
+      "type": "string",
+      "pattern": "^IMG-[0-9]{6}$"
+    },
+    "case_id": {
+      "type": "string",
+      "pattern": "^AF-[0-9]{6}$"
+    },
+    "storage_provider": {
+      "enum": [
+        "cloudinary"
+      ]
+    },
+    "storage_status": {
+      "enum": [
+        "pending",
+        "verified",
+        "failed",
+        "deleted"
+      ]
+    },
+    "asset_public_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "asset_version": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "delivery_type": {
+      "enum": [
+        "authenticated"
+      ]
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "mime_type": {
+      "enum": [
+        "image/jpeg",
+        "image/png",
+        "image/webp"
+      ]
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "width": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "height": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "linked_line_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verified_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "source_kind": {
+      "enum": [
+        "chatgpt_upload",
+        "messenger",
+        "whatsapp",
+        "manual_import"
+      ]
+    }
+  }
+}
