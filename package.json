@@ -34,6 +34,8 @@
     "check:staging-deploy": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/assert-staging-deploy.ts",
     "check:railway-token": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/assert-railway-token.ts",
     "check:staging-backup": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/assert-staging-backup.ts",
+    "diagnose:calibration-github": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/diagnose-calibration-github.ts",
+    "diagnose:calibration-cloudinary": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/diagnose-calibration-cloudinary.ts",
     "bootstrap:staging": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/bootstrap-staging.ts",
     "report:montaje-pintura": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register src/catalog/montaje-pintura-migration-report.ts"
   },

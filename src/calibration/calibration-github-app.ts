@@ -50,8 +50,14 @@ export function readGithubAppConfig(env: NodeJS.ProcessEnv): GithubAppConfig | n
 
 type CachedToken = { token: string; expiresAtMs: number };
 
+export type GithubInstallationGrant = {
+  permissions: Record<string, string>;
+  repositorySelection: 'selected' | 'all' | null;
+};
+
 export class CalibrationGithubApp implements CalibrationAccessToken {
   private cached: CachedToken | null = null;
+  private grant: GithubInstallationGrant | null = null;
   private generation = 0;
 
   constructor(
@@ -63,6 +69,16 @@ export class CalibrationGithubApp implements CalibrationAccessToken {
   invalidate(): void {
     this.generation += 1;
     this.cached = null;
+    this.grant = null;
+  }
+
+  /** Permissions returned with the token. The token itself stays private. */
+  installationGrant(): GithubInstallationGrant | null {
+    if (!this.grant) return null;
+    return {
+      permissions: { ...this.grant.permissions },
+      repositorySelection: this.grant.repositorySelection,
+    };
   }
 
   async authorization(): Promise<string> {
@@ -103,7 +119,12 @@ export class CalibrationGithubApp implements CalibrationAccessToken {
     if (!response.ok) {
       throw new CalibrationCredentialError('rejected', 'Calibration GitHub App token was not issued');
     }
-    const payload = await response.json() as { token?: unknown; expires_at?: unknown };
+    const payload = await response.json() as {
+      token?: unknown;
+      expires_at?: unknown;
+      permissions?: unknown;
+      repository_selection?: unknown;
+    };
     if (typeof payload.token !== 'string' || !TOKEN_PATTERN.test(payload.token)) {
       throw new CalibrationCredentialError('rejected', 'Calibration GitHub App token was not issued');
     }
@@ -111,8 +132,27 @@ export class CalibrationGithubApp implements CalibrationAccessToken {
     if (!Number.isFinite(expiresAtMs) || expiresAtMs - RENEW_BEFORE_MS <= this.clock()) {
       throw new CalibrationCredentialError('rejected', 'Calibration GitHub App token was not issued');
     }
+    this.grant = readInstallationGrant(payload);
     return { token: payload.token, expiresAtMs };
   }
+}
+
+function readInstallationGrant(payload: {
+  permissions?: unknown;
+  repository_selection?: unknown;
+}): GithubInstallationGrant {
+  const permissions: Record<string, string> = {};
+  if (payload.permissions && typeof payload.permissions === 'object' && !Array.isArray(payload.permissions)) {
+    for (const [key, value] of Object.entries(payload.permissions)) {
+      if (/^[a-z_]{1,40}$/.test(key) && (value === 'read' || value === 'write')) {
+        permissions[key] = value;
+      }
+    }
+  }
+  const repositorySelection = payload.repository_selection === 'selected' || payload.repository_selection === 'all'
+    ? payload.repository_selection
+    : null;
+  return { permissions, repositorySelection };
 }
 
 function signAppJwt(appId: string, privateKeyPem: string, nowSeconds: number): string {

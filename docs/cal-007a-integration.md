@@ -6,7 +6,7 @@ Estado: código en `genesis/staging`. `CalibrationModule` no está importado en 
 
 `CALIBRATION_INGEST_ENABLED` solo habilita el manejador cuando su valor es exactamente `true`. Cualquier otro valor, incluido vacío, responde 404 y no abre GitHub ni Cloudinary.
 
-Aunque alguien importe el módulo, la bandera sigue siendo obligatoria. Montar la ruta en `AppModule` queda para una autorización posterior.
+Aunque alguien importe el módulo, la bandera sigue siendo obligatoria. Montar la ruta en `AppModule` queda para una autorización posterior. El diagnóstico de lectura está en `docs/cal-007b1-diagnostic.md` y tampoco activa la ruta.
 
 ## Variables
 
