@@ -30,6 +30,17 @@ El diagnóstico autorizado corre dentro del contenedor ya desplegado de `pegazuz
 
 El contenedor vigente, despliegue `c3702ee6-32cc-4f70-bcdc-5139a4cc60bc` del 6 de noviembre de 2026, no contiene estos scripts. `railway ssh` contra ese contenedor no puede hacer el diagnóstico. Primero hace falta el despliegue manual de la revisión publicada, descrito abajo, y todavía no ejecutado.
 
+## Artefacto
+
+Railway no usa un Dockerfile ni un `nixpacks.toml` en este repositorio. El servicio tiene `buildCommand` vacío y arranca con `npm run start:prod`, que es `node dist/main.js`. Nixpacks ejecuta `npm run build`. Ese build es `nest build`: compila `src` hacia `dist` y no compila `scripts/`.
+
+`ts-node` está en `devDependencies`. Con `NODE_ENV=production`, el empaquetado puede omitir o podar esas dependencias después de compilar. El diagnóstico no depende de ellas. `npm run diagnose:calibration-github` y `npm run diagnose:calibration-cloudinary` ejecutan JavaScript ya compilado:
+
+- `dist/calibration/calibration-diagnose-github.js`
+- `dist/calibration/calibration-diagnose-cloudinary.js`
+
+Esos archivos solo leen. No montan `CalibrationModule`.
+
 ### Comprobar la revisión
 
 Después de que ese despliegue esté en SUCCESS y sea el activo, desde el directorio del backend:
@@ -39,10 +50,10 @@ railway ssh \
   --project db653a25-d8c0-4026-9026-b8f74fb9f1fb \
   --environment faf009cb-88a2-4ac8-80bd-7e3f60bbca8b \
   --service b40bff1c-2da4-4460-b5f4-507d9d994d0a \
-  -- node -e 'const fs=require("fs"); const files=["scripts/diagnose-calibration-github.ts","scripts/diagnose-calibration-cloudinary.ts"]; const present=Object.fromEntries(files.map((file)=>[file, fs.existsSync(file)])); let tsNode=false; try { require.resolve("ts-node"); tsNode=true; } catch {} console.log(JSON.stringify({present, tsNode}));'
+  -- node -e 'const fs=require("fs"); const files=["dist/calibration/calibration-diagnose-github.js","dist/calibration/calibration-diagnose-cloudinary.js"]; console.log(JSON.stringify({present:Object.fromEntries(files.map((file)=>[file, fs.existsSync(file)]))}));'
 ```
 
-Los dos archivos tienen que existir y `tsNode` tiene que ser verdadero. `ts-node` está en `devDependencies`. El servicio arranca con `npm run start:prod`. Si el empaquetado no dejó `ts-node`, hay que detenerse. No se instala nada dentro del contenedor y no se cambia el comando de arranque.
+Los dos archivos tienen que existir. Si falta alguno, el build no incluyó la entrada y hay que detenerse. No se instala `ts-node` dentro del contenedor y no se cambia el comando de arranque.
 
 ### Comprobar variables sin imprimirlas
 
@@ -54,7 +65,9 @@ railway ssh \
   -- node -e 'const names=["CALIBRATION_GITHUB_APP_ID","CALIBRATION_GITHUB_INSTALLATION_ID","CALIBRATION_GITHUB_APP_PRIVATE_KEY","CLOUDINARY_CLOUD_NAME","CLOUDINARY_API_KEY","CLOUDINARY_API_SECRET"]; const present=Object.fromEntries(names.map((name)=>[name, Boolean(String(process.env[name]||"").trim())])); const ingestEnabled=process.env.CALIBRATION_INGEST_ENABLED==="true"; const dbSynchronizeFalse=String(process.env.DB_SYNCHRONIZE||"")==="false"; console.log(JSON.stringify({present, ingestEnabled, dbSynchronizeFalse}));'
 ```
 
-Esa salida solo dice si cada nombre está presente. `ingestEnabled` tiene que ser falso y `dbSynchronizeFalse` verdadero. Si falta un nombre, la categoría del diagnóstico será `missing`. Cargar variables es un paso aparte: no se hace con este procedimiento y no se copian a un archivo local.
+Esa salida solo dice si cada nombre está presente. `ingestEnabled` tiene que ser falso y `dbSynchronizeFalse` verdadero. Si falta un nombre, la categoría del diagnóstico será `missing`.
+
+Las variables se aplican en el servicio `pegazuz-backend-staging` del entorno staging. `railway up` no las crea ni las modifica: Railway las inyecta en el proceso al arrancar. Definirlas es un paso posterior y separado, solo en ese servicio, nunca en `omnichannel-backend`. Este procedimiento no las lee ni las copia. `CALIBRATION_INGEST_ENABLED` no forma parte del build; la ingesta permanece apagada mientras ese valor no sea exactamente `true`. `DB_SYNCHRONIZE` permanece `false`. El arranque rechaza sincronizar una base remota y `Staging migrate` no corre en un push ni en `railway up`.
 
 ### Ejecutar el diagnóstico
 
@@ -100,7 +113,7 @@ railway up --detach --json \
   --message "cal-007b diagnostic scripts"
 ```
 
-Después se espera SUCCESS de ese identificador nuevo. El comando de arranque sigue siendo `npm run start:prod`. La imagen incluye `scripts/` porque el archivo subido es el árbol del repositorio. La comprobación de los dos scripts, hecha por SSH, es la prueba de que llegaron. El humo es `GET /api/health` del host de staging, con `ok` y `staging` en verdadero, y el arranque debe registrar `dbSynchronize` en falso.
+Después se espera SUCCESS de ese identificador nuevo. El comando de arranque sigue siendo `npm run start:prod`. La prueba de que el diagnóstico llegó es la existencia de los dos archivos `dist/calibration/calibration-diagnose-*.js`, comprobada por SSH. El humo es `GET /api/health` del host de staging, con `ok` y `staging` en verdadero, y el arranque debe registrar `dbSynchronize` en falso.
 
 Reversión, solo hacia el despliegue de staging anotado antes de subir:
 

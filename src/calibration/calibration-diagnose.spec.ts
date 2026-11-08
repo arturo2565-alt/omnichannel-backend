@@ -88,10 +88,20 @@ describe('CAL-007B.1 calibration diagnostics', () => {
     const app = readFileSync(join(__dirname, '../app.module.ts'), 'utf8');
     expect(app).not.toContain('CalibrationModule');
     expect(app).not.toContain('calibration-diagnose');
-    const github = readFileSync(join(__dirname, '../../scripts/diagnose-calibration-github.ts'), 'utf8');
-    const cloudinary = readFileSync(join(__dirname, '../../scripts/diagnose-calibration-cloudinary.ts'), 'utf8');
-    expect(github).toContain('calibrationDiagnosticTarget');
-    expect(cloudinary).toContain('calibrationDiagnosticTarget');
+    const pkg = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts['diagnose:calibration-github']).toBe(
+      'node dist/calibration/calibration-diagnose-github.js',
+    );
+    expect(pkg.scripts['diagnose:calibration-cloudinary']).toBe(
+      'node dist/calibration/calibration-diagnose-cloudinary.js',
+    );
+    expect(pkg.scripts['diagnose:calibration-github']).not.toContain('ts-node');
+    const main = readFileSync(join(__dirname, 'calibration-diagnose-main.ts'), 'utf8');
+    expect(main).toContain('calibrationDiagnosticTarget');
+    expect(readFileSync(join(__dirname, 'calibration-diagnose-github.ts'), 'utf8')).not.toContain('@Controller');
+    expect(readFileSync(join(__dirname, 'calibration-diagnose-cloudinary.ts'), 'utf8')).not.toContain('@Controller');
     expect(calibrationDiagnosticTarget({
       RAILWAY_ENVIRONMENT_NAME: 'staging',
       RAILWAY_SERVICE_NAME: 'pegazuz-backend-staging',
