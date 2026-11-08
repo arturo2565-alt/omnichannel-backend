@@ -30,9 +30,13 @@ function githubEnv(): NodeJS.ProcessEnv {
   };
 }
 
-function tokenPayload(permissions: Record<string, string>, selection: 'selected' | 'all' = 'selected') {
+function tokenPayload(
+  permissions: Record<string, string>,
+  selection: 'selected' | 'all' = 'selected',
+  issued = token,
+) {
   return {
-    token,
+    token: issued,
     expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
     permissions,
     repository_selection: selection,
@@ -53,6 +57,7 @@ function githubTransport(options?: {
   indexStatus?: number;
   indexBody?: unknown;
   tokenStatus?: number;
+  issuedToken?: string;
 }) {
   const calls: Array<{ method: string; url: string }> = [];
   const repositories = options?.repositories ?? ['arturo2565-alt/pegazuz-calibration-data'];
@@ -67,6 +72,7 @@ function githubTransport(options?: {
       return response(options?.tokenStatus ?? 201, tokenPayload(
         options?.permissions ?? { contents: 'write', metadata: 'read' },
         options?.selection,
+        options?.issuedToken,
       ));
     }
     if (url.includes('/installation/repositories')) {
@@ -150,6 +156,37 @@ describe('CAL-007B.1 calibration diagnostics', () => {
       category: 'read_failed',
     });
     expect(github.calls.some((call) => call.url.includes('data/index.json'))).toBe(true);
+  });
+
+  it('keeps permission and repository checks after a long installation token', async () => {
+    const longToken = `ghs_app.${'a'.repeat(380)}-x`;
+    expect(longToken).toHaveLength(390);
+    const broad = githubTransport({
+      issuedToken: longToken,
+      permissions: { contents: 'write', metadata: 'read', pull_requests: 'write' },
+    });
+    const blocked = await diagnoseCalibrationGithub(githubEnv(), broad.transport);
+    expect(blocked).toEqual({ service: 'github', result: 'error', category: 'scope' });
+    expect(broad.calls.some((call) => call.url.includes('index.json'))).toBe(false);
+    expect(JSON.stringify(blocked)).not.toContain(longToken);
+
+    const otherRepository = githubTransport({
+      issuedToken: longToken,
+      repositories: ['arturo2565-alt/pegazuz-calibration-data', 'arturo2565-alt/other-private'],
+    });
+    const wrongScope = await diagnoseCalibrationGithub(githubEnv(), otherRepository.transport);
+    expect(wrongScope).toEqual({ service: 'github', result: 'error', category: 'scope' });
+    expect(JSON.stringify(wrongScope)).not.toContain(longToken);
+    expect(JSON.stringify(wrongScope)).not.toContain('other-private');
+
+    const accepted = githubTransport({ issuedToken: longToken });
+    await expect(diagnoseCalibrationGithub(githubEnv(), accepted.transport)).resolves.toEqual({
+      service: 'github',
+      result: 'ok',
+      caseCount: 1,
+    });
+    expect(accepted.calls.map((call) => call.method)).toEqual(['POST', 'GET', 'GET']);
+    expect(accepted.calls.some((call) => call.method === 'PUT')).toBe(false);
   });
 
   it('rejects an installation token with an extra permission before reading the index', async () => {

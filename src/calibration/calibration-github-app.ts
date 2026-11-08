@@ -7,7 +7,15 @@ import type { CalibrationAccessToken } from './calibration-github-writer';
  */
 export const CALIBRATION_GITHUB_REPOSITORY = 'arturo2565-alt/pegazuz-calibration-data';
 const REPOSITORY_NAME = 'pegazuz-calibration-data';
-const TOKEN_PATTERN = /^[A-Za-z0-9_]{20,255}$/;
+/**
+ * Installation tokens stay opaque. Classic values are short; stateless
+ * `ghs_APPID_JWT` values vary and are about 520 characters, including dots
+ * and hyphens. The cap rejects an oversized string without reading the JWT.
+ */
+export const CALIBRATION_GITHUB_INSTALLATION_TOKEN_MAX_LENGTH = 1024;
+const TOKEN_PATTERN = new RegExp(
+  `^ghs_[A-Za-z0-9._-]{16,${CALIBRATION_GITHUB_INSTALLATION_TOKEN_MAX_LENGTH - 4}}$`,
+);
 const RENEW_BEFORE_MS = 60_000;
 
 export class CalibrationCredentialError extends Error {

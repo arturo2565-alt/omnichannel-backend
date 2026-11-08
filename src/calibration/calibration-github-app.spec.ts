@@ -1,5 +1,6 @@
 import { createVerify, generateKeyPairSync } from 'node:crypto';
 import {
+  CALIBRATION_GITHUB_INSTALLATION_TOKEN_MAX_LENGTH,
   CalibrationCredentialError,
   CalibrationGithubApp,
   readGithubAppConfig,
@@ -12,6 +13,13 @@ const publicPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
 
 function response(status: number, value: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => value } as Response;
+}
+
+function fictionalInstallationToken(length: number): string {
+  const prefix = 'ghs_app.';
+  const suffix = '-x';
+  const fill = length - prefix.length - suffix.length;
+  return `${prefix}${'a'.repeat(fill)}${suffix}`;
 }
 
 function config(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
@@ -84,6 +92,56 @@ describe('CAL-007A GitHub App credential', () => {
     now += 60 * 60 * 1000 - 30_000;
     await expect(app.authorization()).resolves.toBe('ghs_installation_token_two');
     expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts real installation token lengths and still records the grant', async () => {
+    const now = Date.parse('2026-11-08T18:00:00.000Z');
+    for (const length of [255, 390, 512]) {
+      const transport = jest.fn().mockResolvedValue(response(201, {
+        token: fictionalInstallationToken(length),
+        expires_at: new Date(now + 60 * 60 * 1000).toISOString(),
+        permissions: { contents: 'write', metadata: 'read' },
+        repository_selection: 'selected',
+      }));
+      const app = new CalibrationGithubApp(readGithubAppConfig(config())!, transport, () => now);
+      const accepted = await app.authorization();
+      expect(accepted).toHaveLength(length);
+      expect(accepted.startsWith('ghs_')).toBe(true);
+      expect(accepted).toMatch(/^[A-Za-z0-9._-]+$/);
+      expect(app.installationGrant()).toEqual({
+        permissions: { contents: 'write', metadata: 'read' },
+        repositorySelection: 'selected',
+      });
+      expect(JSON.stringify(app.installationGrant())).not.toContain(accepted);
+    }
+  });
+
+  it('rejects empty, malformed, and oversized installation tokens', async () => {
+    const now = Date.parse('2026-11-08T18:00:00.000Z');
+    const expiresAt = new Date(now + 60 * 60 * 1000).toISOString();
+    const rejected = [
+      '',
+      'ghs_short',
+      fictionalInstallationToken(19),
+      `github_pat_${'a'.repeat(40)}`,
+      fictionalInstallationToken(80).replace('a', ' '),
+      fictionalInstallationToken(CALIBRATION_GITHUB_INSTALLATION_TOKEN_MAX_LENGTH + 1),
+    ];
+    for (const token of rejected) {
+      const transport = jest.fn().mockResolvedValue(response(201, { token, expires_at: expiresAt }));
+      const app = new CalibrationGithubApp(readGithubAppConfig(config())!, transport, () => now);
+      await expect(app.authorization()).rejects.toMatchObject({
+        kind: 'rejected',
+        message: 'Calibration GitHub App token was not issued',
+      });
+      expect(app.installationGrant()).toBeNull();
+    }
+    const missing = new CalibrationGithubApp(
+      readGithubAppConfig(config())!,
+      jest.fn().mockResolvedValue(response(201, { expires_at: expiresAt })),
+      () => now,
+    );
+    await expect(missing.authorization()).rejects.toMatchObject({ kind: 'rejected' });
   });
 
   it('stops when GitHub rejects the installation permissions', async () => {
