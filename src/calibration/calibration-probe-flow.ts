@@ -73,6 +73,24 @@ export async function recordCal010Observation(
   return result;
 }
 
+/** Links one already verified manifest. It does not upload and does not delete. */
+export async function recoverCal010Manifest(
+  writer: CalibrationProbeWriter,
+  photos: CalibrationPhotoStore,
+  caseId: string,
+): Promise<CalibrationRecordResult['photoArchiveStatus']> {
+  if (caseId === CAL010_PROTECTED_CASE_ID || !/^AF-9\d{5}$/.test(caseId)) {
+    throw new CalibrationConflictError('Probe observation reused the protected case');
+  }
+  const engine = new CalibrationEngine(writer, photos, () => CLOCK, {
+    sleep: async () => undefined,
+    random: () => 0,
+    retry: { maxTransientAttempts: 0 },
+  });
+  const recovered = await engine.recoverOrphanManifests(caseId, ['IMG-000001']);
+  return recovered.photoArchiveStatus;
+}
+
 export function assertCal010Floor(index: ProbeIndex): void {
   if (index.archive !== 'probe') {
     throw new CalibrationConflictError('Probe index can reach the real case range');

@@ -15,14 +15,23 @@ Si el manifiesto no llega a GitHub, el caso queda `pending_private_archive` y `p
 
 `AF-900000` y la clave `probe-cal-009d-001` tienen que existir en el índice de prueba antes de empezar. El caso nuevo usa `probe-cal-010-001` y el siguiente identificador libre, `AF-900001` si ese es el único caso de prueba. El índice real no participa en la asignación.
 
+## Comando
+
+`npm run diagnose:calibration-integrated` ejecuta `node dist/calibration/calibration-diagnose-integrated-run.js`. No usa `ts-node`. El proceso solo arranca si el proyecto, el entorno y el servicio son los de Railway staging, y si `CALIBRATION_INGEST_ENABLED` y `DB_SYNCHRONIZE` valen exactamente `false`.
+
+Antes de cualquier escritura lee el índice real y exige `AF-900000` con la clave `probe-cal-009d-001`. La observación usa `probe-cal-010-001` y pasa por `CalibrationEngine`, `CalibrationProbeWriter` y `createCal010PhotoArchive`. Después vuelve a leer el caso y el manifiesto desde GitHub. `photo_refs` tiene que coincidir con el manifiesto verificado. El índice real y `AF-900000` tienen que quedar iguales.
+
+Si `probe-cal-010-001` ya está completa y el SHA-256 coincide, el comando responde `already_exists` y no crea otro activo. Si el manifiesto está verificado pero el caso no lo enlaza, enlaza ese manifiesto una vez. Si el contenido o el SHA-256 difieren, se detiene. Una respuesta ausente no se trata como “no se escribió”: el resultado queda en `partial` o `error` y no se borra nada.
+
+Esta fase no ejecuta el comando contra GitHub ni Cloudinary.
+
 ## Ejecución real, todavía sin lanzar
 
-Hace falta revisión. No hay comando ejecutable en esta fase.
-
-1. Correr dentro del contenedor de staging, con el repositorio resuelto en `arturo2565-alt/pegazuz-calibration-data` y con `CALIBRATION_INGEST_ENABLED` y `DB_SYNCHRONIZE` exactamente en `false`.
-2. Leer `data/index.json` y `data/probes/cases/AF-900000.json` y anotar su SHA. Si cualquiera cambia al final, la prueba se detiene.
-3. Confirmar que el índice de prueba contiene `AF-900000` con la clave `probe-cal-009d-001`.
-4. Registrar una sola observación con la imagen sintética de CAL-010 y la clave `probe-cal-010-001`. La ruta Cloudinary tiene que empezar por `pegazuz_calibration/cal010-probe/`.
-5. Leer el caso, el manifiesto y el índice de prueba. El caso esperado es `AF-900001`, con `IMG-000001`, estado verificado y el mismo SHA-256.
-6. Repetir la misma observación. El resultado es `already_exists` y no aparece otro caso ni otra subida.
-7. No borrar el activo, el manifiesto, `AF-900000` ni `AF-000001`.
+1. Publicar el commit revisado solo en `genesis/staging` y esperar a que la verificación de Actions termine en éxito y el despliegue quede omitido.
+2. Confirmar que el autodespliegue de `pegazuz-backend-staging` sigue apagado. No cambiar variables.
+3. Desplegar solo ese servicio de staging con `railway up` y los identificadores del proyecto `db653a25-d8c0-4026-9026-b8f74fb9f1fb`, el entorno `faf009cb-88a2-4ac8-80bd-7e3f60bbca8b` y el servicio `b40bff1c-2da4-4460-b5f4-507d9d994d0a`.
+4. Comprobar `GET /api/health` y que `dist/calibration/calibration-diagnose-integrated-run.js` existe en el contenedor.
+5. Ejecutar el comando una vez. El resultado esperado es `created`, caso `AF-900001`, foto `IMG-000001`.
+6. Ejecutarlo otra vez. El resultado esperado es `already_exists`, sin otro caso ni otra fotografía.
+7. Si el resultado es `partial` o `error`, detenerse. No reintentar en ciega y no borrar el activo, el manifiesto, `AF-900000` ni `AF-000001`.
+8. El índice real debe seguir con un solo caso. `CalibrationModule` permanece fuera de la aplicación.
