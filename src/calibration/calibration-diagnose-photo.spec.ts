@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ServiceUnavailableException } from '@nestjs/common';
@@ -5,7 +6,7 @@ import {
   validateCalibrationImage,
   type CalibrationUploadReceipt,
 } from './calibration-image-archive.service';
-import { writeCalibrationPhotoDiagnostic } from './calibration-diagnose-photo-main';
+import { readCalibrationPhotoDiagnostic } from './calibration-diagnose-photo-main';
 import {
   CALIBRATION_PHOTO_PROBE_CASE,
   CALIBRATION_PHOTO_PROBE_PREFIX,
@@ -225,33 +226,58 @@ describe('CAL-008 private photo probe', () => {
   });
 
   it('refuses to run outside the staging container', async () => {
-    const keys = [
-      'RAILWAY_ENVIRONMENT_NAME',
-      'RAILWAY_ENVIRONMENT',
-      'RAILWAY_SERVICE_NAME',
-      'RAILWAY_SERVICE',
-      'RAILWAY_PROJECT_ID',
-      'RAILWAY_ENVIRONMENT_ID',
-      'RAILWAY_SERVICE_ID',
-    ];
-    const saved = new Map(keys.map((key) => [key, process.env[key]]));
-    const lines: string[] = [];
-    const write = jest.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
-      lines.push(String(chunk));
-      return true;
+    const exitCodeBefore = process.exitCode;
+    await expect(readCalibrationPhotoDiagnostic({})).resolves.toEqual({
+      service: 'cloudinary-photo',
+      result: 'error',
+      category: 'wrong_target',
+      deleted: false,
     });
-    try {
-      for (const key of keys) delete process.env[key];
-      await writeCalibrationPhotoDiagnostic();
-    } finally {
-      write.mockRestore();
-      for (const [key, value] of saved) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
-    }
-    expect(lines.join('')).toContain('"category":"wrong_target"');
-    expect(lines.join('')).toContain('"deleted":false');
-    expect(lines.join('')).not.toContain('https://');
-  });
+    expect(process.exitCode).toBe(exitCodeBefore);
+
+    const main = readFileSync(join(__dirname, 'calibration-diagnose-photo-main.ts'), 'utf8');
+    const reader = main.slice(0, main.indexOf('export async function writeCalibrationPhotoDiagnostic'));
+    expect(reader).not.toContain('process.exitCode');
+    expect(main).toContain('process.exitCode = 1');
+
+    const child = await runPhotoCli();
+    expect(child.code).toBe(1);
+    expect(child.stdout).toContain('"category":"wrong_target"');
+    expect(child.stdout).toContain('"deleted":false');
+    expect(child.stdout).not.toContain('https://');
+    expect(process.exitCode).toBe(exitCodeBefore);
+  }, 20_000);
 });
+
+function runPhotoCli(): Promise<{ code: number | null; stdout: string }> {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('RAILWAY_') || key.startsWith('CLOUDINARY_') || key.startsWith('CALIBRATION_')) {
+      delete env[key];
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      require.resolve('ts-node/dist/bin.js'),
+      '--skip-project',
+      '--transpile-only',
+      '--compiler-options',
+      JSON.stringify({
+        module: 'commonjs',
+        moduleResolution: 'node',
+        esModuleInterop: true,
+        target: 'ES2023',
+        experimentalDecorators: true,
+        emitDecoratorMetadata: true,
+      }),
+      join(__dirname, 'calibration-diagnose-cloudinary-photo.ts'),
+    ], { cwd: join(__dirname, '../..'), env });
+    let stdout = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => resolve({ code, stdout }));
+  });
+}
