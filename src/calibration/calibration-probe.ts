@@ -109,8 +109,11 @@ export function nextProbeCaseId(used: readonly string[]): string {
 }
 
 export function probeIndexAllowsCertification(index: ProbeIndex): boolean {
+  if (!index || typeof index !== 'object' || Array.isArray(index)) return false;
+  const keys = Object.keys(index);
+  if (keys.some((key) => !['schema_version', 'archive', 'cases', 'source_keys'].includes(key))) return false;
   if (index.archive !== 'probe' || index.schema_version !== CALIBRATION_PROBE_SCHEMA_VERSION) return false;
-  if (!index.cases || !index.source_keys) return false;
+  if (!index.cases || !index.source_keys || Array.isArray(index.cases) || Array.isArray(index.source_keys)) return false;
   for (const [id, path] of Object.entries(index.cases)) {
     if (!PROBE_CASE_ID.test(id) || path !== `${CALIBRATION_PROBE_ROOT}/cases/${id}.json`) return false;
   }

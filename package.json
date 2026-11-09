@@ -35,6 +35,7 @@
     "check:railway-token": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/assert-railway-token.ts",
     "check:staging-backup": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/assert-staging-backup.ts",
     "diagnose:calibration-github": "node dist/calibration/calibration-diagnose-github.js",
+    "diagnose:calibration-github-write": "node dist/calibration/calibration-diagnose-github-write.js",
     "diagnose:calibration-cloudinary": "node dist/calibration/calibration-diagnose-cloudinary.js",
     "diagnose:calibration-cloudinary-photo": "node dist/calibration/calibration-diagnose-cloudinary-photo.js",
     "bootstrap:staging": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/bootstrap-staging.ts",
