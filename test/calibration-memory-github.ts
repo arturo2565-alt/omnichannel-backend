@@ -67,7 +67,11 @@ export function memoryGithub(options?: {
       return response(422, { message: 'Invalid request.\n\n"sha" wasn\'t supplied.' });
     }
     if (body.sha && (!current || current.sha !== body.sha)) return response(409, { message: 'Conflict' });
-    if (path === 'data/index.json' && indexFailures > 0) {
+    if (
+      body.sha &&
+      (path === 'data/index.json' || path === 'data/probes/index.json') &&
+      indexFailures > 0
+    ) {
       indexFailures -= 1;
       return response(409, { message: 'Conflict' });
     }

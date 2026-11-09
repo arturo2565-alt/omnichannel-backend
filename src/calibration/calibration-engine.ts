@@ -340,7 +340,7 @@ export class CalibrationEngine {
 
   private async assertSameObservation(caseId: string, quote: ValidatedHumanQuote): Promise<void> {
     const stored = await this.writer.readCase(caseId);
-    if (!stored || fingerprint(stored) !== fingerprint(quote)) {
+    if (!stored || calibrationObservationFingerprint(stored) !== calibrationObservationFingerprint(quote)) {
       throw new CalibrationConflictError('Source key already records a different observation');
     }
   }
@@ -376,7 +376,7 @@ function dedupeImages(images: readonly Buffer[]): Buffer[] {
   return unique;
 }
 
-function fingerprint(value: Record<string, unknown> | ValidatedHumanQuote): string {
+export function calibrationObservationFingerprint(value: Record<string, unknown> | ValidatedHumanQuote): string {
   const record = value as Record<string, unknown>;
   const stable = {
     source: record.source ?? null,
