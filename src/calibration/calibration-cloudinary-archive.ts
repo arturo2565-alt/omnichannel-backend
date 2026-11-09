@@ -19,8 +19,11 @@ export type CloudinaryReceipt = {
 
 export type CloudinaryGateway = {
   uploadAuthenticated(input: { publicId: string; bytes: Buffer }): Promise<CloudinaryReceipt>;
-  downloadAuthenticated(input: { publicId: string; format: string; version: number }): Promise<Buffer>;
+  downloadAuthenticated(input: { publicId: string; format: string; version?: number }): Promise<Buffer>;
 };
+
+/** CAL-010 photos stay on this prefix. It is not the CAL-008 probe and not a real case. */
+export const CAL010_CLOUDINARY_PREFIX = 'pegazuz_calibration/cal010-probe';
 
 export type VerifiedCalibrationPhoto = {
   sha256: string;
@@ -36,16 +39,26 @@ const UNVERIFIED: Omit<VerifiedCalibrationPhoto, 'sha256'> = {
 };
 
 export class CalibrationCloudinaryArchive {
-  constructor(private readonly gateway: CloudinaryGateway) {}
+  constructor(
+    private readonly gateway: CloudinaryGateway,
+    private readonly publicPrefix = 'pegazuz_calibration',
+  ) {
+    if (this.publicPrefix !== 'pegazuz_calibration' && this.publicPrefix !== CAL010_CLOUDINARY_PREFIX) {
+      throw new Error('Calibration photo prefix is not allowed');
+    }
+  }
 
   async store(input: { caseId: string; bytes: Buffer }): Promise<VerifiedCalibrationPhoto> {
     const checked = validateCalibrationImage(input.bytes);
-    const publicId = `pegazuz_calibration/${input.caseId}/${checked.sha256.slice(0, 32)}`;
+    if (!this.caseIdAllowed(input.caseId)) return { sha256: checked.sha256, ...UNVERIFIED };
+    const publicId = `${this.publicPrefix}/${input.caseId}/${checked.sha256.slice(0, 32)}`;
+    if (!this.publicIdAllowed(publicId)) return { sha256: checked.sha256, ...UNVERIFIED };
     let receipt: CloudinaryReceipt;
     try {
       receipt = await this.gateway.uploadAuthenticated({ publicId, bytes: input.bytes });
     } catch {
-      return { sha256: checked.sha256, ...UNVERIFIED };
+      if (this.publicPrefix !== CAL010_CLOUDINARY_PREFIX) return { sha256: checked.sha256, ...UNVERIFIED };
+      return this.confirmExisting(publicId, checked.sha256, checked.format);
     }
     if (!receiptMatches(receipt, publicId, input.bytes.length, checked.format)) {
       return { sha256: checked.sha256, ...UNVERIFIED };
@@ -70,6 +83,39 @@ export class CalibrationCloudinaryArchive {
       assetPublicId: receipt.publicId,
       assetVersion: receipt.version,
     };
+  }
+
+  private caseIdAllowed(caseId: string): boolean {
+    if (this.publicPrefix !== CAL010_CLOUDINARY_PREFIX) return true;
+    return /^AF-9\d{5}$/.test(caseId) && caseId !== 'AF-900000' && caseId !== 'AF-000001';
+  }
+
+  private publicIdAllowed(publicId: string): boolean {
+    if (publicId.includes('://')) return false;
+    if (this.publicPrefix === CAL010_CLOUDINARY_PREFIX) {
+      return publicId.startsWith(`${CAL010_CLOUDINARY_PREFIX}/AF-9`)
+        && !publicId.includes('AF-900000')
+        && !publicId.includes('AF-000001')
+        && !publicId.includes('cal008-probe');
+    }
+    return publicId.startsWith('pegazuz_calibration/');
+  }
+
+  private async confirmExisting(
+    publicId: string,
+    sha256: string,
+    format: string,
+  ): Promise<VerifiedCalibrationPhoto> {
+    try {
+      const downloaded = await this.gateway.downloadAuthenticated({ publicId, format });
+      const downloadedSha = createHash('sha256').update(downloaded).digest('hex');
+      if (!confirmArchiveChecksum(sha256, downloadedSha) || !this.publicIdAllowed(publicId)) {
+        return { sha256, ...UNVERIFIED };
+      }
+      return { sha256, verified: true, assetPublicId: publicId, assetVersion: null };
+    } catch {
+      return { sha256, ...UNVERIFIED };
+    }
   }
 }
 
@@ -158,7 +204,7 @@ export function createCloudinaryGateway(
         type: 'authenticated',
         sign_url: true,
         secure: true,
-        version,
+        ...(version == null ? {} : { version }),
         format,
       });
       const response = await transport(url);

@@ -66,8 +66,8 @@ export function probeCasePath(caseId: string): string {
 }
 
 /**
- * Accepts only the probe index and a reserved case file. Relative segments,
- * encodings, real archive paths, and AF-000001 never pass.
+ * Accepts the probe index, a reserved case file, or a verified photo manifest.
+ * Relative segments, encodings, real archive paths, and AF-000001 never pass.
  */
 export function assertProbeContentsPath(raw: string): string {
   if (typeof raw !== 'string' || raw.length < 1 || raw.length > 96) {
@@ -86,7 +86,8 @@ export function assertProbeContentsPath(raw: string): string {
     throw new CalibrationConflictError('Probe path is not allowed');
   }
   const allowed = pathname === CALIBRATION_PROBE_INDEX_PATH
-    || /^data\/probes\/cases\/AF-9\d{5}\.json$/.test(pathname);
+    || /^data\/probes\/cases\/AF-9\d{5}\.json$/.test(pathname)
+    || /^data\/probes\/photos\/AF-9\d{5}\/IMG-[0-9]{6}\.json$/.test(pathname);
   if (!allowed || pathname.includes('AF-000001') || pathname.includes('data/cases/') || pathname.includes('data/index.json')) {
     throw new CalibrationConflictError('Probe path is not allowed');
   }
@@ -238,6 +239,59 @@ export class CalibrationProbeWriter {
       indexFile.sha,
     );
     return { status: 'created', caseId, caseCommit: 'pre-existing', indexCommit };
+  }
+
+  async saveVerifiedPhoto(document: {
+    photo_id: string;
+    case_id: string;
+    content_sha256: string;
+    storage_status: 'verified';
+    [key: string]: unknown;
+  }): Promise<string> {
+    if (!PROBE_CASE_ID.test(document.case_id) || !/^IMG-[0-9]{6}$/.test(document.photo_id)) {
+      throw new CalibrationConflictError('Photo manifest identity is invalid');
+    }
+    if (document.storage_status !== 'verified' || !/^[a-f0-9]{64}$/.test(document.content_sha256)) {
+      throw new CalibrationConflictError('A photo manifest requires a verified checksum');
+    }
+    assertNoForeignArchive(document);
+    const path = `data/probes/photos/${document.case_id}/${document.photo_id}.json`;
+    const existing = await this.read(path);
+    if (existing) {
+      const parsed = JSON.parse(existing.content) as { content_sha256?: string };
+      if (parsed.content_sha256 === document.content_sha256) return 'pre-existing';
+      throw new CalibrationConflictError('Photo id already stores different content');
+    }
+    return this.save(path, canonical(document), `cal: verify probe photo ${document.case_id} ${document.photo_id}`);
+  }
+
+  async readPhotoManifest(caseId: string, photoId: string): Promise<Record<string, unknown> | null> {
+    if (!PROBE_CASE_ID.test(caseId) || !/^IMG-[0-9]{6}$/.test(photoId)) return null;
+    const file = await this.read(`data/probes/photos/${caseId}/${photoId}.json`);
+    if (!file) return null;
+    return JSON.parse(file.content) as Record<string, unknown>;
+  }
+
+  async updateVerifiedPhotos(input: {
+    caseId: string;
+    photoRefs: string[];
+    updatedAt: string;
+  }): Promise<string> {
+    if (!PROBE_CASE_ID.test(input.caseId) || input.photoRefs.length === 0) {
+      throw new CalibrationConflictError('Verified photos require a case and at least one ref');
+    }
+    if (input.photoRefs.some((ref) => !/^IMG-[0-9]{6}$/.test(ref))) {
+      throw new CalibrationConflictError('Photo reference is not a private manifest id');
+    }
+    const casePath = probeCasePath(input.caseId);
+    const caseFile = await this.read(casePath);
+    if (!caseFile) throw new CalibrationWriteError('Missing case file for photo verification');
+    const parsed = JSON.parse(caseFile.content) as Record<string, unknown>;
+    parsed.photo_refs = [...input.photoRefs];
+    parsed.photo_archive_status = 'archived_private';
+    parsed.updated_at = input.updatedAt;
+    assertNoForeignArchive(parsed);
+    return this.save(casePath, canonical(parsed), `cal: verify probe photos ${input.caseId}`, caseFile.sha);
   }
 
   private async read(path: string): Promise<GithubFile | null> {

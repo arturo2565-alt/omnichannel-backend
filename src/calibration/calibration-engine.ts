@@ -99,13 +99,24 @@ const delay = (ms: number) => new Promise<void>((resolve) => {
   setTimeout(resolve, ms);
 });
 
+export type CalibrationRecordWriter = Pick<
+  CalibrationGithubWriter,
+  | 'readIndex'
+  | 'readCase'
+  | 'insert'
+  | 'reconcile'
+  | 'readPhotoManifest'
+  | 'saveVerifiedPhoto'
+  | 'updateVerifiedPhotos'
+>;
+
 export class CalibrationEngine {
   private readonly policy: CalibrationRetryPolicy;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly random: () => number;
 
   constructor(
-    private readonly writer: CalibrationGithubWriter,
+    private readonly writer: CalibrationRecordWriter,
     private readonly photos: CalibrationPhotoStore | null = null,
     private readonly clock: () => string = () => '2026-11-06T18:00:00.000Z',
     options: {
