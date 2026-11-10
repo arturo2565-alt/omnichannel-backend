@@ -37,7 +37,7 @@ Un archivo JSON local, junto a una, dos, tres o cuatro fotografías JPEG, PNG o 
 }
 ```
 
-`human_verified` debe ser exactamente `true` y cada línea debe traer `validation` igual a `human_confirmed` con un precio entero aprobado. Marca, modelo y año pueden omitirse solo con evidencia `unknown` y valor vacío. El archivo no debe incluir nombre, teléfono, correo, placa ni VIN. Las rutas de imagen son relativas al JSON. Una fotografía repetida se conserva una sola vez.
+`human_verified` debe ser exactamente `true` y cada línea debe traer `validation` igual a `human_confirmed` con un precio entero aprobado. Marca, modelo y año pueden omitirse solo con evidencia `unknown` y valor vacío. El archivo no debe incluir nombre, teléfono, correo, placa ni VIN. Cada fotografía es un nombre relativo dentro del mismo directorio del JSON. CAL-011B rechaza rutas absolutas, `..` y enlaces simbólicos. Una fotografía repetida se conserva una sola vez.
 
 La clave de origen es la identidad de la operación. `probe-cal-009d-001`, `probe-cal-010-001` y cualquier clave que empiece por `probe-` se rechazan. La clave que ya apunta a `AF-000001` también se rechaza.
 

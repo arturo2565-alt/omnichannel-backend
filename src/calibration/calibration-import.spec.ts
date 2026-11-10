@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { CalibrationCloudinaryArchive, type CloudinaryGateway } from './calibration-cloudinary-archive';
 import {
@@ -9,7 +9,14 @@ import {
   CALIBRATION_DIAGNOSTIC_PROJECT_ID,
   CALIBRATION_DIAGNOSTIC_SERVICE_ID,
 } from './calibration-diagnose';
-import { assertRealImportRequest, importCalibrationCase, loadCalibrationImportFile } from './calibration-import';
+import { CalibrationValidationError } from './calibration-case';
+import {
+  assertRealImportRequest,
+  importCalibrationCase,
+  loadCalibrationImportFile,
+  prepareCalibrationImport,
+  readCalibrationImportDocument,
+} from './calibration-import';
 import { readCalibrationImport } from './calibration-import-main';
 import { minimalDecodablePng } from './calibration-image-archive.service';
 import { memoryGithub } from '../../test/calibration-memory-github';
@@ -308,6 +315,93 @@ describe('CAL-011A private human import', () => {
     expect(route.github.files.has('data/cases/AF-000003.json')).toBe(false);
     expect(route.calls.filter((call) => call.startsWith('PUT ') && call.includes('AF-000001'))).toHaveLength(0);
     expect(route.calls.some((call) => call.includes('data/probes') || call.includes('cal010-probe') || call.includes('cal008-probe'))).toBe(false);
+  });
+
+  it('reads photographs only from the import directory', async () => {
+    const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(() => {
+      throw new Error('external write');
+    });
+    const root = mkdtempSync(join(tmpdir(), 'cal-011b-'));
+    const outside = mkdtempSync(join(tmpdir(), 'cal-011b-outside-'));
+    const marker = 'OUTSIDE-CANARY-PATH';
+    try {
+      writeFileSync(join(root, 'frente.png'), first);
+      writeFileSync(join(outside, 'secret.png'), Buffer.from(marker));
+      writeFileSync(join(root, 'caso.json'), JSON.stringify({ ...quote(), images: ['frente.png'] }));
+      const loaded = loadCalibrationImportFile(join(root, 'caso.json'));
+      expect(loaded.images).toHaveLength(1);
+      expect(JSON.stringify(loaded.quote)).not.toContain(root);
+      expect(JSON.stringify(loaded.quote)).not.toContain('frente.png');
+      const route = routed();
+      const stored = await importCalibrationCase(stagingEnv(), { ...quote(), images: loaded.images }, {
+        transport: route.transport,
+        photos: archive().photos,
+        clock: () => '2026-11-10T18:00:00.000Z',
+      });
+      expect(stored).toMatchObject({ result: 'ok', caseId: 'AF-000002', protectedCaseUnchanged: true });
+      expect(JSON.stringify(stored)).not.toContain(basename(root));
+      for (const file of route.github.files.values()) {
+        expect(file.text).not.toContain(basename(root));
+        expect(file.text).not.toContain(marker);
+        expect(file.text).not.toContain('/Users');
+        expect(file.text).not.toContain('https://');
+        expect(file.text).not.toContain('ghs_');
+      }
+      expect(route.calls.every((call) => call.includes('https://api.github.com/'))).toBe(true);
+
+      writeFileSync(join(root, 'absolute.json'), JSON.stringify({ ...quote(), images: [join(outside, 'secret.png')] }));
+      writeFileSync(join(root, 'parent.json'), JSON.stringify({ ...quote(), images: [`../${outside.split('/').pop()}/secret.png`] }));
+      writeFileSync(join(root, 'missing.json'), JSON.stringify({ ...quote(), images: ['ausente.png'] }));
+      writeFileSync(join(root, 'corrupt.json'), JSON.stringify({ ...quote(), images: ['roto.png'] }));
+      writeFileSync(join(root, 'roto.png'), Buffer.from('not-an-image'));
+      symlinkSync(join(outside, 'secret.png'), join(root, 'enlace.png'));
+      writeFileSync(join(root, 'symlink.json'), JSON.stringify({ ...quote(), images: ['enlace.png'] }));
+      mkdirSync(join(outside, 'album'));
+      symlinkSync(join(outside, 'album'), join(root, 'album'));
+      writeFileSync(join(root, 'linked-dir.json'), JSON.stringify({ ...quote(), images: ['album/secret.png'] }));
+      symlinkSync(join(root, 'caso.json'), join(root, 'caso-enlace.json'));
+
+      for (const file of ['absolute.json', 'parent.json', 'symlink.json', 'linked-dir.json', 'caso-enlace.json']) {
+        let message = '';
+        try {
+          readCalibrationImportDocument(join(root, file));
+        } catch (err) {
+          message = err instanceof Error ? err.message : '';
+        }
+        expect(message).toContain('must stay inside');
+        expect(message).not.toContain(marker);
+        expect(message).not.toContain(outside);
+        expect(message).not.toContain(root);
+      }
+      expect(() => readCalibrationImportDocument(join(root, 'missing.json'))).toThrow('missing or unreadable');
+      expect(() => loadCalibrationImportFile(join(root, 'corrupt.json'))).toThrow('Unsupported calibration image content');
+      const hidden = await readCalibrationImport(stagingEnv(), join(root, 'absolute.json'));
+      expect(JSON.stringify(hidden)).toBe('{"service":"calibration-import","result":"error","category":"invalid"}');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('rejects personal data before any write and keeps it out of the report', async () => {
+    const route = routed();
+    const phone = await importCalibrationCase(stagingEnv(), {
+      ...quote(),
+      line_items: [{ ...quote().line_items[0], part: '5512345678' }],
+    }, { transport: route.transport, photos: archive().photos });
+    const vin = () => prepareCalibrationImport(quote(1250, '1HGCM82633A004352'));
+    const plate = () => prepareCalibrationImport({
+      ...quote(),
+      visual_observations: ['ABC-123-D'],
+    });
+    const named = () => prepareCalibrationImport({ ...quote(), vehicle: { ...quote().vehicle, nombre: 'Ana' } });
+    expect(phone.category).toBe('invalid');
+    expect(JSON.stringify(phone)).not.toContain('5512345678');
+    expect(vin).toThrow(CalibrationValidationError);
+    expect(plate).toThrow(CalibrationValidationError);
+    expect(named).toThrow(CalibrationValidationError);
+    expect(route.calls).toHaveLength(0);
+    expect(route.github.files.has('data/cases/AF-000002.json')).toBe(false);
   });
 
   it('reads a local file and stays outside the public ingest', async () => {

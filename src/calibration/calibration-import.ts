@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { isAbsolute, join, dirname } from 'node:path';
+import { lstatSync, readFileSync, realpathSync, type Stats } from 'node:fs';
+import { isAbsolute, join, dirname, relative, sep } from 'node:path';
 import { CalibrationValidationError, validateHumanQuote, type ValidatedHumanQuote } from './calibration-case';
 import {
   CalibrationCloudinaryArchive,
@@ -32,6 +32,15 @@ const REPOSITORIES_URL = 'https://api.github.com/installation/repositories?per_p
 const PROTECTED_CASE_ID = 'AF-000001';
 const RESERVED_SOURCE_KEYS = new Set(['probe-cal-009d-001', 'probe-cal-010-001']);
 const FORBIDDEN_TEXT = ['cal008-probe', 'cal010-probe', 'data/probes', 'AF-900000', 'AF-900001'];
+const MAX_QUOTE_BYTES = 64 * 1024;
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
+const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const PHONE = /\d{10,}/;
+const PLATE = /\b[A-Z]{3}-?\d{3,4}(?:-?[A-Z])?\b/;
+const FORBIDDEN_KEYS = new Set([
+  'contact', 'customer', 'customername', 'email', 'name', 'nombre', 'phone', 'placa', 'plate', 'telefono', 'vin',
+]);
 
 export type ImportCategory =
   | 'wrong_target'
@@ -79,6 +88,7 @@ export function prepareCalibrationImport(input: CalibrationImportInput): {
   images: Buffer[];
   duplicateImages: number;
 } {
+  assertImportMaterial(input);
   if (input.human_verified !== true) {
     throw new CalibrationConflictError('An authorized quote must be human verified');
   }
@@ -116,8 +126,8 @@ export function prepareCalibrationImport(input: CalibrationImportInput): {
 }
 
 export function readCalibrationImportDocument(filePath: string): CalibrationImportInput {
-  const text = readFileSync(filePath, 'utf8');
-  const parsed = JSON.parse(text) as {
+  const quotePath = regularFile(filePath, MAX_QUOTE_BYTES, 'The import file is missing or unreadable');
+  let parsed: {
     source_case_key?: unknown;
     quoted_at?: unknown;
     human_verified?: unknown;
@@ -126,13 +136,126 @@ export function readCalibrationImportDocument(filePath: string): CalibrationImpo
     visual_observations?: unknown;
     images?: unknown;
   };
+  try {
+    parsed = JSON.parse(readFileSync(quotePath, 'utf8')) as typeof parsed;
+  } catch (err) {
+    if (err instanceof CalibrationConflictError) throw err;
+    throw new CalibrationConflictError('The import file is unreadable');
+  }
+  assertImportMaterial(parsed);
   const listed = parsed.images;
   if (!Array.isArray(listed) || !listed.every((item): item is string => typeof item === 'string')) {
     throw new CalibrationConflictError('The import accepts one to four original photographs');
   }
-  const folder = dirname(filePath);
-  const images = listed.map((item) => readFileSync(isAbsolute(item) ? item : join(folder, item)));
-  return { ...parsed, images };
+  const folder = dirname(quotePath);
+  const images = listed.map((item) => readFileSync(photographInside(folder, item)));
+  return {
+    source_case_key: parsed.source_case_key,
+    quoted_at: parsed.quoted_at ?? null,
+    human_verified: parsed.human_verified,
+    vehicle: parsed.vehicle,
+    line_items: parsed.line_items,
+    visual_observations: parsed.visual_observations ?? [],
+    images,
+  };
+}
+
+function photographInside(directory: string, reference: string): string {
+  if (!isSafeRelative(reference)) {
+    throw new CalibrationConflictError('The photograph must stay inside the import directory');
+  }
+  const root = realpathSync(directory);
+  let current = root;
+  const segments = reference.split('/');
+  for (const [index, segment] of segments.entries()) {
+    current = join(current, segment);
+    const info = inspect(current, 'The photograph is missing or unreadable');
+    if (info.isSymbolicLink()) {
+      throw new CalibrationConflictError('The photograph must stay inside the import directory');
+    }
+    const last = index === segments.length - 1;
+    if (!last && !info.isDirectory()) {
+      throw new CalibrationConflictError('The photograph must stay inside the import directory');
+    }
+    if (last && (!info.isFile() || info.size < 1 || info.size > MAX_PHOTO_BYTES)) {
+      throw new CalibrationConflictError('The photograph is missing or unreadable');
+    }
+  }
+  const real = realpathSync(current);
+  const rel = relative(root, real);
+  if (rel === '' || rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel) || !real.startsWith(root + sep)) {
+    throw new CalibrationConflictError('The photograph must stay inside the import directory');
+  }
+  return real;
+}
+
+function regularFile(filePath: string, maxBytes: number, missing: string): string {
+  if (typeof filePath !== 'string' || filePath.length === 0 || filePath.includes('\0')) {
+    throw new CalibrationConflictError(missing);
+  }
+  const info = inspect(filePath, missing);
+  if (info.isSymbolicLink()) {
+    throw new CalibrationConflictError('The import file must stay inside its directory');
+  }
+  if (!info.isFile() || info.size < 2 || info.size > maxBytes) {
+    throw new CalibrationConflictError(missing);
+  }
+  return filePath;
+}
+
+function inspect(filePath: string, missing: string): Stats {
+  try {
+    const info = lstatSync(filePath);
+    if (!info) throw new CalibrationConflictError(missing);
+    return info;
+  } catch (err) {
+    if (err instanceof CalibrationConflictError) throw err;
+    throw new CalibrationConflictError(missing);
+  }
+}
+
+function isSafeRelative(reference: string): boolean {
+  if (typeof reference !== 'string' || reference.length === 0 || reference.length > 180) return false;
+  if (reference.includes('\0') || reference.includes('\\') || isAbsolute(reference)) return false;
+  const segments = reference.split('/');
+  return segments.length > 0 && segments.every((segment) => SAFE_SEGMENT.test(segment));
+}
+
+function assertImportMaterial(value: unknown, keyName = ''): void {
+  if (Buffer.isBuffer(value)) return;
+  if (typeof value === 'string') {
+    if (keyName === 'images') return;
+    if (
+      EMAIL.test(value)
+      || PHONE.test(value)
+      || PLATE.test(value)
+      || hasVin(value)
+      || value.includes('/')
+      || value.includes('\\')
+      || value.includes('\0')
+    ) {
+      throw new CalibrationValidationError('personal_data', 'The quote includes unnecessary personal data');
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (keyName === 'images') return;
+    value.forEach((item) => assertImportMaterial(item));
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const [key, nested] of Object.entries(value)) {
+    if (FORBIDDEN_KEYS.has(key.toLowerCase())) {
+      throw new CalibrationValidationError('personal_data', 'The quote includes unnecessary personal data');
+    }
+    assertImportMaterial(nested, key);
+  }
+}
+
+function hasVin(value: string): boolean {
+  return value.split(/[^A-Za-z0-9]/).some((part) => (
+    /^[A-HJ-NPR-Z0-9]{17}$/i.test(part) && /\d/.test(part) && /[A-Z]/i.test(part)
+  ));
 }
 
 export function loadCalibrationImportFile(filePath: string): ReturnType<typeof prepareCalibrationImport> {
