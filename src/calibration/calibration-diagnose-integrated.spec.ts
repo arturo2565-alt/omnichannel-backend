@@ -7,6 +7,7 @@ import {
   type CloudinaryGateway,
   type CloudinaryReceipt,
 } from './calibration-cloudinary-archive';
+import { validateCalibrationImage } from './calibration-image-archive.service';
 import {
   CALIBRATION_DIAGNOSTIC_ENVIRONMENT_ID,
   CALIBRATION_DIAGNOSTIC_PROJECT_ID,
@@ -105,7 +106,7 @@ function gateway(options?: {
         publicId: options?.wrongPublicId ? 'pegazuz_calibration/cal008-probe/AF-008008/other' : publicId,
         version: 11,
         bytes: bytes.length,
-        format: 'jpg',
+        format: 'png',
         type: 'authenticated',
         resourceType: 'image',
       };
@@ -319,10 +320,87 @@ describe('CAL-010.1 integrated calibration diagnostic', () => {
     const otherCloud = gateway({ failUploads: 1, download: Buffer.from([0xff, 0xd8, 0xff, 0x0b]) });
     const otherPhotos = counting(otherCloud);
     const pending = await diagnoseCalibrationIntegrated(stagingEnv(), { transport: other.transport, photos: otherPhotos });
-    expect(pending).toMatchObject({ result: 'error', category: 'partial', status: 'partial', caseId: 'AF-900001' });
+    expect(pending).toMatchObject({
+      result: 'error',
+      category: 'partial',
+      status: 'partial',
+      caseId: 'AF-900001',
+      storageFailure: 'checksum_mismatch',
+    });
     expect(other.github.files.has('data/probes/photos/AF-900001/IMG-000001.json')).toBe(false);
     expect(otherPhotos.calls()).toBe(1);
     expect(other.github.files.has('data/probes/cases/AF-900002.json')).toBe(false);
+  });
+
+  it('recovers pending AF-900001 in place after the synthetic checksum changes', async () => {
+    const rejected = Buffer.from([0xff, 0xd8, 0xff, 0x0a, 0x10, 0x01]);
+    const rejectedSha = createHash('sha256').update(rejected).digest('hex');
+    expect(imageSha).not.toBe(rejectedSha);
+    expect(imageSha).not.toBe('c414cd0e204de974f73753c7e28d7638e7b3691bb8b1a2bab6b25bb7fed7ce77');
+    expect(() => validateCalibrationImage(rejected)).toThrow('Unsupported calibration image content');
+
+    const { github, transport } = routed();
+    seed(github);
+    const pending = await diagnoseCalibrationIntegrated(stagingEnv(), {
+      transport,
+      photos: {
+        store: async () => ({
+          sha256: imageSha,
+          verified: false,
+          assetPublicId: null,
+          assetVersion: null,
+          failure: 'upload_rejected' as const,
+        }),
+      },
+    });
+    expect(pending).toMatchObject({
+      result: 'error',
+      category: 'partial',
+      status: 'partial',
+      caseId: 'AF-900001',
+      storageFailure: 'upload_rejected',
+      probeCaseCount: 2,
+      realIndexUnchanged: true,
+      protectedCaseUnchanged: true,
+    });
+    expect(github.files.has('data/probes/photos/AF-900001/IMG-000001.json')).toBe(false);
+    expect(github.files.has('data/probes/cases/AF-900002.json')).toBe(false);
+
+    const cloud = gateway();
+    const photos = counting(cloud);
+    const recovered = await diagnoseCalibrationIntegrated(stagingEnv(), { transport, photos });
+    expect(recovered).toMatchObject({
+      result: 'ok',
+      status: 'already_exists',
+      caseId: 'AF-900001',
+      contentMatch: true,
+      manifestMatch: true,
+      probeCaseCount: 2,
+      realCaseCountBefore: 1,
+      realCaseCountAfter: 1,
+      realIndexUnchanged: true,
+      protectedCaseUnchanged: true,
+    });
+    expect(photos.calls()).toBe(1);
+    const manifest = JSON.parse(github.files.get('data/probes/photos/AF-900001/IMG-000001.json')!.text) as {
+      content_sha256: string;
+    };
+    expect(manifest.content_sha256).toBe(imageSha);
+    const repeated = await diagnoseCalibrationIntegrated(stagingEnv(), { transport, photos });
+    expect(repeated).toMatchObject({ result: 'ok', status: 'already_exists', caseId: 'AF-900001' });
+    expect(photos.calls()).toBe(1);
+    expect(cloud.uploads).toHaveLength(1);
+
+    manifest.content_sha256 = rejectedSha;
+    const manifestFile = github.files.get('data/probes/photos/AF-900001/IMG-000001.json')!;
+    github.files.set('data/probes/photos/AF-900001/IMG-000001.json', {
+      sha: manifestFile.sha,
+      text: JSON.stringify(manifest),
+    });
+    const conflict = await diagnoseCalibrationIntegrated(stagingEnv(), { transport, photos });
+    expect(conflict).toMatchObject({ result: 'error', category: 'conflict', realIndexUnchanged: true });
+    expect(photos.calls()).toBe(1);
+    expect(github.files.has('data/probes/cases/AF-900002.json')).toBe(false);
   });
 
   it('stops when an existing manifest or case has different content', async () => {

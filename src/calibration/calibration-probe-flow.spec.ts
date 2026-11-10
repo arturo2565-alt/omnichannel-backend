@@ -67,7 +67,7 @@ function gateway(options?: {
         publicId: options?.wrongPublicId ? 'pegazuz_calibration/cal008-probe/AF-008008/other' : publicId,
         version: 11,
         bytes: bytes.length,
-        format: 'jpg',
+        format: 'png',
         type: 'authenticated',
         resourceType: 'image',
       };

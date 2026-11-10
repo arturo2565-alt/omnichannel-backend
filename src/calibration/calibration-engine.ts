@@ -18,12 +18,19 @@ import {
  */
 export type PhotoArchiveStatus = 'not_provided' | 'pending_private_archive' | 'archived_private';
 
+export type CalibrationPhotoStoreFailure =
+  | 'upload_rejected'
+  | 'download_failed'
+  | 'checksum_mismatch'
+  | 'receipt_rejected';
+
 export type CalibrationPhotoStore = {
   store(input: { caseId: string; bytes: Buffer }): Promise<{
     sha256: string;
     verified: boolean;
     assetPublicId?: string | null;
     assetVersion?: number | null;
+    failure?: CalibrationPhotoStoreFailure;
   }>;
 };
 
@@ -37,6 +44,8 @@ export type CalibrationRecordResult = {
   photoRefs: string[];
   /** Manifests stored for this case but not linked yet. They are not deleted. */
   orphanPhotoRefs: string[];
+  /** Closed storage code. It never carries a URL, credential, or provider message. */
+  storageFailure?: CalibrationPhotoStoreFailure;
 };
 
 export type CalibrationRetryPolicy = {
@@ -289,6 +298,7 @@ export class CalibrationEngine {
             photoArchiveStatus: 'pending_private_archive',
             photoRefs: [],
             orphanPhotoRefs: refs,
+            ...(stored.failure ? { storageFailure: stored.failure } : {}),
           };
         }
         await this.withTransientRetry(() => this.writer.saveVerifiedPhoto({

@@ -1,4 +1,5 @@
 import { CAL010_CLOUDINARY_PREFIX, CalibrationCloudinaryArchive } from './calibration-cloudinary-archive';
+import { minimalDecodablePng } from './calibration-image-archive.service';
 import { CalibrationEngine, type CalibrationPhotoStore, type CalibrationRecordResult } from './calibration-engine';
 import { CalibrationConflictError } from './calibration-github-writer';
 import { CalibrationProbeWriter, type ProbeIndex } from './calibration-probe';
@@ -10,9 +11,9 @@ export const CAL010_SOURCE_KEY = 'probe-cal-010-001';
 
 const CLOCK = '2026-11-08T18:00:00.000Z';
 
-/** A new synthetic JPEG. It is not the CAL-008 PNG and carries no personal data. */
+/** A 1×1 opaque PNG. It is not the CAL-008 image and carries no personal data or EXIF. */
 export function syntheticCal010Image(): Buffer {
-  return Buffer.from([0xff, 0xd8, 0xff, 0x0a, 0x10, 0x01]);
+  return minimalDecodablePng([16, 32, 48]);
 }
 
 export function cal010Quote() {

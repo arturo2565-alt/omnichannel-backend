@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { v2 as cloudinary } from 'cloudinary';
-import { confirmArchiveChecksum } from './calibration-engine';
+import { confirmArchiveChecksum, type CalibrationPhotoStoreFailure } from './calibration-engine';
 import { validateCalibrationImage } from './calibration-image-archive.service';
 
 /**
@@ -30,6 +30,7 @@ export type VerifiedCalibrationPhoto = {
   verified: boolean;
   assetPublicId: string | null;
   assetVersion: number | null;
+  failure?: CalibrationPhotoStoreFailure;
 };
 
 const UNVERIFIED: Omit<VerifiedCalibrationPhoto, 'sha256'> = {
@@ -50,18 +51,18 @@ export class CalibrationCloudinaryArchive {
 
   async store(input: { caseId: string; bytes: Buffer }): Promise<VerifiedCalibrationPhoto> {
     const checked = validateCalibrationImage(input.bytes);
-    if (!this.caseIdAllowed(input.caseId)) return { sha256: checked.sha256, ...UNVERIFIED };
+    if (!this.caseIdAllowed(input.caseId)) return unverified(checked.sha256, 'receipt_rejected');
     const publicId = `${this.publicPrefix}/${input.caseId}/${checked.sha256.slice(0, 32)}`;
-    if (!this.publicIdAllowed(publicId)) return { sha256: checked.sha256, ...UNVERIFIED };
+    if (!this.publicIdAllowed(publicId)) return unverified(checked.sha256, 'receipt_rejected');
     let receipt: CloudinaryReceipt;
     try {
       receipt = await this.gateway.uploadAuthenticated({ publicId, bytes: input.bytes });
     } catch {
-      if (this.publicPrefix !== CAL010_CLOUDINARY_PREFIX) return { sha256: checked.sha256, ...UNVERIFIED };
+      if (this.publicPrefix !== CAL010_CLOUDINARY_PREFIX) return unverified(checked.sha256, 'upload_rejected');
       return this.confirmExisting(publicId, checked.sha256, checked.format);
     }
     if (!receiptMatches(receipt, publicId, input.bytes.length, checked.format)) {
-      return { sha256: checked.sha256, ...UNVERIFIED };
+      return unverified(checked.sha256, 'receipt_rejected');
     }
     let downloaded: Buffer;
     try {
@@ -71,11 +72,11 @@ export class CalibrationCloudinaryArchive {
         version: receipt.version,
       });
     } catch {
-      return { sha256: checked.sha256, ...UNVERIFIED };
+      return unverified(checked.sha256, 'download_failed');
     }
     const downloadedSha = createHash('sha256').update(downloaded).digest('hex');
     if (!confirmArchiveChecksum(checked.sha256, downloadedSha)) {
-      return { sha256: checked.sha256, ...UNVERIFIED };
+      return unverified(checked.sha256, 'checksum_mismatch');
     }
     return {
       sha256: checked.sha256,
@@ -109,14 +110,17 @@ export class CalibrationCloudinaryArchive {
     try {
       const downloaded = await this.gateway.downloadAuthenticated({ publicId, format });
       const downloadedSha = createHash('sha256').update(downloaded).digest('hex');
-      if (!confirmArchiveChecksum(sha256, downloadedSha) || !this.publicIdAllowed(publicId)) {
-        return { sha256, ...UNVERIFIED };
-      }
+      if (!this.publicIdAllowed(publicId)) return unverified(sha256, 'receipt_rejected');
+      if (!confirmArchiveChecksum(sha256, downloadedSha)) return unverified(sha256, 'checksum_mismatch');
       return { sha256, verified: true, assetPublicId: publicId, assetVersion: null };
     } catch {
-      return { sha256, ...UNVERIFIED };
+      return unverified(sha256, 'upload_rejected');
     }
   }
+}
+
+function unverified(sha256: string, failure: CalibrationPhotoStoreFailure): VerifiedCalibrationPhoto {
+  return { sha256, ...UNVERIFIED, failure };
 }
 
 function receiptMatches(

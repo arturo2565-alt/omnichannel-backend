@@ -10,7 +10,7 @@ import {
   assertProbeWriteRequest,
 } from './calibration-diagnose-probe-write';
 import { calibrationObservationFingerprint } from './calibration-engine';
-import type { CalibrationPhotoStore } from './calibration-engine';
+import type { CalibrationPhotoStore, CalibrationPhotoStoreFailure } from './calibration-engine';
 import {
   CALIBRATION_GITHUB_REPOSITORY,
   CalibrationCredentialError,
@@ -65,6 +65,7 @@ export type IntegratedReport = {
   realCaseCountAfter?: number;
   realIndexUnchanged?: boolean;
   protectedCaseUnchanged?: boolean;
+  storageFailure?: CalibrationPhotoStoreFailure;
 };
 
 export async function diagnoseCalibrationIntegrated(
@@ -188,6 +189,7 @@ async function finish(
   recorded: {
     status: 'created' | 'already_exists' | 'reconciled';
     caseId: string;
+    storageFailure?: CalibrationPhotoStoreFailure;
   },
 ): Promise<IntegratedReport> {
   const stored = await writer.readCase(recorded.caseId);
@@ -229,6 +231,7 @@ async function finish(
       category: !realIndexUnchanged || !protectedCaseUnchanged ? 'real_index' : 'partial',
       status: 'partial',
       ...base,
+      ...(recorded.storageFailure ? { storageFailure: recorded.storageFailure } : {}),
     };
   }
   return {

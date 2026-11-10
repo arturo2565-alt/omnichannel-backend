@@ -8,6 +8,7 @@ import { memoryGithub } from '../../test/calibration-memory-github';
 import { CalibrationEngine } from './calibration-engine';
 import { CalibrationGithubWriter } from './calibration-github-writer';
 import { CalibrationIngestController } from './calibration-ingest.controller';
+import { minimalDecodablePng } from './calibration-image-archive.service';
 import {
   CalibrationIngestService,
   calibrationIngestEnabled,
@@ -16,7 +17,7 @@ import {
 
 const enabled = { CALIBRATION_INGEST_ENABLED: 'true' };
 const workshop = { tallerId: '01000000-0000-4000-8000-000000000010' };
-const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x10, 0x20]);
+const image = minimalDecodablePng([1, 2, 3]);
 
 function quote(key = 'case-test-ingest') {
   return {
@@ -86,10 +87,10 @@ describe('CAL-007A calibration ingest', () => {
   });
 
   it('limits image count and rejects a remote or data URL in place of original bytes', () => {
-    expect(() => readCalibrationImages(Array.from({ length: 9 }, () => jpeg.toString('base64')))).toThrow(
+    expect(() => readCalibrationImages(Array.from({ length: 9 }, () => image.toString('base64')))).toThrow(
       expect.objectContaining({ response: { error: 'too_many_images' } }),
     );
-    expect(() => readCalibrationImages(['data:image/jpeg;base64,' + jpeg.toString('base64')])).toThrow(
+    expect(() => readCalibrationImages(['data:image/jpeg;base64,' + image.toString('base64')])).toThrow(
       expect.objectContaining({ response: { error: 'original_bytes_required' } }),
     );
     expect(() => readCalibrationImages(['https://example.test/photo.jpg'])).toThrow(
@@ -110,7 +111,7 @@ describe('CAL-007A calibration ingest', () => {
       { sleep: async () => undefined, retry: { maxTransientAttempts: 0 } },
     );
     const ingest = service(engine);
-    const body = { tallerId: workshop.tallerId, quote: quote(), images: [jpeg.toString('base64')] };
+    const body = { tallerId: workshop.tallerId, quote: quote(), images: [image.toString('base64')] };
     const first = await ingest.record(workshop, body, enabled);
     const second = await ingest.record(workshop, body, enabled);
     expect(first).toMatchObject({

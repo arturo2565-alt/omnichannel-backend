@@ -13,7 +13,7 @@ import {
   CalibrationWriteError,
   classifyGithubFailure,
 } from './calibration-github-writer';
-import { validateCalibrationImage } from './calibration-image-archive.service';
+import { minimalDecodablePng, validateCalibrationImage } from './calibration-image-archive.service';
 import { memoryGithub } from '../../test/calibration-memory-github';
 
 function quote(key = 'case-test-000010', price = 1250) {
@@ -43,7 +43,7 @@ function quote(key = 'case-test-000010', price = 1250) {
   };
 }
 
-const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x11, 0x22]);
+const image = minimalDecodablePng();
 
 function verifiedStore() {
   const calls: Buffer[] = [];
@@ -159,7 +159,7 @@ describe('CAL-006 calibration engine', () => {
   it('does not persist when GitHub fails', async () => {
     const photos = verifiedStore();
     const { engine } = engineFor(memoryGithub({ failAll: true }), photos);
-    await expect(engine.record(quote(), [jpeg])).rejects.toThrow('github unavailable');
+    await expect(engine.record(quote(), [image])).rejects.toThrow('github unavailable');
     expect(photos.calls).toHaveLength(0);
   });
 
@@ -169,7 +169,7 @@ describe('CAL-006 calibration engine', () => {
       new CalibrationGithubWriter('test-token', github.transport),
       { store: async () => { throw new Error('cloudinary unavailable'); } },
     );
-    const result = await engine.record(quote('case-test-photo-fail'), [jpeg]);
+    const result = await engine.record(quote('case-test-photo-fail'), [image]);
     expect(result.photoArchiveStatus).toBe('pending_private_archive');
     expect(result.photoRefs).toEqual([]);
     expect(storedCase(github, result.caseId).photo_archive_status).toBe('pending_private_archive');
@@ -186,7 +186,7 @@ describe('CAL-006 calibration engine', () => {
         }),
       },
     );
-    const result = await engine.record(quote('case-test-unverified'), [jpeg]);
+    const result = await engine.record(quote('case-test-unverified'), [image]);
     expect(result.photoArchiveStatus).toBe('pending_private_archive');
     expect([...github.files.keys()].some((path) => path.includes('/photos/'))).toBe(false);
   });
@@ -194,12 +194,12 @@ describe('CAL-006 calibration engine', () => {
   it('stores one manifest for a duplicated photograph', async () => {
     const photos = verifiedStore();
     const { engine, github } = engineFor(memoryGithub(), photos);
-    const result = await engine.record(quote('case-test-same-photo'), [jpeg, Buffer.from(jpeg)]);
+    const result = await engine.record(quote('case-test-same-photo'), [image, Buffer.from(image)]);
     expect(photos.calls).toHaveLength(1);
     expect(result.photoArchiveStatus).toBe('archived_private');
     expect(result.photoRefs).toEqual(['IMG-000001']);
     const manifest = github.files.get(`data/photos/${result.caseId}/IMG-000001.json`);
-    expect(JSON.parse(manifest!.text).content_sha256).toBe(validateCalibrationImage(jpeg).sha256);
+    expect(JSON.parse(manifest!.text).content_sha256).toBe(validateCalibrationImage(image).sha256);
     expect(JSON.parse(manifest!.text).storage_status).toBe('verified');
   });
 
@@ -311,12 +311,12 @@ describe('CAL-006 calibration engine', () => {
     const photos = verifiedStore();
     const github = memoryGithub({ failArchivedUpdates: 1 });
     const { engine } = engineFor(github, photos, { retry: { maxTransientAttempts: 0 } });
-    const first = await engine.record(quote('case-test-photo-crash'), [jpeg]);
+    const first = await engine.record(quote('case-test-photo-crash'), [image]);
     expect(first.photoArchiveStatus).toBe('pending_private_archive');
     expect(first.photoRefs).toEqual([]);
     expect(first.orphanPhotoRefs).toEqual(['IMG-000001']);
     expect(storedCase(github, first.caseId).photo_archive_status).toBe('pending_private_archive');
-    const second = await engine.record(quote('case-test-photo-crash'), [jpeg]);
+    const second = await engine.record(quote('case-test-photo-crash'), [image]);
     expect(second.photoArchiveStatus).toBe('archived_private');
     expect(second.photoRefs).toEqual(['IMG-000001']);
     expect(photos.calls).toHaveLength(1);
@@ -382,7 +382,7 @@ describe('CAL-006 calibration engine', () => {
         }),
       },
     );
-    const saved = await engine.record(quote('case-test-asset'), [jpeg]);
+    const saved = await engine.record(quote('case-test-asset'), [image]);
     const manifest = JSON.parse(
       github.files.get(`data/photos/${saved.caseId}/IMG-000001.json`)!.text,
     ) as Record<string, unknown>;
@@ -404,7 +404,7 @@ describe('CAL-006 calibration engine', () => {
         }),
       },
     );
-    const pending = await blocked.record(quote('case-test-public-url'), [jpeg]);
+    const pending = await blocked.record(quote('case-test-public-url'), [image]);
     expect(pending.photoArchiveStatus).toBe('pending_private_archive');
     expect([...rejected.files.keys()].some((path) => path.includes('/photos/'))).toBe(false);
   });
