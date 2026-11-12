@@ -12,6 +12,8 @@ import {
   calibrationObservationFingerprint,
   type CalibrationPhotoStore,
   type CalibrationPhotoStoreFailure,
+  type CalibrationRecordWriter,
+  type ExpectedCalibrationPhoto,
 } from './calibration-engine';
 import {
   CALIBRATION_GITHUB_REPOSITORY,
@@ -25,15 +27,19 @@ import {
   CalibrationGithubWriter,
   CalibrationWriteError,
 } from './calibration-github-writer';
-import { validateCalibrationImage } from './calibration-image-archive.service';
+import { imageContainsPersonalMetadata, validateCalibrationImage } from './calibration-image-archive.service';
 
 const TOKEN_URL = /^https:\/\/api\.github\.com\/app\/installations\/\d{1,12}\/access_tokens$/;
 const REPOSITORIES_URL = 'https://api.github.com/installation/repositories?per_page=100';
 const PROTECTED_CASE_ID = 'AF-000001';
+/** Historical cases. New archived cases stay immutable without being added here. */
+const HISTORICAL_CASE_IDS = new Set(['AF-000001', 'AF-000002', 'AF-000003']);
 const RESERVED_SOURCE_KEYS = new Set(['probe-cal-009d-001', 'probe-cal-010-001']);
 const FORBIDDEN_TEXT = ['cal008-probe', 'cal010-probe', 'data/probes', 'AF-900000', 'AF-900001'];
 const MAX_QUOTE_BYTES = 64 * 1024;
-const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+const IMPORT_MAX_PHOTOS = 30;
+const IMPORT_MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+const IMPORT_MAX_TOTAL_BYTES = 80 * 1024 * 1024;
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/;
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE = /\d{10,}/;
@@ -71,7 +77,51 @@ export type ImportReport = {
   realCaseCountAfter?: number;
   protectedCaseUnchanged?: boolean;
   storageFailure?: CalibrationPhotoStoreFailure;
+  /** Operator folder. A WhatsApp download is not treated as a camera original. */
+  provenance?: 'operator_local_folder';
+  cameraOriginal?: false;
 };
+
+export type CalibrationImportLimits = {
+  minPhotos: 1;
+  maxPhotos: number;
+  maxPhotoBytes: number;
+  maxTotalBytes: number;
+};
+
+export function defaultCalibrationImportLimits(): CalibrationImportLimits {
+  return {
+    minPhotos: 1,
+    maxPhotos: IMPORT_MAX_PHOTOS,
+    maxPhotoBytes: IMPORT_MAX_PHOTO_BYTES,
+    maxTotalBytes: IMPORT_MAX_TOTAL_BYTES,
+  };
+}
+
+/**
+ * Reads the private importer caps from the process environment supplied by the caller.
+ * Unset values keep the defaults. A value above the hard ceiling is rejected.
+ * This function does not write Railway variables.
+ */
+export function readCalibrationImportLimits(env: NodeJS.ProcessEnv): CalibrationImportLimits {
+  const maxPhotos = boundedImportLimit(env.CALIBRATION_IMPORT_MAX_PHOTOS, IMPORT_MAX_PHOTOS, 1, IMPORT_MAX_PHOTOS);
+  const maxPhotoBytes = boundedImportLimit(
+    env.CALIBRATION_IMPORT_MAX_PHOTO_BYTES,
+    IMPORT_MAX_PHOTO_BYTES,
+    1,
+    IMPORT_MAX_PHOTO_BYTES,
+  );
+  const maxTotalBytes = boundedImportLimit(
+    env.CALIBRATION_IMPORT_MAX_TOTAL_BYTES,
+    IMPORT_MAX_TOTAL_BYTES,
+    1,
+    IMPORT_MAX_TOTAL_BYTES,
+  );
+  if (maxTotalBytes < maxPhotoBytes) {
+    throw new CalibrationConflictError('The import limits are not valid');
+  }
+  return { minPhotos: 1, maxPhotos, maxPhotoBytes, maxTotalBytes };
+}
 
 export type CalibrationImportInput = {
   source_case_key?: unknown;
@@ -83,9 +133,13 @@ export type CalibrationImportInput = {
   images?: Buffer[];
 };
 
-export function prepareCalibrationImport(input: CalibrationImportInput): {
+export function prepareCalibrationImport(
+  input: CalibrationImportInput,
+  limits: CalibrationImportLimits = defaultCalibrationImportLimits(),
+): {
   quote: ValidatedHumanQuote;
   images: Buffer[];
+  imageShas: string[];
   duplicateImages: number;
 } {
   assertImportMaterial(input);
@@ -107,25 +161,34 @@ export function prepareCalibrationImport(input: CalibrationImportInput): {
     throw new CalibrationConflictError('Source key belongs to the calibration probe');
   }
   const images = input.images ?? [];
-  if (images.length < 1 || images.length > 4) {
-    throw new CalibrationConflictError('The import accepts one to four original photographs');
-  }
+  assertPhotographBudget(images, limits);
   const seen = new Set<string>();
   const unique: Buffer[] = [];
+  const imageShas: string[] = [];
   let duplicateImages = 0;
   for (const bytes of images) {
     const { sha256 } = validateCalibrationImage(bytes);
+    if (imageContainsPersonalMetadata(bytes)) {
+      throw new CalibrationConflictError('The photograph contains personal metadata');
+    }
     if (seen.has(sha256)) {
       duplicateImages += 1;
       continue;
     }
     seen.add(sha256);
     unique.push(bytes);
+    imageShas.push(sha256);
   }
-  return { quote, images: unique, duplicateImages };
+  if (unique.length < limits.minPhotos) {
+    throw new CalibrationConflictError('The import requires at least one photograph');
+  }
+  return { quote, images: unique, imageShas, duplicateImages };
 }
 
-export function readCalibrationImportDocument(filePath: string): CalibrationImportInput {
+export function readCalibrationImportDocument(
+  filePath: string,
+  limits: CalibrationImportLimits = defaultCalibrationImportLimits(),
+): CalibrationImportInput {
   const quotePath = regularFile(filePath, MAX_QUOTE_BYTES, 'The import file is missing or unreadable');
   let parsed: {
     source_case_key?: unknown;
@@ -145,10 +208,31 @@ export function readCalibrationImportDocument(filePath: string): CalibrationImpo
   assertImportMaterial(parsed);
   const listed = parsed.images;
   if (!Array.isArray(listed) || !listed.every((item): item is string => typeof item === 'string')) {
-    throw new CalibrationConflictError('The import accepts one to four original photographs');
+    throw new CalibrationConflictError('The import requires at least one photograph');
+  }
+  if (listed.length < limits.minPhotos) {
+    throw new CalibrationConflictError('The import requires at least one photograph');
+  }
+  if (listed.length > limits.maxPhotos) {
+    throw new CalibrationConflictError('The import exceeds the photograph safety limit');
   }
   const folder = dirname(quotePath);
-  const images = listed.map((item) => readFileSync(photographInside(folder, item)));
+  const files = listed.map((item) => photographInside(folder, item, limits));
+  let total = 0;
+  for (const file of files) {
+    total += file.size;
+    if (total > limits.maxTotalBytes) {
+      throw new CalibrationConflictError('The import exceeds the photograph safety limit');
+    }
+  }
+  const cache = new Map<string, Buffer>();
+  const images = files.map((file) => {
+    const cached = cache.get(file.path);
+    if (cached) return cached;
+    const bytes = readFileSync(file.path);
+    cache.set(file.path, bytes);
+    return bytes;
+  });
   return {
     source_case_key: parsed.source_case_key,
     quoted_at: parsed.quoted_at ?? null,
@@ -160,12 +244,17 @@ export function readCalibrationImportDocument(filePath: string): CalibrationImpo
   };
 }
 
-function photographInside(directory: string, reference: string): string {
+function photographInside(
+  directory: string,
+  reference: string,
+  limits: CalibrationImportLimits,
+): { path: string; size: number } {
   if (!isSafeRelative(reference)) {
     throw new CalibrationConflictError('The photograph must stay inside the import directory');
   }
   const root = realpathSync(directory);
   let current = root;
+  let size = 0;
   const segments = reference.split('/');
   for (const [index, segment] of segments.entries()) {
     current = join(current, segment);
@@ -177,16 +266,20 @@ function photographInside(directory: string, reference: string): string {
     if (!last && !info.isDirectory()) {
       throw new CalibrationConflictError('The photograph must stay inside the import directory');
     }
-    if (last && (!info.isFile() || info.size < 1 || info.size > MAX_PHOTO_BYTES)) {
+    if (last && (!info.isFile() || info.size < 1)) {
       throw new CalibrationConflictError('The photograph is missing or unreadable');
     }
+    if (last && info.size > limits.maxPhotoBytes) {
+      throw new CalibrationConflictError('The import exceeds the photograph safety limit');
+    }
+    if (last) size = info.size;
   }
   const real = realpathSync(current);
   const rel = relative(root, real);
   if (rel === '' || rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel) || !real.startsWith(root + sep)) {
     throw new CalibrationConflictError('The photograph must stay inside the import directory');
   }
-  return real;
+  return { path: real, size };
 }
 
 function regularFile(filePath: string, maxBytes: number, missing: string): string {
@@ -276,7 +369,7 @@ export async function importCalibrationCase(
   if (env.CALIBRATION_INGEST_ENABLED !== 'false' || env.DB_SYNCHRONIZE !== 'false') return error('flags');
   let prepared: ReturnType<typeof prepareCalibrationImport>;
   try {
-    prepared = prepareCalibrationImport(input);
+    prepared = prepareCalibrationImport(input, readCalibrationImportLimits(env));
   } catch (err) {
     return error(categoryOf(err));
   }
@@ -294,7 +387,7 @@ export async function importCalibrationCase(
     const names = await installationRepositories(guarded, await app.authorization());
     if (!names) return error('rejected');
     if (names.length !== 1 || names[0] !== CALIBRATION_GITHUB_REPOSITORY) return error('scope');
-    const writer = new CalibrationGithubWriter(app, guarded);
+    const writer = protectingWriter(new CalibrationGithubWriter(app, guarded));
     const index = await writer.readIndex();
     const protectedBefore = await writer.readCase(PROTECTED_CASE_ID);
     const realCaseCountBefore = Object.keys(index.cases).length;
@@ -305,19 +398,22 @@ export async function importCalibrationCase(
     if (existingId === PROTECTED_CASE_ID || (existingId != null && !realCaseId(existingId))) {
       return halted('conflict', writer, protectedBefore, realCaseCountBefore);
     }
-    if (existingId && !(await sameCompleteObservation(writer, existingId, prepared))) {
+    if (existingId) {
       const stored = await writer.readCase(existingId);
-      if (!stored || calibrationObservationFingerprint(stored) !== calibrationObservationFingerprint(prepared.quote)) {
+      const sameQuote = stored != null
+        && calibrationObservationFingerprint(stored) === calibrationObservationFingerprint(prepared.quote);
+      if (!sameQuote) return halted('conflict', writer, protectedBefore, realCaseCountBefore);
+      if (stored.photo_archive_status === 'archived_private') {
+        if (await sameCompleteObservation(writer, existingId, prepared)) {
+          return finish(writer, protectedBefore, realCaseCountBefore, {
+            status: 'already_exists',
+            caseId: existingId,
+            photoArchiveStatus: 'archived_private',
+            photoRefs: photoIds(prepared.images.length),
+          }, prepared);
+        }
         return halted('conflict', writer, protectedBefore, realCaseCountBefore);
       }
-    }
-    if (existingId && await sameCompleteObservation(writer, existingId, prepared)) {
-      return finish(writer, protectedBefore, realCaseCountBefore, {
-        status: 'already_exists',
-        caseId: existingId,
-        photoArchiveStatus: 'archived_private',
-        photoRefs: photoIds(prepared.images.length),
-      }, prepared);
     }
     const engine = new CalibrationEngine(writer, photos, deps.clock ?? (() => new Date().toISOString()), {
       sleep: async () => undefined,
@@ -328,8 +424,12 @@ export async function importCalibrationCase(
     try {
       recorded = await engine.record(prepared.quote, prepared.images);
       if (!realCaseId(recorded.caseId)) throw new CalibrationConflictError('Real import selected a protected case');
-      if (recorded.orphanPhotoRefs.length > 0) {
-        await engine.recoverOrphanManifests(recorded.caseId, recorded.orphanPhotoRefs);
+      if (recorded.photoArchiveStatus !== 'archived_private' && recorded.orphanPhotoRefs.length > 0) {
+        await engine.recoverOrphanManifests(
+          recorded.caseId,
+          recorded.orphanPhotoRefs,
+          expectedPhotos(prepared),
+        );
       }
     } catch (err) {
       return halted(categoryOf(err) === 'rejected' ? 'partial' : categoryOf(err), writer, protectedBefore, realCaseCountBefore);
@@ -348,8 +448,8 @@ export function assertRealImportRequest(method: string, rawUrl: string): void {
   } catch {
     throw new Error('Calibration import refused a request');
   }
-  const mentionsProtectedCase = url.href.includes(PROTECTED_CASE_ID);
-  const forbidden = FORBIDDEN_TEXT.some((needle) => url.href.includes(needle)) || (mentionsProtectedCase && verb === 'PUT');
+  const forbidden = FORBIDDEN_TEXT.some((needle) => url.href.includes(needle))
+    || (verb === 'PUT' && historicalRequest(url.href));
   if (url.protocol !== 'https:' || url.hostname !== 'api.github.com' || url.username || url.password || forbidden) {
     throw new Error('Calibration import refused a request');
   }
@@ -362,14 +462,15 @@ export function assertRealImportRequest(method: string, rawUrl: string): void {
   }
   const path = url.pathname.slice(prefix.length);
   if (path === 'data/index.json') return;
-  if (verb === 'GET' && path === `data/cases/${PROTECTED_CASE_ID}.json`) return;
-  if ((verb === 'GET' || verb === 'PUT') && /^data\/cases\/AF-0\d{5}\.json$/.test(path) && !path.endsWith(`${PROTECTED_CASE_ID}.json`)) return;
-  if ((verb === 'GET' || verb === 'PUT') && /^data\/photos\/AF-0\d{5}\/IMG-[0-9]{6}\.json$/.test(path) && !path.includes(PROTECTED_CASE_ID)) return;
+  if (verb === 'GET' && /^data\/cases\/AF-0\d{5}\.json$/.test(path)) return;
+  if (verb === 'GET' && /^data\/photos\/AF-0\d{5}\/IMG-[0-9]{6}\.json$/.test(path)) return;
+  if (verb === 'PUT' && /^data\/cases\/AF-0\d{5}\.json$/.test(path) && !historicalRequest(path)) return;
+  if (verb === 'PUT' && /^data\/photos\/AF-0\d{5}\/IMG-[0-9]{6}\.json$/.test(path) && !historicalRequest(path)) return;
   throw new Error('Calibration import refused a request');
 }
 
 async function sameCompleteObservation(
-  writer: CalibrationGithubWriter,
+  writer: CalibrationRecordWriter,
   caseId: string,
   prepared: ReturnType<typeof prepareCalibrationImport>,
 ): Promise<boolean> {
@@ -381,7 +482,7 @@ async function sameCompleteObservation(
   for (let index = 0; index < expected.length; index += 1) {
     if (refs[index] !== expected[index]) return false;
     const manifest = await writer.readPhotoManifest(caseId, expected[index]);
-    const sha = validateCalibrationImage(prepared.images[index]).sha256;
+    const sha = prepared.imageShas[index];
     const publicId = manifest?.asset_public_id;
     if (
       !manifest
@@ -397,7 +498,7 @@ async function sameCompleteObservation(
 }
 
 async function finish(
-  writer: CalibrationGithubWriter,
+  writer: CalibrationRecordWriter,
   protectedBefore: Record<string, unknown>,
   realCaseCountBefore: number,
   recorded: {
@@ -429,6 +530,8 @@ async function finish(
     realCaseCountBefore,
     realCaseCountAfter: Object.keys(index.cases).length,
     protectedCaseUnchanged,
+    provenance: 'operator_local_folder',
+    cameraOriginal: false,
     ...(recorded.storageFailure && !complete ? { storageFailure: recorded.storageFailure } : {}),
   };
   return base;
@@ -436,7 +539,7 @@ async function finish(
 
 async function halted(
   category: ImportCategory,
-  writer: CalibrationGithubWriter,
+  writer: CalibrationRecordWriter,
   protectedBefore: Record<string, unknown>,
   realCaseCountBefore: number,
 ): Promise<ImportReport> {
@@ -478,11 +581,94 @@ function livePhotos(env: NodeJS.ProcessEnv, transport: typeof fetch): Calibratio
 }
 
 function realCaseId(caseId: string): boolean {
-  return /^AF-0\d{5}$/.test(caseId) && caseId !== PROTECTED_CASE_ID;
+  return /^AF-0\d{5}$/.test(caseId) && !HISTORICAL_CASE_IDS.has(caseId);
 }
 
 function photoIds(count: number): string[] {
   return Array.from({ length: count }, (_item, index) => `IMG-${String(index + 1).padStart(6, '0')}`);
+}
+
+function expectedPhotos(prepared: ReturnType<typeof prepareCalibrationImport>): ExpectedCalibrationPhoto[] {
+  return prepared.imageShas.map((sha256, index) => ({
+    photoId: `IMG-${String(index + 1).padStart(6, '0')}`,
+    sha256,
+  }));
+}
+
+function historicalCase(caseId: string): boolean {
+  return HISTORICAL_CASE_IDS.has(caseId);
+}
+
+function historicalRequest(value: string): boolean {
+  for (const caseId of HISTORICAL_CASE_IDS) {
+    if (value.includes(caseId)) return true;
+  }
+  return false;
+}
+
+function assertPhotographBudget(images: readonly Buffer[], limits: CalibrationImportLimits): void {
+  if (images.length < limits.minPhotos) {
+    throw new CalibrationConflictError('The import requires at least one photograph');
+  }
+  if (images.length > limits.maxPhotos) {
+    throw new CalibrationConflictError('The import exceeds the photograph safety limit');
+  }
+  let total = 0;
+  for (const bytes of images) {
+    if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > limits.maxPhotoBytes) {
+      throw new CalibrationConflictError('The import exceeds the photograph safety limit');
+    }
+    total += bytes.length;
+    if (total > limits.maxTotalBytes) {
+      throw new CalibrationConflictError('The import exceeds the photograph safety limit');
+    }
+  }
+}
+
+function boundedImportLimit(value: string | undefined, fallback: number, min: number, max: number): number {
+  if (value == null || value === '') return fallback;
+  if (!/^[1-9]\d{0,8}$/.test(value)) {
+    throw new CalibrationConflictError('The import limits are not valid');
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new CalibrationConflictError('The import limits are not valid');
+  }
+  return parsed;
+}
+
+function protectingWriter(writer: CalibrationGithubWriter): CalibrationRecordWriter {
+  return {
+    readIndex: () => writer.readIndex(),
+    readCase: (caseId) => writer.readCase(caseId),
+    async insert(document) {
+      if (historicalCase(document.case_id)) {
+        throw new CalibrationConflictError('Case ID already assigned');
+      }
+      return writer.insert(document);
+    },
+    async reconcile(caseId) {
+      if (historicalCase(caseId)) throw new CalibrationConflictError('Case ID already assigned');
+      return writer.reconcile(caseId);
+    },
+    readPhotoManifest: (caseId, photoId) => writer.readPhotoManifest(caseId, photoId),
+    async saveVerifiedPhoto(document) {
+      if (historicalCase(document.case_id)) {
+        throw new CalibrationConflictError('Real import selected a protected case');
+      }
+      return writer.saveVerifiedPhoto(document);
+    },
+    async updateVerifiedPhotos(input) {
+      if (historicalCase(input.caseId)) {
+        throw new CalibrationConflictError('Real import selected a protected case');
+      }
+      const stored = await writer.readCase(input.caseId);
+      if (stored?.photo_archive_status === 'archived_private') {
+        throw new CalibrationConflictError('Archived case is immutable');
+      }
+      return writer.updateVerifiedPhotos(input);
+    },
+  };
 }
 
 function contentsGrantIsExpected(grant: GithubInstallationGrant): boolean {
@@ -518,11 +704,23 @@ async function installationRepositories(transport: typeof fetch, token: string):
 function categoryOf(err: unknown): ImportCategory {
   if (err instanceof CalibrationCredentialError) return err.kind === 'forbidden' ? 'forbidden' : 'rejected';
   if (err instanceof CalibrationConflictError) {
-    if (err.message === 'Source key already records a different observation' || err.message === 'Source key belongs to the calibration probe') {
+    if (
+      err.message === 'Source key already records a different observation'
+      || err.message === 'Source key belongs to the calibration probe'
+      || err.message === 'Photo id already stores different content'
+      || err.message === 'Archived case is immutable'
+    ) {
       return 'conflict';
     }
-    if (err.message === 'An authorized quote must be human verified' || err.message === 'The import accepts one to four original photographs') {
+    if (
+      err.message === 'An authorized quote must be human verified'
+      || err.message === 'The import requires at least one photograph'
+      || err.message === 'The import exceeds the photograph safety limit'
+    ) {
       return 'incomplete';
+    }
+    if (err.message === 'The photograph contains personal metadata' || err.message === 'The import limits are not valid') {
+      return 'invalid';
     }
     return 'rejected';
   }
@@ -547,7 +745,7 @@ function cloudinaryGuard(transport: typeof fetch): typeof fetch {
   return async (input, init) => {
     const url = new URL(String(input));
     const allowedHost = url.protocol === 'https:' && (url.hostname === 'res.cloudinary.com' || url.hostname === 'api.cloudinary.com');
-    const foreign = FORBIDDEN_TEXT.some((needle) => url.href.includes(needle)) || url.href.includes(PROTECTED_CASE_ID);
+    const foreign = FORBIDDEN_TEXT.some((needle) => url.href.includes(needle)) || historicalRequest(url.href);
     if (!allowedHost || foreign || url.username || url.password) {
       throw new Error('Calibration import refused a request');
     }

@@ -356,12 +356,28 @@ describe('CAL-006 calibration engine', () => {
       pathPhotoId: 'IMG-000001',
       manifest: proven,
     })).toBe('unproven');
+    const partial = await engine.recoverOrphanManifests(created.caseId, [
+      'IMG-000001',
+      'IMG-000009',
+    ], [
+      { photoId: 'IMG-000001', sha256: checksum },
+      { photoId: 'IMG-000002', sha256: checksum },
+    ]);
+    expect(partial.linked).toEqual([]);
+    expect(partial.unproven).toEqual(['IMG-000009']);
+    expect(partial.photoArchiveStatus).not.toBe('archived_private');
+    expect(storedCase(github, created.caseId).photo_archive_status).not.toBe('archived_private');
+    expect(storedCase(github, created.caseId).photo_refs ?? []).toEqual([]);
+    expect(github.files.get(`data/photos/${created.caseId}/IMG-000009.json`)?.text).toBe(
+      JSON.stringify(foreign),
+    );
     const recovered = await engine.recoverOrphanManifests(created.caseId, [
       'IMG-000001',
       'IMG-000009',
+    ], [
+      { photoId: 'IMG-000001', sha256: checksum },
     ]);
     expect(recovered.linked).toEqual(['IMG-000001']);
-    expect(recovered.unproven).toEqual(['IMG-000009']);
     expect(recovered.photoArchiveStatus).toBe('archived_private');
     expect(github.files.get(`data/photos/${created.caseId}/IMG-000009.json`)?.text).toBe(
       JSON.stringify(foreign),

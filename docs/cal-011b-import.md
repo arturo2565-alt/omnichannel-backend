@@ -15,7 +15,7 @@ El caso y el manifiesto guardan la cotización validada, el identificador, el SH
 Las fotografías no se suben al repositorio de código ni al de calibración. Cuando exista la cotización aprobada y se autorice la primera importación, la copia será una sola sesión SSH autenticada hacia `pegazuz-backend-staging`:
 
 1. Crear en el contenedor el directorio efímero `/tmp/pegazuz-import`. No es un volumen ni una variable de Railway.
-2. Copiar el JSON y entre una y cuatro fotografías por esa sesión, con nombres relativos simples.
+2. Copiar el JSON y las fotografías de esa sesión, con nombres relativos simples. La cantidad sigue el tope de CAL-013.
 3. Ejecutar una vez `node dist/calibration/calibration-import-run.js /tmp/pegazuz-import/caso.json`.
 4. Ejecutar el mismo comando otra vez. Lo esperado es `already_exists` sobre el mismo caso.
 5. Detenerse ante `partial`, `conflict`, `real_index` o `storageFailure`. No borrar el caso, el manifiesto ni la fotografía. No cambiar la clave.

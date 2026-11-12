@@ -15,7 +15,9 @@ import {
   importCalibrationCase,
   prepareCalibrationImport,
   readCalibrationImportDocument,
+  readCalibrationImportLimits,
   type CalibrationImportInput,
+  type CalibrationImportLimits,
   type ImportCategory,
   type ImportReport,
 } from './calibration-import';
@@ -127,9 +129,15 @@ export async function importCalibrationBatch(
   options: CalibrationBatchOptions = {},
 ): Promise<BatchReport> {
   const mode = options.apply ? 'apply' : 'prepare';
+  let limits: CalibrationImportLimits;
+  try {
+    limits = readCalibrationImportLimits(env);
+  } catch {
+    return containerReport(mode, { category: 'invalid' });
+  }
   const opened = openContainer(directory);
   if ('failure' in opened) return containerReport(mode, opened.failure);
-  const loaded = loadExpedientes(opened.path);
+  const loaded = loadExpedientes(opened.path, limits);
   if ('failure' in loaded) return containerReport(mode, loaded.failure);
   const classified = classifyExpedientes(loaded.items);
   if (!options.apply) return summarize(mode, classified.map(localItem));
@@ -204,6 +212,7 @@ function placement(real: string): 'repository' | 'probes' | null {
 
 function loadExpedientes(
   directory: string,
+  limits: CalibrationImportLimits,
 ): { items: LocalItem[] } | { failure: ContainerFailure } {
   let names: string[];
   try {
@@ -222,7 +231,7 @@ function loadExpedientes(
     return { failure: { category: 'rejected', reason: 'batch_limit' } };
   return {
     items: names.map((name, index) =>
-      loadExpediente(directory, name, index + 1),
+      loadExpediente(directory, name, index + 1, limits),
     ),
   };
 }
@@ -231,6 +240,7 @@ function loadExpediente(
   directory: string,
   name: string,
   slot: number,
+  limits: CalibrationImportLimits,
 ): LocalItem {
   const child = join(directory, name);
   const rel = relative(directory, child);
@@ -258,7 +268,7 @@ function loadExpediente(
     return { slot, disposition: 'requiere_correccion', reason: 'symlink' };
   let input: CalibrationImportInput;
   try {
-    input = readCalibrationImportDocument(quotePath);
+    input = readCalibrationImportDocument(quotePath, limits);
   } catch (err) {
     const sourceKey = peekedKey(quotePath);
     return {
@@ -270,11 +280,9 @@ function loadExpediente(
   }
   const sourceKey = reportableKey(input.source_case_key);
   try {
-    const prepared = prepareCalibrationImport(input);
+    const prepared = prepareCalibrationImport(input, limits);
     const fixture = fixtureOf(prepared.quote.source.source_case_key);
-    const imageShas = prepared.images.map(
-      (bytes) => validateCalibrationImage(bytes).sha256,
-    );
+    const imageShas = prepared.imageShas;
     return {
       slot,
       sourceKey: prepared.quote.source.source_case_key,
@@ -659,8 +667,15 @@ function failureReason(err: unknown): BatchReason {
   const message = err instanceof Error ? err.message : '';
   if (message.includes('calibration probe')) return 'probe_key';
   if (message.includes('stay inside')) return 'unsafe_path';
-  if (message.includes('human verified') || message.includes('one to four'))
+  if (
+    message.includes('human verified') ||
+    message.includes('one to four') ||
+    message.includes('at least one photograph') ||
+    message.includes('photograph safety limit')
+  )
     return 'incomplete';
+  if (message.includes('personal metadata') || message.includes('limits are not valid'))
+    return 'invalid';
   if (message.includes('missing') || message.includes('unreadable'))
     return 'unreadable';
   if (

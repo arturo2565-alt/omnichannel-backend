@@ -238,7 +238,7 @@ function forbiddenPuts(calls: readonly string[]): string[] {
   return calls.filter(
     (call) =>
       call.startsWith('PUT') &&
-      /AF-000001|AF-000002|data\/probes|AF-900|cal008-probe|cal010-probe/.test(
+      /AF-000001|AF-000002|AF-000003|data\/probes|AF-900|cal008-probe|cal010-probe/.test(
         call,
       ),
   );
@@ -290,7 +290,7 @@ describe('CAL-012 private batch import', () => {
           sourceKey: keyFor(index),
           disposition: 'registrado',
           labelEligible: true,
-          caseId: `AF-${String(index + 3).padStart(6, '0')}`,
+          caseId: `AF-${String(index + 4).padStart(6, '0')}`,
           photoRefs: ['IMG-000001'],
           contentMatch: true,
           manifestMatch: true,
@@ -300,7 +300,8 @@ describe('CAL-012 private batch import', () => {
         });
       });
       expect(harness.photos.uploads).toHaveLength(10);
-      expect(harness.github.files.has('data/cases/AF-000013.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000003.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000014.json')).toBe(false);
       frozenUntouched(harness.github);
       expect(forbiddenPuts(harness.calls)).toEqual([]);
       withoutSecrets(report, [basename(root)]);
@@ -337,7 +338,6 @@ describe('CAL-012 private batch import', () => {
         (item) => item.disposition === 'registrado',
       );
       expect(registered.map((item) => item.caseId)).toEqual([
-        'AF-000003',
         'AF-000004',
         'AF-000005',
         'AF-000006',
@@ -346,6 +346,7 @@ describe('CAL-012 private batch import', () => {
         'AF-000009',
         'AF-000010',
         'AF-000011',
+        'AF-000012',
       ]);
       expect(registered.every((item) => item.labelEligible)).toBe(true);
       const index = JSON.parse(
@@ -379,7 +380,7 @@ describe('CAL-012 private batch import', () => {
         disposition: 'registrado',
         labelEligible: true,
         duplicateImages: 1,
-        caseId: 'AF-000003',
+        caseId: 'AF-000004',
         photoRefs: ['IMG-000001'],
       });
       expect(harness.photos.uploads).toHaveLength(1);
@@ -408,7 +409,7 @@ describe('CAL-012 private batch import', () => {
       ]);
       expect(report.items[0]).toMatchObject({
         sourceKey: key,
-        caseId: 'AF-000003',
+        caseId: 'AF-000004',
         labelEligible: true,
       });
       expect(report.items[1]).toMatchObject({
@@ -417,7 +418,8 @@ describe('CAL-012 private batch import', () => {
       });
       expect(report.items[1].caseId).toBeUndefined();
       expect(harness.photos.uploads).toHaveLength(1);
-      expect(harness.github.files.has('data/cases/AF-000004.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000003.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000005.json')).toBe(false);
     });
   });
 
@@ -486,7 +488,7 @@ describe('CAL-012 private batch import', () => {
       ]);
       expect(report.items[2]).toMatchObject({
         sourceKey: 'autofix-2026-11-11-43',
-        caseId: 'AF-000003',
+        caseId: 'AF-000004',
         labelEligible: true,
       });
       expect(harness.photos.uploads).toHaveLength(1);
@@ -606,12 +608,13 @@ describe('CAL-012 private batch import', () => {
         sourceKey: key,
         disposition: 'pending_private_archive',
         labelEligible: false,
-        caseId: 'AF-000003',
+        caseId: 'AF-000004',
         photoArchiveStatus: 'pending_private_archive',
         storageFailure: 'upload_rejected',
         protectedCaseUnchanged: true,
       });
-      expect(harness.github.files.has('data/cases/AF-000004.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000003.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000005.json')).toBe(false);
       harness.photos.fail(0);
       const recovered = await importCalibrationBatch(stagingEnv(), root, {
         apply: true,
@@ -622,15 +625,15 @@ describe('CAL-012 private batch import', () => {
         sourceKey: key,
         disposition: 'already_exists',
         labelEligible: true,
-        caseId: 'AF-000003',
+        caseId: 'AF-000004',
         photoRefs: ['IMG-000001'],
         contentMatch: true,
         manifestMatch: true,
         photoArchiveStatus: 'archived_private',
       });
-      expect(harness.github.files.has('data/cases/AF-000004.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000005.json')).toBe(false);
       const stored = JSON.parse(
-        harness.github.files.get('data/cases/AF-000003.json')?.text ?? '{}',
+        harness.github.files.get('data/cases/AF-000004.json')?.text ?? '{}',
       ) as {
         source?: { source_case_key?: string };
       };
@@ -849,6 +852,40 @@ describe('CAL-012 private batch import', () => {
     });
   });
 
+  it('prepares fifteen photographs without network and rejects thirty-one', async () => {
+    await withRoot(async (root) => {
+      const many = Array.from({ length: 15 }, (_item, index) => `f${index}.png`);
+      const files = Object.fromEntries(many.map((name, index) => [
+        name,
+        minimalDecodablePng([index + 1, 3, 4]),
+      ]));
+      writeExpediente(root, 'quince', quote('autofix-2026-11-11-15', 1500), many, files);
+      const tooMany = Array.from({ length: 31 }, (_item, index) => `g${index}.png`);
+      writeExpediente(
+        root,
+        'treinta',
+        quote('autofix-2026-11-11-31b', 3100),
+        tooMany,
+        { 'g0.png': minimalDecodablePng([1, 2, 3]) },
+      );
+      const calls: string[] = [];
+      const transport: typeof fetch = (input) => {
+        calls.push(String(input));
+        return Promise.reject(new Error('network'));
+      };
+      const report = await importCalibrationBatch(stagingEnv(), root, {
+        apply: false,
+        transport,
+      });
+      expect(calls).toEqual([]);
+      expect(report.items.map((item) => [item.disposition, item.reason])).toEqual([
+        ['listo_para_importar', undefined],
+        ['requiere_correccion', 'incomplete'],
+      ]);
+      expect(report.items[0].caseId).toBeUndefined();
+    });
+  });
+
   it('does not modify AF-000001, AF-000002, or the calibration probes', async () => {
     await withRoot(async (root) => {
       writeExpediente(
@@ -906,17 +943,18 @@ describe('CAL-012 private batch import', () => {
           'conflict',
           undefined,
         ],
-        ['autofix-2026-11-11-92', 'registrado', undefined, 'AF-000003'],
+        ['autofix-2026-11-11-92', 'registrado', undefined, 'AF-000004'],
         ['autofix-sim-0092', 'requiere_correccion', 'fixture_key', undefined],
         ['probe-cal-012-001', 'requiere_correccion', 'probe_key', undefined],
       ]);
       expect(report.items[1].labelEligible).toBe(true);
-      expect(harness.github.files.has('data/cases/AF-000004.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000003.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000005.json')).toBe(false);
       frozenUntouched(harness.github);
       expect(forbiddenPuts(harness.calls)).toEqual([]);
       expect(
         harness.photos.uploads.every((id) =>
-          id.startsWith('pegazuz_calibration/AF-000003/'),
+          id.startsWith('pegazuz_calibration/AF-000004/'),
         ),
       ).toBe(true);
     });
@@ -952,7 +990,7 @@ describe('CAL-012 private batch import', () => {
           item.caseId,
         ]),
       ).toEqual([
-        ['registrado', undefined, 'AF-000003'],
+        ['registrado', undefined, 'AF-000004'],
         ['detenido_por_seguridad', 'forbidden', undefined],
         ['detenido_por_seguridad', 'halted', undefined],
       ]);
@@ -960,7 +998,8 @@ describe('CAL-012 private batch import', () => {
       expect(report.items[1].labelEligible).toBe(false);
       expect(report.items[1].sourceKey).toBe(keyFor(1));
       expect(report.items[2].sourceKey).toBe(keyFor(2));
-      expect(harness.github.files.has('data/cases/AF-000004.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000003.json')).toBe(false);
+      expect(harness.github.files.has('data/cases/AF-000005.json')).toBe(false);
       frozenUntouched(harness.github);
       withoutSecrets(report, []);
     });

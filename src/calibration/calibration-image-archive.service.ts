@@ -40,6 +40,50 @@ export function validateCalibrationImage(buffer: Buffer): { format: 'jpg' | 'png
   return { format: decoded.format, sha256: createHash('sha256').update(buffer).digest('hex') };
 }
 
+const PERSONAL_EXIF_TAGS = new Set<number>([
+  0x013b, // Artist
+  0x8825, // GPSInfo
+  0xa420, // ImageUniqueID
+  0xa430, // CameraOwnerName
+  0xa431, // BodySerialNumber
+  0xa435, // LensSerialNumber
+]);
+
+const PERSONAL_TEXT_KEYWORDS = new Set([
+  'artist',
+  'author',
+  'bodyserialnumber',
+  'cameraownername',
+  'gps',
+  'gpsinfo',
+  'gpslatitude',
+  'imageuniqueid',
+  'lensserialnumber',
+  'owner',
+  'serialnumber',
+  'usercomment',
+]);
+
+const PERSONAL_EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const PERSONAL_PHONE = /\d{10,}/;
+const PERSONAL_PLATE = /\b[A-Z]{3}-?\d{3,4}(?:-?[A-Z])?\b/i;
+
+/**
+ * Detects personal metadata carried beside the pixels.
+ * It does not read a plate, a face, or a VIN painted on the vehicle, and it does not modify the buffer.
+ */
+export function imageContainsPersonalMetadata(buffer: Buffer): boolean {
+  try {
+    const format = detectCalibrationImageFormat(buffer);
+    if (format === 'jpg') return jpegHasPersonalMetadata(buffer);
+    if (format === 'png') return pngHasPersonalMetadata(buffer);
+    if (format === 'webp') return webpHasPersonalMetadata(buffer);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 /** One opaque pixel. No text, time, or EXIF chunks. */
 export function minimalDecodablePng(rgb: readonly [number, number, number] = [16, 32, 48]): Buffer {
   const ihdr = Buffer.alloc(13);
@@ -309,4 +353,152 @@ export class CalibrationImageArchiveService {
       format,
     };
   }
+}
+
+function textHasPersonal(value: string): boolean {
+  if (PERSONAL_EMAIL.test(value) || PERSONAL_PHONE.test(value) || PERSONAL_PLATE.test(value)) return true;
+  return value.split(/[^A-Za-z0-9]/).some((part) => (
+    /^[A-HJ-NPR-Z0-9]{17}$/i.test(part) && /\d/.test(part) && /[A-Z]/i.test(part)
+  ));
+}
+
+function keywordHasPersonal(keyword: string): boolean {
+  return PERSONAL_TEXT_KEYWORDS.has(keyword.toLowerCase().replace(/[^a-z]/g, ''));
+}
+
+function tiffHasPersonal(buffer: Buffer, start: number, end: number): boolean {
+  if (start < 0 || end > buffer.length || start + 8 > end) return false;
+  const order = buffer.toString('ascii', start, start + 2);
+  const little = order === 'II';
+  if (!little && order !== 'MM') return false;
+  const read16 = (pos: number): number | null => {
+    if (pos < start || pos + 2 > end) return null;
+    return little ? buffer.readUInt16LE(pos) : buffer.readUInt16BE(pos);
+  };
+  const read32 = (pos: number): number | null => {
+    if (pos < start || pos + 4 > end) return null;
+    return little ? buffer.readUInt32LE(pos) : buffer.readUInt32BE(pos);
+  };
+  if (read16(start + 2) !== 42) return false;
+  const offset = read32(start + 4);
+  if (offset == null) return false;
+  return ifdHasPersonal(start + offset, read16, read32, end, start, 0);
+}
+
+function ifdHasPersonal(
+  ifd: number,
+  read16: (pos: number) => number | null,
+  read32: (pos: number) => number | null,
+  end: number,
+  tiffStart: number,
+  depth: number,
+): boolean {
+  if (depth > 4 || ifd < tiffStart || ifd + 2 > end) return false;
+  const count = read16(ifd);
+  if (count == null || count > 256 || ifd + 2 + count * 12 > end) return false;
+  for (let index = 0; index < count; index += 1) {
+    const entry = ifd + 2 + index * 12;
+    const tag = read16(entry);
+    const entries = read32(entry + 4);
+    if (tag == null || entries == null || entries < 1) continue;
+    if (PERSONAL_EXIF_TAGS.has(tag)) return true;
+    if (tag === 0x8769) {
+      const pointer = read32(entry + 8);
+      if (pointer != null && ifdHasPersonal(tiffStart + pointer, read16, read32, end, tiffStart, depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function jpegHasPersonalMetadata(buffer: Buffer): boolean {
+  let offset = 2;
+  while (offset + 4 < buffer.length) {
+    if (buffer[offset] !== 0xff) return false;
+    while (offset < buffer.length && buffer[offset] === 0xff) offset += 1;
+    if (offset >= buffer.length) return false;
+    const marker = buffer[offset];
+    offset += 1;
+    if (marker === 0xda || marker === 0xd9) return false;
+    if (marker === 0x00 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 2 > buffer.length) return false;
+    const length = buffer.readUInt16BE(offset);
+    if (length < 2 || offset + length > buffer.length) return false;
+    const segment = buffer.subarray(offset + 2, offset + length);
+    if (marker === 0xe1 && app1HasPersonal(segment)) return true;
+    if (marker === 0xfe && textHasPersonal(segment.toString('latin1'))) return true;
+    offset += length;
+  }
+  return false;
+}
+
+function app1HasPersonal(segment: Buffer): boolean {
+  if (segment.length >= 6 && segment.toString('ascii', 0, 4) === 'Exif') {
+    return tiffHasPersonal(segment, 6, segment.length);
+  }
+  const text = segment.toString('latin1');
+  return text.includes('GPSLatitude')
+    || text.includes('CameraOwnerName')
+    || text.includes('BodySerialNumber')
+    || textHasPersonal(text);
+}
+
+function pngHasPersonalMetadata(buffer: Buffer): boolean {
+  let offset = 8;
+  while (offset + 12 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    if (offset + 12 + length > buffer.length) return false;
+    const type = buffer.toString('ascii', offset + 4, offset + 8);
+    const data = buffer.subarray(offset + 8, offset + 8 + length);
+    if ((type === 'tEXt' || type === 'zTXt' || type === 'iTXt') && pngTextHasPersonal(type, data)) return true;
+    if (type === 'eXIf' && tiffHasPersonal(data, 0, data.length)) return true;
+    if (type === 'IEND') return false;
+    offset += 12 + length;
+  }
+  return false;
+}
+
+function pngTextHasPersonal(type: string, data: Buffer): boolean {
+  const split = data.indexOf(0);
+  if (split < 1) return true;
+  const keyword = data.toString('latin1', 0, split);
+  if (keywordHasPersonal(keyword)) return true;
+  if (type === 'tEXt') return textHasPersonal(data.toString('latin1', split + 1));
+  if (type === 'zTXt') {
+    if (data.length < split + 2) return true;
+    try {
+      return textHasPersonal(inflateSync(data.subarray(split + 2), { maxOutputLength: 65536 }).toString('latin1'));
+    } catch {
+      return true;
+    }
+  }
+  const flag = data[split + 1];
+  let cursor = split + 3;
+  const language = data.indexOf(0, cursor);
+  if (language < 0) return true;
+  const translated = data.indexOf(0, language + 1);
+  if (translated < 0) return true;
+  const text = data.subarray(translated + 1);
+  if (flag === 1) {
+    try {
+      return textHasPersonal(inflateSync(text, { maxOutputLength: 65536 }).toString('latin1'));
+    } catch {
+      return true;
+    }
+  }
+  return textHasPersonal(text.toString('latin1'));
+}
+
+function webpHasPersonalMetadata(buffer: Buffer): boolean {
+  let offset = 12;
+  while (offset + 8 <= buffer.length) {
+    const fourcc = buffer.toString('ascii', offset, offset + 4);
+    const size = buffer.readUInt32LE(offset + 4);
+    const start = offset + 8;
+    if (start + size > buffer.length) return false;
+    if (fourcc === 'EXIF' && tiffHasPersonal(buffer, start, start + size)) return true;
+    offset = start + size + (size & 1);
+  }
+  return false;
 }

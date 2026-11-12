@@ -66,6 +66,12 @@ export const DEFAULT_CALIBRATION_RETRY: CalibrationRetryPolicy = {
 
 export type ManifestAssessment = 'linked' | 'orphan_recoverable' | 'unproven';
 
+/** One unique photograph in the order the importer expects to archive. */
+export type ExpectedCalibrationPhoto = {
+  photoId: string;
+  sha256: string;
+};
+
 export function retryDelayMs(
   attempt: number,
   policy: Pick<CalibrationRetryPolicy, 'baseDelayMs' | 'jitterRatio'>,
@@ -150,10 +156,15 @@ export class CalibrationEngine {
   }
 
   /**
-   * Links verified manifests that belong to the case and are not referenced.
-   * A manifest without that proof stays on disk. This method does not delete.
+   * Links a pending case only when every expected photograph is already verified.
+   * A shorter manifest list stays pending. This method does not delete files and
+   * does not rewrite a case that is already archived_private.
    */
-  async recoverOrphanManifests(caseId: string, photoIds: readonly string[]): Promise<{
+  async recoverOrphanManifests(
+    caseId: string,
+    photoIds: readonly string[],
+    expected: readonly ExpectedCalibrationPhoto[],
+  ): Promise<{
     linked: string[];
     unproven: string[];
     photoArchiveStatus: PhotoArchiveStatus;
@@ -162,35 +173,34 @@ export class CalibrationEngine {
     if (!stored) {
       return { linked: [], unproven: [...photoIds], photoArchiveStatus: 'not_provided' };
     }
-    const referenced = new Set(photoRefsOf(stored));
-    const recoverable: string[] = [];
+    const referenced = photoRefsOf(stored);
+    const referencedSet = new Set(referenced);
     const unproven: string[] = [];
     for (const photoId of photoIds) {
       const manifest = await this.writer.readPhotoManifest(caseId, photoId);
       const assessment = assessPhotoManifest({
         caseExists: true,
-        referenced: referenced.has(photoId),
+        referenced: referencedSet.has(photoId),
         pathCaseId: caseId,
         pathPhotoId: photoId,
         manifest,
       });
-      if (assessment === 'orphan_recoverable') recoverable.push(photoId);
-      else if (assessment !== 'linked') unproven.push(photoId);
+      if (assessment !== 'linked' && assessment !== 'orphan_recoverable') unproven.push(photoId);
     }
-    if (recoverable.length === 0) {
-      return {
-        linked: [...referenced],
-        unproven,
-        photoArchiveStatus: photoStatusOf(stored),
-      };
+    const current = photoStatusOf(stored);
+    if (!expectedPhotoIdentity(expected) || !(await this.expectedManifestsMatch(caseId, expected))) {
+      return { linked: referenced, unproven, photoArchiveStatus: current };
     }
-    const linked = [...referenced, ...recoverable];
+    const expectedIds = expected.map((item) => item.photoId);
+    if (current === 'archived_private') {
+      return { linked: referenced, unproven, photoArchiveStatus: current };
+    }
     await this.withTransientRetry(() => this.writer.updateVerifiedPhotos({
       caseId,
-      photoRefs: linked,
+      photoRefs: expectedIds,
       updatedAt: this.clock(),
     }));
-    return { linked, unproven, photoArchiveStatus: 'archived_private' };
+    return { linked: expectedIds, unproven: [], photoArchiveStatus: 'archived_private' };
   }
 
   private async commitQuote(
@@ -286,7 +296,10 @@ export class CalibrationEngine {
         const local = validateCalibrationImage(bytes);
         const photoId = `IMG-${String(index + 1).padStart(6, '0')}`;
         const prior = await this.writer.readPhotoManifest(written.caseId, photoId);
-        if (prior?.content_sha256 === local.sha256 && prior.storage_status === 'verified') {
+        if (prior?.storage_status === 'verified') {
+          if (prior.content_sha256 !== local.sha256) {
+            throw new CalibrationConflictError('Photo id already stores different content');
+          }
           refs.push(photoId);
           continue;
         }
@@ -317,9 +330,18 @@ export class CalibrationEngine {
           height: null,
           linked_line_ids: [],
           verified_at: this.clock(),
+          // Operator-supplied bytes. This does not assert a camera original.
           source_kind: 'manual_import',
         }));
         refs.push(photoId);
+      }
+      if (!refsMatchImages(refs, images.length)) {
+        return {
+          ...written,
+          photoArchiveStatus: 'pending_private_archive',
+          photoRefs: [],
+          orphanPhotoRefs: refs,
+        };
       }
       const caseCommit = await this.withTransientRetry(() => this.writer.updateVerifiedPhotos({
         caseId: written.caseId,
@@ -333,7 +355,8 @@ export class CalibrationEngine {
         photoRefs: refs,
         orphanPhotoRefs: [],
       };
-    } catch {
+    } catch (err) {
+      if (err instanceof CalibrationConflictError) throw err;
       return {
         ...written,
         photoArchiveStatus: 'pending_private_archive',
@@ -341,6 +364,23 @@ export class CalibrationEngine {
         orphanPhotoRefs: refs,
       };
     }
+  }
+
+  private async expectedManifestsMatch(
+    caseId: string,
+    expected: readonly ExpectedCalibrationPhoto[],
+  ): Promise<boolean> {
+    for (const item of expected) {
+      const manifest = await this.writer.readPhotoManifest(caseId, item.photoId);
+      if (
+        !manifest
+        || manifest.case_id !== caseId
+        || manifest.photo_id !== item.photoId
+        || manifest.storage_status !== 'verified'
+        || manifest.content_sha256 !== item.sha256
+      ) return false;
+    }
+    return true;
   }
 
   private async withTransientRetry<T>(operation: () => Promise<T>): Promise<T> {
@@ -383,6 +423,31 @@ export function acceptedPrivateAsset(stored: {
   if (assetPublicId != null && !PRIVATE_ASSET_ID.test(assetPublicId)) return null;
   if (assetVersion != null && (!Number.isInteger(assetVersion) || assetVersion < 1)) return null;
   return { assetPublicId, assetVersion };
+}
+
+function expectedPhotoIdentity(expected: readonly ExpectedCalibrationPhoto[]): boolean {
+  if (expected.length < 1 || expected.length > 999999) return false;
+  const seen = new Set<string>();
+  for (let index = 0; index < expected.length; index += 1) {
+    const item = expected[index];
+    const photoId = `IMG-${String(index + 1).padStart(6, '0')}`;
+    if (!item || item.photoId !== photoId || seen.has(photoId) || !/^[a-f0-9]{64}$/.test(item.sha256)) {
+      return false;
+    }
+    seen.add(photoId);
+  }
+  return true;
+}
+
+function refsMatchImages(refs: readonly string[], count: number): boolean {
+  if (refs.length !== count) return false;
+  const seen = new Set<string>();
+  for (let index = 0; index < count; index += 1) {
+    const photoId = `IMG-${String(index + 1).padStart(6, '0')}`;
+    if (refs[index] !== photoId || seen.has(photoId)) return false;
+    seen.add(photoId);
+  }
+  return true;
 }
 
 function dedupeImages(images: readonly Buffer[]): Buffer[] {

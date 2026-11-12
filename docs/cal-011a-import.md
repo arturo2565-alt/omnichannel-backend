@@ -6,7 +6,7 @@ No escribe en `data/probes/`, no reutiliza los activos de CAL-008 ni CAL-010 y n
 
 ## Entrada
 
-Un archivo JSON local, junto a una, dos, tres o cuatro fotografías JPEG, PNG o WEBP. El comando no acepta datos por HTTP.
+Un archivo JSON local, junto a las fotografías JPEG, PNG o WEBP del expediente. CAL-013 sustituyó el máximo fijo de cuatro por un tope de seguridad configurable. El comando no acepta datos por HTTP.
 
 ```json
 {

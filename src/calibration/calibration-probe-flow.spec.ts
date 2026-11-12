@@ -205,7 +205,10 @@ describe('CAL-010 probe observation with a private photo', () => {
       random: () => 0,
       retry: { maxTransientAttempts: 0 },
     });
-    const recovered = await engine.recoverOrphanManifests('AF-900001', ['IMG-000001']);
+    const recovered = await engine.recoverOrphanManifests('AF-900001', ['IMG-000001'], [{
+      photoId: 'IMG-000001',
+      sha256,
+    }]);
     expect(recovered).toMatchObject({ linked: ['IMG-000001'], photoArchiveStatus: 'archived_private' });
     expect((await writer.readCase('AF-900001'))?.photo_refs).toEqual(['IMG-000001']);
 

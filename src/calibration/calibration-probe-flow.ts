@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { CAL010_CLOUDINARY_PREFIX, CalibrationCloudinaryArchive } from './calibration-cloudinary-archive';
 import { minimalDecodablePng } from './calibration-image-archive.service';
 import { CalibrationEngine, type CalibrationPhotoStore, type CalibrationRecordResult } from './calibration-engine';
@@ -88,7 +89,11 @@ export async function recoverCal010Manifest(
     random: () => 0,
     retry: { maxTransientAttempts: 0 },
   });
-  const recovered = await engine.recoverOrphanManifests(caseId, ['IMG-000001']);
+  const image = syntheticCal010Image();
+  const recovered = await engine.recoverOrphanManifests(caseId, ['IMG-000001'], [{
+    photoId: 'IMG-000001',
+    sha256: createHash('sha256').update(image).digest('hex'),
+  }]);
   return recovered.photoArchiveStatus;
 }
 

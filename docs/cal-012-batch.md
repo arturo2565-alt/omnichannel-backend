@@ -2,7 +2,7 @@
 
 El comando es `node dist/calibration/calibration-import-batch-run.js`. No hay endpoint. `CalibrationModule` sigue fuera de la aplicación y `CALIBRATION_INGEST_ENABLED` permanece en `false`.
 
-Cada expediente reutiliza el importador de un caso. La identidad sigue siendo `source_case_key`. Un reintento de un archivo pendiente usa esa misma clave y no asigna otro identificador.
+Cada expediente reutiliza el importador de un caso. La cantidad de fotografías sigue el tope de CAL-013, no un máximo de cuatro. La identidad sigue siendo `source_case_key`. Un reintento de un archivo pendiente usa esa misma clave y no asigna otro identificador. Un caso ya archivado no se reabre.
 
 ## Directorio
 
@@ -36,7 +36,7 @@ Solo esta forma llama al importador, y lo hace de uno en uno, en el contenedor d
 
 `labelEligible` es `true` solo en `registrado` y `already_exists` cuando el almacenamiento privado y los manifiestos están verificados. Solo entonces el operador puede cambiar manualmente la etiqueta a CAL REGISTRADA. Este comando no llama a WhatsApp. Un pendiente conserva CAL PENDIENTE y su clave de origen.
 
-`AF-000001` no admite escritura. Un caso ya archivado, incluido `AF-000002`, no se reescribe: la misma observación responde `already_exists` y una observación distinta responde `requiere_correccion`. `data/probes/` no admite escritura.
+`AF-000001`, `AF-000002` y `AF-000003` no admiten escritura. Un caso ya archivado, sea cual sea su identificador, no se reescribe: la misma observación responde `already_exists` y una observación distinta responde `requiere_correccion`. `data/probes/` no admite escritura.
 
 ## Informe
 

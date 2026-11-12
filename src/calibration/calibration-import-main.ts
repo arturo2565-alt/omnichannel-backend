@@ -1,5 +1,10 @@
 import { calibrationDiagnosticTarget } from './calibration-diagnose';
-import { importCalibrationCase, readCalibrationImportDocument, type ImportReport } from './calibration-import';
+import {
+  importCalibrationCase,
+  readCalibrationImportDocument,
+  readCalibrationImportLimits,
+  type ImportReport,
+} from './calibration-import';
 
 /** Lee el archivo local y no modifica el código de salida del proceso. */
 export async function readCalibrationImport(env: NodeJS.ProcessEnv, filePath: string | undefined): Promise<ImportReport> {
@@ -8,7 +13,8 @@ export async function readCalibrationImport(env: NodeJS.ProcessEnv, filePath: st
       return { service: 'calibration-import', result: 'error', category: 'wrong_target' };
     }
     if (!filePath) return { service: 'calibration-import', result: 'error', category: 'incomplete' };
-    return await importCalibrationCase(env, readCalibrationImportDocument(filePath));
+    const limits = readCalibrationImportLimits(env);
+    return await importCalibrationCase(env, readCalibrationImportDocument(filePath, limits));
   } catch {
     return { service: 'calibration-import', result: 'error', category: 'invalid' };
   }
