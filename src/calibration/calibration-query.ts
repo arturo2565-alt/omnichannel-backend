@@ -1,0 +1,530 @@
+import { createHash } from 'node:crypto';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
+
+/**
+ * Consulta de solo lectura. No escribe índices, expedientes ni fotografías.
+ * El rol admin existe en el usuario, pero ninguna ruta lo autoriza: el acceso
+ * exige owner y un correo incluido en CALIBRATION_READ_ACTORS.
+ */
+
+export const CALIBRATION_QUERY_SCAN_LIMIT = 200;
+const CASE_ID = /^AF-\d{6}$/;
+const PHOTO_ID = /^IMG-\d{6}$/;
+const QUOTE_ID = /^CQ-\d{6}$/;
+const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const PHONE = /\d{10,}/;
+const PLATE = /\b[A-Z]{3}-?\d{3,4}(?:-?[A-Z])?\b/;
+const ACTOR = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const SERVICES = new Set(['exterior_bath', 'bath_with_bodywork', 'color_change']);
+const WORK = new Set(['bodywork', 'disassembly', 'interior_frames']);
+const TREATMENTS = new Set(['repair_paint', 'paint', 'replace_paint', 'replace', 'other', 'uncertain']);
+const EVIDENCE = new Set(['customer_provided', 'visual_inference', 'unknown']);
+const COMMERCIAL_EVIDENCE = new Set(['customer_provided', 'unknown']);
+const ARCHIVE = new Set(['not_provided', 'pending_private_archive', 'archived_private']);
+
+export class CalibrationQueryError extends Error {
+  constructor(readonly code: 'hidden' | 'forbidden' | 'invalid' | 'missing' | 'unavailable') {
+    super(code);
+    this.name = 'CalibrationQueryError';
+  }
+}
+
+export type PhotoLocator = {
+  publicId: string;
+  version: number;
+  format: 'jpg' | 'png' | 'webp';
+  sha256: string;
+};
+
+export type CalibrationArchive = {
+  read(path: string): Promise<string | null>;
+  photo(locator: PhotoLocator): Promise<Buffer>;
+};
+
+export type QueryList = {
+  q?: string;
+  limit?: string;
+  cursor?: string;
+  archive?: string;
+  service?: string;
+};
+
+export function calibrationPathAllowed(path: string): boolean {
+  if (path.includes('..') || path.includes('\\') || path.includes('?') || path.includes('#')) return false;
+  if (path.startsWith('data/probes')) return false;
+  return path === 'data/index.json'
+    || path === 'data/commercial/index.json'
+    || /^data\/cases\/AF-\d{6}\.json$/.test(path)
+    || /^data\/photos\/IMG-\d{6}\.json$/.test(path)
+    || /^data\/commercial\/quotes\/CQ-\d{6}\.json$/.test(path);
+}
+
+export function calibrationQueryAccess(
+  env: NodeJS.ProcessEnv,
+  user: AuthenticatedUser | undefined,
+): 'open' | 'hidden' | 'forbidden' {
+  if (!queryVisible(env)) return 'hidden';
+  const email = String(user?.email ?? '').trim().toLowerCase();
+  if (user?.role !== 'owner' || !readActors(env).includes(email)) return 'forbidden';
+  return 'open';
+}
+
+export async function readCalibrationSummary(archive: CalibrationArchive) {
+  const visual = await readVisualIndex(archive);
+  const commercial = await readCommercialIndex(archive);
+  let archived = 0;
+  let pending = 0;
+  let photos = 0;
+  for (const id of visual.ids.slice(0, CALIBRATION_QUERY_SCAN_LIMIT)) {
+    const record = await readCaseRecord(archive, id);
+    if (!record) continue;
+    if (record.archiveStatus === 'archived_private') archived += 1;
+    if (record.archiveStatus === 'pending_private_archive') pending += 1;
+    photos += record.photoCount;
+  }
+  return {
+    visual: {
+      caseCount: visual.ids.length,
+      archivedCount: archived,
+      pendingCount: pending,
+      photoCount: photos,
+      truncated: visual.ids.length > CALIBRATION_QUERY_SCAN_LIMIT,
+    },
+    commercial: {
+      opportunityCount: commercial.rows.length,
+      quoteCount: commercial.rows.reduce((sum, row) => sum + row.quoteIds.length, 0),
+      truncated: commercial.truncated,
+    },
+  };
+}
+
+export async function listCalibrationCases(archive: CalibrationArchive, query: QueryList) {
+  const page = readPage(query, CASE_ID);
+  const archiveFilter = readArchiveFilter(query.archive);
+  const visual = await readVisualIndex(archive);
+  const records: NonNullable<Awaited<ReturnType<typeof readCaseRecord>>>[] = [];
+  for (const id of visual.ids.slice(0, CALIBRATION_QUERY_SCAN_LIMIT)) {
+    const record = await readCaseRecord(archive, id);
+    if (!record) continue;
+    if (archiveFilter && record.archiveStatus !== archiveFilter) continue;
+    if (!matchesQuery(page.q, [record.id, record.make, record.model, record.year])) continue;
+    records.push(record);
+  }
+  return paginate(records, page, visual.ids.length > CALIBRATION_QUERY_SCAN_LIMIT);
+}
+
+export async function readCalibrationCase(archive: CalibrationArchive, caseId: string) {
+  if (!CASE_ID.test(caseId)) throw new CalibrationQueryError('invalid');
+  const record = await readCaseRecord(archive, caseId);
+  if (!record) throw new CalibrationQueryError('missing');
+  return record;
+}
+
+export async function listCalibrationOpportunities(archive: CalibrationArchive, query: QueryList) {
+  const page = readPage(query, QUOTE_ID);
+  const service = readServiceFilter(query.service);
+  const commercial = await readCommercialIndex(archive);
+  const records: {
+    headQuoteId: string;
+    opportunityKey: string;
+    revisionCount: number;
+    service: string | null;
+    integrity: string;
+    make: string | null;
+    model: string | null;
+    year: number | null;
+    quotedMxn: number | null;
+  }[] = [];
+  for (const row of commercial.rows.slice(0, CALIBRATION_QUERY_SCAN_LIMIT)) {
+    const detail = await readOpportunity(archive, row);
+    if (!detail) continue;
+    if (service && detail.service !== service) continue;
+    const head = detail.revisions[detail.revisions.length - 1];
+    if (!matchesQuery(page.q, [
+      detail.headQuoteId,
+      detail.opportunityKey,
+      head?.make,
+      head?.model,
+      head?.year,
+      detail.service,
+    ])) continue;
+    records.push({
+      headQuoteId: detail.headQuoteId,
+      opportunityKey: detail.opportunityKey,
+      revisionCount: detail.revisions.length,
+      service: detail.service,
+      integrity: detail.integrity,
+      make: head?.make ?? null,
+      model: head?.model ?? null,
+      year: head?.year ?? null,
+      quotedMxn: head?.quotedMxn ?? null,
+    });
+  }
+  return paginate(records, page, commercial.truncated);
+}
+
+export async function readCalibrationQuote(archive: CalibrationArchive, quoteId: string) {
+  if (!QUOTE_ID.test(quoteId)) throw new CalibrationQueryError('invalid');
+  const commercial = await readCommercialIndex(archive);
+  const row = commercial.rows.find((item) => item.quoteIds.includes(quoteId));
+  if (!row) throw new CalibrationQueryError('missing');
+  const detail = await readOpportunity(archive, row);
+  if (!detail) throw new CalibrationQueryError('missing');
+  return detail;
+}
+
+export async function readCalibrationPhoto(
+  archive: CalibrationArchive,
+  caseId: string,
+  photoId: string,
+): Promise<{ mime: 'image/jpeg' | 'image/png' | 'image/webp'; bytes: Buffer }> {
+  if (!CASE_ID.test(caseId) || !PHOTO_ID.test(photoId)) throw new CalibrationQueryError('invalid');
+  const manifest = await readPhotoManifest(archive, caseId, photoId);
+  if (!manifest?.locator) throw new CalibrationQueryError('missing');
+  let bytes: Buffer;
+  try {
+    bytes = await archive.photo(manifest.locator);
+  } catch {
+    throw new CalibrationQueryError('unavailable');
+  }
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > 5_242_880) {
+    throw new CalibrationQueryError('unavailable');
+  }
+  const actual = createHash('sha256').update(bytes).digest('hex');
+  if (actual !== manifest.locator.sha256) throw new CalibrationQueryError('unavailable');
+  return { mime: manifest.mime, bytes };
+}
+
+function queryVisible(env: NodeJS.ProcessEnv): boolean {
+  if (String(env.CALIBRATION_READ_ENABLED ?? '').trim() !== 'true') return false;
+  if (String(env.CALIBRATION_INGEST_ENABLED ?? '').trim() === 'true') return false;
+  if (String(env.PEGAZUZ_ENV ?? '').trim().toLowerCase() !== 'staging') return false;
+  const railwayEnv = String(env.RAILWAY_ENVIRONMENT_NAME ?? '').trim();
+  if (railwayEnv === 'production') return false;
+  const service = String(env.RAILWAY_SERVICE_NAME ?? '').trim();
+  return service !== 'omnichannel-backend' && service !== 'Postgres';
+}
+
+function readActors(env: NodeJS.ProcessEnv): string[] {
+  return String(env.CALIBRATION_READ_ACTORS ?? '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => ACTOR.test(item))
+    .slice(0, 20);
+}
+
+async function readText(archive: CalibrationArchive, path: string): Promise<string | null> {
+  if (!calibrationPathAllowed(path)) throw new CalibrationQueryError('unavailable');
+  try {
+    const text = await archive.read(path);
+    if (text == null) return null;
+    if (text.length > 262_144) throw new CalibrationQueryError('unavailable');
+    return text;
+  } catch (err) {
+    if (err instanceof CalibrationQueryError) throw err;
+    throw new CalibrationQueryError('unavailable');
+  }
+}
+
+async function readJson(archive: CalibrationArchive, path: string): Promise<unknown | null> {
+  const text = await readText(archive, path);
+  if (text == null) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+async function readVisualIndex(archive: CalibrationArchive): Promise<{ ids: string[] }> {
+  const parsed = await readJson(archive, 'data/index.json');
+  const cases = objectOf(parsed)?.cases;
+  if (!cases || typeof cases !== 'object' || Array.isArray(cases)) return { ids: [] };
+  return { ids: Object.keys(cases).filter((id) => CASE_ID.test(id)).sort() };
+}
+
+async function readCommercialIndex(archive: CalibrationArchive): Promise<{
+  rows: { key: string; quoteIds: string[] }[];
+  truncated: boolean;
+}> {
+  const parsed = await readJson(archive, 'data/commercial/index.json');
+  const opportunities = objectOf(parsed)?.opportunities;
+  if (!opportunities || typeof opportunities !== 'object' || Array.isArray(opportunities)) {
+    return { rows: [], truncated: false };
+  }
+  const entries = Object.entries(opportunities);
+  const rows = entries.slice(0, CALIBRATION_QUERY_SCAN_LIMIT).flatMap(([key, value]) => {
+    const safeKey = cleanText(key, 150);
+    const ids = Array.isArray(objectOf(value)?.quote_ids)
+      ? (objectOf(value)?.quote_ids as unknown[]).filter((id): id is string => typeof id === 'string' && QUOTE_ID.test(id))
+      : [];
+    if (!safeKey || ids.length === 0) return [];
+    return [{ key: safeKey, quoteIds: ids }];
+  });
+  return { rows, truncated: entries.length > CALIBRATION_QUERY_SCAN_LIMIT };
+}
+
+async function readCaseRecord(archive: CalibrationArchive, caseId: string) {
+  const parsed = objectOf(await readJson(archive, `data/cases/${caseId}.json`));
+  if (!parsed || parsed.case_id !== caseId) return null;
+  const vehicle = objectOf(parsed.vehicle) ?? {};
+  const lines = Array.isArray(parsed.line_items) ? parsed.line_items.flatMap(readLine) : [];
+  const refs = Array.isArray(parsed.photo_refs)
+    ? parsed.photo_refs.filter((id): id is string => typeof id === 'string' && PHOTO_ID.test(id))
+    : [];
+  const archiveStatus = ARCHIVE.has(String(parsed.photo_archive_status))
+    ? String(parsed.photo_archive_status) as 'not_provided' | 'pending_private_archive' | 'archived_private'
+    : 'pending_private_archive';
+  const observations = Array.isArray(parsed.visual_observations)
+    ? parsed.visual_observations.flatMap((item) => {
+      const text = cleanText(item, 240);
+      return text ? [text] : [];
+    })
+    : [];
+  const photos = await Promise.all(refs.map((id) => readPhotoSummary(archive, caseId, id)));
+  const droppedObservation = Array.isArray(parsed.visual_observations)
+    && observations.length !== parsed.visual_observations.length;
+  const integrity = visualIntegrity(archiveStatus, refs, photos, droppedObservation || lines.length !== (Array.isArray(parsed.line_items) ? parsed.line_items.length : 0));
+  return {
+    id: caseId,
+    make: identityText(vehicle.make, vehicle.make_evidence),
+    model: identityText(vehicle.model, vehicle.model_evidence),
+    year: identityYear(vehicle.year, vehicle.year_evidence),
+    variant: identityText(vehicle.variant, vehicle.variant_evidence),
+    makeEvidence: evidence(vehicle.make_evidence),
+    modelEvidence: evidence(vehicle.model_evidence),
+    yearEvidence: evidence(vehicle.year_evidence),
+    archiveStatus,
+    integrity,
+    lineCount: lines.length,
+    photoCount: refs.length,
+    quotedTotalMxn: lines.reduce((sum, line) => sum + line.priceMxn, 0),
+    lines,
+    observations,
+    photos,
+  };
+}
+
+async function readPhotoSummary(archive: CalibrationArchive, caseId: string, photoId: string) {
+  const manifest = await readPhotoManifest(archive, caseId, photoId);
+  if (!manifest) return { id: photoId, status: 'missing' as const, bytes: null, verified: false };
+  return {
+    id: photoId,
+    status: manifest.locator ? 'verified' as const : 'unverified' as const,
+    bytes: manifest.bytes,
+    verified: Boolean(manifest.locator),
+  };
+}
+
+async function readPhotoManifest(archive: CalibrationArchive, caseId: string, photoId: string): Promise<{
+  mime: 'image/jpeg' | 'image/png' | 'image/webp';
+  bytes: number | null;
+  locator: PhotoLocator | null;
+} | null> {
+  const parsed = objectOf(await readJson(archive, `data/photos/${photoId}.json`));
+  if (!parsed || parsed.photo_id !== photoId || parsed.case_id !== caseId) return null;
+  const mime = parsed.mime_type === 'image/jpeg' || parsed.mime_type === 'image/png' || parsed.mime_type === 'image/webp'
+    ? parsed.mime_type
+    : null;
+  const sha = typeof parsed.content_sha256 === 'string' && /^[a-f0-9]{64}$/.test(parsed.content_sha256)
+    ? parsed.content_sha256
+    : null;
+  const bytes = Number.isInteger(parsed.size_bytes) && Number(parsed.size_bytes) > 0 ? Number(parsed.size_bytes) : null;
+  const publicId = typeof parsed.asset_public_id === 'string' ? parsed.asset_public_id : '';
+  const version = Number(parsed.asset_version);
+  const format = mime === 'image/jpeg' ? 'jpg' : mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : null;
+  const owned = Boolean(
+    mime && sha && format
+    && parsed.storage_provider === 'cloudinary'
+    && parsed.storage_status === 'verified'
+    && parsed.delivery_type === 'authenticated'
+    && Number.isInteger(version) && version > 0
+    && publicId === `pegazuz_calibration/${caseId}/${sha.slice(0, 32)}`
+    && !publicId.includes('probe')
+    && !publicId.includes('AF-900'),
+  );
+  return {
+    mime: mime ?? 'image/jpeg',
+    bytes,
+    locator: owned && sha && format ? { publicId, version, format, sha256: sha } : null,
+  };
+}
+
+async function readOpportunity(
+  archive: CalibrationArchive,
+  row: { key: string; quoteIds: string[] },
+) {
+  const revisions: NonNullable<Awaited<ReturnType<typeof readQuoteRecord>>>[] = [];
+  for (const id of row.quoteIds) {
+    const quote = await readQuoteRecord(archive, id);
+    if (quote) revisions.push(quote);
+  }
+  if (revisions.length === 0) return null;
+  const chainBroken = revisions.some((quote, index) => quote.revision !== index + 1);
+  return {
+    headQuoteId: row.quoteIds[row.quoteIds.length - 1],
+    opportunityKey: row.key,
+    service: revisions[revisions.length - 1]?.service ?? null,
+    integrity: chainBroken || revisions.some((quote) => quote.integrity === 'incomplete') ? 'incomplete' : 'complete',
+    revisions,
+  };
+}
+
+async function readQuoteRecord(archive: CalibrationArchive, quoteId: string) {
+  const parsed = objectOf(await readJson(archive, `data/commercial/quotes/${quoteId}.json`));
+  if (!parsed || parsed.quote_id !== quoteId) return null;
+  const vehicle = objectOf(parsed.vehicle) ?? {};
+  const colors = objectOf(parsed.colors) ?? {};
+  const prices = objectOf(parsed.prices) ?? {};
+  const quoted = readPrice(objectOf(prices.quoted), true);
+  const contracted = readPrice(objectOf(prices.contracted), false);
+  const collected = readPrice(objectOf(prices.collected), false);
+  const service = SERVICES.has(String(parsed.service)) ? String(parsed.service) : null;
+  const workScope = Array.isArray(parsed.work_scope)
+    ? parsed.work_scope.filter((item): item is string => typeof item === 'string' && WORK.has(item))
+    : [];
+  const incomplete = !service || !quoted || parsed.status !== 'human_verified';
+  return {
+    id: quoteId,
+    revision: Number.isInteger(parsed.revision) ? Number(parsed.revision) : null,
+    service,
+    make: identityText(vehicle.make, vehicle.make_evidence, COMMERCIAL_EVIDENCE),
+    model: identityText(vehicle.model, vehicle.model_evidence, COMMERCIAL_EVIDENCE),
+    year: identityYear(vehicle.year, vehicle.year_evidence),
+    variant: identityText(vehicle.variant, vehicle.variant_evidence, COMMERCIAL_EVIDENCE),
+    currentColor: identityText(colors.current, colors.current_evidence, COMMERCIAL_EVIDENCE),
+    requestedColor: identityText(colors.requested, colors.requested_evidence, COMMERCIAL_EVIDENCE),
+    workScope,
+    quotedMxn: quoted?.amount ?? null,
+    quotedValidation: quoted?.validation ?? null,
+    contractedMxn: contracted?.amount ?? null,
+    contractedValidation: contracted?.validation ?? null,
+    collectedMxn: collected?.amount ?? null,
+    collectedValidation: collected?.validation ?? null,
+    integrity: incomplete ? 'incomplete' as const : 'complete' as const,
+  };
+}
+
+function readLine(value: unknown) {
+  const line = objectOf(value);
+  if (!line || line.validation !== 'human_confirmed') return [];
+  const part = cleanText(line.part, 80);
+  const price = Number(line.price_mxn);
+  if (!part || !TREATMENTS.has(String(line.treatment)) || !Number.isInteger(price) || price < 1) return [];
+  return [{
+    lineId: cleanText(line.line_id, 40),
+    part,
+    treatment: String(line.treatment),
+    priceMxn: price,
+    severity: ['minor', 'moderate', 'severe', 'unknown'].includes(String(line.damage_severity))
+      ? String(line.damage_severity)
+      : 'unknown',
+  }];
+}
+
+function readPrice(value: Record<string, unknown> | null, required: boolean): { amount: number | null; validation: string } | null {
+  if (!value) return required ? null : { amount: null, validation: 'not_provided' };
+  if (value.validation === 'not_provided' && value.amount_mxn == null) {
+    return required ? null : { amount: null, validation: 'not_provided' };
+  }
+  const amount = Number(value.amount_mxn);
+  if (value.validation === 'human_confirmed' && Number.isInteger(amount) && amount >= 1) {
+    return { amount, validation: 'human_confirmed' };
+  }
+  return null;
+}
+
+function visualIntegrity(
+  status: string,
+  refs: string[],
+  photos: { verified: boolean }[],
+  dropped: boolean,
+): 'complete' | 'incomplete' {
+  if (dropped) return 'incomplete';
+  if (status === 'not_provided') return refs.length === 0 ? 'complete' : 'incomplete';
+  if (status !== 'archived_private' || refs.length === 0) return 'incomplete';
+  if (photos.length > 0 && photos.some((photo) => !photo.verified)) return 'incomplete';
+  return 'complete';
+}
+
+function identityText(value: unknown, evidenceValue: unknown, allowed = EVIDENCE): string | null {
+  const kind = evidence(evidenceValue, allowed);
+  if (kind === 'unknown') return null;
+  return cleanText(value, 80);
+}
+
+function identityYear(value: unknown, evidenceValue: unknown): number | null {
+  if (evidence(evidenceValue) === 'unknown') return null;
+  const year = Number(value);
+  if (!Number.isInteger(year) || year < 1900 || year > 2100) return null;
+  return year;
+}
+
+function evidence(value: unknown, allowed = EVIDENCE): string {
+  return allowed.has(String(value)) ? String(value) : 'unknown';
+}
+
+function cleanText(value: unknown, max: number): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text || text.length > max) return null;
+  if (EMAIL.test(text) || PHONE.test(text) || PLATE.test(text) || hasVin(text)) return null;
+  return text;
+}
+
+function hasVin(value: string): boolean {
+  return value.split(/[^A-Za-z0-9]/).some((part) => (
+    /^[A-HJ-NPR-Z0-9]{17}$/i.test(part) && /\d/.test(part) && /[A-Z]/i.test(part)
+  ));
+}
+
+function objectOf(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function readPage(query: QueryList, cursorPattern: RegExp): { q: string; limit: number; cursor: string | null } {
+  const limit = query.limit == null || query.limit === '' ? 20 : Number(query.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new CalibrationQueryError('invalid');
+  const cursor = query.cursor == null || query.cursor === '' ? null : String(query.cursor);
+  if (cursor && !cursorPattern.test(cursor)) throw new CalibrationQueryError('invalid');
+  const q = query.q == null ? '' : String(query.q).trim().toLowerCase();
+  if (q.length > 80) throw new CalibrationQueryError('invalid');
+  return { q, limit, cursor };
+}
+
+function readArchiveFilter(value: string | undefined): string | null {
+  if (value == null || value === '') return null;
+  if (!ARCHIVE.has(value)) throw new CalibrationQueryError('invalid');
+  return value;
+}
+
+function readServiceFilter(value: string | undefined): string | null {
+  if (value == null || value === '') return null;
+  if (!SERVICES.has(value)) throw new CalibrationQueryError('invalid');
+  return value;
+}
+
+function matchesQuery(q: string, fields: unknown[]): boolean {
+  if (!q) return true;
+  return fields.some((field) => String(field ?? '').toLowerCase().includes(q));
+}
+
+function paginate<T extends { id?: string; headQuoteId?: string }>(
+  records: T[],
+  page: { limit: number; cursor: string | null },
+  truncated: boolean,
+) {
+  const start = page.cursor
+    ? records.findIndex((record) => (record.id ?? record.headQuoteId) === page.cursor) + 1
+    : 0;
+  if (page.cursor && start <= 0) throw new CalibrationQueryError('invalid');
+  const slice = records.slice(start, start + page.limit);
+  const last = slice[slice.length - 1];
+  return {
+    items: slice,
+    limit: page.limit,
+    nextCursor: start + slice.length < records.length ? (last?.id ?? last?.headQuoteId ?? null) : null,
+    truncated,
+  };
+}
