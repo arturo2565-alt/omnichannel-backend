@@ -9,6 +9,7 @@ import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface
 
 export const CALIBRATION_QUERY_SCAN_LIMIT = 200;
 const CASE_ID = /^AF-\d{6}$/;
+const REAL_CASE_ID = /^AF-0\d{5}$/;
 const PHOTO_ID = /^IMG-\d{6}$/;
 const QUOTE_ID = /^CQ-\d{6}$/;
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
@@ -49,13 +50,22 @@ export type QueryList = {
   service?: string;
 };
 
+export function calibrationPhotoManifestPath(caseId: string, photoId: string): string | null {
+  if (!REAL_CASE_ID.test(caseId) || !PHOTO_ID.test(photoId)) return null;
+  const path = `data/photos/${caseId}/${photoId}.json`;
+  return calibrationPathAllowed(path) ? path : null;
+}
+
 export function calibrationPathAllowed(path: string): boolean {
-  if (path.includes('..') || path.includes('\\') || path.includes('?') || path.includes('#')) return false;
-  if (path.startsWith('data/probes')) return false;
+  if (typeof path !== 'string' || path.length === 0 || path.length > 160) return false;
+  if (path.includes('..') || path.includes('\\') || path.includes('?') || path.includes('#') || path.includes('%') || path.includes('\0')) {
+    return false;
+  }
+  if (path.startsWith('data/probes') || path.includes('/probes/')) return false;
   return path === 'data/index.json'
     || path === 'data/commercial/index.json'
     || /^data\/cases\/AF-\d{6}\.json$/.test(path)
-    || /^data\/photos\/IMG-\d{6}\.json$/.test(path)
+    || /^data\/photos\/AF-0\d{5}\/IMG-\d{6}\.json$/.test(path)
     || /^data\/commercial\/quotes\/CQ-\d{6}\.json$/.test(path);
 }
 
@@ -184,7 +194,7 @@ export async function readCalibrationPhoto(
   caseId: string,
   photoId: string,
 ): Promise<{ mime: 'image/jpeg' | 'image/png' | 'image/webp'; bytes: Buffer }> {
-  if (!CASE_ID.test(caseId) || !PHOTO_ID.test(photoId)) throw new CalibrationQueryError('invalid');
+  if (!calibrationPhotoManifestPath(caseId, photoId)) throw new CalibrationQueryError('invalid');
   const manifest = await readPhotoManifest(archive, caseId, photoId);
   if (!manifest?.locator) throw new CalibrationQueryError('missing');
   let bytes: Buffer;
@@ -327,7 +337,12 @@ async function readPhotoManifest(archive: CalibrationArchive, caseId: string, ph
   bytes: number | null;
   locator: PhotoLocator | null;
 } | null> {
-  const parsed = objectOf(await readJson(archive, `data/photos/${photoId}.json`));
+  const path = calibrationPhotoManifestPath(caseId, photoId);
+  if (!path) return null;
+  const ownerCase = objectOf(await readJson(archive, `data/cases/${caseId}.json`));
+  const refs = Array.isArray(ownerCase?.photo_refs) ? ownerCase.photo_refs : [];
+  if (!ownerCase || ownerCase.case_id !== caseId || !refs.includes(photoId)) return null;
+  const parsed = objectOf(await readJson(archive, path));
   if (!parsed || parsed.photo_id !== photoId || parsed.case_id !== caseId) return null;
   const mime = parsed.mime_type === 'image/jpeg' || parsed.mime_type === 'image/png' || parsed.mime_type === 'image/webp'
     ? parsed.mime_type

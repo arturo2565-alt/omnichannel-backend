@@ -6,6 +6,7 @@ import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface
 import {
   CalibrationQueryError,
   calibrationPathAllowed,
+  calibrationPhotoManifestPath,
   calibrationQueryAccess,
   listCalibrationCases,
   listCalibrationOpportunities,
@@ -98,10 +99,10 @@ describe('consulta de calibración', () => {
   const photo = {
     schema_version: '1.0.0',
     photo_id: 'IMG-000001',
-    case_id: 'AF-100101',
+    case_id: 'AF-000101',
     storage_provider: 'cloudinary',
     storage_status: 'verified',
-    asset_public_id: `pegazuz_calibration/AF-100101/${digest.slice(0, 32)}`,
+    asset_public_id: `pegazuz_calibration/AF-000101/${digest.slice(0, 32)}`,
     asset_version: 7,
     delivery_type: 'authenticated',
     content_sha256: digest,
@@ -114,15 +115,15 @@ describe('consulta de calibración', () => {
     return {
       'data/index.json': JSON.stringify({
         schema_version: '1.0.0',
-        cases: { 'AF-100101': 'fuente-a', 'AF-100102': 'fuente-b' },
-        source_keys: { 'fuente-a': 'AF-100101', 'fuente-b': 'AF-100102' },
+        cases: { 'AF-000101': 'fuente-a', 'AF-000102': 'fuente-b' },
+        source_keys: { 'fuente-a': 'AF-000101', 'fuente-b': 'AF-000102' },
       }),
-      'data/cases/AF-100101.json': visualCase('AF-100101', {
+      'data/cases/AF-000101.json': visualCase('AF-000101', {
         photo_refs: ['IMG-000001'],
         photo_archive_status: 'archived_private',
         visual_observations: ['Observación de taller', 'cliente@correo.test'],
       }),
-      'data/cases/AF-100102.json': visualCase('AF-100102', {
+      'data/cases/AF-000102.json': visualCase('AF-000102', {
         vehicle: {
           make: null,
           make_evidence: 'unknown',
@@ -135,7 +136,7 @@ describe('consulta de calibración', () => {
         },
         photo_archive_status: 'pending_private_archive',
       }),
-      'data/photos/IMG-000001.json': JSON.stringify(photo),
+      'data/photos/AF-000101/IMG-000001.json': JSON.stringify(photo),
       'data/commercial/index.json': JSON.stringify({
         schema_version: '1.0.0',
         archive: 'commercial',
@@ -189,8 +190,8 @@ describe('consulta de calibración', () => {
     const previous = snapshotEnv();
     try {
       Object.assign(process.env, openEnv);
-      await expect(controller.photo({ ...owner, role: 'agent' }, 'AF-100101', 'IMG-000001')).rejects.toBeInstanceOf(ForbiddenException);
-      await expect(controller.photo(undefined as unknown as AuthenticatedUser, 'AF-100101', 'IMG-000001')).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(controller.photo({ ...owner, role: 'agent' }, 'AF-000101', 'IMG-000001')).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(controller.photo(undefined as unknown as AuthenticatedUser, 'AF-000101', 'IMG-000001')).rejects.toBeInstanceOf(ForbiddenException);
       Object.assign(process.env, { CALIBRATION_READ_ENABLED: 'false' });
       await expect(controller.summary(owner)).rejects.toBeInstanceOf(NotFoundException);
       expect(calls).toEqual([]);
@@ -213,20 +214,20 @@ describe('consulta de calibración', () => {
   it('lista, filtra y pagina expedientes, y conserva un caso sin fotografías', async () => {
     const store = archive(files(), new Map([[digest, image]]));
     const pending = await listCalibrationCases(store, { archive: 'pending_private_archive' });
-    expect(pending.items.map((item) => item.id)).toEqual(['AF-100102']);
+    expect(pending.items.map((item) => item.id)).toEqual(['AF-000102']);
     expect(pending.items[0]).toMatchObject({ archiveStatus: 'pending_private_archive', integrity: 'incomplete', photoCount: 0 });
     const page = await listCalibrationCases(store, { limit: '1' });
     expect(page.items).toHaveLength(1);
-    expect(page.nextCursor).toBe('AF-100101');
-    const next = await listCalibrationCases(store, { limit: '1', cursor: 'AF-100101' });
-    expect(next.items.map((item) => item.id)).toEqual(['AF-100102']);
+    expect(page.nextCursor).toBe('AF-000101');
+    const next = await listCalibrationCases(store, { limit: '1', cursor: 'AF-000101' });
+    expect(next.items.map((item) => item.id)).toEqual(['AF-000102']);
     await expect(listCalibrationCases(store, { limit: '0' })).rejects.toMatchObject({ code: 'invalid' });
     await expect(listCalibrationCases(store, { q: 'x'.repeat(81) })).rejects.toMatchObject({ code: 'invalid' });
   });
 
   it('muestra piezas y omite el identificador privado de la fotografía', async () => {
     const store = archive(files(), new Map([[digest, image]]));
-    const detail = await readCalibrationCase(store, 'AF-100101');
+    const detail = await readCalibrationCase(store, 'AF-000101');
     expect(detail.lines).toEqual([
       expect.objectContaining({ part: 'Cofre', treatment: 'repair_paint', priceMxn: 1900 }),
     ]);
@@ -245,21 +246,180 @@ describe('consulta de calibración', () => {
 
   it('entrega bytes verificados y rechaza una fotografía ajena o alterada', async () => {
     const store = archive(files(), new Map([[digest, image]]));
-    const served = await readCalibrationPhoto(store, 'AF-100101', 'IMG-000001');
+    const served = await readCalibrationPhoto(store, 'AF-000101', 'IMG-000001');
     expect(served.mime).toBe('image/jpeg');
     expect(served.bytes.equals(image)).toBe(true);
     expect(JSON.stringify({ mime: served.mime, bytes: served.bytes.length })).not.toContain('http');
     const tampered = archive(files(), new Map([[digest, Buffer.from('otro-archivo')]]));
-    await expect(readCalibrationPhoto(tampered, 'AF-100101', 'IMG-000001')).rejects.toMatchObject({ code: 'unavailable' });
+    await expect(readCalibrationPhoto(tampered, 'AF-000101', 'IMG-000001')).rejects.toMatchObject({ code: 'unavailable' });
     const foreign = archive({
       ...files(),
-      'data/photos/IMG-000001.json': JSON.stringify({
+      'data/photos/AF-000101/IMG-000001.json': JSON.stringify({
         ...photo,
         asset_public_id: 'pegazuz_calibration/cal010-probe/AF-900001/abc',
       }),
     }, new Map([[digest, image]]));
-    await expect(readCalibrationPhoto(foreign, 'AF-100101', 'IMG-000001')).rejects.toMatchObject({ code: 'missing' });
+    await expect(readCalibrationPhoto(foreign, 'AF-000101', 'IMG-000001')).rejects.toMatchObject({ code: 'missing' });
     expect(foreign.calls.some((call) => call.startsWith('PHOTO'))).toBe(false);
+  });
+
+  it('resuelve los manifiestos en la carpeta del expediente', async () => {
+    expect(calibrationPhotoManifestPath('AF-000002', 'IMG-000001')).toBe('data/photos/AF-000002/IMG-000001.json');
+    expect(calibrationPhotoManifestPath('AF-000002', 'IMG-000002')).toBe('data/photos/AF-000002/IMG-000002.json');
+    expect(calibrationPhotoManifestPath('AF-000002', 'IMG-000003')).toBe('data/photos/AF-000002/IMG-000003.json');
+    expect(calibrationPhotoManifestPath('AF-000003', 'IMG-000001')).toBe('data/photos/AF-000003/IMG-000001.json');
+    expect(calibrationPhotoManifestPath('AF-900001', 'IMG-000001')).toBeNull();
+    expect(calibrationPhotoManifestPath('AF-12', 'IMG-000001')).toBeNull();
+    expect(calibrationPhotoManifestPath('AF-000002/../AF-000003', 'IMG-000001')).toBeNull();
+    expect(calibrationPhotoManifestPath('AF-000002%2f..', 'IMG-000001')).toBeNull();
+    expect(calibrationPhotoManifestPath('AF-000002', '..\\IMG-000001')).toBeNull();
+    expect(calibrationPathAllowed('data/photos/IMG-000001.json')).toBe(false);
+    expect(calibrationPathAllowed('data/photos/AF-900001/IMG-000001.json')).toBe(false);
+    expect(calibrationPathAllowed('data/photos/AF-000002/../../data/probes/index.json')).toBe(false);
+    expect(calibrationPathAllowed('data/probes/photos/AF-900001/IMG-000001.json')).toBe(false);
+
+    const mazdaFirst = Buffer.from('ensayo-mazda-1');
+    const mazdaSecond = Buffer.from('ensayo-mazda-2');
+    const mazdaThird = Buffer.from('ensayo-mazda-3');
+    const golf = Buffer.from('ensayo-golf-1');
+    const digests = {
+      mazdaFirst: sha(mazdaFirst),
+      mazdaSecond: sha(mazdaSecond),
+      mazdaThird: sha(mazdaThird),
+      golf: sha(golf),
+    };
+    const manifest = (caseId: string, photoId: string, digest: string, bytes: number) => JSON.stringify({
+      photo_id: photoId,
+      case_id: caseId,
+      storage_provider: 'cloudinary',
+      storage_status: 'verified',
+      asset_public_id: `pegazuz_calibration/${caseId}/${digest.slice(0, 32)}`,
+      asset_version: 3,
+      delivery_type: 'authenticated',
+      content_sha256: digest,
+      mime_type: 'image/jpeg',
+      size_bytes: bytes,
+    });
+    const stored: Record<string, string> = {
+      'data/index.json': JSON.stringify({
+        cases: { 'AF-000001': 'inicial', 'AF-000002': 'mazda', 'AF-000003': 'golf' },
+      }),
+      'data/cases/AF-000001.json': visualCase('AF-000001', {
+        photo_refs: [],
+        photo_archive_status: 'pending_private_archive',
+        visual_observations: [],
+        line_items: [],
+      }),
+      'data/cases/AF-000002.json': visualCase('AF-000002', {
+        vehicle: {
+          make: 'Mazda',
+          make_evidence: 'customer_provided',
+          model: null,
+          model_evidence: 'unknown',
+          year: null,
+          year_evidence: 'unknown',
+          variant: null,
+          variant_evidence: 'unknown',
+        },
+        line_items: [{
+          line_id: 'L1',
+          part: 'Costado',
+          treatment: 'repair_paint',
+          price_mxn: 5300,
+          damage_severity: 'moderate',
+          validation: 'human_confirmed',
+        }],
+        photo_refs: ['IMG-000001', 'IMG-000002', 'IMG-000003'],
+        photo_archive_status: 'archived_private',
+        visual_observations: [],
+      }),
+      'data/cases/AF-000003.json': visualCase('AF-000003', {
+        vehicle: {
+          make: 'Volkswagen',
+          make_evidence: 'customer_provided',
+          model: 'Golf MK2',
+          model_evidence: 'customer_provided',
+          year: null,
+          year_evidence: 'unknown',
+          variant: null,
+          variant_evidence: 'unknown',
+        },
+        line_items: [{
+          line_id: 'L1',
+          part: 'Carrocería',
+          treatment: 'paint',
+          price_mxn: 10500,
+          damage_severity: 'moderate',
+          validation: 'human_confirmed',
+        }],
+        photo_refs: ['IMG-000001'],
+        photo_archive_status: 'archived_private',
+        visual_observations: [],
+      }),
+      'data/photos/AF-000002/IMG-000001.json': manifest('AF-000002', 'IMG-000001', digests.mazdaFirst, mazdaFirst.length),
+      'data/photos/AF-000002/IMG-000002.json': manifest('AF-000002', 'IMG-000002', digests.mazdaSecond, mazdaSecond.length),
+      'data/photos/AF-000002/IMG-000003.json': manifest('AF-000002', 'IMG-000003', digests.mazdaThird, mazdaThird.length),
+      'data/photos/AF-000003/IMG-000001.json': manifest('AF-000003', 'IMG-000001', digests.golf, golf.length),
+    };
+    const bytes = new Map<string, Buffer>([
+      [digests.mazdaFirst, mazdaFirst],
+      [digests.mazdaSecond, mazdaSecond],
+      [digests.mazdaThird, mazdaThird],
+      [digests.golf, golf],
+    ]);
+    const store = archive(stored, bytes);
+    const mazda = await readCalibrationCase(store, 'AF-000002');
+    expect(mazda.photos.map((item) => item.id)).toEqual(['IMG-000001', 'IMG-000002', 'IMG-000003']);
+    expect(mazda.photos.every((item) => item.verified)).toBe(true);
+    expect(mazda.quotedTotalMxn).toBe(5300);
+    const golfCase = await readCalibrationCase(store, 'AF-000003');
+    expect(golfCase.photoCount).toBe(1);
+    expect(golfCase.quotedTotalMxn).toBe(10500);
+    const empty = await readCalibrationCase(store, 'AF-000001');
+    expect(empty.photoCount).toBe(0);
+    expect(empty.photos).toEqual([]);
+    const sharedMazda = await readCalibrationPhoto(store, 'AF-000002', 'IMG-000001');
+    const sharedGolf = await readCalibrationPhoto(store, 'AF-000003', 'IMG-000001');
+    expect(sharedMazda.bytes.equals(mazdaFirst)).toBe(true);
+    expect(sharedGolf.bytes.equals(golf)).toBe(true);
+
+    await expect(readCalibrationPhoto(store, 'AF-000001', 'IMG-000001')).rejects.toMatchObject({ code: 'missing' });
+    await expect(readCalibrationPhoto(store, 'AF-900001', 'IMG-000001')).rejects.toMatchObject({ code: 'invalid' });
+    await expect(readCalibrationPhoto(store, 'AF-000002/../AF-000003', 'IMG-000001')).rejects.toMatchObject({ code: 'invalid' });
+    await expect(readCalibrationPhoto(store, 'AF-%00002', 'IMG-000001')).rejects.toMatchObject({ code: 'invalid' });
+
+    const absent = archive({
+      ...stored,
+      'data/cases/AF-000002.json': visualCase('AF-000002', {
+        photo_refs: ['IMG-000002'],
+        photo_archive_status: 'archived_private',
+        visual_observations: [],
+      }),
+    }, bytes);
+    await expect(readCalibrationPhoto(absent, 'AF-000002', 'IMG-000001')).rejects.toMatchObject({ code: 'missing' });
+    expect(absent.calls.some((call) => call.includes('data/photos/AF-000002/IMG-000001.json'))).toBe(false);
+
+    const foreignCase = archive({
+      ...stored,
+      'data/photos/AF-000002/IMG-000001.json': manifest('AF-000003', 'IMG-000001', digests.golf, golf.length),
+    }, bytes);
+    await expect(readCalibrationPhoto(foreignCase, 'AF-000002', 'IMG-000001')).rejects.toMatchObject({ code: 'missing' });
+    expect(foreignCase.calls.some((call) => call.startsWith('PHOTO'))).toBe(false);
+
+    const wrongHash = archive(stored, new Map([[digests.mazdaFirst, Buffer.from('bytes-distintos')]]));
+    await expect(readCalibrationPhoto(wrongHash, 'AF-000002', 'IMG-000001')).rejects.toMatchObject({ code: 'unavailable' });
+
+    expect(store.calls.every((call) => call.startsWith('GET ') || call.startsWith('PHOTO '))).toBe(true);
+    expect(store.calls.some((call) => call.includes('data/probes') || call.includes('PUT '))).toBe(false);
+    expect(store.calls).toEqual(expect.arrayContaining([
+      'GET data/photos/AF-000002/IMG-000001.json',
+      'GET data/photos/AF-000002/IMG-000002.json',
+      'GET data/photos/AF-000002/IMG-000003.json',
+      'GET data/photos/AF-000003/IMG-000001.json',
+    ]));
+    const query = readFileSync(join(__dirname, 'calibration-query.ts'), 'utf8');
+    expect(query).toContain('data/photos/${caseId}/${photoId}.json');
+    expect(query).not.toContain('data/photos/${photoId}.json');
   });
 
   it('lista oportunidades y conserva el historial comercial sin fotografías', async () => {
@@ -330,7 +490,7 @@ describe('consulta de calibración', () => {
   it('no devuelve la URL firmada de Cloudinary', async () => {
     const signed = 'https://res.cloudinary.com/example/image/authenticated/s--short--/v7/photo.jpg';
     const bytes = await fetchPrivatePhoto({
-      publicId: `pegazuz_calibration/AF-100101/${digest.slice(0, 32)}`,
+      publicId: `pegazuz_calibration/AF-000101/${digest.slice(0, 32)}`,
       version: 7,
       format: 'jpg',
       sha256: digest,
@@ -341,7 +501,7 @@ describe('consulta de calibración', () => {
     expect(bytes.equals(image)).toBe(true);
     expect(JSON.stringify({ bytes: bytes.length })).not.toContain('cloudinary');
     await expect(fetchPrivatePhoto({
-      publicId: 'pegazuz_calibration/AF-100101/abc',
+      publicId: 'pegazuz_calibration/AF-000101/abc',
       version: 7,
       format: 'jpg',
       sha256: digest,
