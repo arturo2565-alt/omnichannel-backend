@@ -1,6 +1,7 @@
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import {
   CalibrationQueryError,
@@ -20,6 +21,7 @@ import {
   fetchPrivatePhoto,
   mintCalibrationReadToken,
 } from './calibration-query-source';
+import { CalibrationQueryController, CalibrationQueryService } from './calibration-query.module';
 
 const owner: AuthenticatedUser = {
   userId: 'user-1',
@@ -159,7 +161,42 @@ describe('consulta de calibración', () => {
     expect(calibrationQueryAccess(openEnv, { ...owner, role: 'admin' })).toBe('forbidden');
     expect(calibrationQueryAccess(openEnv, { ...owner, role: 'agent' })).toBe('forbidden');
     expect(calibrationQueryAccess(openEnv, { ...owner, email: 'otro@ensayo.test' })).toBe('forbidden');
+    expect(calibrationQueryAccess(openEnv, { ...owner, email: 'dueno@ensayo.test.evil' })).toBe('forbidden');
+    expect(calibrationQueryAccess(openEnv, { ...owner, email: 'xdueno@ensayo.test' })).toBe('forbidden');
+    expect(calibrationQueryAccess(openEnv, { ...owner, email: 'dueno@ensayo.tes' })).toBe('forbidden');
+    expect(calibrationQueryAccess(openEnv, { ...owner, email: 'DUENO@Ensayo.Test' })).toBe('open');
+    expect(calibrationQueryAccess(openEnv, undefined)).toBe('forbidden');
+    expect(calibrationQueryAccess({ ...openEnv, CALIBRATION_READ_ACTORS: '  Dueno@Ensayo.Test , otro@ensayo.test ' }, owner)).toBe('open');
+    expect(calibrationQueryAccess({ ...openEnv, CALIBRATION_READ_ACTORS: '*@ensayo.test' }, owner)).toBe('forbidden');
+    expect(calibrationQueryAccess({ ...openEnv, CALIBRATION_READ_ACTORS: 'dueno@ensayo' }, owner)).toBe('forbidden');
+    expect(calibrationQueryAccess({ ...openEnv, CALIBRATION_READ_ACTORS: '' }, owner)).toBe('forbidden');
     expect(calibrationQueryAccess(openEnv, owner)).toBe('open');
+  });
+
+  it('no lee el archivo ni descarga fotografías sin permiso', async () => {
+    const calls: string[] = [];
+    const archive: CalibrationArchive = {
+      read: async () => {
+        calls.push('read');
+        return null;
+      },
+      photo: async () => {
+        calls.push('photo');
+        return Buffer.from('x');
+      },
+    };
+    const controller = new CalibrationQueryController(new CalibrationQueryService(archive));
+    const previous = snapshotEnv();
+    try {
+      Object.assign(process.env, openEnv);
+      await expect(controller.photo({ ...owner, role: 'agent' }, 'AF-100101', 'IMG-000001')).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(controller.photo(undefined as unknown as AuthenticatedUser, 'AF-100101', 'IMG-000001')).rejects.toBeInstanceOf(ForbiddenException);
+      Object.assign(process.env, { CALIBRATION_READ_ENABLED: 'false' });
+      await expect(controller.summary(owner)).rejects.toBeInstanceOf(NotFoundException);
+      expect(calls).toEqual([]);
+    } finally {
+      restoreEnv(previous);
+    }
   });
 
   it('resume expedientes, fotografías y oportunidades sin claves de origen', async () => {
@@ -267,10 +304,7 @@ describe('consulta de calibración', () => {
       CALIBRATION_GITHUB_REPOSITORY: 'arturo2565-alt/pegazuz-calibration-data',
     }, async (input, init) => {
       tokenCalls.push({ method: String(init?.method), body: String(init?.body) });
-      return new Response(JSON.stringify({
-        token: 'ghs_readtoken',
-        permissions: { contents: 'read', metadata: 'read' },
-      }), { status: 201 });
+      return new Response(JSON.stringify(readTokenBody()), { status: 201 });
     });
     expect(token).toBe('ghs_readtoken');
     expect(tokenCalls[0]?.method).toBe('POST');
@@ -278,14 +312,19 @@ describe('consulta de calibración', () => {
       repositories: ['pegazuz-calibration-data'],
       permissions: { contents: 'read' },
     });
-    await expect(mintCalibrationReadToken({
-      CALIBRATION_GITHUB_APP_ID: '123',
-      CALIBRATION_GITHUB_INSTALLATION_ID: '456',
-      CALIBRATION_GITHUB_APP_PRIVATE_KEY: pem,
-    }, async () => new Response(JSON.stringify({
-      token: 'ghs_writetoken',
-      permissions: { contents: 'write' },
-    }), { status: 201 }))).rejects.toThrow('could not be read');
+    const rejected = [
+      { token: 'ghs_writetoken', permissions: { contents: 'write' } },
+      { ...readTokenBody(), permissions: { contents: 'read', metadata: 'read', actions: 'read' } },
+      { ...readTokenBody(), repositories: [{ name: 'otro-repo', full_name: 'arturo2565-alt/otro-repo' }] },
+      { ...readTokenBody(), expires_at: '2000-01-01T00:00:00.000Z' },
+    ];
+    for (const body of rejected) {
+      await expect(mintCalibrationReadToken({
+        CALIBRATION_GITHUB_APP_ID: '123',
+        CALIBRATION_GITHUB_INSTALLATION_ID: '456',
+        CALIBRATION_GITHUB_APP_PRIVATE_KEY: pem,
+      }, async () => new Response(JSON.stringify(body), { status: 201 }))).rejects.toThrow('could not be read');
+    }
   });
 
   it('no devuelve la URL firmada de Cloudinary', async () => {
@@ -322,8 +361,43 @@ describe('consulta de calibración', () => {
     expect(source).not.toContain("method: 'PATCH'");
     expect(source).not.toContain("method: 'DELETE'");
     expect(source).toContain("permissions: { contents: 'read' }");
+    expect(source).toContain('expiresAtMs - RENEW_BEFORE_MS');
+    const strategy = readFileSync(join(__dirname, '../auth/strategies/jwt.strategy.ts'), 'utf8');
+    const auth = readFileSync(join(__dirname, '../auth/auth.service.ts'), 'utf8');
+    expect(strategy).toContain('ExtractJwt.fromAuthHeaderAsBearerToken()');
+    expect(strategy).not.toContain('req.body');
+    expect(auth).toContain('email: user.email');
+    expect(auth).toContain('role: user.role');
+    expect(controller).toContain("@Header('Cache-Control', 'private, no-store')");
+    expect(controller).toContain('@UseGuards(JwtAuthGuard)');
+    expect(controller).toContain('@CurrentUser() user: AuthenticatedUser');
   });
 });
+
+function readTokenBody() {
+  return {
+    token: 'ghs_readtoken',
+    expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    permissions: { contents: 'read', metadata: 'read' },
+    repository_selection: 'selected',
+    repositories: [{
+      name: 'pegazuz-calibration-data',
+      full_name: 'arturo2565-alt/pegazuz-calibration-data',
+      private: true,
+    }],
+  };
+}
+
+function snapshotEnv(): NodeJS.ProcessEnv {
+  return { ...process.env };
+}
+
+function restoreEnv(previous: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in previous)) delete process.env[key];
+  }
+  Object.assign(process.env, previous);
+}
 
 function quote(id: string, revision: number, prior: string | null, contracted: number | null = null) {
   return {

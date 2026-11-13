@@ -41,7 +41,15 @@ export class CalibrationQueryGithub implements Pick<CalibrationArchive, 'read'> 
   }
 }
 
+const RENEW_BEFORE_MS = 60_000;
+
+type ReadGrant = { token: string; expiresAtMs: number };
+
 export async function mintCalibrationReadToken(env: NodeJS.ProcessEnv, transport: typeof fetch): Promise<string> {
+  return (await mintCalibrationReadGrant(env, transport)).token;
+}
+
+async function mintCalibrationReadGrant(env: NodeJS.ProcessEnv, transport: typeof fetch): Promise<ReadGrant> {
   const config = readGithubAppConfig(env);
   if (!config) throw new Error('Calibration archive is not configured');
   const now = Math.floor(Date.now() / 1000);
@@ -69,19 +77,30 @@ export async function mintCalibrationReadToken(env: NodeJS.ProcessEnv, transport
     },
   );
   if (!response.ok) throw new Error('Calibration archive could not be read');
-  const body = await response.json() as { token?: unknown; permissions?: unknown };
-  if (typeof body.token !== 'string' || !body.token.startsWith('ghs_')) {
-    throw new Error('Calibration archive could not be read');
-  }
-  const contents = objectPermission(body.permissions, 'contents');
-  if (contents !== 'read') throw new Error('Calibration archive could not be read');
-  return body.token;
+  const grant = readGrant(await response.json());
+  if (!grant) throw new Error('Calibration archive could not be read');
+  return grant;
 }
 
-function objectPermission(value: unknown, key: string): string | null {
+function readGrant(value: unknown): ReadGrant | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const permission = (value as Record<string, unknown>)[key];
-  return typeof permission === 'string' ? permission : null;
+  const body = value as Record<string, unknown>;
+  if (typeof body.token !== 'string' || !body.token.startsWith('ghs_') || body.token.length > 1024) return null;
+  const permissions = body.permissions;
+  if (!permissions || typeof permissions !== 'object' || Array.isArray(permissions)) return null;
+  const granted = permissions as Record<string, unknown>;
+  const keys = Object.keys(granted);
+  if (granted.contents !== 'read') return null;
+  if (!keys.every((key) => key === 'contents' || key === 'metadata')) return null;
+  if (granted.metadata != null && granted.metadata !== 'read') return null;
+  if (body.repository_selection !== 'selected' || !Array.isArray(body.repositories) || body.repositories.length !== 1) {
+    return null;
+  }
+  const repo = body.repositories[0] as { name?: unknown; full_name?: unknown } | null;
+  if (!repo || repo.name !== 'pegazuz-calibration-data' || repo.full_name !== REPOSITORY) return null;
+  const expiresAtMs = Date.parse(typeof body.expires_at === 'string' ? body.expires_at : '');
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs - RENEW_BEFORE_MS <= Date.now()) return null;
+  return { token: body.token, expiresAtMs };
 }
 
 export async function fetchPrivatePhoto(
@@ -132,10 +151,11 @@ export function signAuthenticatedDelivery(env: NodeJS.ProcessEnv, locator: Photo
 }
 
 export function liveCalibrationArchive(env: NodeJS.ProcessEnv, transport: typeof fetch = fetch): CalibrationArchive {
-  let token = '';
+  let cached: ReadGrant | null = null;
   const github = new CalibrationQueryGithub(async () => {
-    if (!token) token = await mintCalibrationReadToken(env, transport);
-    return token;
+    if (cached && cached.expiresAtMs - RENEW_BEFORE_MS > Date.now()) return cached.token;
+    cached = await mintCalibrationReadGrant(env, transport);
+    return cached.token;
   }, transport);
   return {
     read: (path) => github.read(path),

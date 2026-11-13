@@ -30,6 +30,15 @@ import {
 } from './calibration-query';
 import { liveCalibrationArchive } from './calibration-query-source';
 
+export class CalibrationQueryService {
+  constructor(private readonly archive?: CalibrationArchive) {}
+
+  open(env: NodeJS.ProcessEnv): CalibrationArchive {
+    if (this.archive) return this.archive;
+    return liveCalibrationArchive(env);
+  }
+}
+
 /**
  * Consulta autenticada. Permanece oculta hasta CALIBRATION_READ_ENABLED=true
  * en staging. No registra CalibrationModule ni abre escritura.
@@ -90,15 +99,6 @@ export class CalibrationQueryController {
       }
       throw new ServiceUnavailableException('La consulta no está disponible.');
     }
-  }
-}
-
-export class CalibrationQueryService {
-  constructor(private readonly archive?: CalibrationArchive) {}
-
-  open(env: NodeJS.ProcessEnv): CalibrationArchive {
-    if (this.archive) return this.archive;
-    return liveCalibrationArchive(env);
   }
 }
 

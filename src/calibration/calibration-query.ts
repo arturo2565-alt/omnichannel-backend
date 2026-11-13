@@ -64,9 +64,15 @@ export function calibrationQueryAccess(
   user: AuthenticatedUser | undefined,
 ): 'open' | 'hidden' | 'forbidden' {
   if (!queryVisible(env)) return 'hidden';
-  const email = String(user?.email ?? '').trim().toLowerCase();
-  if (user?.role !== 'owner' || !readActors(env).includes(email)) return 'forbidden';
+  if (user?.role !== 'owner' || !actorPermitted(user.email, env)) return 'forbidden';
   return 'open';
+}
+
+function actorPermitted(email: unknown, env: NodeJS.ProcessEnv): boolean {
+  if (typeof email !== 'string') return false;
+  const normalized = email.trim().toLowerCase();
+  if (!ACTOR.test(normalized) || normalized.length > 254) return false;
+  return new Set(readActors(env)).has(normalized);
 }
 
 export async function readCalibrationSummary(archive: CalibrationArchive) {
