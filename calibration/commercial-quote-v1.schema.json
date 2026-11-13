@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pegazuz Commercial Quote V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "quote_id",
+    "revision",
+    "recorded_at",
+    "source",
+    "vehicle",
+    "service",
+    "colors",
+    "work_scope",
+    "prices",
+    "status"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0.0" },
+    "quote_id": { "type": "string", "pattern": "^CQ-[0-9]{6}$" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source_case_key", "opportunity_key", "prior_quote_id", "quoted_at"],
+      "properties": {
+        "kind": { "const": "autofix_human_commercial_quote" },
+        "source_case_key": { "type": "string", "minLength": 4, "maxLength": 150 },
+        "opportunity_key": { "type": "string", "minLength": 4, "maxLength": 150 },
+        "prior_quote_id": { "type": ["string", "null"], "pattern": "^CQ-[0-9]{6}$" },
+        "quoted_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "vehicle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "make", "make_evidence", "model", "model_evidence",
+        "year", "year_evidence", "variant", "variant_evidence"
+      ],
+      "properties": {
+        "make": { "type": ["string", "null"] },
+        "make_evidence": { "enum": ["customer_provided", "unknown"] },
+        "model": { "type": ["string", "null"] },
+        "model_evidence": { "enum": ["customer_provided", "unknown"] },
+        "year": { "type": ["integer", "null"], "minimum": 1900, "maximum": 2100 },
+        "year_evidence": { "enum": ["customer_provided", "unknown"] },
+        "variant": { "type": ["string", "null"] },
+        "variant_evidence": { "enum": ["customer_provided", "unknown"] }
+      }
+    },
+    "service": { "enum": ["exterior_bath", "bath_with_bodywork", "color_change"] },
+    "colors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "current_evidence", "requested", "requested_evidence"],
+      "properties": {
+        "current": { "type": ["string", "null"] },
+        "current_evidence": { "enum": ["customer_provided", "unknown"] },
+        "requested": { "type": ["string", "null"] },
+        "requested_evidence": { "enum": ["customer_provided", "unknown"] }
+      }
+    },
+    "work_scope": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["bodywork", "disassembly", "interior_frames"] }
+    },
+    "prices": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quoted", "contracted", "collected"],
+      "properties": {
+        "quoted": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["amount_mxn", "validation"],
+          "properties": {
+            "amount_mxn": { "type": "integer", "minimum": 1 },
+            "validation": { "const": "human_confirmed" }
+          }
+        },
+        "contracted": { "$ref": "#/$defs/optionalPrice" },
+        "collected": { "$ref": "#/$defs/optionalPrice" }
+      }
+    },
+    "status": { "const": "human_verified" }
+  },
+  "$defs": {
+    "optionalPrice": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["amount_mxn", "validation"],
+          "properties": {
+            "amount_mxn": { "type": "integer", "minimum": 1 },
+            "validation": { "const": "human_confirmed" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["amount_mxn", "validation"],
+          "properties": {
+            "amount_mxn": { "type": "null" },
+            "validation": { "const": "not_provided" }
+          }
+        }
+      ]
+    }
+  }
+}
