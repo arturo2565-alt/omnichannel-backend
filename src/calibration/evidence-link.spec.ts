@@ -1,4 +1,6 @@
 import { crc32 } from 'node:zlib';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { minimalDecodablePng } from './calibration-image-archive.service';
 import { evidencePublicId } from './evidence-cloudinary';
 import {
@@ -6,6 +8,7 @@ import {
   EvidenceLinkError,
   assertEvidenceTransport,
   assertEvidenceWrite,
+  attestHumanReview,
   linkEvidence,
   sha256,
   type EvidenceFiles,
@@ -17,6 +20,7 @@ class MemoryFiles implements EvidenceFiles {
   readonly files = new Map<string, { content: string; sha: string }>();
   readonly writes: string[] = [];
   failVerifiedIndex = false;
+  failManifest = false;
 
   async read(path: string) {
     return this.files.get(path) ?? null;
@@ -28,9 +32,13 @@ class MemoryFiles implements EvidenceFiles {
     const current = this.files.get(path);
     if (current && current.sha !== sha) throw new EvidenceLinkError('conflict');
     if (!current && sha) throw new EvidenceLinkError('conflict');
-    if (this.failVerifiedIndex && path.endsWith('/index.json') && content.includes('"verified"')) {
+    if (this.failVerifiedIndex && path.endsWith('/CQ-000011/index.json') && content.includes('"verified"')) {
       this.failVerifiedIndex = false;
       throw new Error('index interrupted');
+    }
+    if (this.failManifest && path.includes('/manifests/') && content.includes('"storage_status": "verified"')) {
+      this.failManifest = false;
+      throw new Error('manifest interrupted');
     }
     const next = { content, sha: `git-${this.writes.length + 1}` };
     this.files.set(path, next);
@@ -98,13 +106,15 @@ describe('vínculo de evidencia para CQ y RQ', () => {
     });
     expect(held).toMatchObject({ status: 'privacy_pending', evidenceId: 'EV-000001' });
     expect(photos.calls).toEqual([]);
-    expect(files.writes.every((path) => path.startsWith('data/evidence/commercial/CQ-000010/'))).toBe(true);
+    expect(files.writes.filter((path) => path !== 'data/evidence/index.json').every((path) => path.startsWith('data/evidence/commercial/CQ-000010/'))).toBe(true);
+    expect(files.writes).toContain('data/evidence/index.json');
     expect(files.files.get('data/commercial/quotes/CQ-000010.json')?.content).toBe(quote);
     const written = [...files.files.values()].map((file) => file.content).join('\n');
-    expect(written).toContain('"visual_review": false');
-    expect(written).toContain('"operator_declaration": "privacy_hold"');
+    expect(written).toContain('"disposition": "privacy_hold"');
+    expect(written).not.toContain('visual_review');
+    expect(written).not.toContain('human_reviewed');
     expect(written).not.toContain('https://');
-    expect(written).not.toContain('"visual_review": true');
+    expect(written).not.toContain('@');
 
     const again = await linkEvidence(files, photos, {
       subjectId: 'CQ-000010',
@@ -112,7 +122,7 @@ describe('vínculo de evidencia para CQ y RQ', () => {
       receivedSha256: received,
     });
     expect(again).toEqual({ status: 'already_recorded', evidenceId: 'EV-000001' });
-    expect(files.writes).toHaveLength(2);
+    expect(files.writes).toHaveLength(3);
     await expect(linkEvidence(files, photos, {
       subjectId: 'CQ-000010',
       approval: 'privacy_hold',
@@ -149,6 +159,23 @@ describe('vínculo de evidencia para CQ y RQ', () => {
     })).rejects.toMatchObject({ code: 'metadata' });
     expect(files.writes).toEqual([]);
 
+    await expect(linkEvidence(files, photos, {
+      subjectId: 'CQ-000011',
+      approval: 'anonymized_copy',
+      receivedSha256: received,
+      bytes: derivative,
+    })).rejects.toMatchObject({ code: 'review_required' });
+    expect(photos.calls).toEqual([]);
+    expect(files.writes).toEqual([]);
+    expect(files.files.get('data/commercial/quotes/CQ-000011.json')?.content).toBe(quote);
+
+    await attestHumanReview(files, {
+      subjectId: 'CQ-000011',
+      receivedSha256: received,
+      reviewedSha256: sha256(derivative),
+      operatorRole: 'owner',
+      confirmation: 'human_reviewed',
+    });
     photos.verified = false;
     const pending = await linkEvidence(files, photos, {
       subjectId: 'CQ-000011',
@@ -170,7 +197,8 @@ describe('vínculo de evidencia para CQ y RQ', () => {
       bytes: derivative,
     })).rejects.toThrow('index interrupted');
     expect(files.files.get(manifestPath)?.content).toContain('"storage_status": "verified"');
-    expect(files.files.get(manifestPath)?.content).toContain('"visual_review": false');
+    expect(files.files.get(manifestPath)?.content).toContain('"reviewed_sha256"');
+    expect(files.files.get(manifestPath)?.content).not.toContain('visual_review');
     expect(files.files.get('data/evidence/commercial/CQ-000011/index.json')?.content).toContain('"link_pending"');
 
     const linked = await linkEvidence(files, photos, {
@@ -184,7 +212,7 @@ describe('vínculo de evidencia para CQ y RQ', () => {
     const archived = files.files.get(manifestPath)?.content ?? '';
     expect(archived).toContain(`"received_sha256": "${received}"`);
     expect(archived).toContain(`"content_sha256": "${sha256(derivative)}"`);
-    expect(archived).toContain('"operator_declaration": "anonymized_copy"');
+    expect(archived).toContain('"operator_role": "owner"');
     expect(archived).not.toContain('https://');
 
     const duplicate = await linkEvidence(files, photos, {
@@ -217,6 +245,20 @@ describe('vínculo de evidencia para CQ y RQ', () => {
     files.seed('data/repairs/quotes/RQ-000012.json', quoteFile('RQ-000012', 4500));
     const photos = new MemoryPhotos();
     const derivative = minimalDecodablePng([4, 5, 6]);
+    await attestHumanReview(files, {
+      subjectId: 'CQ-000012',
+      receivedSha256: received,
+      reviewedSha256: sha256(derivative),
+      operatorRole: 'owner',
+      confirmation: 'human_reviewed',
+    });
+    await attestHumanReview(files, {
+      subjectId: 'RQ-000012',
+      receivedSha256: received,
+      reviewedSha256: sha256(derivative),
+      operatorRole: 'owner',
+      confirmation: 'human_reviewed',
+    });
     const commercial = await linkEvidence(files, photos, {
       subjectId: 'CQ-000012',
       approval: 'anonymized_copy',
@@ -298,5 +340,120 @@ describe('vínculo de evidencia para CQ y RQ', () => {
       receivedSha256: 'ff'.repeat(32),
     })).rejects.toMatchObject({ code: 'limit' });
     expect(files.writes).toEqual([]);
+  });
+
+  it('exige una revisión humana del SHA exacto y no deja que el vínculo la invente', async () => {
+    const files = new MemoryFiles();
+    const quote = quoteFile('RQ-000040', 12000);
+    files.seed('data/repairs/quotes/RQ-000040.json', quote);
+    const photos = new MemoryPhotos();
+    const approved = minimalDecodablePng([3, 3, 3]);
+    const changed = minimalDecodablePng([4, 4, 4]);
+    await expect(linkEvidence(files, photos, {
+      subjectId: 'RQ-000040',
+      approval: 'anonymized_copy',
+      receivedSha256: received,
+      bytes: approved,
+      humanReviewed: true,
+    } as EvidenceRequest)).rejects.toMatchObject({ code: 'rejected' });
+    expect(files.writes).toEqual([]);
+    expect(photos.calls).toEqual([]);
+
+    const review = await attestHumanReview(files, {
+      subjectId: 'RQ-000040',
+      receivedSha256: received,
+      reviewedSha256: sha256(approved),
+      operatorRole: 'owner',
+      confirmation: 'human_reviewed',
+    });
+    expect(review).toEqual({ status: 'attested', reviewId: 'RV-000001' });
+    expect(await attestHumanReview(files, {
+      subjectId: 'RQ-000040',
+      receivedSha256: received,
+      reviewedSha256: sha256(approved),
+      operatorRole: 'owner',
+      confirmation: 'human_reviewed',
+    })).toEqual({ status: 'already_attested', reviewId: 'RV-000001' });
+    await expect(attestHumanReview(files, {
+      subjectId: 'RQ-000040',
+      receivedSha256: received,
+      reviewedSha256: sha256(approved),
+      operatorRole: 'agent' as 'owner',
+      confirmation: 'human_reviewed',
+    })).rejects.toMatchObject({ code: 'rejected' });
+    await expect(linkEvidence(files, photos, {
+      subjectId: 'RQ-000040',
+      approval: 'anonymized_copy',
+      receivedSha256: received,
+      bytes: changed,
+    })).rejects.toMatchObject({ code: 'review_required' });
+    expect(photos.calls).toEqual([]);
+
+    const linked = await linkEvidence(files, photos, {
+      subjectId: 'RQ-000040',
+      approval: 'anonymized_copy',
+      receivedSha256: received,
+      bytes: approved,
+    });
+    expect(linked.status).toBe('linked');
+    const manifest = files.files.get('data/evidence/repairs/RQ-000040/manifests/EV-000001.json')?.content ?? '';
+    expect(manifest).toContain(`"reviewed_sha256": "${sha256(approved)}"`);
+    expect(manifest).toContain('"human_review_id": "RV-000001"');
+    expect(manifest).not.toContain('visual_review');
+    expect(manifest).not.toContain('@');
+    expect(manifest).not.toMatch(/rostro|placa|\bvin\b/i);
+    expect(files.files.get('data/repairs/quotes/RQ-000040.json')?.content).toBe(quote);
+    await expect(linkEvidence(files, photos, {
+      subjectId: 'RQ-000040',
+      approval: 'anonymized_copy',
+      receivedSha256: received,
+      bytes: changed,
+    })).rejects.toMatchObject({ code: 'conflict' });
+    expect(photos.calls).toHaveLength(1);
+
+    files.failManifest = true;
+    const second = minimalDecodablePng([8, 8, 8]);
+    await attestHumanReview(files, {
+      subjectId: 'RQ-000040',
+      receivedSha256: otherReceived,
+      reviewedSha256: sha256(second),
+      operatorRole: 'owner',
+      confirmation: 'human_reviewed',
+    });
+    await expect(linkEvidence(files, photos, {
+      subjectId: 'RQ-000040',
+      approval: 'anonymized_copy',
+      receivedSha256: otherReceived,
+      bytes: second,
+    })).rejects.toThrow('manifest interrupted');
+    const pendingManifest = files.files.get('data/evidence/repairs/RQ-000040/manifests/EV-000002.json')?.content ?? '';
+    expect(pendingManifest).toContain('"storage_status": "pending"');
+    const storedIndex = JSON.parse(files.files.get('data/evidence/repairs/RQ-000040/index.json')?.content ?? '{}') as {
+      items: Array<{ received_sha256: string; state: string }>;
+    };
+    expect(storedIndex.items.find((item) => item.received_sha256 === otherReceived)?.state).toBe('link_pending');
+  });
+
+  it('no deja que los importadores declaren la revisión ni abran ingesta', () => {
+    const names = [
+      'commercial-quote-import.ts',
+      'commercial-quote-import-run.ts',
+      'repair-quote-import.ts',
+      'repair-quote-import-run.ts',
+      'calibration-import.ts',
+      'calibration-import-run.ts',
+      'calibration-import-batch.ts',
+    ];
+    for (const name of names) {
+      const source = readFileSync(join(__dirname, name), 'utf8');
+      expect(source).not.toContain('attestHumanReview');
+      expect(source).not.toContain('linkEvidence');
+      expect(source).not.toContain('human_reviewed');
+    }
+    const moduleSource = readFileSync(join(__dirname, 'calibration-query.module.ts'), 'utf8');
+    const app = readFileSync(join(__dirname, '../app.module.ts'), 'utf8');
+    expect(moduleSource).not.toMatch(/@(Post|Put|Patch|Delete)\(/);
+    expect(app).not.toContain('evidence-link');
+    expect(app).not.toContain('CalibrationIngestController');
   });
 });

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
-import { evidenceByteTarget, evidenceIndexPath, presentEvidenceItems } from './evidence-link';
+import { evidenceByteTarget, evidenceIndexPath, evidenceReviewMatches, presentEvidenceItems } from './evidence-link';
 import { presentVehicle, type VehiclePresentation } from './vehicle-presentation';
 
 /**
@@ -77,8 +77,9 @@ export function calibrationPathAllowed(path: string): boolean {
     || /^data\/photos\/AF-0\d{5}\/IMG-\d{6}\.json$/.test(path)
     || /^data\/commercial\/quotes\/CQ-\d{6}\.json$/.test(path)
     || /^data\/repairs\/quotes\/RQ-\d{6}\.json$/.test(path)
-    || /^data\/evidence\/commercial\/CQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json)$/.test(path)
-    || /^data\/evidence\/repairs\/RQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json)$/.test(path);
+    || /^data\/evidence\/commercial\/CQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json|reviews\/RV-\d{6}\.json)$/.test(path)
+    || /^data\/evidence\/repairs\/RQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json|reviews\/RV-\d{6}\.json)$/.test(path)
+    || path === 'data/evidence/index.json';
 }
 
 export function calibrationQueryAccess(
@@ -101,9 +102,10 @@ export async function readCalibrationSummary(archive: CalibrationArchive) {
   const visual = await readVisualIndex(archive);
   const commercial = await readCommercialIndex(archive);
   const repairs = await readRepairIndex(archive);
+  const catalog = await readEvidenceCatalog(archive);
   let archived = 0;
   let pending = 0;
-  let photos = 0;
+  let photos = verifiedEvidenceCount(catalog);
   for (const id of newestWindow(visual.ids)) {
     const record = await readCaseRecord(archive, id);
     if (!record) continue;
@@ -251,6 +253,7 @@ export async function listCalibrationRepairWork(archive: CalibrationArchive, que
   const evidenceFilter = readEvidenceFilter(query.evidence);
   const visual = await readVisualIndex(archive);
   const repairs = await readRepairIndex(archive);
+  const catalog = await readEvidenceCatalog(archive);
   const records: RepairWorkItem[] = [];
   for (const id of newestWindow(visual.ids)) {
     const record = await readCaseRecord(archive, id);
@@ -274,7 +277,7 @@ export async function listCalibrationRepairWork(archive: CalibrationArchive, que
     const detail = await readRepairOpportunity(archive, row);
     if (!detail) continue;
     const head = detail.revisions[detail.revisions.length - 1];
-    const evidence = await repairWorkEvidence(archive, detail.headQuoteId);
+    const evidence = catalogEvidence(catalog.repairs[detail.headQuoteId]);
     if (evidenceFilter && evidence !== evidenceFilter) continue;
     if (!matchesQuery(page.q, [
       detail.headQuoteId,
@@ -359,6 +362,10 @@ export async function readCalibrationEvidence(
   const manifest = await readText(archive, `data/evidence/${folder}/${subjectId}/manifests/${evidenceId}.json`);
   const target = manifest ? evidenceByteTarget(manifest, subjectId, evidenceId) : null;
   if (!target || item.content_sha256 !== target.sha256) throw new CalibrationQueryError('missing');
+  const review = await readText(archive, `data/evidence/${folder}/${subjectId}/reviews/${target.reviewId}.json`);
+  if (!review || !evidenceReviewMatches(review, subjectId, target.reviewId, target.sha256)) {
+    throw new CalibrationQueryError('missing');
+  }
   let bytes: Buffer;
   try {
     bytes = await archive.photo(target);
@@ -824,23 +831,62 @@ function newestWindow<T>(items: T[]): T[] {
     : items;
 }
 
+async function readEvidenceCatalog(archive: CalibrationArchive): Promise<{
+  commercial: Record<string, { verified: number; pending: number }>;
+  repairs: Record<string, { verified: number; pending: number }>;
+}> {
+  const empty = { commercial: {}, repairs: {} };
+  const text = await readText(archive, 'data/evidence/index.json');
+  if (!text) return empty;
+  try {
+    const parsed = JSON.parse(text) as { commercial?: unknown; repairs?: unknown };
+    return {
+      commercial: tallyMap(parsed.commercial, QUOTE_ID),
+      repairs: tallyMap(parsed.repairs, REPAIR_ID),
+    };
+  } catch {
+    return empty;
+  }
+}
+
+function tallyMap(
+  value: unknown,
+  pattern: RegExp,
+): Record<string, { verified: number; pending: number }> {
+  const tally: Record<string, { verified: number; pending: number }> = {};
+  const source = objectOf(value);
+  if (!source) return tally;
+  for (const [id, entry] of Object.entries(source)) {
+    if (!pattern.test(id)) continue;
+    const verified = Number(objectOf(entry)?.verified);
+    const pending = Number(objectOf(entry)?.pending);
+    if (!Number.isInteger(verified) || verified < 0 || verified > 30) continue;
+    if (!Number.isInteger(pending) || pending < 0 || pending > 30) continue;
+    tally[id] = { verified, pending };
+  }
+  return tally;
+}
+
+function verifiedEvidenceCount(catalog: {
+  commercial: Record<string, { verified: number }>;
+  repairs: Record<string, { verified: number }>;
+}): number {
+  return [...Object.values(catalog.commercial), ...Object.values(catalog.repairs)]
+    .reduce((sum, item) => sum + item.verified, 0);
+}
+
+function catalogEvidence(tally: { verified: number; pending: number } | undefined): 'photographs' | 'text' | 'pending' {
+  if (tally && tally.verified > 0) return 'photographs';
+  if (tally && tally.pending > 0) return 'pending';
+  return 'text';
+}
+
 async function evidenceSubjectExists(archive: CalibrationArchive, subjectId: string): Promise<boolean> {
   if (!/^(?:CQ|RQ)-\d{6}$/.test(subjectId)) throw new CalibrationQueryError('invalid');
   const path = subjectId.startsWith('CQ-')
     ? `data/commercial/quotes/${subjectId}.json`
     : `data/repairs/quotes/${subjectId}.json`;
   return objectOf(await readJson(archive, path))?.quote_id === subjectId;
-}
-
-async function repairWorkEvidence(
-  archive: CalibrationArchive,
-  quoteId: string,
-): Promise<'photographs' | 'text' | 'pending'> {
-  const text = await readText(archive, evidenceIndexPath(quoteId));
-  const items = text ? presentEvidenceItems(text, quoteId) : [];
-  if (items.some((item) => item.state === 'verified')) return 'photographs';
-  if (items.some((item) => item.state === 'privacy_pending' || item.state === 'link_pending')) return 'pending';
-  return 'text';
 }
 
 function caseEvidence(status: string): RepairWorkItem['evidence'] {

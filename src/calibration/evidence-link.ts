@@ -12,12 +12,15 @@ export const EVIDENCE_SCHEMA_VERSION = '1.0.0';
 const SUBJECT_ID = /^(?:CQ|RQ)-\d{6}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_ITEMS = 30;
-const WRITE_PATH = /^data\/evidence\/(?:commercial\/CQ-\d{6}|repairs\/RQ-\d{6})\/(?:index\.json|links\/LN-\d{6}\.json|manifests\/EV-\d{6}\.json)$/;
+const WRITE_PATH = /^data\/evidence\/(?:index\.json|(?:commercial\/CQ-\d{6}|repairs\/RQ-\d{6})\/(?:index\.json|links\/LN-\d{6}\.json|manifests\/EV-\d{6}\.json|reviews\/index\.json|reviews\/RV-\d{6}\.json))$/;
+export const EVIDENCE_CATALOG_PATH = 'data/evidence/index.json';
+const SELF_REVIEW = ['humanReviewed', 'human_reviewed', 'visualReview', 'visual_review', 'attestation', 'review', 'reviewer', 'operator', 'operatorRole', 'operator_role', 'confirmation', 'email', 'name'];
+const REVIEW_FIELDS = new Set(['subjectId', 'receivedSha256', 'reviewedSha256', 'operatorRole', 'confirmation']);
 const QUOTE_PATH = /^data\/(?:commercial\/quotes\/CQ-\d{6}|repairs\/quotes\/RQ-\d{6})\.json$/;
 const BLOCKED = ['data/cases/', 'data/photos/', 'data/probes', 'data/index.json', 'AF-', 'cal008-probe', 'cal010-probe'];
 
 export class EvidenceLinkError extends Error {
-  constructor(readonly code: 'invalid' | 'missing' | 'conflict' | 'rejected' | 'limit' | 'metadata') {
+  constructor(readonly code: 'invalid' | 'missing' | 'conflict' | 'rejected' | 'limit' | 'metadata' | 'review_required') {
     super(code);
     this.name = 'EvidenceLinkError';
   }
@@ -40,6 +43,14 @@ export type EvidenceRequest = {
   approval: EvidenceApproval;
   receivedSha256: string;
   bytes?: Buffer;
+};
+
+export type HumanReviewRequest = {
+  subjectId: string;
+  receivedSha256: string;
+  reviewedSha256: string;
+  operatorRole: 'owner';
+  confirmation: 'human_reviewed';
 };
 
 export type EvidenceResult =
@@ -92,6 +103,7 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
   version: number;
   format: 'jpg' | 'png' | 'webp';
   sha256: string;
+  reviewId: string;
 } | null {
   let parsed: Record<string, unknown>;
   try {
@@ -108,7 +120,11 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
     || parsed.evidence_id !== evidenceId
     || parsed.storage_status !== 'verified'
     || parsed.provenance !== 'anonymized_copy'
-    || parsed.visual_review !== false
+    || parsed.visual_review !== undefined
+    || parsed.reviewed_sha256 !== sha
+    || parsed.review_confirmation !== 'human_reviewed'
+    || parsed.operator_role !== 'owner'
+    || !/^RV-\d{6}$/.test(String(parsed.human_review_id))
     || parsed.delivery_type !== 'authenticated'
     || !format
     || !SHA256.test(sha)
@@ -118,7 +134,66 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
   ) {
     return null;
   }
-  return { mime: format.mime, publicId, version, format: format.format, sha256: sha };
+  return { mime: format.mime, publicId, version, format: format.format, sha256: sha, reviewId: String(parsed.human_review_id) };
+}
+
+export function evidenceReviewMatches(content: string, subjectId: string, reviewId: string, sha256Value: string): boolean {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+  const serialized = content.toLowerCase();
+  if (serialized.includes('@') || /\brostro|\bplaca|\bvin\b|email|nombre/.test(serialized)) return false;
+  return parsed.review_id === reviewId
+    && parsed.subject_id === subjectId
+    && parsed.reviewed_sha256 === sha256Value
+    && parsed.confirmation === 'human_reviewed'
+    && parsed.operator_role === 'owner'
+    && !('visual_review' in parsed)
+    && !('email' in parsed);
+}
+
+export async function attestHumanReview(
+  files: EvidenceFiles,
+  request: HumanReviewRequest,
+): Promise<{ status: 'attested' | 'already_attested'; reviewId: string }> {
+  rejectUnexpectedReview(request);
+  const subjectId = request.subjectId;
+  if (!SUBJECT_ID.test(subjectId) || !SHA256.test(request.receivedSha256) || !SHA256.test(request.reviewedSha256)) {
+    throw new EvidenceLinkError('invalid');
+  }
+  if (request.operatorRole !== 'owner' || request.confirmation !== 'human_reviewed') throw new EvidenceLinkError('rejected');
+  if (request.receivedSha256 === request.reviewedSha256) throw new EvidenceLinkError('rejected');
+  if (!(await readQuote(files, subjectId))) throw new EvidenceLinkError('missing');
+  const indexPath = reviewIndexPath(subjectId);
+  const indexFile = await files.read(indexPath);
+  const reviews = indexFile ? requireReviews(indexFile.content, subjectId) : [];
+  const sameBytes = reviews.find((item) => item.reviewed_sha256 === request.reviewedSha256);
+  if (sameBytes && sameBytes.received_sha256 !== request.receivedSha256) throw new EvidenceLinkError('conflict');
+  if (sameBytes) return { status: 'already_attested', reviewId: sameBytes.review_id };
+  if (reviews.length >= MAX_ITEMS) throw new EvidenceLinkError('limit');
+  const reviewId = nextId('RV', reviews.map((item) => item.review_id));
+  const document = {
+    schema_version: EVIDENCE_SCHEMA_VERSION,
+    review_id: reviewId,
+    subject_kind: subjectId.startsWith('CQ-') ? 'commercial_quote' : 'repair_quote',
+    subject_id: subjectId,
+    received_sha256: request.receivedSha256,
+    reviewed_sha256: request.reviewedSha256,
+    confirmation: 'human_reviewed',
+    operator_role: 'owner',
+  };
+  await createDocument(files, reviewPath(subjectId, reviewId), document);
+  reviews.push({ review_id: reviewId, received_sha256: request.receivedSha256, reviewed_sha256: request.reviewedSha256 });
+  await files.write(indexPath, canonical({
+    schema_version: EVIDENCE_SCHEMA_VERSION,
+    subject_kind: document.subject_kind,
+    subject_id: subjectId,
+    reviews,
+  }), indexFile?.sha);
+  return { status: 'attested', reviewId };
 }
 
 export async function linkEvidence(
@@ -127,6 +202,7 @@ export async function linkEvidence(
   request: EvidenceRequest,
 ): Promise<EvidenceResult> {
   const subjectId = request.subjectId;
+  rejectSelfReview(request);
   if (!SUBJECT_ID.test(subjectId) || !SHA256.test(request.receivedSha256)) throw new EvidenceLinkError('invalid');
   if (request.approval !== 'anonymized_copy' && request.approval !== 'privacy_hold') {
     throw new EvidenceLinkError('rejected');
@@ -243,7 +319,10 @@ async function holdPrivacy(
 ): Promise<EvidenceResult> {
   if (bytes) throw new EvidenceLinkError('rejected');
   const existing = index.items.find((item) => item.received_sha256 === receivedSha256);
-  if (existing) return { status: 'already_recorded', evidenceId: existing.evidence_id };
+  if (existing) {
+    await publishCatalog(files, index.subject_id, index);
+    return { status: 'already_recorded', evidenceId: existing.evidence_id };
+  }
   assertRoom(index);
   const evidenceId = nextId('EV', index.items.map((item) => item.evidence_id));
   const linkId = nextId('LN', index.link_ids);
@@ -257,8 +336,7 @@ async function holdPrivacy(
     provenance: null,
     received_sha256: receivedSha256,
     content_sha256: null,
-    operator_declaration: 'privacy_hold',
-    visual_review: false,
+    disposition: 'privacy_hold',
   };
   await createDocument(files, `${evidenceDirectory(index.subject_id)}/links/${linkId}.json`, link);
   index.items.push({
@@ -271,6 +349,7 @@ async function holdPrivacy(
   });
   index.link_ids.push(linkId);
   await files.write(evidenceIndexPath(index.subject_id), canonical(index), indexSha);
+  await publishCatalog(files, index.subject_id, index);
   return { status: 'privacy_pending', evidenceId, linkId };
 }
 
@@ -295,7 +374,12 @@ async function archiveDerivative(
   if (sameContent && sameContent.received_sha256 !== receivedSha256) throw new EvidenceLinkError('conflict');
   const receivedItem = index.items.find((item) => item.received_sha256 === receivedSha256);
   if (receivedItem && receivedItem.content_sha256 !== checked.sha256) throw new EvidenceLinkError('conflict');
-  if (sameContent?.state === 'verified') return { status: 'already_linked', evidenceId: sameContent.evidence_id };
+  const review = await findReview(files, subjectId, receivedSha256, checked.sha256);
+  if (!review) throw new EvidenceLinkError('review_required');
+  if (sameContent?.state === 'verified') {
+    await publishCatalog(files, subjectId, index);
+    return { status: 'already_linked', evidenceId: sameContent.evidence_id };
+  }
 
   let evidenceId = sameContent?.evidence_id;
   let linkId = sameContent?.link_id ?? '';
@@ -304,9 +388,9 @@ async function archiveDerivative(
     assertRoom(index);
     evidenceId = nextId('EV', index.items.map((item) => item.evidence_id));
     linkId = nextId('LN', index.link_ids);
-    const manifest = manifestDocument(index, evidenceId, receivedSha256, checked, bytes.length, null, null, 'pending');
+    const manifest = manifestDocument(index, evidenceId, receivedSha256, checked, bytes.length, review.review_id, null, null, 'pending');
     await createDocument(files, manifestPath(subjectId, evidenceId), manifest);
-    await createDocument(files, linkPath(subjectId, linkId), linkDocument(index, linkId, evidenceId, 'link_pending', receivedSha256, checked.sha256));
+    await createDocument(files, linkPath(subjectId, linkId), linkDocument(index, linkId, evidenceId, 'link_pending', receivedSha256, checked.sha256, review.review_id));
     index.items.push({
       evidence_id: evidenceId,
       link_id: linkId,
@@ -339,7 +423,7 @@ async function archiveDerivative(
   const completionId = index.link_ids.includes(linkId) && linkId
     ? nextId('LN', index.link_ids)
     : linkId;
-  const completion = linkDocument(index, completionId, evidenceId, 'linked', receivedSha256, checked.sha256);
+  const completion = linkDocument(index, completionId, evidenceId, 'linked', receivedSha256, checked.sha256, review.review_id);
   await createDocument(files, linkPath(subjectId, completionId), completion);
   const item = index.items.find((entry) => entry.evidence_id === evidenceId);
   if (!item) throw new EvidenceLinkError('missing');
@@ -348,6 +432,7 @@ async function archiveDerivative(
   item.provenance = 'anonymized_copy';
   if (!index.link_ids.includes(completionId)) index.link_ids.push(completionId);
   await files.write(evidenceIndexPath(subjectId), canonical(index), currentSha);
+  await publishCatalog(files, subjectId, index);
   return { status: 'linked', evidenceId, linkId: completionId };
 }
 
@@ -357,6 +442,7 @@ function manifestDocument(
   receivedSha256: string,
   checked: { format: 'jpg' | 'png' | 'webp'; sha256: string },
   sizeBytes: number,
+  reviewId: string,
   assetPublicId: string | null,
   assetVersion: number | null,
   storageStatus: 'pending' | 'verified',
@@ -369,10 +455,12 @@ function manifestDocument(
     storage_provider: 'cloudinary',
     storage_status: storageStatus,
     provenance: 'anonymized_copy',
-    operator_declaration: 'anonymized_copy',
-    visual_review: false,
     received_sha256: receivedSha256,
     content_sha256: checked.sha256,
+    human_review_id: reviewId,
+    reviewed_sha256: checked.sha256,
+    review_confirmation: 'human_reviewed',
+    operator_role: 'owner',
     mime_type: checked.format === 'jpg' ? 'image/jpeg' : checked.format === 'png' ? 'image/png' : 'image/webp',
     size_bytes: sizeBytes,
     asset_public_id: assetPublicId,
@@ -388,6 +476,7 @@ function linkDocument(
   action: 'link_pending' | 'linked',
   receivedSha256: string,
   contentSha256: string,
+  reviewId: string,
 ) {
   return {
     schema_version: EVIDENCE_SCHEMA_VERSION,
@@ -399,8 +488,10 @@ function linkDocument(
     provenance: 'anonymized_copy',
     received_sha256: receivedSha256,
     content_sha256: contentSha256,
-    operator_declaration: 'anonymized_copy',
-    visual_review: false,
+    human_review_id: reviewId,
+    reviewed_sha256: contentSha256,
+    review_confirmation: 'human_reviewed',
+    operator_role: 'owner',
   };
 }
 
@@ -410,6 +501,14 @@ async function createDocument(files: EvidenceFiles, path: string, document: unkn
   if (!existing) return files.write(path, content);
   const current = JSON.parse(existing.content) as Record<string, unknown>;
   const next = document as Record<string, unknown>;
+  if (current.review_id || next.review_id) {
+    if (
+      current.review_id === next.review_id
+      && current.reviewed_sha256 === next.reviewed_sha256
+      && current.received_sha256 === next.received_sha256
+    ) return existing.sha;
+    throw new EvidenceLinkError('conflict');
+  }
   if (current.evidence_id === next.evidence_id && current.action === next.action && current.content_sha256 === next.content_sha256) {
     return existing.sha;
   }
@@ -457,7 +556,7 @@ function assertRoom(index: EvidenceIndex): void {
   if (index.items.length >= MAX_ITEMS) throw new EvidenceLinkError('limit');
 }
 
-function nextId(prefix: 'EV' | 'LN', used: string[]): string {
+function nextId(prefix: 'EV' | 'LN' | 'RV', used: string[]): string {
   const values = used.map((id) => Number(id.slice(3))).filter((value) => Number.isInteger(value));
   const next = (values.length ? Math.max(...values) : 0) + 1;
   if (next > 999999) throw new EvidenceLinkError('limit');
@@ -481,6 +580,90 @@ function mimeFormat(value: unknown): { mime: 'image/jpeg' | 'image/png' | 'image
 
 function canonical(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function rejectSelfReview(request: EvidenceRequest): void {
+  const record = request as unknown as Record<string, unknown>;
+  if (SELF_REVIEW.some((key) => Object.prototype.hasOwnProperty.call(record, key))) {
+    throw new EvidenceLinkError('rejected');
+  }
+}
+
+function rejectUnexpectedReview(request: HumanReviewRequest): void {
+  const record = request as unknown as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !REVIEW_FIELDS.has(key))) throw new EvidenceLinkError('rejected');
+  if ('bytes' in record) throw new EvidenceLinkError('rejected');
+}
+
+type StoredReview = { review_id: string; received_sha256: string; reviewed_sha256: string };
+
+function reviewIndexPath(subjectId: string): string {
+  return `${evidenceDirectory(subjectId)}/reviews/index.json`;
+}
+
+function reviewPath(subjectId: string, reviewId: string): string {
+  return `${evidenceDirectory(subjectId)}/reviews/${reviewId}.json`;
+}
+
+function requireReviews(content: string, subjectId: string): StoredReview[] {
+  const parsed = JSON.parse(content) as { subject_id?: unknown; reviews?: unknown };
+  if (parsed.subject_id !== subjectId || !Array.isArray(parsed.reviews)) throw new EvidenceLinkError('conflict');
+  return parsed.reviews.flatMap((item) => {
+    const review = item as StoredReview;
+    return review && typeof review.review_id === 'string' ? [review] : [];
+  });
+}
+
+async function findReview(
+  files: EvidenceFiles,
+  subjectId: string,
+  receivedSha256: string,
+  reviewedSha256: string,
+): Promise<StoredReview | null> {
+  const indexFile = await files.read(reviewIndexPath(subjectId));
+  if (!indexFile) return null;
+  const entry = requireReviews(indexFile.content, subjectId).find((item) => (
+    item.reviewed_sha256 === reviewedSha256 && item.received_sha256 === receivedSha256
+  ));
+  if (!entry) return null;
+  const file = await files.read(reviewPath(subjectId, entry.review_id));
+  if (!file || !evidenceReviewMatches(file.content, subjectId, entry.review_id, reviewedSha256)) return null;
+  return entry;
+}
+
+async function publishCatalog(files: EvidenceFiles, subjectId: string, index: EvidenceIndex): Promise<void> {
+  const current = await files.read(EVIDENCE_CATALOG_PATH);
+  const catalog = current ? parseCatalog(current.content) : { schema_version: EVIDENCE_SCHEMA_VERSION, commercial: {}, repairs: {} };
+  if (!catalog) throw new EvidenceLinkError('conflict');
+  const folder = subjectId.startsWith('CQ-') ? 'commercial' : 'repairs';
+  const verified = index.items.filter((item) => item.state === 'verified').length;
+  const pending = index.items.filter((item) => item.state === 'privacy_pending' || item.state === 'link_pending').length;
+  if (verified === 0 && pending === 0) delete catalog[folder][subjectId];
+  else catalog[folder][subjectId] = { verified, pending };
+  const next = canonical(catalog);
+  if (current?.content === next) return;
+  await files.write(EVIDENCE_CATALOG_PATH, next, current?.sha);
+}
+
+function parseCatalog(content: string): {
+  schema_version: typeof EVIDENCE_SCHEMA_VERSION;
+  commercial: Record<string, { verified: number; pending: number }>;
+  repairs: Record<string, { verified: number; pending: number }>;
+} | null {
+  try {
+    const parsed = JSON.parse(content) as {
+      commercial?: Record<string, { verified: number; pending: number }>;
+      repairs?: Record<string, { verified: number; pending: number }>;
+    };
+    if (!parsed.commercial || !parsed.repairs || Array.isArray(parsed.commercial) || Array.isArray(parsed.repairs)) return null;
+    return {
+      schema_version: EVIDENCE_SCHEMA_VERSION,
+      commercial: parsed.commercial,
+      repairs: parsed.repairs,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function sha256(bytes: Buffer): string {

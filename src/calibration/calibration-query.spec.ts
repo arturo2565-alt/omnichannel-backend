@@ -288,7 +288,10 @@ describe('consulta de calibración', () => {
     expect(calibrationPathAllowed('data/probes/photos/AF-900001/IMG-000001.json')).toBe(false);
     expect(calibrationPathAllowed('data/repairs/index.json')).toBe(true);
     expect(calibrationPathAllowed('data/repairs/quotes/RQ-000001.json')).toBe(true);
+    expect(calibrationPathAllowed('data/evidence/index.json')).toBe(true);
     expect(calibrationPathAllowed('data/evidence/commercial/CQ-000006/index.json')).toBe(true);
+    expect(calibrationPathAllowed('data/evidence/repairs/RQ-000001/reviews/RV-000001.json')).toBe(true);
+    expect(calibrationPathAllowed('data/evidence/commercial/CQ-000006/reviews/index.json')).toBe(false);
     expect(calibrationPathAllowed('data/evidence/repairs/RQ-000001/manifests/EV-000001.json')).toBe(true);
     expect(calibrationPathAllowed('data/evidence/commercial/CQ-000006/links/LN-000001.json')).toBe(false);
     expect(calibrationPathAllowed('data/evidence/commercial/AF-000001/index.json')).toBe(false);
@@ -788,6 +791,10 @@ describe('consulta de calibración', () => {
     expect(summary.repairs).toEqual({ recordCount: 402, caseCount: 201, opportunityCount: 201, truncated: false });
     expect(summary.pending).toEqual({ caseCount: 0, truncated: true });
     expect(summary.evidence.truncated).toBe(true);
+    expect(store.calls.some((call) => /data\/evidence\/(?:commercial|repairs)\/(?:CQ|RQ)-\d{6}\//.test(call))).toBe(false);
+    const catalogReads = store.calls.filter((call) => call === 'GET data/evidence/index.json');
+    expect(catalogReads.length).toBeGreaterThan(0);
+    expect(catalogReads.length).toBeLessThanOrEqual(12);
   });
 
   it('no lee el listado unido sin autorización de owner', async () => {
@@ -851,7 +858,10 @@ describe('consulta de calibración', () => {
       subject_id: 'RQ-000021',
       storage_status: 'verified',
       provenance: 'anonymized_copy',
-      visual_review: false,
+      human_review_id: 'RV-000001',
+      reviewed_sha256: digest,
+      review_confirmation: 'human_reviewed',
+      operator_role: 'owner',
       delivery_type: 'authenticated',
       content_sha256: digest,
       mime_type: 'image/png',
@@ -904,6 +914,20 @@ describe('consulta de calibración', () => {
       'data/commercial/quotes/CQ-000010.json': JSON.stringify(quote('CQ-000010', 1, null)),
       'data/evidence/repairs/RQ-000021/index.json': JSON.stringify(index),
       'data/evidence/repairs/RQ-000021/manifests/EV-000001.json': JSON.stringify(manifest),
+      'data/evidence/repairs/RQ-000021/reviews/RV-000001.json': JSON.stringify({
+        schema_version: '1.0.0',
+        review_id: 'RV-000001',
+        subject_id: 'RQ-000021',
+        received_sha256: received,
+        reviewed_sha256: digest,
+        confirmation: 'human_reviewed',
+        operator_role: 'owner',
+      }),
+      'data/evidence/index.json': JSON.stringify({
+        schema_version: '1.0.0',
+        commercial: { 'CQ-000010': { verified: 0, pending: 0 } },
+        repairs: { 'RQ-000021': { verified: 1, pending: 1 } },
+      }),
       'data/evidence/commercial/CQ-000099/index.json': JSON.stringify(orphan),
     };
     const store = archive(stored, new Map([[digest, bytes]]));
@@ -933,7 +957,11 @@ describe('consulta de calibración', () => {
     await expect(readCalibrationEvidence(store, 'RQ-000021', 'EV-000001')).rejects.toMatchObject({ code: 'missing' });
     expect(store.calls.some((call) => call.includes('pegazuz_calibration/AF-'))).toBe(false);
 
+    const beforeList = store.calls.length;
     const listed = await listCalibrationRepairWork(store, {});
+    const listCalls = store.calls.slice(beforeList);
+    expect(listCalls.some((call) => call.includes('data/evidence/repairs/RQ-'))).toBe(false);
+    expect(listCalls.filter((call) => call === 'GET data/evidence/index.json')).toHaveLength(1);
     expect(listed.items.find((item) => item.id === 'RQ-000021')).toMatchObject({ evidence: 'photographs', revisionCount: 2 });
     expect(listed.items.find((item) => item.id === 'AF-000030')).toMatchObject({ contract: 'visual', evidence: 'photographs' });
     expect(listed.items.map((item) => item.id)).not.toContain('RQ-000020');
@@ -942,6 +970,9 @@ describe('consulta de calibración', () => {
       'AF-000030',
       'RQ-000021',
     ]);
+    const summary = await readCalibrationSummary(store);
+    expect(summary.evidence.photoCount).toBe(1);
+    expect(summary.pending.caseCount).toBe(0);
 
     const controller = new CalibrationQueryController(new CalibrationQueryService(store));
     const previous = snapshotEnv();
