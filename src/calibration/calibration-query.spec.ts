@@ -10,9 +10,11 @@ import {
   calibrationQueryAccess,
   listCalibrationCases,
   listCalibrationOpportunities,
+  listCalibrationRepairs,
   readCalibrationCase,
   readCalibrationPhoto,
   readCalibrationQuote,
+  readCalibrationRepair,
   readCalibrationSummary,
   type CalibrationArchive,
   type PhotoLocator,
@@ -206,6 +208,7 @@ describe('consulta de calibración', () => {
     expect(summary).toMatchObject({
       visual: { caseCount: 2, archivedCount: 1, pendingCount: 1, photoCount: 1 },
       commercial: { opportunityCount: 1, quoteCount: 2 },
+      repairs: { opportunityCount: 0, quoteCount: 0, truncated: false },
     });
     expect(JSON.stringify(summary)).not.toContain('fuente-a');
     expect(store.calls.some((call) => call.startsWith('PHOTO'))).toBe(false);
@@ -277,6 +280,11 @@ describe('consulta de calibración', () => {
     expect(calibrationPathAllowed('data/photos/AF-900001/IMG-000001.json')).toBe(false);
     expect(calibrationPathAllowed('data/photos/AF-000002/../../data/probes/index.json')).toBe(false);
     expect(calibrationPathAllowed('data/probes/photos/AF-900001/IMG-000001.json')).toBe(false);
+    expect(calibrationPathAllowed('data/repairs/index.json')).toBe(true);
+    expect(calibrationPathAllowed('data/repairs/quotes/RQ-000001.json')).toBe(true);
+    expect(calibrationPathAllowed('data/repairs/quotes/CQ-000001.json')).toBe(false);
+    expect(calibrationPathAllowed('data/repairs/quotes/../index.json')).toBe(false);
+    expect(calibrationPathAllowed('data/repairs/quotes/RQ-000001.json/../../data/index.json')).toBe(false);
 
     const mazdaFirst = Buffer.from('ensayo-mazda-1');
     const mazdaSecond = Buffer.from('ensayo-mazda-2');
@@ -508,12 +516,94 @@ describe('consulta de calibración', () => {
     }, async () => new Response(image), () => 'https://example.test/private.jpg')).rejects.toThrow('could not be read');
   });
 
+  it('lista reparaciones textuales, pagina y conserva el historial sin fotografías', async () => {
+    const store = archive({
+      'data/repairs/index.json': JSON.stringify({
+        schema_version: '1.0.0',
+        archive: 'repairs',
+        opportunities: {
+          'fuente-rq-secreta': {
+            root_quote_id: 'RQ-100001',
+            head_quote_id: 'RQ-100001',
+            quote_ids: ['RQ-100001'],
+          },
+          'oportunidad-fascia': {
+            root_quote_id: 'RQ-100002',
+            head_quote_id: 'RQ-100003',
+            quote_ids: ['RQ-100002', 'RQ-100003'],
+          },
+        },
+        source_keys: { 'fuente-rq-secreta': 'RQ-100001' },
+      }),
+      'data/repairs/quotes/RQ-100001.json': JSON.stringify(repairQuote('RQ-100001', 1, null, 'Aveo', 2026)),
+      'data/repairs/quotes/RQ-100002.json': JSON.stringify(repairQuote('RQ-100002', 1, null, 'Sedán', 2019)),
+      'data/repairs/quotes/RQ-100003.json': JSON.stringify(repairQuote('RQ-100003', 2, 'RQ-100002', 'Sedán', 2019, 2900)),
+      'data/cases/AF-000101.json': visualCase('AF-000101'),
+      'data/commercial/quotes/CQ-100201.json': JSON.stringify(quote('CQ-100201', 1, null)),
+    });
+    const listed = await listCalibrationRepairs(store, { q: 'aveo' });
+    expect(listed.items).toEqual([
+      expect.objectContaining({
+        headQuoteId: 'RQ-100001',
+        revisionCount: 1,
+        integrity: 'complete',
+        model: 'Aveo',
+        year: 2026,
+        quotedMxn: 6300,
+        evidence: 'text_only',
+        photoStatus: 'not_provided',
+      }),
+    ]);
+    expect(JSON.stringify(listed)).not.toContain('fuente-rq-secreta');
+    const page = await listCalibrationRepairs(store, { limit: '1' });
+    expect(page.items).toHaveLength(1);
+    expect(page.nextCursor).toBe('RQ-100001');
+    const detail = await readCalibrationRepair(store, 'RQ-100003');
+    expect(detail.revisions.map((item) => item.id)).toEqual(['RQ-100002', 'RQ-100003']);
+    expect(detail.headQuoteId).toBe('RQ-100003');
+    expect(detail.integrity).toBe('complete');
+    const active = detail.revisions[1];
+    expect(active.lines.map((line) => [line.part, line.role, line.quotedMxn])).toEqual([
+      ['fascia delantera', 'part', 2900],
+      ['fascia delantera', 'labor', 3400],
+    ]);
+    expect(active.quotedTotalMxn).toBe(6300);
+    expect(active.lines[0].contractedValidation).toBe('not_provided');
+    expect(active.lines[1].contractedMxn).toBe(2900);
+    expect(active.conditions).toEqual(['Tiempo estimado de 3 a 4 dias habiles.']);
+    expect(store.calls.some((call) => call.startsWith('PHOTO') || call.includes('data/cases') || call.includes('data/commercial'))).toBe(false);
+    expect(JSON.stringify(detail)).not.toContain('fuente-rq-secreta');
+    await expect(readCalibrationRepair(store, 'CQ-100201')).rejects.toMatchObject({ code: 'invalid' });
+    await expect(readCalibrationRepair(store, 'RQ-100099')).rejects.toMatchObject({ code: 'missing' });
+  });
+
+  it('no lee reparaciones sin autorización de owner', async () => {
+    const store = archive({
+      'data/repairs/index.json': JSON.stringify({ opportunities: {}, source_keys: {} }),
+    });
+    const controller = new CalibrationQueryController(new CalibrationQueryService(store));
+    const previous = snapshotEnv();
+    try {
+      Object.assign(process.env, openEnv);
+      await expect(controller.repairs({ ...owner, role: 'agent' }, {})).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(controller.repair({ ...owner, role: 'admin' }, 'RQ-100001')).rejects.toBeInstanceOf(ForbiddenException);
+      Object.assign(process.env, { CALIBRATION_READ_ENABLED: 'false' });
+      await expect(controller.repairs(owner, {})).rejects.toBeInstanceOf(NotFoundException);
+      expect(store.calls).toEqual([]);
+    } finally {
+      restoreEnv(previous);
+    }
+  });
+
   it('no abre escritura ni monta el módulo de ingesta', () => {
     const controller = readFileSync(join(__dirname, 'calibration-query.module.ts'), 'utf8');
     const app = readFileSync(join(__dirname, '../app.module.ts'), 'utf8');
     const source = readFileSync(join(__dirname, 'calibration-query-source.ts'), 'utf8');
     expect(controller).not.toMatch(/@(Post|Put|Patch|Delete)\(/);
     expect(controller).toContain("@Get('summary')");
+    expect(controller).toContain("@Get('repairs')");
+    expect(controller).toContain("@Get('repairs/:quoteId')");
+    expect(controller).not.toContain('repair-quote-import');
     expect(app).toContain('CalibrationQueryModule');
     expect(app).not.toContain('CalibrationModule');
     expect(app).not.toContain('CalibrationIngestController');
@@ -557,6 +647,71 @@ function restoreEnv(previous: NodeJS.ProcessEnv): void {
     if (!(key in previous)) delete process.env[key];
   }
   Object.assign(process.env, previous);
+}
+
+function repairQuote(
+  id: string,
+  revision: number,
+  prior: string | null,
+  model: string,
+  year: number,
+  contractedLabor: number | null = null,
+) {
+  const laborContracted = contractedLabor == null
+    ? { amount_mxn: null, validation: 'not_provided' }
+    : { amount_mxn: contractedLabor, validation: 'human_confirmed' };
+  return {
+    schema_version: '1.0.0',
+    quote_id: id,
+    revision,
+    recorded_at: '2026-11-14T03:25:39.889Z',
+    evidence: 'text_only',
+    photo_status: 'not_provided',
+    source: {
+      kind: 'autofix_human_repair_quote',
+      source_case_key: 'fuente-rq-secreta',
+      opportunity_key: 'fuente-rq-secreta',
+      prior_quote_id: prior,
+      quoted_at: null,
+    },
+    vehicle: {
+      make: null,
+      make_evidence: 'unknown',
+      model,
+      model_evidence: 'customer_provided',
+      year,
+      year_evidence: 'customer_provided',
+      variant: null,
+      variant_evidence: 'unknown',
+    },
+    lines: [
+      {
+        line_id: 'L01',
+        part: 'fascia delantera',
+        role: 'part',
+        labor: null,
+        prices: {
+          quoted: { amount_mxn: 2900, validation: 'human_confirmed' },
+          contracted: { amount_mxn: null, validation: 'not_provided' },
+          collected: { amount_mxn: null, validation: 'not_provided' },
+        },
+      },
+      {
+        line_id: 'L02',
+        part: 'fascia delantera',
+        role: 'labor',
+        labor: 'mount_and_paint',
+        prices: {
+          quoted: { amount_mxn: 3400, validation: 'human_confirmed' },
+          contracted: laborContracted,
+          collected: { amount_mxn: null, validation: 'not_provided' },
+        },
+      },
+    ],
+    quoted_total_mxn: 6300,
+    conditions: ['Tiempo estimado de 3 a 4 dias habiles.'],
+    status: 'human_verified',
+  };
 }
 
 function quote(id: string, revision: number, prior: string | null, contracted: number | null = null) {

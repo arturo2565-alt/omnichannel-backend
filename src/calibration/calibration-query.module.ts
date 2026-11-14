@@ -21,9 +21,11 @@ import {
   calibrationQueryAccess,
   listCalibrationCases,
   listCalibrationOpportunities,
+  listCalibrationRepairs,
   readCalibrationCase,
   readCalibrationPhoto,
   readCalibrationQuote,
+  readCalibrationRepair,
   readCalibrationSummary,
   type CalibrationArchive,
   type QueryList,
@@ -83,6 +85,16 @@ export class CalibrationQueryController {
   @Get('quotes/:quoteId')
   quote(@CurrentUser() user: AuthenticatedUser, @Param('quoteId') quoteId: string) {
     return this.run(user, (archive) => readCalibrationQuote(archive, quoteId));
+  }
+
+  @Get('repairs')
+  repairs(@CurrentUser() user: AuthenticatedUser, @Query() query: QueryList) {
+    return this.run(user, (archive) => listCalibrationRepairs(archive, query));
+  }
+
+  @Get('repairs/:quoteId')
+  repair(@CurrentUser() user: AuthenticatedUser, @Param('quoteId') quoteId: string) {
+    return this.run(user, (archive) => readCalibrationRepair(archive, quoteId));
   }
 
   private async run<T>(user: AuthenticatedUser, work: (archive: CalibrationArchive) => Promise<T>): Promise<T> {

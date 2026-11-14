@@ -12,6 +12,7 @@ const CASE_ID = /^AF-\d{6}$/;
 const REAL_CASE_ID = /^AF-0\d{5}$/;
 const PHOTO_ID = /^IMG-\d{6}$/;
 const QUOTE_ID = /^CQ-\d{6}$/;
+const REPAIR_ID = /^RQ-\d{6}$/;
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE = /\d{10,}/;
 const PLATE = /\b[A-Z]{3}-?\d{3,4}(?:-?[A-Z])?\b/;
@@ -22,6 +23,7 @@ const TREATMENTS = new Set(['repair_paint', 'paint', 'replace_paint', 'replace',
 const EVIDENCE = new Set(['customer_provided', 'visual_inference', 'unknown']);
 const COMMERCIAL_EVIDENCE = new Set(['customer_provided', 'unknown']);
 const ARCHIVE = new Set(['not_provided', 'pending_private_archive', 'archived_private']);
+const REPAIR_LABOR = new Set(['mount_and_paint', 'paint', 'repair']);
 
 export class CalibrationQueryError extends Error {
   constructor(readonly code: 'hidden' | 'forbidden' | 'invalid' | 'missing' | 'unavailable') {
@@ -64,9 +66,11 @@ export function calibrationPathAllowed(path: string): boolean {
   if (path.startsWith('data/probes') || path.includes('/probes/')) return false;
   return path === 'data/index.json'
     || path === 'data/commercial/index.json'
+    || path === 'data/repairs/index.json'
     || /^data\/cases\/AF-\d{6}\.json$/.test(path)
     || /^data\/photos\/AF-0\d{5}\/IMG-\d{6}\.json$/.test(path)
-    || /^data\/commercial\/quotes\/CQ-\d{6}\.json$/.test(path);
+    || /^data\/commercial\/quotes\/CQ-\d{6}\.json$/.test(path)
+    || /^data\/repairs\/quotes\/RQ-\d{6}\.json$/.test(path);
 }
 
 export function calibrationQueryAccess(
@@ -88,6 +92,7 @@ function actorPermitted(email: unknown, env: NodeJS.ProcessEnv): boolean {
 export async function readCalibrationSummary(archive: CalibrationArchive) {
   const visual = await readVisualIndex(archive);
   const commercial = await readCommercialIndex(archive);
+  const repairs = await readRepairIndex(archive);
   let archived = 0;
   let pending = 0;
   let photos = 0;
@@ -110,6 +115,11 @@ export async function readCalibrationSummary(archive: CalibrationArchive) {
       opportunityCount: commercial.rows.length,
       quoteCount: commercial.rows.reduce((sum, row) => sum + row.quoteIds.length, 0),
       truncated: commercial.truncated,
+    },
+    repairs: {
+      opportunityCount: repairs.rows.length,
+      quoteCount: repairs.rows.reduce((sum, row) => sum + row.quoteIds.length, 0),
+      truncated: repairs.truncated,
     },
   };
 }
@@ -177,6 +187,56 @@ export async function listCalibrationOpportunities(archive: CalibrationArchive, 
     });
   }
   return paginate(records, page, commercial.truncated);
+}
+
+export async function listCalibrationRepairs(archive: CalibrationArchive, query: QueryList) {
+  const page = readPage(query, REPAIR_ID);
+  const repairs = await readRepairIndex(archive);
+  const records: {
+    headQuoteId: string;
+    revisionCount: number;
+    integrity: 'complete' | 'incomplete';
+    make: string | null;
+    model: string | null;
+    year: number | null;
+    quotedMxn: number | null;
+    evidence: 'text_only';
+    photoStatus: 'not_provided';
+  }[] = [];
+  for (const row of repairs.rows.slice(0, CALIBRATION_QUERY_SCAN_LIMIT)) {
+    const detail = await readRepairOpportunity(archive, row);
+    if (!detail) continue;
+    const head = detail.revisions[detail.revisions.length - 1];
+    if (!matchesQuery(page.q, [
+      detail.headQuoteId,
+      head?.make,
+      head?.model,
+      head?.year,
+      ...(head?.lines ?? []).map((line) => line.part),
+    ])) continue;
+    records.push({
+      headQuoteId: detail.headQuoteId,
+      revisionCount: detail.revisions.length,
+      integrity: detail.integrity,
+      make: head?.make ?? null,
+      model: head?.model ?? null,
+      year: head?.year ?? null,
+      quotedMxn: head?.quotedTotalMxn ?? null,
+      evidence: 'text_only',
+      photoStatus: 'not_provided',
+    });
+  }
+  return paginate(records, page, repairs.truncated);
+}
+
+export async function readCalibrationRepair(archive: CalibrationArchive, quoteId: string) {
+  if (!REPAIR_ID.test(quoteId)) throw new CalibrationQueryError('invalid');
+  const repairs = await readRepairIndex(archive);
+  const row = repairs.rows.find((item) => item.quoteIds.includes(quoteId));
+  if (!row) throw new CalibrationQueryError('missing');
+  const detail = await readRepairOpportunity(archive, row);
+  if (!detail) throw new CalibrationQueryError('missing');
+  return detail;
 }
 
 export async function readCalibrationQuote(archive: CalibrationArchive, quoteId: string) {
@@ -273,6 +333,27 @@ async function readCommercialIndex(archive: CalibrationArchive): Promise<{
     const safeKey = cleanText(key, 150);
     const ids = Array.isArray(objectOf(value)?.quote_ids)
       ? (objectOf(value)?.quote_ids as unknown[]).filter((id): id is string => typeof id === 'string' && QUOTE_ID.test(id))
+      : [];
+    if (!safeKey || ids.length === 0) return [];
+    return [{ key: safeKey, quoteIds: ids }];
+  });
+  return { rows, truncated: entries.length > CALIBRATION_QUERY_SCAN_LIMIT };
+}
+
+async function readRepairIndex(archive: CalibrationArchive): Promise<{
+  rows: { key: string; quoteIds: string[] }[];
+  truncated: boolean;
+}> {
+  const parsed = await readJson(archive, 'data/repairs/index.json');
+  const opportunities = objectOf(parsed)?.opportunities;
+  if (!opportunities || typeof opportunities !== 'object' || Array.isArray(opportunities)) {
+    return { rows: [], truncated: false };
+  }
+  const entries = Object.entries(opportunities);
+  const rows = entries.slice(0, CALIBRATION_QUERY_SCAN_LIMIT).flatMap(([key, value]) => {
+    const safeKey = cleanText(key, 150);
+    const ids = Array.isArray(objectOf(value)?.quote_ids)
+      ? (objectOf(value)?.quote_ids as unknown[]).filter((id): id is string => typeof id === 'string' && REPAIR_ID.test(id))
       : [];
     if (!safeKey || ids.length === 0) return [];
     return [{ key: safeKey, quoteIds: ids }];
@@ -424,6 +505,88 @@ async function readQuoteRecord(archive: CalibrationArchive, quoteId: string) {
     collectedValidation: collected?.validation ?? null,
     integrity: incomplete ? 'incomplete' as const : 'complete' as const,
   };
+}
+
+async function readRepairOpportunity(
+  archive: CalibrationArchive,
+  row: { key: string; quoteIds: string[] },
+) {
+  const revisions: NonNullable<Awaited<ReturnType<typeof readRepairQuoteRecord>>>[] = [];
+  for (const id of row.quoteIds) {
+    const quote = await readRepairQuoteRecord(archive, id);
+    if (quote) revisions.push(quote);
+  }
+  if (revisions.length === 0) return null;
+  const chainBroken = revisions.some((quote, index) => quote.revision !== index + 1)
+    || revisions.length !== row.quoteIds.length;
+  return {
+    headQuoteId: row.quoteIds[row.quoteIds.length - 1],
+    evidence: 'text_only' as const,
+    photoStatus: 'not_provided' as const,
+    integrity: chainBroken || revisions.some((quote) => quote.integrity === 'incomplete') ? 'incomplete' as const : 'complete' as const,
+    revisions,
+  };
+}
+
+async function readRepairQuoteRecord(archive: CalibrationArchive, quoteId: string) {
+  const parsed = objectOf(await readJson(archive, `data/repairs/quotes/${quoteId}.json`));
+  if (!parsed || parsed.quote_id !== quoteId) return null;
+  const vehicle = objectOf(parsed.vehicle) ?? {};
+  const rawLines = Array.isArray(parsed.lines) ? parsed.lines : [];
+  const lines = rawLines.flatMap(readRepairLine);
+  const rawConditions = Array.isArray(parsed.conditions) ? parsed.conditions : [];
+  const conditions = rawConditions.flatMap((item) => {
+    const text = cleanText(item, 240);
+    return text ? [text] : [];
+  });
+  const quotedTotal = Number(parsed.quoted_total_mxn);
+  const quotedSum = lines.reduce((sum, line) => sum + line.quotedMxn, 0);
+  const totalMatches = Number.isInteger(quotedTotal) && quotedTotal >= 1 && quotedTotal === quotedSum;
+  const declared = parsed.evidence === 'text_only'
+    && parsed.photo_status === 'not_provided'
+    && parsed.status === 'human_verified'
+    && Number.isInteger(parsed.revision)
+    && Number(parsed.revision) >= 1;
+  const dropped = lines.length !== rawLines.length || conditions.length !== rawConditions.length;
+  return {
+    id: quoteId,
+    revision: Number.isInteger(parsed.revision) ? Number(parsed.revision) : null,
+    make: identityText(vehicle.make, vehicle.make_evidence, COMMERCIAL_EVIDENCE),
+    model: identityText(vehicle.model, vehicle.model_evidence, COMMERCIAL_EVIDENCE),
+    year: identityYear(vehicle.year, vehicle.year_evidence),
+    variant: identityText(vehicle.variant, vehicle.variant_evidence, COMMERCIAL_EVIDENCE),
+    lines,
+    conditions,
+    quotedTotalMxn: totalMatches ? quotedTotal : null,
+    integrity: declared && totalMatches && !dropped && lines.length > 0 ? 'complete' as const : 'incomplete' as const,
+  };
+}
+
+function readRepairLine(value: unknown) {
+  const line = objectOf(value);
+  if (!line) return [];
+  const part = cleanText(line.part, 80);
+  const lineId = cleanText(line.line_id, 8);
+  const role = line.role === 'part' || line.role === 'labor' ? line.role : null;
+  const labor = line.labor == null ? null : (REPAIR_LABOR.has(String(line.labor)) ? String(line.labor) : null);
+  const prices = objectOf(line.prices);
+  const quoted = readPrice(objectOf(prices?.quoted), true);
+  const contracted = readPrice(objectOf(prices?.contracted), false);
+  const collected = readPrice(objectOf(prices?.collected), false);
+  const laborFits = role === 'part' ? labor == null && line.labor == null : role === 'labor' && labor != null;
+  if (!part || !lineId || !/^L\d{2}$/.test(lineId) || !role || !laborFits || !quoted || !contracted || !collected) return [];
+  return [{
+    lineId,
+    part,
+    role,
+    labor,
+    quotedMxn: quoted.amount as number,
+    quotedValidation: quoted.validation,
+    contractedMxn: contracted.amount,
+    contractedValidation: contracted.validation,
+    collectedMxn: collected.amount,
+    collectedValidation: collected.validation,
+  }];
 }
 
 function readLine(value: unknown) {
