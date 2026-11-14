@@ -10,6 +10,7 @@ import {
   calibrationQueryAccess,
   listCalibrationCases,
   listCalibrationOpportunities,
+  listCalibrationRepairWork,
   listCalibrationRepairs,
   readCalibrationCase,
   readCalibrationPhoto,
@@ -206,9 +207,10 @@ describe('consulta de calibración', () => {
     const store = archive(files(), new Map([[digest, image]]));
     const summary = await readCalibrationSummary(store);
     expect(summary).toMatchObject({
-      visual: { caseCount: 2, archivedCount: 1, pendingCount: 1, photoCount: 1 },
-      commercial: { opportunityCount: 1, quoteCount: 2 },
-      repairs: { opportunityCount: 0, quoteCount: 0, truncated: false },
+      repairs: { recordCount: 2, caseCount: 2, opportunityCount: 0, truncated: false },
+      paint: { opportunityCount: 1, quoteCount: 2, truncated: false },
+      evidence: { photoCount: 1, truncated: false },
+      pending: { caseCount: 1, truncated: false },
     });
     expect(JSON.stringify(summary)).not.toContain('fuente-a');
     expect(store.calls.some((call) => call.startsWith('PHOTO'))).toBe(false);
@@ -615,6 +617,186 @@ describe('consulta de calibración', () => {
     }
   });
 
+  it('une expedientes y oportunidades, pagina la secuencia y no presenta un recorrido parcial como completo', async () => {
+    const stored: Record<string, string> = {
+      'data/index.json': JSON.stringify({
+        cases: {
+          'AF-000010': 'mazda',
+          'AF-000020': 'archivo',
+          'AF-000030': 'pendiente',
+          'AF-000040': 'empate',
+        },
+      }),
+      'data/cases/AF-000010.json': visualCase('AF-000010', {
+        updated_at: '2026-01-01T00:00:00.000Z',
+        vehicle: {
+          make: 'Mazda',
+          make_evidence: 'customer_provided',
+          model: 'Sedán',
+          model_evidence: 'customer_provided',
+          year: 2018,
+          year_evidence: 'customer_provided',
+          variant: null,
+          variant_evidence: 'unknown',
+        },
+      }),
+      'data/cases/AF-000020.json': visualCase('AF-000020', {
+        updated_at: '2026-03-01T00:00:00.000Z',
+        photo_archive_status: 'archived_private',
+        photo_refs: [],
+      }),
+      'data/cases/AF-000030.json': visualCase('AF-000030', {
+        updated_at: '2026-05-01T00:00:00.000Z',
+        photo_archive_status: 'pending_private_archive',
+      }),
+      'data/cases/AF-000040.json': visualCase('AF-000040', {
+        updated_at: '2026-02-01T00:00:00.000Z',
+      }),
+      'data/repairs/index.json': JSON.stringify({
+        opportunities: {
+          aveo: { quote_ids: ['RQ-000010'] },
+          jetta: { quote_ids: ['RQ-000020', 'RQ-000021'] },
+          empate: { quote_ids: ['RQ-000040'] },
+        },
+      }),
+      'data/repairs/quotes/RQ-000010.json': JSON.stringify(repairQuote('RQ-000010', 1, null, 'Aveo', 2026, null, '2026-06-01T00:00:00.000Z')),
+      'data/repairs/quotes/RQ-000020.json': JSON.stringify(repairQuote('RQ-000020', 1, null, 'Jetta', 2012, null, '2026-04-01T00:00:00.000Z')),
+      'data/repairs/quotes/RQ-000021.json': JSON.stringify(repairQuote('RQ-000021', 2, 'RQ-000020', 'Jetta', 2012, null, '2026-04-02T00:00:00.000Z')),
+      'data/repairs/quotes/RQ-000040.json': JSON.stringify(repairQuote('RQ-000040', 1, null, 'Gol', 2011, null, '2026-02-01T00:00:00.000Z')),
+      'data/commercial/index.json': JSON.stringify({
+        opportunities: { pintura: { quote_ids: ['CQ-000006', 'CQ-000007'] } },
+      }),
+      'data/commercial/quotes/CQ-000006.json': JSON.stringify(quote('CQ-000006', 1, null)),
+      'data/commercial/quotes/CQ-000007.json': JSON.stringify(quote('CQ-000007', 2, 'CQ-000006')),
+    };
+    const store = archive(stored);
+    const listed = await listCalibrationRepairWork(store, {});
+    expect(listed.items.map((item) => item.id)).toEqual([
+      'RQ-000010',
+      'AF-000030',
+      'RQ-000021',
+      'AF-000020',
+      'RQ-000040',
+      'AF-000040',
+      'AF-000010',
+    ]);
+    expect(listed.items.map((item) => item.contract)).toEqual([
+      'repair', 'visual', 'repair', 'visual', 'repair', 'visual', 'visual',
+    ]);
+    const jetta = listed.items.find((item) => item.id === 'RQ-000021');
+    expect(jetta).toMatchObject({ evidence: 'text', revisionCount: 2 });
+    expect(listed.items.some((item) => item.id === 'RQ-000020' || item.id.startsWith('CQ-'))).toBe(false);
+    expect(listed.items.every((item) => !('recordedAt' in item))).toBe(true);
+    expect(JSON.stringify(listed)).not.toContain('fuente-rq-secreta');
+    const detail = await readCalibrationRepair(store, 'RQ-000020');
+    expect(detail.headQuoteId).toBe('RQ-000021');
+    expect(detail.revisions).toHaveLength(2);
+    expect(detail.integrity).toBe(jetta && 'integrity' in jetta ? jetta.integrity : '');
+    expect(JSON.stringify(detail)).not.toContain('recordedAt');
+
+    expect((await listCalibrationRepairWork(store, { q: 'mazda' })).items.map((item) => item.id)).toEqual(['AF-000010']);
+    expect((await listCalibrationRepairWork(store, { q: 'aveo' })).items.map((item) => item.id)).toEqual(['RQ-000010']);
+    expect((await listCalibrationRepairWork(store, { q: 'RQ-000021' })).items.map((item) => item.id)).toEqual(['RQ-000021']);
+    expect((await listCalibrationRepairWork(store, { evidence: 'photographs' })).items.map((item) => item.id)).toEqual(['AF-000020']);
+    expect((await listCalibrationRepairWork(store, { evidence: 'text' })).items.map((item) => item.id)).toEqual([
+      'RQ-000010',
+      'RQ-000021',
+      'RQ-000040',
+    ]);
+    expect((await listCalibrationRepairWork(store, { evidence: 'pending' })).items.map((item) => item.id)).toEqual(['AF-000030']);
+    const textPage = await listCalibrationRepairWork(store, { evidence: 'text', limit: '2' });
+    expect(textPage.items.map((item) => item.id)).toEqual(['RQ-000010', 'RQ-000021']);
+    expect(textPage.nextCursor).toBe('RQ-000021');
+    expect((await listCalibrationRepairWork(store, { evidence: 'text', limit: '2', cursor: 'RQ-000021' })).items.map((item) => item.id)).toEqual(['RQ-000040']);
+
+    const first = await listCalibrationRepairWork(store, { limit: '2' });
+    const second = await listCalibrationRepairWork(store, { limit: '2', cursor: first.nextCursor ?? '' });
+    const third = await listCalibrationRepairWork(store, { limit: '2', cursor: second.nextCursor ?? '' });
+    const fourth = await listCalibrationRepairWork(store, { limit: '2', cursor: third.nextCursor ?? '' });
+    const collected = [...first.items, ...second.items, ...third.items, ...fourth.items].map((item) => item.id);
+    expect(collected).toEqual(listed.items.map((item) => item.id));
+    expect(new Set(collected).size).toBe(collected.length);
+    expect(fourth.nextCursor).toBeNull();
+    expect(listed.truncated).toBe(false);
+
+    await expect(listCalibrationRepairWork(store, { cursor: 'CQ-000006' })).rejects.toMatchObject({ code: 'invalid' });
+    await expect(listCalibrationRepairWork(store, { cursor: 'AF-000099' })).rejects.toMatchObject({ code: 'invalid' });
+    await expect(listCalibrationRepairWork(store, { evidence: 'text', cursor: 'AF-000030' })).rejects.toMatchObject({ code: 'invalid' });
+    await expect(listCalibrationRepairWork(store, { evidence: 'otra' })).rejects.toMatchObject({ code: 'invalid' });
+
+    const summary = await readCalibrationSummary(store);
+    expect(summary.repairs).toEqual({ recordCount: 7, caseCount: 4, opportunityCount: 3, truncated: false });
+    expect(summary.paint).toEqual({ opportunityCount: 1, quoteCount: 2, truncated: false });
+    expect(summary.evidence).toEqual({ photoCount: 0, truncated: false });
+    expect(summary.pending).toEqual({ caseCount: 1, truncated: false });
+  });
+
+  it('recorre como máximo 200 registros y marca la cifra parcial', async () => {
+    const cases: Record<string, string> = {};
+    const stored: Record<string, string> = {};
+    for (let number = 1; number <= 201; number += 1) {
+      const id = `AF-${String(number).padStart(6, '0')}`;
+      cases[id] = 'fila';
+      stored[`data/cases/${id}.json`] = visualCase(id, {
+        photo_archive_status: number === 1 ? 'pending_private_archive' : 'not_provided',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      });
+    }
+    stored['data/index.json'] = JSON.stringify({ cases });
+    const opportunities: Record<string, { quote_ids: string[] }> = {};
+    for (let number = 1; number <= 201; number += 1) {
+      const id = `RQ-${String(number).padStart(6, '0')}`;
+      opportunities[`fila-${number}`] = { quote_ids: [id] };
+      stored[`data/repairs/quotes/${id}.json`] = JSON.stringify(repairQuote(id, 1, null, 'Aveo', 2026));
+    }
+    stored['data/repairs/index.json'] = JSON.stringify({ opportunities });
+    const store = archive(stored);
+    const listed = await listCalibrationRepairWork(store, { limit: '50' });
+    const ids = new Set<string>();
+    let cursor = listed.nextCursor;
+    listed.items.forEach((item) => ids.add(item.id));
+    let guard = 0;
+    while (cursor) {
+      const page = await listCalibrationRepairWork(store, { limit: '50', cursor });
+      expect(page.items.some((item) => ids.has(item.id))).toBe(false);
+      page.items.forEach((item) => ids.add(item.id));
+      cursor = page.nextCursor;
+      guard += 1;
+      if (guard > 10) break;
+    }
+    expect(ids.has('AF-000001')).toBe(false);
+    expect(ids.has('RQ-000001')).toBe(false);
+    expect(ids.has('AF-000201')).toBe(true);
+    expect(ids.has('RQ-000201')).toBe(true);
+    expect(ids.size).toBe(400);
+    expect(listed.truncated).toBe(true);
+    expect(store.calls.some((call) => call.includes('data/cases/AF-000001.json'))).toBe(false);
+    expect(store.calls.some((call) => call.includes('data/repairs/quotes/RQ-000001.json'))).toBe(false);
+    const outside = await listCalibrationRepairWork(store, { q: 'AF-000001' });
+    expect(outside.items).toEqual([]);
+    expect(outside.truncated).toBe(true);
+    const summary = await readCalibrationSummary(store);
+    expect(summary.repairs).toEqual({ recordCount: 402, caseCount: 201, opportunityCount: 201, truncated: false });
+    expect(summary.pending).toEqual({ caseCount: 0, truncated: true });
+    expect(summary.evidence.truncated).toBe(true);
+  });
+
+  it('no lee el listado unido sin autorización de owner', async () => {
+    const store = archive({ 'data/index.json': JSON.stringify({ cases: {} }) });
+    const controller = new CalibrationQueryController(new CalibrationQueryService(store));
+    const previous = snapshotEnv();
+    try {
+      Object.assign(process.env, openEnv);
+      await expect(controller.repairWork({ ...owner, role: 'agent' }, {})).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(controller.repairWork(undefined as unknown as AuthenticatedUser, {})).rejects.toBeInstanceOf(ForbiddenException);
+      Object.assign(process.env, { CALIBRATION_READ_ENABLED: 'false' });
+      await expect(controller.repairWork(owner, {})).rejects.toBeInstanceOf(NotFoundException);
+      expect(store.calls).toEqual([]);
+    } finally {
+      restoreEnv(previous);
+    }
+  });
+
   it('no abre escritura ni monta el módulo de ingesta', () => {
     const controller = readFileSync(join(__dirname, 'calibration-query.module.ts'), 'utf8');
     const app = readFileSync(join(__dirname, '../app.module.ts'), 'utf8');
@@ -622,6 +804,7 @@ describe('consulta de calibración', () => {
     expect(controller).not.toMatch(/@(Post|Put|Patch|Delete)\(/);
     expect(controller).toContain("@Get('summary')");
     expect(controller).toContain("@Get('repairs')");
+    expect(controller).toContain("@Get('repair-work')");
     expect(controller).toContain("@Get('repairs/:quoteId')");
     expect(controller).not.toContain('repair-quote-import');
     expect(app).toContain('CalibrationQueryModule');
@@ -676,6 +859,7 @@ function repairQuote(
   model: string,
   year: number,
   contractedLabor: number | null = null,
+  recordedAt = '2026-11-14T03:25:39.889Z',
 ) {
   const laborContracted = contractedLabor == null
     ? { amount_mxn: null, validation: 'not_provided' }
@@ -684,7 +868,7 @@ function repairQuote(
     schema_version: '1.0.0',
     quote_id: id,
     revision,
-    recorded_at: '2026-11-14T03:25:39.889Z',
+    recorded_at: recordedAt,
     evidence: 'text_only',
     photo_status: 'not_provided',
     source: {

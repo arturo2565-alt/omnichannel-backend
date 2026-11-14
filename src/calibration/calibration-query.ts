@@ -14,6 +14,9 @@ const REAL_CASE_ID = /^AF-0\d{5}$/;
 const PHOTO_ID = /^IMG-\d{6}$/;
 const QUOTE_ID = /^CQ-\d{6}$/;
 const REPAIR_ID = /^RQ-\d{6}$/;
+const WORK_ID = /^(?:AF|RQ)-\d{6}$/;
+const RECORDED_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+const EVIDENCE_FILTER = new Set(['photographs', 'text', 'pending']);
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE = /\d{10,}/;
 const PLATE = /\b[A-Z]{3}-?\d{3,4}(?:-?[A-Z])?\b/;
@@ -51,6 +54,7 @@ export type QueryList = {
   cursor?: string;
   archive?: string;
   service?: string;
+  evidence?: string;
 };
 
 export function calibrationPhotoManifestPath(caseId: string, photoId: string): string | null {
@@ -97,30 +101,33 @@ export async function readCalibrationSummary(archive: CalibrationArchive) {
   let archived = 0;
   let pending = 0;
   let photos = 0;
-  for (const id of visual.ids.slice(0, CALIBRATION_QUERY_SCAN_LIMIT)) {
+  for (const id of newestWindow(visual.ids)) {
     const record = await readCaseRecord(archive, id);
     if (!record) continue;
     if (record.archiveStatus === 'archived_private') archived += 1;
     if (record.archiveStatus === 'pending_private_archive') pending += 1;
-    photos += record.photoCount;
+    photos += record.photos.filter((photo) => photo.verified).length;
   }
+  const evidenceTruncated = visual.ids.length > CALIBRATION_QUERY_SCAN_LIMIT;
   return {
-    visual: {
-      caseCount: visual.ids.length,
-      archivedCount: archived,
-      pendingCount: pending,
-      photoCount: photos,
-      truncated: visual.ids.length > CALIBRATION_QUERY_SCAN_LIMIT,
-    },
-    commercial: {
-      opportunityCount: commercial.rows.length,
-      quoteCount: commercial.rows.reduce((sum, row) => sum + row.quoteIds.length, 0),
-      truncated: commercial.truncated,
-    },
     repairs: {
-      opportunityCount: repairs.rows.length,
-      quoteCount: repairs.rows.reduce((sum, row) => sum + row.quoteIds.length, 0),
-      truncated: repairs.truncated,
+      recordCount: visual.ids.length + repairs.opportunityCount,
+      caseCount: visual.ids.length,
+      opportunityCount: repairs.opportunityCount,
+      truncated: false,
+    },
+    paint: {
+      opportunityCount: commercial.opportunityCount,
+      quoteCount: commercial.quoteCount,
+      truncated: false,
+    },
+    evidence: {
+      photoCount: photos,
+      truncated: evidenceTruncated,
+    },
+    pending: {
+      caseCount: pending,
+      truncated: evidenceTruncated,
     },
   };
 }
@@ -129,13 +136,13 @@ export async function listCalibrationCases(archive: CalibrationArchive, query: Q
   const page = readPage(query, CASE_ID);
   const archiveFilter = readArchiveFilter(query.archive);
   const visual = await readVisualIndex(archive);
-  const records: NonNullable<Awaited<ReturnType<typeof readCaseRecord>>>[] = [];
+  const records = [];
   for (const id of visual.ids.slice(0, CALIBRATION_QUERY_SCAN_LIMIT)) {
     const record = await readCaseRecord(archive, id);
     if (!record) continue;
     if (archiveFilter && record.archiveStatus !== archiveFilter) continue;
     if (!matchesQuery(page.q, [record.id, record.make, record.model, record.year])) continue;
-    records.push(record);
+    records.push(withoutRecordedAt(record));
   }
   return paginate(records, page, visual.ids.length > CALIBRATION_QUERY_SCAN_LIMIT);
 }
@@ -144,7 +151,7 @@ export async function readCalibrationCase(archive: CalibrationArchive, caseId: s
   if (!CASE_ID.test(caseId)) throw new CalibrationQueryError('invalid');
   const record = await readCaseRecord(archive, caseId);
   if (!record) throw new CalibrationQueryError('missing');
-  return record;
+  return withoutRecordedAt(record);
 }
 
 export async function listCalibrationOpportunities(archive: CalibrationArchive, query: QueryList) {
@@ -236,14 +243,77 @@ export async function listCalibrationRepairs(archive: CalibrationArchive, query:
   return paginate(records, page, repairs.truncated);
 }
 
+export async function listCalibrationRepairWork(archive: CalibrationArchive, query: QueryList) {
+  const page = readPage(query, WORK_ID);
+  const evidenceFilter = readEvidenceFilter(query.evidence);
+  const visual = await readVisualIndex(archive);
+  const repairs = await readRepairIndex(archive);
+  const records: RepairWorkItem[] = [];
+  for (const id of newestWindow(visual.ids)) {
+    const record = await readCaseRecord(archive, id);
+    if (!record) continue;
+    const evidence = caseEvidence(record.archiveStatus);
+    if (evidenceFilter && evidence !== evidenceFilter) continue;
+    if (!matchesQuery(page.q, [record.id, record.make, record.model, record.year])) continue;
+    records.push({
+      contract: 'visual',
+      id: record.id,
+      evidence,
+      integrity: record.integrity,
+      make: record.make,
+      model: record.model,
+      year: record.year,
+      quotedTotalMxn: record.quotedTotalMxn,
+      recordedAt: record.recordedAt,
+    });
+  }
+  for (const row of newestWindow(repairs.allRows)) {
+    const detail = await readRepairOpportunity(archive, row);
+    if (!detail) continue;
+    const head = detail.revisions[detail.revisions.length - 1];
+    if (evidenceFilter && evidenceFilter !== 'text') continue;
+    if (!matchesQuery(page.q, [
+      detail.headQuoteId,
+      head?.make,
+      head?.presentation.make,
+      head?.model,
+      head?.year,
+      ...(head?.lines ?? []).map((line) => line.part),
+    ])) continue;
+    records.push({
+      contract: 'repair',
+      id: detail.headQuoteId,
+      evidence: 'text',
+      integrity: detail.integrity,
+      make: head?.make ?? null,
+      model: head?.model ?? null,
+      year: head?.year ?? null,
+      presentation: head?.presentation ?? presentVehicle({}),
+      quotedMxn: head?.quotedTotalMxn ?? null,
+      revisionCount: detail.revisions.length,
+      recordedAt: head?.recordedAt ?? '',
+    });
+  }
+  records.sort(compareRepairWork);
+  const visible = records.map(withoutRecordedAt);
+  return paginate(
+    visible,
+    page,
+    visual.ids.length > CALIBRATION_QUERY_SCAN_LIMIT || repairs.allRows.length > CALIBRATION_QUERY_SCAN_LIMIT,
+  );
+}
+
 export async function readCalibrationRepair(archive: CalibrationArchive, quoteId: string) {
   if (!REPAIR_ID.test(quoteId)) throw new CalibrationQueryError('invalid');
   const repairs = await readRepairIndex(archive);
-  const row = repairs.rows.find((item) => item.quoteIds.includes(quoteId));
+  const row = repairs.allRows.find((item) => item.quoteIds.includes(quoteId));
   if (!row) throw new CalibrationQueryError('missing');
   const detail = await readRepairOpportunity(archive, row);
   if (!detail) throw new CalibrationQueryError('missing');
-  return detail;
+  return {
+    ...detail,
+    revisions: detail.revisions.map((revision) => withoutRecordedAt(revision)),
+  };
 }
 
 export async function readCalibrationQuote(archive: CalibrationArchive, quoteId: string) {
@@ -326,46 +396,35 @@ async function readVisualIndex(archive: CalibrationArchive): Promise<{ ids: stri
   return { ids: Object.keys(cases).filter((id) => CASE_ID.test(id)).sort() };
 }
 
-async function readCommercialIndex(archive: CalibrationArchive): Promise<{
-  rows: { key: string; quoteIds: string[] }[];
-  truncated: boolean;
-}> {
-  const parsed = await readJson(archive, 'data/commercial/index.json');
-  const opportunities = objectOf(parsed)?.opportunities;
-  if (!opportunities || typeof opportunities !== 'object' || Array.isArray(opportunities)) {
-    return { rows: [], truncated: false };
-  }
-  const entries = Object.entries(opportunities);
-  const rows = entries.slice(0, CALIBRATION_QUERY_SCAN_LIMIT).flatMap(([key, value]) => {
-    const safeKey = cleanText(key, 150);
-    const ids = Array.isArray(objectOf(value)?.quote_ids)
-      ? (objectOf(value)?.quote_ids as unknown[]).filter((id): id is string => typeof id === 'string' && QUOTE_ID.test(id))
-      : [];
-    if (!safeKey || ids.length === 0) return [];
-    return [{ key: safeKey, quoteIds: ids }];
-  });
-  return { rows, truncated: entries.length > CALIBRATION_QUERY_SCAN_LIMIT };
+async function readCommercialIndex(archive: CalibrationArchive) {
+  return readOpportunityIndex(archive, 'data/commercial/index.json', QUOTE_ID);
 }
 
-async function readRepairIndex(archive: CalibrationArchive): Promise<{
-  rows: { key: string; quoteIds: string[] }[];
-  truncated: boolean;
-}> {
-  const parsed = await readJson(archive, 'data/repairs/index.json');
+async function readRepairIndex(archive: CalibrationArchive) {
+  return readOpportunityIndex(archive, 'data/repairs/index.json', REPAIR_ID);
+}
+
+async function readOpportunityIndex(archive: CalibrationArchive, path: string, pattern: RegExp) {
+  const parsed = await readJson(archive, path);
   const opportunities = objectOf(parsed)?.opportunities;
-  if (!opportunities || typeof opportunities !== 'object' || Array.isArray(opportunities)) {
-    return { rows: [], truncated: false };
-  }
+  const empty = { rows: [] as OpportunityRow[], allRows: [] as OpportunityRow[], opportunityCount: 0, quoteCount: 0, truncated: false };
+  if (!opportunities || typeof opportunities !== 'object' || Array.isArray(opportunities)) return empty;
   const entries = Object.entries(opportunities);
-  const rows = entries.slice(0, CALIBRATION_QUERY_SCAN_LIMIT).flatMap(([key, value]) => {
+  const allRows = entries.flatMap(([key, value]) => {
     const safeKey = cleanText(key, 150);
     const ids = Array.isArray(objectOf(value)?.quote_ids)
-      ? (objectOf(value)?.quote_ids as unknown[]).filter((id): id is string => typeof id === 'string' && REPAIR_ID.test(id))
+      ? (objectOf(value)?.quote_ids as unknown[]).filter((id): id is string => typeof id === 'string' && pattern.test(id))
       : [];
     if (!safeKey || ids.length === 0) return [];
     return [{ key: safeKey, quoteIds: ids }];
   });
-  return { rows, truncated: entries.length > CALIBRATION_QUERY_SCAN_LIMIT };
+  return {
+    rows: allRows.slice(0, CALIBRATION_QUERY_SCAN_LIMIT),
+    allRows,
+    opportunityCount: allRows.length,
+    quoteCount: allRows.reduce((sum, row) => sum + row.quoteIds.length, 0),
+    truncated: entries.length > CALIBRATION_QUERY_SCAN_LIMIT,
+  };
 }
 
 async function readCaseRecord(archive: CalibrationArchive, caseId: string) {
@@ -406,6 +465,7 @@ async function readCaseRecord(archive: CalibrationArchive, caseId: string) {
     lines,
     observations,
     photos,
+    recordedAt: recordedStamp(parsed.updated_at) || recordedStamp(parsed.created_at),
   };
 }
 
@@ -561,6 +621,7 @@ async function readRepairQuoteRecord(archive: CalibrationArchive, quoteId: strin
     conditions,
     quotedTotalMxn: totalMatches ? quotedTotal : null,
     integrity: declared && totalMatches && !dropped && lines.length > 0 ? 'complete' as const : 'incomplete' as const,
+    recordedAt: recordedStamp(parsed.recorded_at),
   };
 }
 
@@ -690,6 +751,56 @@ function readPage(query: QueryList, cursorPattern: RegExp): { q: string; limit: 
   const q = query.q == null ? '' : String(query.q).trim().toLowerCase();
   if (q.length > 80) throw new CalibrationQueryError('invalid');
   return { q, limit, cursor };
+}
+
+type OpportunityRow = { key: string; quoteIds: string[] };
+
+type RepairWorkItem = {
+  contract: 'visual' | 'repair';
+  id: string;
+  evidence: 'photographs' | 'text' | 'pending' | 'not_provided';
+  integrity: 'complete' | 'incomplete';
+  make: string | null;
+  model: string | null;
+  year: number | null;
+  presentation?: VehiclePresentation;
+  quotedTotalMxn?: number;
+  quotedMxn?: number | null;
+  revisionCount?: number;
+  recordedAt: string;
+};
+
+function newestWindow<T>(items: T[]): T[] {
+  return items.length > CALIBRATION_QUERY_SCAN_LIMIT
+    ? items.slice(items.length - CALIBRATION_QUERY_SCAN_LIMIT)
+    : items;
+}
+
+function caseEvidence(status: string): RepairWorkItem['evidence'] {
+  if (status === 'archived_private') return 'photographs';
+  if (status === 'pending_private_archive') return 'pending';
+  return 'not_provided';
+}
+
+function recordedStamp(value: unknown): string {
+  return typeof value === 'string' && RECORDED_STAMP.test(value) ? value : '';
+}
+
+function compareRepairWork(left: RepairWorkItem, right: RepairWorkItem): number {
+  if (left.recordedAt !== right.recordedAt) return left.recordedAt < right.recordedAt ? 1 : -1;
+  return left.id < right.id ? 1 : -1;
+}
+
+function withoutRecordedAt<T extends { recordedAt: string }>(record: T): Omit<T, 'recordedAt'> {
+  const { recordedAt, ...visible } = record;
+  void recordedAt;
+  return visible;
+}
+
+function readEvidenceFilter(value: string | undefined): RepairWorkItem['evidence'] | null {
+  if (value == null || value === '') return null;
+  if (!EVIDENCE_FILTER.has(value)) throw new CalibrationQueryError('invalid');
+  return value as RepairWorkItem['evidence'];
 }
 
 function readArchiveFilter(value: string | undefined): string | null {

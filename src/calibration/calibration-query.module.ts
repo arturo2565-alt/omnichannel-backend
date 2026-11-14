@@ -21,6 +21,7 @@ import {
   calibrationQueryAccess,
   listCalibrationCases,
   listCalibrationOpportunities,
+  listCalibrationRepairWork,
   listCalibrationRepairs,
   readCalibrationCase,
   readCalibrationPhoto,
@@ -90,6 +91,11 @@ export class CalibrationQueryController {
   @Get('repairs')
   repairs(@CurrentUser() user: AuthenticatedUser, @Query() query: QueryList) {
     return this.run(user, (archive) => listCalibrationRepairs(archive, query));
+  }
+
+  @Get('repair-work')
+  repairWork(@CurrentUser() user: AuthenticatedUser, @Query() query: QueryList) {
+    return this.run(user, (archive) => listCalibrationRepairWork(archive, query));
   }
 
   @Get('repairs/:quoteId')
