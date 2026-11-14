@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
+import { evidenceByteTarget, evidenceIndexPath, presentEvidenceItems } from './evidence-link';
 import { presentVehicle, type VehiclePresentation } from './vehicle-presentation';
 
 /**
@@ -75,7 +76,9 @@ export function calibrationPathAllowed(path: string): boolean {
     || /^data\/cases\/AF-\d{6}\.json$/.test(path)
     || /^data\/photos\/AF-0\d{5}\/IMG-\d{6}\.json$/.test(path)
     || /^data\/commercial\/quotes\/CQ-\d{6}\.json$/.test(path)
-    || /^data\/repairs\/quotes\/RQ-\d{6}\.json$/.test(path);
+    || /^data\/repairs\/quotes\/RQ-\d{6}\.json$/.test(path)
+    || /^data\/evidence\/commercial\/CQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json)$/.test(path)
+    || /^data\/evidence\/repairs\/RQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json)$/.test(path);
 }
 
 export function calibrationQueryAccess(
@@ -271,7 +274,8 @@ export async function listCalibrationRepairWork(archive: CalibrationArchive, que
     const detail = await readRepairOpportunity(archive, row);
     if (!detail) continue;
     const head = detail.revisions[detail.revisions.length - 1];
-    if (evidenceFilter && evidenceFilter !== 'text') continue;
+    const evidence = await repairWorkEvidence(archive, detail.headQuoteId);
+    if (evidenceFilter && evidence !== evidenceFilter) continue;
     if (!matchesQuery(page.q, [
       detail.headQuoteId,
       head?.make,
@@ -283,7 +287,7 @@ export async function listCalibrationRepairWork(archive: CalibrationArchive, que
     records.push({
       contract: 'repair',
       id: detail.headQuoteId,
-      evidence: 'text',
+      evidence,
       integrity: detail.integrity,
       make: head?.make ?? null,
       model: head?.model ?? null,
@@ -324,6 +328,50 @@ export async function readCalibrationQuote(archive: CalibrationArchive, quoteId:
   const detail = await readOpportunity(archive, row);
   if (!detail) throw new CalibrationQueryError('missing');
   return detail;
+}
+
+export async function listCalibrationEvidence(archive: CalibrationArchive, subjectId: string) {
+  if (!(await evidenceSubjectExists(archive, subjectId))) throw new CalibrationQueryError('missing');
+  const text = await readText(archive, evidenceIndexPath(subjectId));
+  const items = text ? presentEvidenceItems(text, subjectId) : [];
+  return {
+    subjectId,
+    items: items.map((item) => ({
+      id: item.evidence_id,
+      state: item.state,
+      provenance: item.provenance,
+    })),
+  };
+}
+
+export async function readCalibrationEvidence(
+  archive: CalibrationArchive,
+  subjectId: string,
+  evidenceId: string,
+): Promise<{ mime: 'image/jpeg' | 'image/png' | 'image/webp'; bytes: Buffer }> {
+  if (!/^EV-\d{6}$/.test(evidenceId)) throw new CalibrationQueryError('invalid');
+  if (!(await evidenceSubjectExists(archive, subjectId))) throw new CalibrationQueryError('missing');
+  const indexText = await readText(archive, evidenceIndexPath(subjectId));
+  const item = (indexText ? presentEvidenceItems(indexText, subjectId) : [])
+    .find((entry) => entry.evidence_id === evidenceId);
+  if (!item || item.state !== 'verified') throw new CalibrationQueryError('missing');
+  const folder = subjectId.startsWith('CQ-') ? 'commercial' : 'repairs';
+  const manifest = await readText(archive, `data/evidence/${folder}/${subjectId}/manifests/${evidenceId}.json`);
+  const target = manifest ? evidenceByteTarget(manifest, subjectId, evidenceId) : null;
+  if (!target || item.content_sha256 !== target.sha256) throw new CalibrationQueryError('missing');
+  let bytes: Buffer;
+  try {
+    bytes = await archive.photo(target);
+  } catch {
+    throw new CalibrationQueryError('unavailable');
+  }
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > 5_242_880) {
+    throw new CalibrationQueryError('unavailable');
+  }
+  if (createHash('sha256').update(bytes).digest('hex') !== target.sha256) {
+    throw new CalibrationQueryError('unavailable');
+  }
+  return { mime: target.mime, bytes };
 }
 
 export async function readCalibrationPhoto(
@@ -774,6 +822,25 @@ function newestWindow<T>(items: T[]): T[] {
   return items.length > CALIBRATION_QUERY_SCAN_LIMIT
     ? items.slice(items.length - CALIBRATION_QUERY_SCAN_LIMIT)
     : items;
+}
+
+async function evidenceSubjectExists(archive: CalibrationArchive, subjectId: string): Promise<boolean> {
+  if (!/^(?:CQ|RQ)-\d{6}$/.test(subjectId)) throw new CalibrationQueryError('invalid');
+  const path = subjectId.startsWith('CQ-')
+    ? `data/commercial/quotes/${subjectId}.json`
+    : `data/repairs/quotes/${subjectId}.json`;
+  return objectOf(await readJson(archive, path))?.quote_id === subjectId;
+}
+
+async function repairWorkEvidence(
+  archive: CalibrationArchive,
+  quoteId: string,
+): Promise<'photographs' | 'text' | 'pending'> {
+  const text = await readText(archive, evidenceIndexPath(quoteId));
+  const items = text ? presentEvidenceItems(text, quoteId) : [];
+  if (items.some((item) => item.state === 'verified')) return 'photographs';
+  if (items.some((item) => item.state === 'privacy_pending' || item.state === 'link_pending')) return 'pending';
+  return 'text';
 }
 
 function caseEvidence(status: string): RepairWorkItem['evidence'] {

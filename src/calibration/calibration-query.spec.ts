@@ -13,10 +13,12 @@ import {
   listCalibrationRepairWork,
   listCalibrationRepairs,
   readCalibrationCase,
+  readCalibrationEvidence,
   readCalibrationPhoto,
   readCalibrationQuote,
   readCalibrationRepair,
   readCalibrationSummary,
+  listCalibrationEvidence,
   type CalibrationArchive,
   type PhotoLocator,
 } from './calibration-query';
@@ -26,6 +28,8 @@ import {
   mintCalibrationReadToken,
 } from './calibration-query-source';
 import { CalibrationQueryController, CalibrationQueryService } from './calibration-query.module';
+import { minimalDecodablePng } from './calibration-image-archive.service';
+import { evidencePublicId } from './evidence-cloudinary';
 
 const owner: AuthenticatedUser = {
   userId: 'user-1',
@@ -284,6 +288,11 @@ describe('consulta de calibración', () => {
     expect(calibrationPathAllowed('data/probes/photos/AF-900001/IMG-000001.json')).toBe(false);
     expect(calibrationPathAllowed('data/repairs/index.json')).toBe(true);
     expect(calibrationPathAllowed('data/repairs/quotes/RQ-000001.json')).toBe(true);
+    expect(calibrationPathAllowed('data/evidence/commercial/CQ-000006/index.json')).toBe(true);
+    expect(calibrationPathAllowed('data/evidence/repairs/RQ-000001/manifests/EV-000001.json')).toBe(true);
+    expect(calibrationPathAllowed('data/evidence/commercial/CQ-000006/links/LN-000001.json')).toBe(false);
+    expect(calibrationPathAllowed('data/evidence/commercial/AF-000001/index.json')).toBe(false);
+    expect(calibrationPathAllowed('data/cases/AF-000001.json')).toBe(true);
     expect(calibrationPathAllowed('data/repairs/quotes/CQ-000001.json')).toBe(false);
     expect(calibrationPathAllowed('data/repairs/quotes/../index.json')).toBe(false);
     expect(calibrationPathAllowed('data/repairs/quotes/RQ-000001.json/../../data/index.json')).toBe(false);
@@ -806,6 +815,10 @@ describe('consulta de calibración', () => {
     expect(controller).toContain("@Get('repairs')");
     expect(controller).toContain("@Get('repair-work')");
     expect(controller).toContain("@Get('repairs/:quoteId')");
+    expect(controller).toContain("@Get('quotes/:quoteId/evidence')");
+    expect(controller).toContain("@Get('quotes/:quoteId/evidence/:evidenceId')");
+    expect(controller).toContain("@Get('repairs/:quoteId/evidence')");
+    expect(controller).toContain("@Get('repairs/:quoteId/evidence/:evidenceId')");
     expect(controller).not.toContain('repair-quote-import');
     expect(app).toContain('CalibrationQueryModule');
     expect(app).not.toContain('CalibrationModule');
@@ -824,6 +837,124 @@ describe('consulta de calibración', () => {
     expect(controller).toContain("@Header('Cache-Control', 'private, no-store')");
     expect(controller).toContain('@UseGuards(JwtAuthGuard)');
     expect(controller).toContain('@CurrentUser() user: AuthenticatedUser');
+  });
+
+  it('vincula la evidencia al documento exacto y la separa de AF', async () => {
+    const bytes = minimalDecodablePng();
+    const digest = sha(bytes);
+    const received = 'ab'.repeat(32);
+    const publicId = evidencePublicId('RQ-000021', 'EV-000001', digest);
+    const manifest = {
+      schema_version: '1.0.0',
+      evidence_id: 'EV-000001',
+      subject_kind: 'repair_quote',
+      subject_id: 'RQ-000021',
+      storage_status: 'verified',
+      provenance: 'anonymized_copy',
+      visual_review: false,
+      delivery_type: 'authenticated',
+      content_sha256: digest,
+      mime_type: 'image/png',
+      asset_public_id: publicId,
+      asset_version: 4,
+    };
+    const index = {
+      schema_version: '1.0.0',
+      subject_kind: 'repair_quote',
+      subject_id: 'RQ-000021',
+      items: [
+        {
+          evidence_id: 'EV-000001',
+          link_id: 'LN-000002',
+          state: 'verified',
+          received_sha256: received,
+          content_sha256: digest,
+          provenance: 'anonymized_copy',
+        },
+        {
+          evidence_id: 'EV-000002',
+          link_id: 'LN-000003',
+          state: 'privacy_pending',
+          received_sha256: 'cd'.repeat(32),
+          content_sha256: null,
+          provenance: null,
+        },
+      ],
+      link_ids: ['LN-000001', 'LN-000002', 'LN-000003'],
+    };
+    const orphan = {
+      ...index,
+      subject_id: 'CQ-000099',
+      items: index.items.map((item) => ({ ...item, state: 'verified' })),
+    };
+    const stored: Record<string, string> = {
+      'data/index.json': JSON.stringify({ cases: { 'AF-000030': 'fila' } }),
+      'data/cases/AF-000030.json': visualCase('AF-000030', {
+        photo_archive_status: 'archived_private',
+        updated_at: '2026-11-14T04:00:00.000Z',
+      }),
+      'data/repairs/index.json': JSON.stringify({
+        opportunities: { jetta: { quote_ids: ['RQ-000020', 'RQ-000021'] } },
+      }),
+      'data/repairs/quotes/RQ-000020.json': JSON.stringify(repairQuote('RQ-000020', 1, null, 'Jetta', 2012)),
+      'data/repairs/quotes/RQ-000021.json': JSON.stringify(repairQuote('RQ-000021', 2, 'RQ-000020', 'Jetta', 2012)),
+      'data/commercial/index.json': JSON.stringify({
+        opportunities: { pintura: { quote_ids: ['CQ-000010'] } },
+      }),
+      'data/commercial/quotes/CQ-000010.json': JSON.stringify(quote('CQ-000010', 1, null)),
+      'data/evidence/repairs/RQ-000021/index.json': JSON.stringify(index),
+      'data/evidence/repairs/RQ-000021/manifests/EV-000001.json': JSON.stringify(manifest),
+      'data/evidence/commercial/CQ-000099/index.json': JSON.stringify(orphan),
+    };
+    const store = archive(stored, new Map([[digest, bytes]]));
+    const quoteDetail = await readCalibrationQuote(store, 'CQ-000010');
+    expect(quoteDetail.revisions[0].quotedMxn).toBe(34000);
+    expect(store.calls.some((call) => call.includes('data/evidence'))).toBe(false);
+
+    const linked = await listCalibrationEvidence(store, 'RQ-000021');
+    expect(linked.items).toEqual([
+      { id: 'EV-000001', state: 'verified', provenance: 'anonymized_copy' },
+      { id: 'EV-000002', state: 'privacy_pending', provenance: null },
+    ]);
+    expect(JSON.stringify(linked)).not.toContain(received);
+    expect(JSON.stringify(linked)).not.toContain(publicId);
+    expect(JSON.stringify(linked)).not.toContain('https://');
+    expect(await listCalibrationEvidence(store, 'RQ-000020')).toEqual({ subjectId: 'RQ-000020', items: [] });
+    expect(await listCalibrationEvidence(store, 'CQ-000010')).toEqual({ subjectId: 'CQ-000010', items: [] });
+    await expect(listCalibrationEvidence(store, 'CQ-000099')).rejects.toMatchObject({ code: 'missing' });
+
+    const image = await readCalibrationEvidence(store, 'RQ-000021', 'EV-000001');
+    expect(image.mime).toBe('image/png');
+    expect(image.bytes.equals(bytes)).toBe(true);
+    expect(image).not.toHaveProperty('publicId');
+    await expect(readCalibrationEvidence(store, 'RQ-000021', 'EV-000002')).rejects.toMatchObject({ code: 'missing' });
+    const swapped = { ...manifest, asset_public_id: `pegazuz_calibration/AF-000030/${digest.slice(0, 32)}` };
+    stored['data/evidence/repairs/RQ-000021/manifests/EV-000001.json'] = JSON.stringify(swapped);
+    await expect(readCalibrationEvidence(store, 'RQ-000021', 'EV-000001')).rejects.toMatchObject({ code: 'missing' });
+    expect(store.calls.some((call) => call.includes('pegazuz_calibration/AF-'))).toBe(false);
+
+    const listed = await listCalibrationRepairWork(store, {});
+    expect(listed.items.find((item) => item.id === 'RQ-000021')).toMatchObject({ evidence: 'photographs', revisionCount: 2 });
+    expect(listed.items.find((item) => item.id === 'AF-000030')).toMatchObject({ contract: 'visual', evidence: 'photographs' });
+    expect(listed.items.map((item) => item.id)).not.toContain('RQ-000020');
+    expect((await listCalibrationRepairWork(store, { evidence: 'text' })).items.map((item) => item.id)).not.toContain('RQ-000021');
+    expect((await listCalibrationRepairWork(store, { evidence: 'photographs' })).items.map((item) => item.id)).toEqual([
+      'AF-000030',
+      'RQ-000021',
+    ]);
+
+    const controller = new CalibrationQueryController(new CalibrationQueryService(store));
+    const previous = snapshotEnv();
+    try {
+      Object.assign(process.env, openEnv);
+      await expect(controller.repairEvidence({ ...owner, role: 'agent' }, 'RQ-000021')).rejects.toBeInstanceOf(ForbiddenException);
+      Object.assign(process.env, { CALIBRATION_READ_ENABLED: 'false' });
+      const callsBefore = store.calls.length;
+      await expect(controller.quoteEvidence(owner, 'CQ-000010')).rejects.toBeInstanceOf(NotFoundException);
+      expect(store.calls).toHaveLength(callsBefore);
+    } finally {
+      restoreEnv(previous);
+    }
   });
 });
 

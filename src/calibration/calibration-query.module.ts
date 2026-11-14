@@ -24,6 +24,8 @@ import {
   listCalibrationRepairWork,
   listCalibrationRepairs,
   readCalibrationCase,
+  readCalibrationEvidence,
+  listCalibrationEvidence,
   readCalibrationPhoto,
   readCalibrationQuote,
   readCalibrationRepair,
@@ -88,6 +90,23 @@ export class CalibrationQueryController {
     return this.run(user, (archive) => readCalibrationQuote(archive, quoteId));
   }
 
+  @Get('quotes/:quoteId/evidence')
+  quoteEvidence(@CurrentUser() user: AuthenticatedUser, @Param('quoteId') quoteId: string) {
+    return this.run(user, (archive) => listCalibrationEvidence(archive, quoteId));
+  }
+
+  @Get('quotes/:quoteId/evidence/:evidenceId')
+  @Header('Cache-Control', 'private, no-store')
+  @Header('X-Content-Type-Options', 'nosniff')
+  async quoteEvidencePhoto(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('quoteId') quoteId: string,
+    @Param('evidenceId') evidenceId: string,
+  ): Promise<StreamableFile> {
+    const image = await this.run(user, (archive) => readCalibrationEvidence(archive, quoteId, evidenceId));
+    return new StreamableFile(image.bytes, { type: image.mime, disposition: 'inline' });
+  }
+
   @Get('repairs')
   repairs(@CurrentUser() user: AuthenticatedUser, @Query() query: QueryList) {
     return this.run(user, (archive) => listCalibrationRepairs(archive, query));
@@ -101,6 +120,23 @@ export class CalibrationQueryController {
   @Get('repairs/:quoteId')
   repair(@CurrentUser() user: AuthenticatedUser, @Param('quoteId') quoteId: string) {
     return this.run(user, (archive) => readCalibrationRepair(archive, quoteId));
+  }
+
+  @Get('repairs/:quoteId/evidence')
+  repairEvidence(@CurrentUser() user: AuthenticatedUser, @Param('quoteId') quoteId: string) {
+    return this.run(user, (archive) => listCalibrationEvidence(archive, quoteId));
+  }
+
+  @Get('repairs/:quoteId/evidence/:evidenceId')
+  @Header('Cache-Control', 'private, no-store')
+  @Header('X-Content-Type-Options', 'nosniff')
+  async repairEvidencePhoto(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('quoteId') quoteId: string,
+    @Param('evidenceId') evidenceId: string,
+  ): Promise<StreamableFile> {
+    const image = await this.run(user, (archive) => readCalibrationEvidence(archive, quoteId, evidenceId));
+    return new StreamableFile(image.bytes, { type: image.mime, disposition: 'inline' });
   }
 
   private async run<T>(user: AuthenticatedUser, work: (archive: CalibrationArchive) => Promise<T>): Promise<T> {
