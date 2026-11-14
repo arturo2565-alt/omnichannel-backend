@@ -35,13 +35,13 @@ export const VEHICLE_CATALOG: readonly VehicleCatalogEntry[] = [
   {
     model: 'aveo',
     aliases: [],
-    ambiguity: 'Kalos, Barina, G3, Wave, Swift+, Sonic, Lova, Nexia y Vida son otros nombres y no identifican un Aveo.',
+    ambiguity: 'En 2002 y 2003 el nombre comercial era Kalos, no Aveo. Barina, G3, Wave, Swift+, Sonic, Lova, Nexia y Vida tampoco son Aveo. Sin año, o en otro mercado, la marca sigue siendo Chevrolet: nadie más usó ese nombre.',
     spans: [{
       make: 'Chevrolet',
-      from: 2002,
+      from: 2004,
       to: 2026,
       markets: null,
-      source: 'https://en.wikipedia.org/wiki/Chevrolet_Aveo ; catálogo Chevrolet Aveo 2026 de GM México',
+      source: 'https://www.autoweek.com/news/a2094776/chevrolet-calls-its-low-priced-korean-car-aveo-sales-begin-2004/ ; https://en.wikipedia.org/wiki/Chevrolet_Aveo ; catálogo Chevrolet Aveo 2026 de GM México',
     }],
   },
   {
@@ -83,7 +83,7 @@ export const VEHICLE_CATALOG: readonly VehicleCatalogEntry[] = [
   {
     model: 'charger',
     aliases: [],
-    ambiguity: 'Entre 1975 y 1978 el nombre Charger fue Dodge en Estados Unidos y Chrysler en Australia. Valiant Charger no se trata como el mismo nombre fuera de ese mercado. Sin año, o sin mercado dentro de ese cruce, la marca queda desconocida.',
+    ambiguity: 'Valiant Charger es otro nombre y queda desconocido. Entre 1975 y 1978 el nombre Charger fue Dodge en Estados Unidos y Chrysler en Australia. Sin año, o sin mercado en ese cruce, la marca queda desconocida.',
     spans: [
       {
         make: 'Dodge',

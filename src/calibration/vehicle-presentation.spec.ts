@@ -60,6 +60,11 @@ describe('presentación de marca', () => {
       label: 'Sedán 2019',
     });
     expect(presentVehicle({ model: 'Aveo' }).make).toBe('Chevrolet');
+    expect(presentVehicle({ model: 'Aveo', year: 2002 }).provenance).toBe('unknown');
+    expect(presentVehicle({ model: 'Aveo', year: 2003 }).provenance).toBe('unknown');
+    expect(presentVehicle({ model: 'Aveo', year: 2004, market: 'US' }).make).toBe('Chevrolet');
+    expect(presentVehicle({ model: 'Aveo', year: 2026, market: 'MX' }).make).toBe('Chevrolet');
+    expect(presentVehicle({ model: 'Valiant Charger', year: 1973 }).provenance).toBe('unknown');
     expect(presentVehicle({ model: 'Charger' })).toMatchObject({ make: null, provenance: 'unknown' });
     expect(presentVehicle({ model: 'Charger', year: 1975 })).toMatchObject({ make: null, provenance: 'unknown' });
     expect(presentVehicle({ model: 'Charger', year: 1975, market: 'US' }).make).toBe('Dodge');
