@@ -1,20 +1,49 @@
 import { crc32 } from 'node:zlib';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { minimalDecodablePng } from './calibration-image-archive.service';
 import { evidencePublicId } from './evidence-cloudinary';
+import { EvidenceReviewDesk } from './evidence-review';
 import {
   EvidenceGithub,
   EvidenceLinkError,
   assertEvidenceTransport,
   assertEvidenceWrite,
-  attestHumanReview,
   linkEvidence,
   sha256,
   type EvidenceFiles,
   type EvidencePhotoReceipt,
   type EvidenceRequest,
 } from './evidence-link';
+
+const reviewOwner: AuthenticatedUser = {
+  userId: 'user-1',
+  email: 'dueno@ensayo.test',
+  tallerId: '01000000-0000-4000-8000-000000000010',
+  role: 'owner',
+};
+
+const reviewEnv: NodeJS.ProcessEnv = {
+  PEGAZUZ_ENV: 'staging',
+  CALIBRATION_READ_ENABLED: 'true',
+  CALIBRATION_INGEST_ENABLED: 'false',
+  CALIBRATION_READ_ACTORS: 'dueno@ensayo.test',
+  RAILWAY_ENVIRONMENT_NAME: 'staging',
+  RAILWAY_SERVICE_NAME: 'pegazuz-backend-staging',
+};
+
+async function approve(files: MemoryFiles, subjectId: string, receivedSha256: string, bytes: Buffer) {
+  const desk = new EvidenceReviewDesk({ files, env: reviewEnv });
+  const preview = await desk.hold(reviewOwner, { subjectId, receivedSha256, bytes });
+  const seen = await desk.read(reviewOwner, preview.previewId);
+  if (!seen.bytes.equals(bytes)) throw new Error('preview bytes');
+  return desk.confirm(reviewOwner, preview.previewId, {
+    subjectId,
+    sha256: preview.sha256,
+    visibleIdentifiersReviewed: true,
+  });
+}
 
 class MemoryFiles implements EvidenceFiles {
   readonly files = new Map<string, { content: string; sha: string }>();
@@ -169,13 +198,7 @@ describe('vínculo de evidencia para CQ y RQ', () => {
     expect(files.writes).toEqual([]);
     expect(files.files.get('data/commercial/quotes/CQ-000011.json')?.content).toBe(quote);
 
-    await attestHumanReview(files, {
-      subjectId: 'CQ-000011',
-      receivedSha256: received,
-      reviewedSha256: sha256(derivative),
-      operatorRole: 'owner',
-      confirmation: 'human_reviewed',
-    });
+    await approve(files, 'CQ-000011', received, derivative);
     photos.verified = false;
     const pending = await linkEvidence(files, photos, {
       subjectId: 'CQ-000011',
@@ -212,7 +235,9 @@ describe('vínculo de evidencia para CQ y RQ', () => {
     const archived = files.files.get(manifestPath)?.content ?? '';
     expect(archived).toContain(`"received_sha256": "${received}"`);
     expect(archived).toContain(`"content_sha256": "${sha256(derivative)}"`);
-    expect(archived).toContain('"operator_role": "owner"');
+    expect(archived).toContain('"authorization": "authenticated_owner"');
+    expect(archived).not.toContain('operator_role');
+    expect(archived).not.toContain('@');
     expect(archived).not.toContain('https://');
 
     const duplicate = await linkEvidence(files, photos, {
@@ -245,20 +270,8 @@ describe('vínculo de evidencia para CQ y RQ', () => {
     files.seed('data/repairs/quotes/RQ-000012.json', quoteFile('RQ-000012', 4500));
     const photos = new MemoryPhotos();
     const derivative = minimalDecodablePng([4, 5, 6]);
-    await attestHumanReview(files, {
-      subjectId: 'CQ-000012',
-      receivedSha256: received,
-      reviewedSha256: sha256(derivative),
-      operatorRole: 'owner',
-      confirmation: 'human_reviewed',
-    });
-    await attestHumanReview(files, {
-      subjectId: 'RQ-000012',
-      receivedSha256: received,
-      reviewedSha256: sha256(derivative),
-      operatorRole: 'owner',
-      confirmation: 'human_reviewed',
-    });
+    await approve(files, 'CQ-000012', received, derivative);
+    await approve(files, 'RQ-000012', received, derivative);
     const commercial = await linkEvidence(files, photos, {
       subjectId: 'CQ-000012',
       approval: 'anonymized_copy',
@@ -359,28 +372,13 @@ describe('vínculo de evidencia para CQ y RQ', () => {
     expect(files.writes).toEqual([]);
     expect(photos.calls).toEqual([]);
 
-    const review = await attestHumanReview(files, {
-      subjectId: 'RQ-000040',
-      receivedSha256: received,
-      reviewedSha256: sha256(approved),
-      operatorRole: 'owner',
-      confirmation: 'human_reviewed',
+    const review = await approve(files, 'RQ-000040', received, approved);
+    expect(review).toMatchObject({ status: 'attested', reviewId: 'RV-000001', evidenceId: 'EV-000001' });
+    expect(await approve(files, 'RQ-000040', received, approved)).toMatchObject({
+      status: 'already_attested',
+      reviewId: 'RV-000001',
+      evidenceId: 'EV-000001',
     });
-    expect(review).toEqual({ status: 'attested', reviewId: 'RV-000001' });
-    expect(await attestHumanReview(files, {
-      subjectId: 'RQ-000040',
-      receivedSha256: received,
-      reviewedSha256: sha256(approved),
-      operatorRole: 'owner',
-      confirmation: 'human_reviewed',
-    })).toEqual({ status: 'already_attested', reviewId: 'RV-000001' });
-    await expect(attestHumanReview(files, {
-      subjectId: 'RQ-000040',
-      receivedSha256: received,
-      reviewedSha256: sha256(approved),
-      operatorRole: 'agent' as 'owner',
-      confirmation: 'human_reviewed',
-    })).rejects.toMatchObject({ code: 'rejected' });
     await expect(linkEvidence(files, photos, {
       subjectId: 'RQ-000040',
       approval: 'anonymized_copy',
@@ -413,13 +411,7 @@ describe('vínculo de evidencia para CQ y RQ', () => {
 
     files.failManifest = true;
     const second = minimalDecodablePng([8, 8, 8]);
-    await attestHumanReview(files, {
-      subjectId: 'RQ-000040',
-      receivedSha256: otherReceived,
-      reviewedSha256: sha256(second),
-      operatorRole: 'owner',
-      confirmation: 'human_reviewed',
-    });
+    await approve(files, 'RQ-000040', otherReceived, second);
     await expect(linkEvidence(files, photos, {
       subjectId: 'RQ-000040',
       approval: 'anonymized_copy',
@@ -447,6 +439,9 @@ describe('vínculo de evidencia para CQ y RQ', () => {
     for (const name of names) {
       const source = readFileSync(join(__dirname, name), 'utf8');
       expect(source).not.toContain('attestHumanReview');
+      expect(source).not.toContain('issueOwnerReviewProof');
+      expect(source).not.toContain('commitOwnerReview');
+      expect(source).not.toContain('EvidenceReviewDesk');
       expect(source).not.toContain('linkEvidence');
       expect(source).not.toContain('human_reviewed');
     }

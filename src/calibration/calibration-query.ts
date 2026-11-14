@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { evidenceByteTarget, evidenceIndexPath, evidenceReviewMatches, presentEvidenceItems } from './evidence-link';
 import { presentVehicle, type VehiclePresentation } from './vehicle-presentation';
+
+export { calibrationQueryAccess } from './calibration-access';
 
 /**
  * Consulta de solo lectura. No escribe índices, expedientes ni fotografías.
@@ -21,7 +22,6 @@ const EVIDENCE_FILTER = new Set(['photographs', 'text', 'pending']);
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const PHONE = /\d{10,}/;
 const PLATE = /\b[A-Z]{3}-?\d{3,4}(?:-?[A-Z])?\b/;
-const ACTOR = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const SERVICES = new Set(['exterior_bath', 'bath_with_bodywork', 'color_change']);
 const WORK = new Set(['bodywork', 'disassembly', 'interior_frames']);
 const TREATMENTS = new Set(['repair_paint', 'paint', 'replace_paint', 'replace', 'other', 'uncertain']);
@@ -80,22 +80,6 @@ export function calibrationPathAllowed(path: string): boolean {
     || /^data\/evidence\/commercial\/CQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json|reviews\/RV-\d{6}\.json)$/.test(path)
     || /^data\/evidence\/repairs\/RQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json|reviews\/RV-\d{6}\.json)$/.test(path)
     || path === 'data/evidence/index.json';
-}
-
-export function calibrationQueryAccess(
-  env: NodeJS.ProcessEnv,
-  user: AuthenticatedUser | undefined,
-): 'open' | 'hidden' | 'forbidden' {
-  if (!queryVisible(env)) return 'hidden';
-  if (user?.role !== 'owner' || !actorPermitted(user.email, env)) return 'forbidden';
-  return 'open';
-}
-
-function actorPermitted(email: unknown, env: NodeJS.ProcessEnv): boolean {
-  if (typeof email !== 'string') return false;
-  const normalized = email.trim().toLowerCase();
-  if (!ACTOR.test(normalized) || normalized.length > 254) return false;
-  return new Set(readActors(env)).has(normalized);
 }
 
 export async function readCalibrationSummary(archive: CalibrationArchive) {
@@ -363,7 +347,7 @@ export async function readCalibrationEvidence(
   const target = manifest ? evidenceByteTarget(manifest, subjectId, evidenceId) : null;
   if (!target || item.content_sha256 !== target.sha256) throw new CalibrationQueryError('missing');
   const review = await readText(archive, `data/evidence/${folder}/${subjectId}/reviews/${target.reviewId}.json`);
-  if (!review || !evidenceReviewMatches(review, subjectId, target.reviewId, target.sha256)) {
+  if (!review || !evidenceReviewMatches(review, subjectId, target.reviewId, target.sha256, evidenceId, target.actorKey, target.receivedSha256)) {
     throw new CalibrationQueryError('missing');
   }
   let bytes: Buffer;
@@ -401,24 +385,6 @@ export async function readCalibrationPhoto(
   const actual = createHash('sha256').update(bytes).digest('hex');
   if (actual !== manifest.locator.sha256) throw new CalibrationQueryError('unavailable');
   return { mime: manifest.mime, bytes };
-}
-
-function queryVisible(env: NodeJS.ProcessEnv): boolean {
-  if (String(env.CALIBRATION_READ_ENABLED ?? '').trim() !== 'true') return false;
-  if (String(env.CALIBRATION_INGEST_ENABLED ?? '').trim() === 'true') return false;
-  if (String(env.PEGAZUZ_ENV ?? '').trim().toLowerCase() !== 'staging') return false;
-  const railwayEnv = String(env.RAILWAY_ENVIRONMENT_NAME ?? '').trim();
-  if (railwayEnv === 'production') return false;
-  const service = String(env.RAILWAY_SERVICE_NAME ?? '').trim();
-  return service !== 'omnichannel-backend' && service !== 'Postgres';
-}
-
-function readActors(env: NodeJS.ProcessEnv): string[] {
-  return String(env.CALIBRATION_READ_ACTORS ?? '')
-    .split(',')
-    .map((item) => item.trim().toLowerCase())
-    .filter((item) => ACTOR.test(item))
-    .slice(0, 20);
 }
 
 async function readText(archive: CalibrationArchive, path: string): Promise<string | null> {

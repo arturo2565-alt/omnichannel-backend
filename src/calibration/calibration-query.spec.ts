@@ -860,8 +860,10 @@ describe('consulta de calibración', () => {
       provenance: 'anonymized_copy',
       human_review_id: 'RV-000001',
       reviewed_sha256: digest,
-      review_confirmation: 'human_reviewed',
-      operator_role: 'owner',
+      received_sha256: received,
+      authorization: 'authenticated_owner',
+      actor_key: 'cd'.repeat(32),
+      visible_identifiers_reviewed: true,
       delivery_type: 'authenticated',
       content_sha256: digest,
       mime_type: 'image/png',
@@ -917,11 +919,13 @@ describe('consulta de calibración', () => {
       'data/evidence/repairs/RQ-000021/reviews/RV-000001.json': JSON.stringify({
         schema_version: '1.0.0',
         review_id: 'RV-000001',
+        evidence_id: 'EV-000001',
         subject_id: 'RQ-000021',
         received_sha256: received,
         reviewed_sha256: digest,
-        confirmation: 'human_reviewed',
-        operator_role: 'owner',
+        authorization: 'authenticated_owner',
+        actor_key: 'cd'.repeat(32),
+        visible_identifiers_reviewed: true,
       }),
       'data/evidence/index.json': JSON.stringify({
         schema_version: '1.0.0',
@@ -951,6 +955,20 @@ describe('consulta de calibración', () => {
     expect(image.mime).toBe('image/png');
     expect(image.bytes.equals(bytes)).toBe(true);
     expect(image).not.toHaveProperty('publicId');
+    const reviewPath = 'data/evidence/repairs/RQ-000021/reviews/RV-000001.json';
+    const authenticReview = stored[reviewPath];
+    stored[reviewPath] = JSON.stringify({
+      schema_version: '1.0.0',
+      review_id: 'RV-000001',
+      evidence_id: 'EV-000001',
+      subject_id: 'RQ-000021',
+      received_sha256: received,
+      reviewed_sha256: digest,
+      confirmation: 'human_reviewed',
+      operator_role: 'owner',
+    });
+    await expect(readCalibrationEvidence(store, 'RQ-000021', 'EV-000001')).rejects.toMatchObject({ code: 'missing' });
+    stored[reviewPath] = authenticReview;
     await expect(readCalibrationEvidence(store, 'RQ-000021', 'EV-000002')).rejects.toMatchObject({ code: 'missing' });
     const swapped = { ...manifest, asset_public_id: `pegazuz_calibration/AF-000030/${digest.slice(0, 32)}` };
     stored['data/evidence/repairs/RQ-000021/manifests/EV-000001.json'] = JSON.stringify(swapped);

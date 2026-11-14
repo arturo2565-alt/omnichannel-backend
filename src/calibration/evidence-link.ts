@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
+import { calibrationQueryAccess } from './calibration-access';
 import { CalibrationWriteError, classifyGithubFailure } from './calibration-github-writer';
 import { imageContainsPersonalMetadata, validateCalibrationImage } from './calibration-image-archive.service';
 import { evidencePublicId, type EvidencePhotoReceipt } from './evidence-cloudinary';
@@ -14,8 +16,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_ITEMS = 30;
 const WRITE_PATH = /^data\/evidence\/(?:index\.json|(?:commercial\/CQ-\d{6}|repairs\/RQ-\d{6})\/(?:index\.json|links\/LN-\d{6}\.json|manifests\/EV-\d{6}\.json|reviews\/index\.json|reviews\/RV-\d{6}\.json))$/;
 export const EVIDENCE_CATALOG_PATH = 'data/evidence/index.json';
-const SELF_REVIEW = ['humanReviewed', 'human_reviewed', 'visualReview', 'visual_review', 'attestation', 'review', 'reviewer', 'operator', 'operatorRole', 'operator_role', 'confirmation', 'email', 'name'];
-const REVIEW_FIELDS = new Set(['subjectId', 'receivedSha256', 'reviewedSha256', 'operatorRole', 'confirmation']);
+const SELF_REVIEW = ['humanReviewed', 'human_reviewed', 'visualReview', 'visual_review', 'attestation', 'review', 'reviewer', 'operator', 'operatorRole', 'operator_role', 'confirmation', 'email', 'name', 'authorization', 'actorKey', 'actor_key', 'visibleIdentifiersReviewed', 'visible_identifiers_reviewed', 'previewId', 'imageBase64'];
 const QUOTE_PATH = /^data\/(?:commercial\/quotes\/CQ-\d{6}|repairs\/quotes\/RQ-\d{6})\.json$/;
 const BLOCKED = ['data/cases/', 'data/photos/', 'data/probes', 'data/index.json', 'AF-', 'cal008-probe', 'cal010-probe'];
 
@@ -43,14 +44,6 @@ export type EvidenceRequest = {
   approval: EvidenceApproval;
   receivedSha256: string;
   bytes?: Buffer;
-};
-
-export type HumanReviewRequest = {
-  subjectId: string;
-  receivedSha256: string;
-  reviewedSha256: string;
-  operatorRole: 'owner';
-  confirmation: 'human_reviewed';
 };
 
 export type EvidenceResult =
@@ -104,6 +97,8 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
   format: 'jpg' | 'png' | 'webp';
   sha256: string;
   reviewId: string;
+  actorKey: string;
+  receivedSha256: string;
 } | null {
   let parsed: Record<string, unknown>;
   try {
@@ -112,6 +107,8 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
     return null;
   }
   const sha = typeof parsed.content_sha256 === 'string' ? parsed.content_sha256 : '';
+  const received = typeof parsed.received_sha256 === 'string' ? parsed.received_sha256 : '';
+  const actorKey = typeof parsed.actor_key === 'string' ? parsed.actor_key : '';
   const publicId = typeof parsed.asset_public_id === 'string' ? parsed.asset_public_id : '';
   const version = Number(parsed.asset_version);
   const format = mimeFormat(parsed.mime_type);
@@ -121,23 +118,47 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
     || parsed.storage_status !== 'verified'
     || parsed.provenance !== 'anonymized_copy'
     || parsed.visual_review !== undefined
+    || parsed.operator_role !== undefined
+    || parsed.confirmation !== undefined
+    || parsed.review_confirmation !== undefined
+    || parsed.email !== undefined
     || parsed.reviewed_sha256 !== sha
-    || parsed.review_confirmation !== 'human_reviewed'
-    || parsed.operator_role !== 'owner'
+    || parsed.authorization !== 'authenticated_owner'
+    || parsed.visible_identifiers_reviewed !== true
     || !/^RV-\d{6}$/.test(String(parsed.human_review_id))
     || parsed.delivery_type !== 'authenticated'
     || !format
     || !SHA256.test(sha)
+    || !SHA256.test(received)
+    || received === sha
+    || !SHA256.test(actorKey)
     || publicId !== evidencePublicId(subjectId, evidenceId, sha)
     || !Number.isInteger(version)
     || version < 1
   ) {
     return null;
   }
-  return { mime: format.mime, publicId, version, format: format.format, sha256: sha, reviewId: String(parsed.human_review_id) };
+  return {
+    mime: format.mime,
+    publicId,
+    version,
+    format: format.format,
+    sha256: sha,
+    reviewId: String(parsed.human_review_id),
+    actorKey,
+    receivedSha256: received,
+  };
 }
 
-export function evidenceReviewMatches(content: string, subjectId: string, reviewId: string, sha256Value: string): boolean {
+export function evidenceReviewMatches(
+  content: string,
+  subjectId: string,
+  reviewId: string,
+  sha256Value: string,
+  evidenceId: string,
+  actorKey: string,
+  receivedSha256: string,
+): boolean {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(content) as Record<string, unknown>;
@@ -147,53 +168,123 @@ export function evidenceReviewMatches(content: string, subjectId: string, review
   const serialized = content.toLowerCase();
   if (serialized.includes('@') || /\brostro|\bplaca|\bvin\b|email|nombre/.test(serialized)) return false;
   return parsed.review_id === reviewId
+    && parsed.evidence_id === evidenceId
     && parsed.subject_id === subjectId
     && parsed.reviewed_sha256 === sha256Value
-    && parsed.confirmation === 'human_reviewed'
-    && parsed.operator_role === 'owner'
+    && parsed.received_sha256 === receivedSha256
+    && parsed.authorization === 'authenticated_owner'
+    && parsed.visible_identifiers_reviewed === true
+    && parsed.actor_key === actorKey
+    && SHA256.test(actorKey)
     && !('visual_review' in parsed)
-    && !('email' in parsed);
+    && !('email' in parsed)
+    && !('operator_role' in parsed)
+    && !('confirmation' in parsed)
+    && !('name' in parsed);
 }
 
-export async function attestHumanReview(
-  files: EvidenceFiles,
-  request: HumanReviewRequest,
-): Promise<{ status: 'attested' | 'already_attested'; reviewId: string }> {
-  rejectUnexpectedReview(request);
-  const subjectId = request.subjectId;
-  if (!SUBJECT_ID.test(subjectId) || !SHA256.test(request.receivedSha256) || !SHA256.test(request.reviewedSha256)) {
+const proofs = new WeakSet<object>();
+const PROOF_FIELDS = new Set(['subjectId', 'receivedSha256', 'reviewedSha256', 'visibleIdentifiersReviewed']);
+
+export type OwnerReviewProof = {
+  readonly actorKey: string;
+  readonly subjectId: string;
+  readonly receivedSha256: string;
+  readonly reviewedSha256: string;
+};
+
+export function ownerActorKey(userId: string): string {
+  if (typeof userId !== 'string' || !/^[A-Za-z0-9-]{1,80}$/.test(userId)) throw new EvidenceLinkError('rejected');
+  return createHash('sha256').update(`calibration-owner\0${userId}`).digest('hex');
+}
+
+/**
+ * The proof is sealed here. A caller-supplied role string is not a proof.
+ * Only the object returned by this function can be committed.
+ */
+export function issueOwnerReviewProof(
+  env: NodeJS.ProcessEnv,
+  user: AuthenticatedUser | undefined,
+  fields: {
+    subjectId: string;
+    receivedSha256: string;
+    reviewedSha256: string;
+    visibleIdentifiersReviewed: true;
+  },
+): OwnerReviewProof {
+  if (calibrationQueryAccess(env, user) !== 'open' || !user) throw new EvidenceLinkError('rejected');
+  const record = fields as unknown as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !PROOF_FIELDS.has(key))) throw new EvidenceLinkError('rejected');
+  if (fields.visibleIdentifiersReviewed !== true) throw new EvidenceLinkError('rejected');
+  if (!SUBJECT_ID.test(fields.subjectId) || !SHA256.test(fields.receivedSha256) || !SHA256.test(fields.reviewedSha256)) {
     throw new EvidenceLinkError('invalid');
   }
-  if (request.operatorRole !== 'owner' || request.confirmation !== 'human_reviewed') throw new EvidenceLinkError('rejected');
-  if (request.receivedSha256 === request.reviewedSha256) throw new EvidenceLinkError('rejected');
-  if (!(await readQuote(files, subjectId))) throw new EvidenceLinkError('missing');
-  const indexPath = reviewIndexPath(subjectId);
+  if (fields.receivedSha256 === fields.reviewedSha256) throw new EvidenceLinkError('rejected');
+  const proof: OwnerReviewProof = Object.freeze({
+    actorKey: ownerActorKey(user.userId),
+    subjectId: fields.subjectId,
+    receivedSha256: fields.receivedSha256,
+    reviewedSha256: fields.reviewedSha256,
+  });
+  proofs.add(proof);
+  return proof;
+}
+
+export async function commitOwnerReview(
+  files: EvidenceFiles,
+  proof: OwnerReviewProof,
+): Promise<{ status: 'attested' | 'already_attested'; reviewId: string; evidenceId: string }> {
+  if (!proofs.has(proof)) throw new EvidenceLinkError('rejected');
+  if (!(await readQuote(files, proof.subjectId))) throw new EvidenceLinkError('missing');
+  const indexPath = reviewIndexPath(proof.subjectId);
   const indexFile = await files.read(indexPath);
-  const reviews = indexFile ? requireReviews(indexFile.content, subjectId) : [];
-  const sameBytes = reviews.find((item) => item.reviewed_sha256 === request.reviewedSha256);
-  if (sameBytes && sameBytes.received_sha256 !== request.receivedSha256) throw new EvidenceLinkError('conflict');
-  if (sameBytes) return { status: 'already_attested', reviewId: sameBytes.review_id };
+  const reviews = indexFile ? requireReviews(indexFile.content, proof.subjectId) : [];
+  const sameBytes = reviews.find((item) => item.reviewed_sha256 === proof.reviewedSha256);
+  if (sameBytes && sameBytes.received_sha256 !== proof.receivedSha256) throw new EvidenceLinkError('conflict');
+  if (sameBytes) {
+    return { status: 'already_attested', reviewId: sameBytes.review_id, evidenceId: sameBytes.evidence_id };
+  }
   if (reviews.length >= MAX_ITEMS) throw new EvidenceLinkError('limit');
+  const evidenceFile = await files.read(evidenceIndexPath(proof.subjectId));
+  const evidence = evidenceFile ? requireIndex(evidenceFile.content, proof.subjectId) : emptyIndex(proof.subjectId);
+  if (evidence.items.length >= MAX_ITEMS) throw new EvidenceLinkError('limit');
+  const evidenceId = nextId('EV', [
+    ...evidence.items.map((item) => item.evidence_id),
+    ...reviews.map((item) => item.evidence_id),
+  ]);
   const reviewId = nextId('RV', reviews.map((item) => item.review_id));
   const document = {
     schema_version: EVIDENCE_SCHEMA_VERSION,
     review_id: reviewId,
-    subject_kind: subjectId.startsWith('CQ-') ? 'commercial_quote' : 'repair_quote',
-    subject_id: subjectId,
-    received_sha256: request.receivedSha256,
-    reviewed_sha256: request.reviewedSha256,
-    confirmation: 'human_reviewed',
-    operator_role: 'owner',
+    evidence_id: evidenceId,
+    subject_kind: proof.subjectId.startsWith('CQ-') ? 'commercial_quote' : 'repair_quote',
+    subject_id: proof.subjectId,
+    received_sha256: proof.receivedSha256,
+    reviewed_sha256: proof.reviewedSha256,
+    authorization: 'authenticated_owner',
+    actor_key: proof.actorKey,
+    visible_identifiers_reviewed: true,
   };
-  await createDocument(files, reviewPath(subjectId, reviewId), document);
-  reviews.push({ review_id: reviewId, received_sha256: request.receivedSha256, reviewed_sha256: request.reviewedSha256 });
+  await createDocument(files, reviewPath(proof.subjectId, reviewId), document);
+  reviews.push({
+    review_id: reviewId,
+    evidence_id: evidenceId,
+    received_sha256: proof.receivedSha256,
+    reviewed_sha256: proof.reviewedSha256,
+    actor_key: proof.actorKey,
+  });
   await files.write(indexPath, canonical({
     schema_version: EVIDENCE_SCHEMA_VERSION,
     subject_kind: document.subject_kind,
-    subject_id: subjectId,
+    subject_id: proof.subjectId,
     reviews,
   }), indexFile?.sha);
-  return { status: 'attested', reviewId };
+  return { status: 'attested', reviewId, evidenceId };
+}
+
+export async function evidenceSubjectExists(files: EvidenceFiles, subjectId: string): Promise<boolean> {
+  if (!SUBJECT_ID.test(subjectId)) return false;
+  return readQuote(files, subjectId);
 }
 
 export async function linkEvidence(
@@ -376,6 +467,7 @@ async function archiveDerivative(
   if (receivedItem && receivedItem.content_sha256 !== checked.sha256) throw new EvidenceLinkError('conflict');
   const review = await findReview(files, subjectId, receivedSha256, checked.sha256);
   if (!review) throw new EvidenceLinkError('review_required');
+  if (sameContent && sameContent.evidence_id !== review.evidence_id) throw new EvidenceLinkError('conflict');
   if (sameContent?.state === 'verified') {
     await publishCatalog(files, subjectId, index);
     return { status: 'already_linked', evidenceId: sameContent.evidence_id };
@@ -386,11 +478,14 @@ async function archiveDerivative(
   let currentSha = indexSha;
   if (!evidenceId) {
     assertRoom(index);
-    evidenceId = nextId('EV', index.items.map((item) => item.evidence_id));
+    evidenceId = review.evidence_id;
+    if (!/^EV-\d{6}$/.test(evidenceId) || index.items.some((item) => item.evidence_id === evidenceId)) {
+      throw new EvidenceLinkError('conflict');
+    }
     linkId = nextId('LN', index.link_ids);
-    const manifest = manifestDocument(index, evidenceId, receivedSha256, checked, bytes.length, review.review_id, null, null, 'pending');
+    const manifest = manifestDocument(index, evidenceId, receivedSha256, checked, bytes.length, review, null, null, 'pending');
     await createDocument(files, manifestPath(subjectId, evidenceId), manifest);
-    await createDocument(files, linkPath(subjectId, linkId), linkDocument(index, linkId, evidenceId, 'link_pending', receivedSha256, checked.sha256, review.review_id));
+    await createDocument(files, linkPath(subjectId, linkId), linkDocument(index, linkId, evidenceId, 'link_pending', receivedSha256, checked.sha256, review));
     index.items.push({
       evidence_id: evidenceId,
       link_id: linkId,
@@ -423,7 +518,8 @@ async function archiveDerivative(
   const completionId = index.link_ids.includes(linkId) && linkId
     ? nextId('LN', index.link_ids)
     : linkId;
-  const completion = linkDocument(index, completionId, evidenceId, 'linked', receivedSha256, checked.sha256, review.review_id);
+  if (evidenceId !== review.evidence_id) throw new EvidenceLinkError('conflict');
+  const completion = linkDocument(index, completionId, evidenceId, 'linked', receivedSha256, checked.sha256, review);
   await createDocument(files, linkPath(subjectId, completionId), completion);
   const item = index.items.find((entry) => entry.evidence_id === evidenceId);
   if (!item) throw new EvidenceLinkError('missing');
@@ -442,7 +538,7 @@ function manifestDocument(
   receivedSha256: string,
   checked: { format: 'jpg' | 'png' | 'webp'; sha256: string },
   sizeBytes: number,
-  reviewId: string,
+  review: StoredReview,
   assetPublicId: string | null,
   assetVersion: number | null,
   storageStatus: 'pending' | 'verified',
@@ -457,10 +553,11 @@ function manifestDocument(
     provenance: 'anonymized_copy',
     received_sha256: receivedSha256,
     content_sha256: checked.sha256,
-    human_review_id: reviewId,
+    human_review_id: review.review_id,
     reviewed_sha256: checked.sha256,
-    review_confirmation: 'human_reviewed',
-    operator_role: 'owner',
+    authorization: 'authenticated_owner',
+    actor_key: review.actor_key,
+    visible_identifiers_reviewed: true,
     mime_type: checked.format === 'jpg' ? 'image/jpeg' : checked.format === 'png' ? 'image/png' : 'image/webp',
     size_bytes: sizeBytes,
     asset_public_id: assetPublicId,
@@ -476,7 +573,7 @@ function linkDocument(
   action: 'link_pending' | 'linked',
   receivedSha256: string,
   contentSha256: string,
-  reviewId: string,
+  review: StoredReview,
 ) {
   return {
     schema_version: EVIDENCE_SCHEMA_VERSION,
@@ -488,10 +585,11 @@ function linkDocument(
     provenance: 'anonymized_copy',
     received_sha256: receivedSha256,
     content_sha256: contentSha256,
-    human_review_id: reviewId,
+    human_review_id: review.review_id,
     reviewed_sha256: contentSha256,
-    review_confirmation: 'human_reviewed',
-    operator_role: 'owner',
+    authorization: 'authenticated_owner',
+    actor_key: review.actor_key,
+    visible_identifiers_reviewed: true,
   };
 }
 
@@ -504,8 +602,10 @@ async function createDocument(files: EvidenceFiles, path: string, document: unkn
   if (current.review_id || next.review_id) {
     if (
       current.review_id === next.review_id
+      && current.evidence_id === next.evidence_id
       && current.reviewed_sha256 === next.reviewed_sha256
       && current.received_sha256 === next.received_sha256
+      && current.actor_key === next.actor_key
     ) return existing.sha;
     throw new EvidenceLinkError('conflict');
   }
@@ -589,13 +689,13 @@ function rejectSelfReview(request: EvidenceRequest): void {
   }
 }
 
-function rejectUnexpectedReview(request: HumanReviewRequest): void {
-  const record = request as unknown as Record<string, unknown>;
-  if (Object.keys(record).some((key) => !REVIEW_FIELDS.has(key))) throw new EvidenceLinkError('rejected');
-  if ('bytes' in record) throw new EvidenceLinkError('rejected');
-}
-
-type StoredReview = { review_id: string; received_sha256: string; reviewed_sha256: string };
+type StoredReview = {
+  review_id: string;
+  evidence_id: string;
+  received_sha256: string;
+  reviewed_sha256: string;
+  actor_key: string;
+};
 
 function reviewIndexPath(subjectId: string): string {
   return `${evidenceDirectory(subjectId)}/reviews/index.json`;
@@ -610,7 +710,10 @@ function requireReviews(content: string, subjectId: string): StoredReview[] {
   if (parsed.subject_id !== subjectId || !Array.isArray(parsed.reviews)) throw new EvidenceLinkError('conflict');
   return parsed.reviews.flatMap((item) => {
     const review = item as StoredReview;
-    return review && typeof review.review_id === 'string' ? [review] : [];
+    if (!review || typeof review !== 'object') return [];
+    if (!/^RV-\d{6}$/.test(review.review_id) || !/^EV-\d{6}$/.test(review.evidence_id)) return [];
+    if (!SHA256.test(review.received_sha256) || !SHA256.test(review.reviewed_sha256) || !SHA256.test(review.actor_key)) return [];
+    return [review];
   });
 }
 
@@ -627,7 +730,7 @@ async function findReview(
   ));
   if (!entry) return null;
   const file = await files.read(reviewPath(subjectId, entry.review_id));
-  if (!file || !evidenceReviewMatches(file.content, subjectId, entry.review_id, reviewedSha256)) return null;
+  if (!file || !evidenceReviewMatches(file.content, subjectId, entry.review_id, reviewedSha256, entry.evidence_id, entry.actor_key, entry.received_sha256)) return null;
   return entry;
 }
 

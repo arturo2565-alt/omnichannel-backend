@@ -10,6 +10,7 @@ import { TallerModule } from './taller/taller.module';
 import { MessagingQueueModule } from './messaging-queue/messaging-queue.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { CalibrationQueryModule } from './calibration/calibration-query.module';
+import { EvidenceReviewModule } from './calibration/evidence-review.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DebugController } from './sentry/debug.controller';
@@ -71,6 +72,7 @@ assertRemoteSynchronizeAllowed(
     MessagingQueueModule,
     DashboardModule,
     CalibrationQueryModule,
+    EvidenceReviewModule,
   ],
   controllers: [AppController, DebugController],
   providers: [AppService],
