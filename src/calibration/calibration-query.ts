@@ -136,7 +136,7 @@ export async function listCalibrationCases(archive: CalibrationArchive, query: Q
   const page = readPage(query, CASE_ID);
   const archiveFilter = readArchiveFilter(query.archive);
   const visual = await readVisualIndex(archive);
-  const records = [];
+  const records: Array<Omit<NonNullable<Awaited<ReturnType<typeof readCaseRecord>>>, 'recordedAt'>> = [];
   for (const id of visual.ids.slice(0, CALIBRATION_QUERY_SCAN_LIMIT)) {
     const record = await readCaseRecord(archive, id);
     if (!record) continue;
