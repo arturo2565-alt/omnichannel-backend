@@ -42,6 +42,7 @@
     "import:calibration-case": "node dist/calibration/calibration-import-run.js",
     "import:calibration-batch": "node dist/calibration/calibration-import-batch-run.js",
     "import:commercial-quote": "node dist/calibration/commercial-quote-import-run.js",
+    "import:repair-quote": "node dist/calibration/repair-quote-import-run.js",
     "bootstrap:staging": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register scripts/bootstrap-staging.ts",
     "report:montaje-pintura": "ts-node --transpile-only --project tsconfig.scripts.json -r tsconfig-paths/register src/catalog/montaje-pintura-migration-report.ts"
   },
