@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
+import { presentVehicle, type VehiclePresentation } from './vehicle-presentation';
 
 /**
  * Consulta de solo lectura. No escribe índices, expedientes ni fotografías.
@@ -159,6 +160,7 @@ export async function listCalibrationOpportunities(archive: CalibrationArchive, 
     make: string | null;
     model: string | null;
     year: number | null;
+    presentation: VehiclePresentation;
     quotedMxn: number | null;
   }[] = [];
   for (const row of commercial.rows.slice(0, CALIBRATION_QUERY_SCAN_LIMIT)) {
@@ -170,6 +172,7 @@ export async function listCalibrationOpportunities(archive: CalibrationArchive, 
       detail.headQuoteId,
       detail.opportunityKey,
       head?.make,
+      head?.presentation.make,
       head?.model,
       head?.year,
       detail.service,
@@ -183,6 +186,7 @@ export async function listCalibrationOpportunities(archive: CalibrationArchive, 
       make: head?.make ?? null,
       model: head?.model ?? null,
       year: head?.year ?? null,
+      presentation: head?.presentation ?? presentVehicle({}),
       quotedMxn: head?.quotedMxn ?? null,
     });
   }
@@ -199,6 +203,7 @@ export async function listCalibrationRepairs(archive: CalibrationArchive, query:
     make: string | null;
     model: string | null;
     year: number | null;
+    presentation: VehiclePresentation;
     quotedMxn: number | null;
     evidence: 'text_only';
     photoStatus: 'not_provided';
@@ -210,6 +215,7 @@ export async function listCalibrationRepairs(archive: CalibrationArchive, query:
     if (!matchesQuery(page.q, [
       detail.headQuoteId,
       head?.make,
+      head?.presentation.make,
       head?.model,
       head?.year,
       ...(head?.lines ?? []).map((line) => line.part),
@@ -221,6 +227,7 @@ export async function listCalibrationRepairs(archive: CalibrationArchive, query:
       make: head?.make ?? null,
       model: head?.model ?? null,
       year: head?.year ?? null,
+      presentation: head?.presentation ?? presentVehicle({}),
       quotedMxn: head?.quotedTotalMxn ?? null,
       evidence: 'text_only',
       photoStatus: 'not_provided',
@@ -486,14 +493,12 @@ async function readQuoteRecord(archive: CalibrationArchive, quoteId: string) {
     ? parsed.work_scope.filter((item): item is string => typeof item === 'string' && WORK.has(item))
     : [];
   const incomplete = !service || !quoted || parsed.status !== 'human_verified';
+  const identity = readPresentedIdentity(vehicle);
   return {
     id: quoteId,
     revision: Number.isInteger(parsed.revision) ? Number(parsed.revision) : null,
     service,
-    make: identityText(vehicle.make, vehicle.make_evidence, COMMERCIAL_EVIDENCE),
-    model: identityText(vehicle.model, vehicle.model_evidence, COMMERCIAL_EVIDENCE),
-    year: identityYear(vehicle.year, vehicle.year_evidence),
-    variant: identityText(vehicle.variant, vehicle.variant_evidence, COMMERCIAL_EVIDENCE),
+    ...identity,
     currentColor: identityText(colors.current, colors.current_evidence, COMMERCIAL_EVIDENCE),
     requestedColor: identityText(colors.requested, colors.requested_evidence, COMMERCIAL_EVIDENCE),
     workScope,
@@ -551,10 +556,7 @@ async function readRepairQuoteRecord(archive: CalibrationArchive, quoteId: strin
   return {
     id: quoteId,
     revision: Number.isInteger(parsed.revision) ? Number(parsed.revision) : null,
-    make: identityText(vehicle.make, vehicle.make_evidence, COMMERCIAL_EVIDENCE),
-    model: identityText(vehicle.model, vehicle.model_evidence, COMMERCIAL_EVIDENCE),
-    year: identityYear(vehicle.year, vehicle.year_evidence),
-    variant: identityText(vehicle.variant, vehicle.variant_evidence, COMMERCIAL_EVIDENCE),
+    ...readPresentedIdentity(vehicle),
     lines,
     conditions,
     quotedTotalMxn: totalMatches ? quotedTotal : null,
@@ -629,6 +631,19 @@ function visualIntegrity(
   if (status !== 'archived_private' || refs.length === 0) return 'incomplete';
   if (photos.length > 0 && photos.some((photo) => !photo.verified)) return 'incomplete';
   return 'complete';
+}
+
+function readPresentedIdentity(vehicle: Record<string, unknown>) {
+  const make = identityText(vehicle.make, vehicle.make_evidence, COMMERCIAL_EVIDENCE);
+  const model = identityText(vehicle.model, vehicle.model_evidence, COMMERCIAL_EVIDENCE);
+  const year = identityYear(vehicle.year, vehicle.year_evidence);
+  return {
+    make,
+    model,
+    year,
+    variant: identityText(vehicle.variant, vehicle.variant_evidence, COMMERCIAL_EVIDENCE),
+    presentation: presentVehicle({ make, model, year }),
+  };
 }
 
 function identityText(value: unknown, evidenceValue: unknown, allowed = EVIDENCE): string | null {

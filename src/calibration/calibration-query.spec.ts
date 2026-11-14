@@ -440,9 +440,17 @@ describe('consulta de calibración', () => {
         service: 'bath_with_bodywork',
         quotedMxn: 34000,
         integrity: 'complete',
+        make: 'Honda',
+        presentation: {
+          make: 'Honda',
+          provenance: 'customer_provided',
+          label: 'Honda CR-V 2010',
+        },
       }),
     ]);
     const detail = await readCalibrationQuote(store, 'CQ-100202');
+    expect(detail.revisions[1].presentation).toEqual(listed.items[0].presentation);
+    expect(detail.revisions[1].make).toBe('Honda');
     expect(detail.revisions.map((item) => item.id)).toEqual(['CQ-100201', 'CQ-100202']);
     expect(detail.revisions[0]).toMatchObject({ contractedValidation: 'not_provided', collectedValidation: 'not_provided' });
     expect(detail.revisions[1]).toMatchObject({ contractedMxn: 26500, quotedMxn: 34000 });
@@ -547,14 +555,24 @@ describe('consulta de calibración', () => {
         headQuoteId: 'RQ-100001',
         revisionCount: 1,
         integrity: 'complete',
+        make: null,
         model: 'Aveo',
         year: 2026,
+        presentation: {
+          make: 'Chevrolet',
+          provenance: 'catalog_inferred',
+          label: 'Chevrolet Aveo 2026',
+        },
         quotedMxn: 6300,
         evidence: 'text_only',
         photoStatus: 'not_provided',
       }),
     ]);
     expect(JSON.stringify(listed)).not.toContain('fuente-rq-secreta');
+    const aveo = await readCalibrationRepair(store, 'RQ-100001');
+    expect(aveo.revisions[0].make).toBeNull();
+    expect(aveo.revisions[0].model).toBe('Aveo');
+    expect(aveo.revisions[0].presentation).toEqual(listed.items[0].presentation);
     const page = await listCalibrationRepairs(store, { limit: '1' });
     expect(page.items).toHaveLength(1);
     expect(page.nextCursor).toBe('RQ-100001');
@@ -571,6 +589,8 @@ describe('consulta de calibración', () => {
     expect(active.lines[0].contractedValidation).toBe('not_provided');
     expect(active.lines[1].contractedMxn).toBe(2900);
     expect(active.conditions).toEqual(['Tiempo estimado de 3 a 4 dias habiles.']);
+    expect(active.make).toBeNull();
+    expect(active.presentation).toEqual({ make: null, provenance: 'unknown', label: 'Sedán 2019' });
     expect(store.calls.some((call) => call.startsWith('PHOTO') || call.includes('data/cases') || call.includes('data/commercial'))).toBe(false);
     expect(JSON.stringify(detail)).not.toContain('fuente-rq-secreta');
     await expect(readCalibrationRepair(store, 'CQ-100201')).rejects.toMatchObject({ code: 'invalid' });
