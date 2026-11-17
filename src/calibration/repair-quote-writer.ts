@@ -13,6 +13,7 @@ import {
   reservedRepairKey,
   type StoredRepairQuote,
 } from './repair-quote';
+import { severityAnnotationPathAllowed } from './severity-annotation';
 
 /**
  * Escritura optimista solo dentro de data/repairs/. No abre el índice visual,
@@ -101,13 +102,16 @@ export function assertRepairRequestPath(path: string): void {
   if (
     BLOCKED.some((needle) => bare.includes(needle)) ||
     bare.includes('CQ-') ||
-    bare.includes('AF-') ||
-    !REPAIR_PATH.test(bare)
+    bare.includes('AF-')
   ) {
     throw new CalibrationConflictError(
       'Repair import refused a protected path',
     );
   }
+  if (severityAnnotationPathAllowed(bare) || REPAIR_PATH.test(bare)) return;
+  throw new CalibrationConflictError(
+    'Repair import refused a protected path',
+  );
 }
 
 export function assertRepairTransport(rawUrl: string, method: string): void {

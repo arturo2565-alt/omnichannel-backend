@@ -22,6 +22,14 @@ import {
   type RepairRecordResult,
 } from './repair-quote-store';
 import { validateRepairQuote, type ValidatedRepairQuote } from './repair-quote';
+import { SeverityError, type SeverityFiles } from './severity-annotation';
+import {
+  applySeverityImport,
+  openImportedSeverityFiles,
+  readSeverityRequests,
+  separateSeverityImport,
+  type SeverityImportReport,
+} from './severity-import';
 
 const TOKEN_URL =
   /^https:\/\/api\.github\.com\/app\/installations\/\d{1,12}\/access_tokens$/;
@@ -54,6 +62,8 @@ export type RepairImportReport = {
   revision?: number;
   opportunityCount?: number;
   quoteCount?: number;
+  severity?: SeverityImportReport;
+  enriched?: boolean;
 };
 
 export function prepareRepairQuote(input: unknown): ValidatedRepairQuote {
@@ -77,6 +87,7 @@ export async function importRepairQuote(
     transport?: typeof fetch;
     archive?: RepairArchive;
     clock?: () => string;
+    severityFiles?: SeverityFiles;
   } = {},
 ): Promise<RepairImportReport> {
   if (!calibrationDiagnosticTarget(env)) return error('wrong_target');
@@ -85,18 +96,26 @@ export async function importRepairQuote(
     env.DB_SYNCHRONIZE !== 'false'
   )
     return error('flags');
+  const split = separateSeverityImport(input);
+  let requests: ReturnType<typeof readSeverityRequests> = null;
+  try {
+    requests = readSeverityRequests(split.severity);
+  } catch (err) {
+    return error(err instanceof SeverityError && err.code === 'rejected' ? 'rejected' : 'invalid');
+  }
   let quote: ValidatedRepairQuote;
   try {
-    quote = prepareRepairQuote(input);
+    quote = prepareRepairQuote(split.document);
   } catch (err) {
     return error(categoryOf(err));
   }
   try {
-    const archive =
-      deps.archive ?? (await openRepairArchive(env, deps.transport ?? fetch));
-    if (!archive) return error('missing');
-    const recorded = await recordRepairObservation(archive, quote, deps.clock);
-    return {
+    const opened = deps.archive
+      ? { archive: deps.archive, severityFiles: deps.severityFiles }
+      : await openRepairArchive(env, deps.transport ?? fetch);
+    if (!opened) return error('missing');
+    const recorded = await recordRepairObservation(opened.archive, quote, deps.clock);
+    const report: RepairImportReport = {
       service: 'repair-quote-import',
       result: 'ok',
       status: recorded.status,
@@ -107,6 +126,16 @@ export async function importRepairQuote(
       opportunityCount: recorded.opportunityCount,
       quoteCount: recorded.quoteCount,
     };
+    if (!requests) return report;
+    if (!opened.severityFiles) {
+      return { ...report, enriched: false, severity: pendingSeverity(recorded.quoteId) };
+    }
+    try {
+      const severity = await applySeverityImport(opened.severityFiles, recorded.quoteId, requests);
+      return { ...report, severity, enriched: severity.enriched };
+    } catch {
+      return { ...report, enriched: false, severity: pendingSeverity(recorded.quoteId) };
+    }
   } catch (err) {
     return error(categoryOf(err));
   }
@@ -188,7 +217,7 @@ function regularFile(filePath: string): string {
 async function openRepairArchive(
   env: NodeJS.ProcessEnv,
   transport: typeof fetch,
-): Promise<RepairArchive | null> {
+): Promise<{ archive: RepairArchive; severityFiles: SeverityFiles } | null> {
   const guarded = guard(transport);
   const config = readGithubAppConfig(withoutLineSeparators(env));
   if (!config) return null;
@@ -217,7 +246,14 @@ async function openRepairArchive(
       'Calibration GitHub App permissions were rejected',
     );
   }
-  return new RepairGithubWriter(app, guarded);
+  return {
+    archive: new RepairGithubWriter(app, guarded),
+    severityFiles: openImportedSeverityFiles(guarded, async () => `Bearer ${await app.authorization()}`),
+  };
+}
+
+function pendingSeverity(subjectId: string): SeverityImportReport {
+  return { status: 'pending', enriched: false, subjectId, items: [] };
 }
 
 async function installationRepositories(

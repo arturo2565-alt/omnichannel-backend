@@ -173,6 +173,10 @@ describe('CAL-011A private human import', () => {
     expect(() => assertRealImportRequest('PUT', `${prefix}data/probes/index.json`)).toThrow('Calibration import refused a request');
     expect(() => assertRealImportRequest('PUT', `${prefix}data/cases/AF-900001.json`)).toThrow('Calibration import refused a request');
     expect(() => assertRealImportRequest('PUT', `${prefix}data/photos/AF-900001/IMG-000001.json`)).toThrow('Calibration import refused a request');
+    expect(() => assertRealImportRequest('PUT', `${prefix}data/annotations/severity/visual/AF-000010/SV-000001.json`)).not.toThrow();
+    expect(() => assertRealImportRequest('GET', `${prefix}data/annotations/severity/index.json?ref=main`)).not.toThrow();
+    expect(() => assertRealImportRequest('PUT', `${prefix}data/annotations/severity/visual/AF-000001/SV-000001.json`)).toThrow('Calibration import refused a request');
+    expect(() => assertRealImportRequest('PUT', `${prefix}data/annotations/severity/repairs/CQ-000001/SV-000001.json`)).toThrow('Calibration import refused a request');
   });
 
   it('records a verified quote and two original photographs', async () => {
@@ -207,6 +211,9 @@ describe('CAL-011A private human import', () => {
     expect([...route.github.files.keys()].some((path) => path.startsWith('data/probes/'))).toBe(false);
     expect(report.provenance).toBe('operator_local_folder');
     expect(report.cameraOriginal).toBe(false);
+    expect(report.severity).toBeUndefined();
+    expect(report.enriched).toBeUndefined();
+    expect([...route.github.files.keys()].some((path) => path.includes('annotations'))).toBe(false);
   });
 
   it('repeats the same source key without another case or photograph', async () => {
@@ -727,6 +734,160 @@ describe('CAL-013 variable photographs', () => {
       expect(route.calls).toHaveLength(0);
       expect(route.github.files.has('data/cases/AF-000004.json')).toBe(false);
     });
+  });
+});
+
+describe('CAL-021C severity on visual import', () => {
+  const depsOf = (route: ReturnType<typeof routed>) => ({
+    transport: route.transport,
+    photos: archive().photos,
+    clock: () => '2026-11-17T16:00:00.000Z',
+  });
+
+  it('records a proposed visual classification and leaves the price untouched', async () => {
+    const route = routed();
+    const input = {
+      ...quote(3600, 'autofix-sim-severidad-001'),
+      line_items: [{
+        line_id: 'L1',
+        part: 'puerta delantera derecha',
+        treatment: 'repair_paint',
+        price_mxn: 3600,
+        damage_severity: 'unknown',
+        validation: 'human_confirmed',
+      }],
+      severity: [{ lineId: 'L1', assessment: 'visual_inference', level: 'medio_leve' }],
+    };
+    const report = await importCalibrationCase(stagingEnv(), input, depsOf(route));
+    const stored = route.github.files.get('data/cases/AF-000004.json')?.text ?? '';
+    const annotation = [...route.github.files.entries()].find(([path]) => path.endsWith('SV-000001.json'))?.[1].text ?? '';
+    expect(report).toMatchObject({
+      result: 'ok',
+      status: 'created',
+      caseId: 'AF-000004',
+      enriched: true,
+      severity: { status: 'recorded', enriched: true, subjectId: 'AF-000004' },
+    });
+    expect(report.severity?.items[0]).toMatchObject({
+      lineId: 'L1',
+      zoneId: 'af:L1',
+      status: 'recorded',
+    });
+    expect(stored).toContain('"price_mxn": 3600');
+    expect(stored).toContain('"damage_severity": "unknown"');
+    expect(annotation).toContain('"status": "proposed"');
+    expect(annotation).toContain('"provenance": "visual_inference"');
+    expect(annotation).toContain('"level": "medio_leve"');
+    expect(annotation).not.toContain('validated');
+    expect(annotation).not.toContain('3600');
+    expect(route.github.files.get('data/cases/AF-000001.json')?.text).toBe(PROTECTED);
+  });
+
+  it('keeps several damaged zones apart and a human declaration pending', async () => {
+    const route = routed();
+    const input = {
+      ...quote(2000, 'autofix-sim-severidad-002'),
+      line_items: [
+        {
+          line_id: 'L1',
+          part: 'puerta delantera derecha',
+          treatment: 'repair_paint',
+          price_mxn: 1200,
+          damage_severity: 'unknown',
+          validation: 'human_confirmed',
+        },
+        {
+          line_id: 'L2',
+          part: 'puerta delantera izquierda',
+          treatment: 'repair_paint',
+          price_mxn: 800,
+          damage_severity: 'unknown',
+          validation: 'human_confirmed',
+        },
+      ],
+      severity: [
+        { lineId: 'L1', assessment: 'visual_inference', level: 'medio' },
+        { lineId: 'L2', assessment: 'human_declaration', level: 'leve' },
+      ],
+    };
+    const report = await importCalibrationCase(stagingEnv(), input, depsOf(route));
+    const notes = [...route.github.files.entries()]
+      .filter(([path]) => /SV-\d{6}\.json$/.test(path))
+      .map(([, file]) => file.text);
+    expect(report.enriched).toBe(true);
+    expect(report.severity?.items.map((item) => item.zoneId)).toEqual(['af:L1', 'af:L2']);
+    expect(notes).toHaveLength(2);
+    expect(notes.join('\n')).toContain('"provenance": "human_declaration"');
+    expect(notes.join('\n')).not.toContain('"status": "validated"');
+    expect(route.github.files.get('data/cases/AF-000004.json')?.text).toContain('"price_mxn": 1200');
+  });
+
+  it('keeps the case when the annotation write fails and completes it on retry', async () => {
+    let blocked = true;
+    const route = routed(memoryGithub(), (method, url) => (
+      blocked && method === 'PUT' && url.includes('/annotations/severity/')
+        ? response(503, { message: 'unavailable' })
+        : null
+    ));
+    const input = {
+      ...quote(1250, 'autofix-sim-severidad-003'),
+      severity: [{ lineId: 'L1', assessment: 'visual_inference', level: 'medio' }],
+    };
+    const failed = await importCalibrationCase(stagingEnv(), input, depsOf(route));
+    const stored = route.github.files.get('data/cases/AF-000004.json')?.text;
+    expect(failed).toMatchObject({ result: 'ok', status: 'created', enriched: false });
+    expect(failed.severity?.status).toBe('pending');
+    expect([...route.github.files.keys()].some((path) => path.includes('/annotations/severity/'))).toBe(false);
+    blocked = false;
+    const recovered = await importCalibrationCase(stagingEnv(), input, depsOf(route));
+    expect(recovered).toMatchObject({ result: 'ok', status: 'already_exists', enriched: true });
+    expect(recovered.severity?.status).toBe('recorded');
+    expect(route.github.files.get('data/cases/AF-000004.json')?.text).toBe(stored);
+    expect([...route.github.files.keys()].filter((path) => /SV-\d{6}\.json$/.test(path))).toHaveLength(1);
+  });
+
+  it('repeats an identical proposal and refuses a different one without rewriting the case', async () => {
+    const route = routed();
+    const input = {
+      ...quote(1250, 'autofix-sim-severidad-004'),
+      severity: [{ lineId: 'L1', assessment: 'visual_inference', level: 'fuerte' }],
+    };
+    const deps = depsOf(route);
+    await importCalibrationCase(stagingEnv(), input, deps);
+    const stored = route.github.files.get('data/cases/AF-000004.json')?.text;
+    const repeated = await importCalibrationCase(stagingEnv(), input, deps);
+    expect(repeated.severity?.status).toBe('already_recorded');
+    expect(repeated.enriched).toBe(true);
+    const changed = await importCalibrationCase(stagingEnv(), {
+      ...input,
+      severity: [{ lineId: 'L1', assessment: 'visual_inference', level: 'leve' }],
+    }, deps);
+    expect(changed.enriched).toBe(false);
+    expect(changed.severity?.status).toBe('conflict');
+    expect(route.github.files.get('data/cases/AF-000004.json')?.text).toBe(stored);
+    const note = [...route.github.files.values()].map((file) => file.text).find((text) => text.includes('"annotation_id"'));
+    expect(note).toContain('"level": "fuerte"');
+    expect([...route.github.files.keys()].filter((path) => /SV-\d{6}\.json$/.test(path))).toHaveLength(1);
+  });
+
+  it('records unknown when the evidence is insufficient and rejects a fabricated validation', async () => {
+    const route = routed();
+    const unknown = await importCalibrationCase(stagingEnv(), {
+      ...quote(1250, 'autofix-sim-severidad-005'),
+      severity: [{ lineId: 'L1', assessment: 'insufficient_evidence' }],
+    }, depsOf(route));
+    const note = [...route.github.files.values()].map((file) => file.text).find((text) => text.includes('"annotation_id"'));
+    expect(unknown.enriched).toBe(true);
+    expect(note).toContain('"status": "unknown"');
+    expect(note).toContain('"level": null');
+    const hostile = routed();
+    const refused = await importCalibrationCase(stagingEnv(), {
+      ...quote(1250, 'autofix-sim-severidad-006'),
+      severity: [{ lineId: 'L1', assessment: 'visual_inference', level: 'medio', operatorRole: 'owner', validated: true }],
+    }, depsOf(hostile));
+    expect(refused).toMatchObject({ result: 'error', category: 'rejected' });
+    expect(hostile.github.files.has('data/cases/AF-000004.json')).toBe(false);
+    expect(hostile.calls).toHaveLength(0);
   });
 });
 

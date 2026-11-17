@@ -708,6 +708,15 @@ describe('CAL-017A repair archive', () => {
     expect(() =>
       assertRepairRequestPath('data/repairs/quotes/RQ-000001.json'),
     ).not.toThrow();
+    expect(() =>
+      assertRepairRequestPath('data/annotations/severity/index.json'),
+    ).not.toThrow();
+    expect(() =>
+      assertRepairRequestPath('data/annotations/severity/repairs/RQ-000010/SV-000001.json'),
+    ).not.toThrow();
+    expect(() =>
+      assertRepairRequestPath('data/annotations/severity/visual/AF-000010/SV-000001.json'),
+    ).toThrow('protected path');
   });
 });
 

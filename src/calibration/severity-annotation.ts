@@ -114,6 +114,15 @@ export function assertSeverityRead(path: string): void {
   }
 }
 
+export function severityAnnotationPathAllowed(path: string): boolean {
+  try {
+    assertSeverityWrite(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function assertSeverityWrite(path: string): void {
   const bare = path.split('?')[0];
   if (BLOCKED.some((needle) => bare.includes(needle)) || READ_PATH.test(bare) || !WRITE_PATH.test(bare)) {
@@ -139,7 +148,7 @@ export async function ingestSeverityAssessment(
   const level = assessment === 'insufficient_evidence' ? null : request.level ?? null;
   if (assessment === 'insufficient_evidence' && request.level != null) throw new SeverityError('rejected');
   if (assessment === 'visual_inference' && !isLevel(level)) throw new SeverityError('invalid');
-  return storeObservation(files, subjectId, lineId, {
+  const stored = await storeObservation(files, subjectId, lineId, {
     level,
     status: assessment === 'insufficient_evidence' ? 'unknown' : 'proposed',
     provenance: assessment,
@@ -147,6 +156,8 @@ export async function ingestSeverityAssessment(
     actorKey: null,
     inferenceMethod: assessment === 'visual_inference' ? SEVERITY_INFERENCE_METHOD : null,
   });
+  if (stored.status === 'conflict') throw new SeverityError('conflict');
+  return { status: stored.status, annotationId: stored.annotationId };
 }
 
 export async function recordDeclaredSeverity(
@@ -157,7 +168,7 @@ export async function recordDeclaredSeverity(
   if (!SUBJECT_ID.test(request.subjectId) || !LINE_ID.test(request.lineId) || !isLevel(request.level)) {
     throw new SeverityError('invalid');
   }
-  return storeObservation(files, request.subjectId, request.lineId, {
+  const stored = await storeObservation(files, request.subjectId, request.lineId, {
     level: request.level,
     status: 'proposed',
     provenance: 'human_declaration',
@@ -165,6 +176,52 @@ export async function recordDeclaredSeverity(
     actorKey: null,
     inferenceMethod: null,
   });
+  if (stored.status === 'conflict') throw new SeverityError('conflict');
+  return { status: stored.status, annotationId: stored.annotationId };
+}
+
+const IMPORT_FIELDS = new Set(['subjectId', 'lineId', 'assessment', 'level']);
+
+export async function describeSeverityLine(
+  files: SeverityFiles,
+  subjectId: string,
+  lineId: string,
+): Promise<{ zoneId: string; part: string; treatment: string | null }> {
+  const subject = await readSubjectLine(files, subjectId, lineId);
+  if (!subject) throw new SeverityError('missing');
+  return { zoneId: subject.zoneId, part: subject.part, treatment: subject.treatment };
+}
+
+/** Propuesta de importación. Nunca valida y no sustituye una clasificación distinta. */
+export async function importSeverityProposal(
+  files: SeverityFiles,
+  request: {
+    subjectId: string;
+    lineId: string;
+    assessment: 'visual_inference' | 'human_declaration' | 'insufficient_evidence';
+    level?: SeverityLevel | null;
+  },
+): Promise<{ status: 'recorded' | 'already_recorded' | 'conflict'; annotationId: string }> {
+  rejectClientFields(request, IMPORT_FIELDS);
+  const assessment = String(request.assessment);
+  if (assessment !== 'visual_inference' && assessment !== 'human_declaration' && assessment !== 'insufficient_evidence') {
+    throw new SeverityError('rejected');
+  }
+  if (assessment === 'insufficient_evidence' && request.level != null) throw new SeverityError('rejected');
+  const level = assessment === 'insufficient_evidence' ? null : request.level ?? null;
+  if (assessment !== 'insufficient_evidence' && !isLevel(level)) throw new SeverityError('invalid');
+  const stored = await storeObservation(files, request.subjectId, request.lineId, {
+    level,
+    status: assessment === 'insufficient_evidence' ? 'unknown' : 'proposed',
+    provenance: assessment,
+    authorization: null,
+    actorKey: null,
+    inferenceMethod: assessment === 'visual_inference' ? SEVERITY_INFERENCE_METHOD : null,
+  }, { conflictOnDifference: true });
+  if (stored.status === 'recorded' || stored.status === 'already_recorded') {
+    return { status: stored.status, annotationId: stored.annotationId };
+  }
+  return { status: 'conflict', annotationId: stored.annotationId };
 }
 
 export async function confirmSeverity(
@@ -187,7 +244,7 @@ export async function confirmSeverity(
     actorKey: actorKey(user.userId),
     inferenceMethod: null,
   });
-  if (stored.status === 'retained') throw new SeverityError('conflict');
+  if (stored.status === 'retained' || stored.status === 'conflict') throw new SeverityError('conflict');
   return stored.status === 'already_recorded'
     ? { status: 'already_validated', annotationId: stored.annotationId }
     : { status: 'validated', annotationId: stored.annotationId };
@@ -265,7 +322,8 @@ async function storeObservation(
     actorKey: string | null;
     inferenceMethod: typeof SEVERITY_INFERENCE_METHOD | null;
   },
-): Promise<{ status: 'recorded' | 'already_recorded' | 'retained'; annotationId: string }> {
+  options: { conflictOnDifference?: boolean } = {},
+): Promise<{ status: 'recorded' | 'already_recorded' | 'retained' | 'conflict'; annotationId: string }> {
   if (!SUBJECT_ID.test(subjectId) || !LINE_ID.test(lineId)) throw new SeverityError('invalid');
   if (next.provenance === 'visual_inference' && next.inferenceMethod !== SEVERITY_INFERENCE_METHOD) throw new SeverityError('rejected');
   if (next.provenance !== 'visual_inference' && next.inferenceMethod != null) throw new SeverityError('rejected');
@@ -299,6 +357,9 @@ async function storeObservation(
     && current.inference_method === next.inferenceMethod
   ) {
     return { status: 'already_recorded', annotationId: current.annotation_id };
+  }
+  if (options.conflictOnDifference && current) {
+    return { status: 'conflict', annotationId: current.annotation_id };
   }
   if (items.length >= MAX_ITEMS) throw new SeverityError('limit');
   const annotationId = nextId(items.map((item) => item.annotation_id));

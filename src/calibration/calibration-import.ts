@@ -28,6 +28,8 @@ import {
   CalibrationWriteError,
 } from './calibration-github-writer';
 import { imageContainsPersonalMetadata, validateCalibrationImage } from './calibration-image-archive.service';
+import { SeverityError, severityAnnotationPathAllowed, type SeverityFiles } from './severity-annotation';
+import { applySeverityImport, openImportedSeverityFiles, readSeverityRequests, type SeverityImportReport } from './severity-import';
 
 const TOKEN_URL = /^https:\/\/api\.github\.com\/app\/installations\/\d{1,12}\/access_tokens$/;
 const REPOSITORIES_URL = 'https://api.github.com/installation/repositories?per_page=100';
@@ -80,6 +82,8 @@ export type ImportReport = {
   /** Operator folder. A WhatsApp download is not treated as a camera original. */
   provenance?: 'operator_local_folder';
   cameraOriginal?: false;
+  severity?: SeverityImportReport;
+  enriched?: boolean;
 };
 
 export type CalibrationImportLimits = {
@@ -131,6 +135,7 @@ export type CalibrationImportInput = {
   line_items?: unknown;
   visual_observations?: unknown;
   images?: Buffer[];
+  severity?: unknown;
 };
 
 export function prepareCalibrationImport(
@@ -198,6 +203,7 @@ export function readCalibrationImportDocument(
     line_items?: unknown;
     visual_observations?: unknown;
     images?: unknown;
+    severity?: unknown;
   };
   try {
     parsed = JSON.parse(readFileSync(quotePath, 'utf8')) as typeof parsed;
@@ -241,6 +247,7 @@ export function readCalibrationImportDocument(
     line_items: parsed.line_items,
     visual_observations: parsed.visual_observations ?? [],
     images,
+    ...(Object.prototype.hasOwnProperty.call(parsed, 'severity') ? { severity: parsed.severity } : {}),
   };
 }
 
@@ -363,10 +370,17 @@ export async function importCalibrationCase(
     photos?: CalibrationPhotoStore;
     clock?: () => string;
     maxTransientAttempts?: number;
+    severityFiles?: SeverityFiles;
   } = {},
 ): Promise<ImportReport> {
   if (!calibrationDiagnosticTarget(env)) return error('wrong_target');
   if (env.CALIBRATION_INGEST_ENABLED !== 'false' || env.DB_SYNCHRONIZE !== 'false') return error('flags');
+  let requests: ReturnType<typeof readSeverityRequests> = null;
+  try {
+    requests = readSeverityRequests(input.severity);
+  } catch (err) {
+    return error(err instanceof SeverityError && err.code === 'rejected' ? 'rejected' : 'invalid');
+  }
   let prepared: ReturnType<typeof prepareCalibrationImport>;
   try {
     prepared = prepareCalibrationImport(input, readCalibrationImportLimits(env));
@@ -405,12 +419,13 @@ export async function importCalibrationCase(
       if (!sameQuote) return halted('conflict', writer, protectedBefore, realCaseCountBefore);
       if (stored.photo_archive_status === 'archived_private') {
         if (await sameCompleteObservation(writer, existingId, prepared)) {
-          return finish(writer, protectedBefore, realCaseCountBefore, {
+          const finished = await finish(writer, protectedBefore, realCaseCountBefore, {
             status: 'already_exists',
             caseId: existingId,
             photoArchiveStatus: 'archived_private',
             photoRefs: photoIds(prepared.images.length),
           }, prepared);
+          return attachSeverity(finished, requests, deps.severityFiles, guarded, () => app.authorization());
         }
         return halted('conflict', writer, protectedBefore, realCaseCountBefore);
       }
@@ -434,7 +449,8 @@ export async function importCalibrationCase(
     } catch (err) {
       return halted(categoryOf(err) === 'rejected' ? 'partial' : categoryOf(err), writer, protectedBefore, realCaseCountBefore);
     }
-    return finish(writer, protectedBefore, realCaseCountBefore, recorded, prepared);
+    const finished = await finish(writer, protectedBefore, realCaseCountBefore, recorded, prepared);
+    return attachSeverity(finished, requests, deps.severityFiles, guarded, () => app.authorization());
   } catch (err) {
     return error(categoryOf(err));
   }
@@ -466,6 +482,7 @@ export function assertRealImportRequest(method: string, rawUrl: string): void {
   if (verb === 'GET' && /^data\/photos\/AF-0\d{5}\/IMG-[0-9]{6}\.json$/.test(path)) return;
   if (verb === 'PUT' && /^data\/cases\/AF-0\d{5}\.json$/.test(path) && !historicalRequest(path)) return;
   if (verb === 'PUT' && /^data\/photos\/AF-0\d{5}\/IMG-[0-9]{6}\.json$/.test(path) && !historicalRequest(path)) return;
+  if (severityAnnotationPathAllowed(path) && !historicalRequest(path)) return;
   throw new Error('Calibration import refused a request');
 }
 
@@ -728,6 +745,27 @@ function categoryOf(err: unknown): ImportCategory {
   if (err instanceof Error && err.message === 'Calibration import refused a request') return 'rejected';
   if (err instanceof CalibrationValidationError) return 'invalid';
   return 'invalid';
+}
+
+async function attachSeverity(
+  report: ImportReport,
+  requests: ReturnType<typeof readSeverityRequests>,
+  files: SeverityFiles | undefined,
+  transport: typeof fetch,
+  authorization: () => Promise<string>,
+): Promise<ImportReport> {
+  if (!requests || report.result !== 'ok' || !report.caseId) return report;
+  try {
+    const writer = files ?? openImportedSeverityFiles(transport, async () => `Bearer ${await authorization()}`);
+    const severity = await applySeverityImport(writer, report.caseId, requests);
+    return { ...report, severity, enriched: severity.enriched };
+  } catch {
+    return {
+      ...report,
+      enriched: false,
+      severity: { status: 'pending', enriched: false, subjectId: report.caseId, items: [] },
+    };
+  }
 }
 
 function error(category: ImportCategory): ImportReport {
