@@ -10,6 +10,7 @@ import { calibrationQueryAccess } from './calibration-access';
 
 export const SEVERITY_SCHEMA_VERSION = '1.0.0';
 export const SEVERITY_SCALE_VERSION = 'severity-v1';
+export const SEVERITY_INFERENCE_METHOD = 'visual_assessment';
 export const SEVERITY_LEVELS = ['leve', 'medio_leve', 'medio', 'medio_fuerte', 'fuerte'] as const;
 export type SeverityLevel = (typeof SEVERITY_LEVELS)[number];
 export type SeverityStatus = 'proposed' | 'validated' | 'unknown';
@@ -26,12 +27,19 @@ const WRITE_PATH = /^data\/annotations\/severity\/(?:index\.json|(?:visual\/AF-\
 const READ_PATH = /^data\/(?:cases\/AF-\d{6}|repairs\/quotes\/RQ-\d{6})\.json$/;
 const BLOCKED = ['data/commercial/', 'data/photos/', 'data/evidence/', 'data/probes', 'data/index.json'];
 const OBSERVATION_FIELDS = new Set(['subjectId', 'lineId', 'assessment', 'level']);
+const DECLARATION_FIELDS = new Set(['subjectId', 'lineId', 'level']);
 const CONFIRM_FIELDS = new Set(['subjectId', 'lineId', 'level', 'lineReviewed']);
 const CLIENT_AUTHORITY = [
   'validated', 'operatorRole', 'operator_role', 'humanValidated', 'human_validated',
   'confirmation', 'email', 'name', 'role', 'price', 'price_mxn', 'priceMxn',
   'quoted_total_mxn', 'damage_severity', 'authorization', 'actorKey', 'actor_key',
+  'inferenceMethod', 'inference_method', 'humanDeclaration', 'human_declaration',
 ];
+const GENERIC_ZONE = new Set([
+  'pintura', 'mano de obra', 'hojalateria', 'reparacion', 'montaje', 'servicio',
+  'general', 'varios', 'refaccion', 'labor', 'trabajo', 'global', 'piezas',
+]);
+const AF_TREATMENTS = new Set(['repair_paint', 'paint', 'replace_paint', 'replace', 'other', 'uncertain']);
 
 export class SeverityError extends Error {
   constructor(readonly code: 'invalid' | 'missing' | 'conflict' | 'rejected' | 'limit' | 'forbidden' | 'unauthorized' | 'hidden') {
@@ -55,12 +63,15 @@ export type SeverityNote = {
   part: string;
   treatment: string | null;
   evidenceKind: SeverityEvidenceKind;
+  zoneId: string;
+  inferenceMethod: typeof SEVERITY_INFERENCE_METHOD | null;
   history: Array<{
     annotationId: string;
     level: SeverityLevel | null;
     status: SeverityStatus;
     provenance: SeverityProvenance;
     scaleVersion: typeof SEVERITY_SCALE_VERSION | null;
+    inferenceMethod: typeof SEVERITY_INFERENCE_METHOD | null;
   }>;
 };
 
@@ -69,6 +80,7 @@ type SubjectLine = {
   part: string;
   treatment: string | null;
   evidenceKind: SeverityEvidenceKind;
+  zoneId: string;
 };
 
 type StoredItem = {
@@ -83,6 +95,8 @@ type StoredItem = {
   part: string;
   treatment: string | null;
   evidence_kind: SeverityEvidenceKind;
+  zone_id: string;
+  inference_method: typeof SEVERITY_INFERENCE_METHOD | null;
   current: boolean;
   supersedes: string | null;
 };
@@ -112,7 +126,7 @@ export async function ingestSeverityAssessment(
   request: {
     subjectId: string;
     lineId: string;
-    assessment: 'visual_inference' | 'human_declaration' | 'insufficient_evidence';
+    assessment: 'visual_inference' | 'insufficient_evidence';
     level?: SeverityLevel;
   },
 ): Promise<{ status: 'recorded' | 'already_recorded' | 'retained'; annotationId: string }> {
@@ -120,20 +134,36 @@ export async function ingestSeverityAssessment(
   const subjectId = request.subjectId;
   const lineId = request.lineId;
   if (!SUBJECT_ID.test(subjectId) || !LINE_ID.test(lineId)) throw new SeverityError('invalid');
-  const provenance = request.assessment;
-  if (provenance !== 'visual_inference' && provenance !== 'human_declaration' && provenance !== 'insufficient_evidence') {
-    throw new SeverityError('rejected');
-  }
-  const level = provenance === 'insufficient_evidence' ? null : request.level ?? null;
-  if (provenance === 'insufficient_evidence' && request.level != null) throw new SeverityError('rejected');
-  if (provenance !== 'insufficient_evidence' && !isLevel(level)) throw new SeverityError('invalid');
-  const status: SeverityStatus = provenance === 'insufficient_evidence' ? 'unknown' : 'proposed';
+  const assessment = request.assessment as string;
+  if (assessment !== 'visual_inference' && assessment !== 'insufficient_evidence') throw new SeverityError('rejected');
+  const level = assessment === 'insufficient_evidence' ? null : request.level ?? null;
+  if (assessment === 'insufficient_evidence' && request.level != null) throw new SeverityError('rejected');
+  if (assessment === 'visual_inference' && !isLevel(level)) throw new SeverityError('invalid');
   return storeObservation(files, subjectId, lineId, {
     level,
-    status,
-    provenance,
+    status: assessment === 'insufficient_evidence' ? 'unknown' : 'proposed',
+    provenance: assessment,
     authorization: null,
     actorKey: null,
+    inferenceMethod: assessment === 'visual_inference' ? SEVERITY_INFERENCE_METHOD : null,
+  });
+}
+
+export async function recordDeclaredSeverity(
+  files: SeverityFiles,
+  request: { subjectId: string; lineId: string; level: SeverityLevel },
+): Promise<{ status: 'recorded' | 'already_recorded' | 'retained'; annotationId: string }> {
+  rejectClientFields(request, DECLARATION_FIELDS);
+  if (!SUBJECT_ID.test(request.subjectId) || !LINE_ID.test(request.lineId) || !isLevel(request.level)) {
+    throw new SeverityError('invalid');
+  }
+  return storeObservation(files, request.subjectId, request.lineId, {
+    level: request.level,
+    status: 'proposed',
+    provenance: 'human_declaration',
+    authorization: null,
+    actorKey: null,
+    inferenceMethod: null,
   });
 }
 
@@ -155,6 +185,7 @@ export async function confirmSeverity(
     provenance: 'authenticated_owner',
     authorization: 'authenticated_owner',
     actorKey: actorKey(user.userId),
+    inferenceMethod: null,
   });
   if (stored.status === 'retained') throw new SeverityError('conflict');
   return stored.status === 'already_recorded'
@@ -181,6 +212,8 @@ export function presentSeverityIndex(content: string, subjectId: string): Severi
       part: current.part,
       treatment: current.treatment,
       evidenceKind: current.evidence_kind,
+      zoneId: current.zone_id,
+      inferenceMethod: current.inference_method,
       history,
     }];
   });
@@ -211,6 +244,8 @@ export function presentSeverityCatalog(content: string): Array<Omit<SeverityNote
         part: note.part,
         treatment: note.treatment,
         evidenceKind: note.evidence_kind,
+        zoneId: note.zone_id,
+        inferenceMethod: note.inference_method,
       }];
     });
   } catch {
@@ -228,9 +263,12 @@ async function storeObservation(
     provenance: SeverityProvenance;
     authorization: 'authenticated_owner' | null;
     actorKey: string | null;
+    inferenceMethod: typeof SEVERITY_INFERENCE_METHOD | null;
   },
 ): Promise<{ status: 'recorded' | 'already_recorded' | 'retained'; annotationId: string }> {
   if (!SUBJECT_ID.test(subjectId) || !LINE_ID.test(lineId)) throw new SeverityError('invalid');
+  if (next.provenance === 'visual_inference' && next.inferenceMethod !== SEVERITY_INFERENCE_METHOD) throw new SeverityError('rejected');
+  if (next.provenance !== 'visual_inference' && next.inferenceMethod != null) throw new SeverityError('rejected');
   if (next.status === 'validated' && (next.authorization !== 'authenticated_owner' || !next.actorKey || !SHA256.test(next.actorKey))) {
     throw new SeverityError('rejected');
   }
@@ -240,8 +278,11 @@ async function storeObservation(
   const indexPath = severitySubjectPath(subjectId);
   const indexFile = await files.read(indexPath);
   const items = indexFile ? requireItems(indexFile.content, subjectId) : [];
-  const current = items.find((item) => item.current && item.line_id === lineId) ?? null;
+  const current = items.find((item) => item.current && item.zone_id === subject.zoneId) ?? null;
   if (current?.status === 'validated' && next.status !== 'validated') {
+    return { status: 'retained', annotationId: current.annotation_id };
+  }
+  if (current?.status === 'proposed' && current.provenance === 'human_declaration' && next.provenance === 'visual_inference') {
     return { status: 'retained', annotationId: current.annotation_id };
   }
   if (current && current.status !== 'unknown' && next.status === 'unknown') {
@@ -254,6 +295,8 @@ async function storeObservation(
     && current.provenance === next.provenance
     && current.part === subject.part
     && current.treatment === subject.treatment
+    && current.zone_id === subject.zoneId
+    && current.inference_method === next.inferenceMethod
   ) {
     return { status: 'already_recorded', annotationId: current.annotation_id };
   }
@@ -275,6 +318,8 @@ async function storeObservation(
     authorization: next.authorization,
     actor_key: next.actorKey,
     evidence_kind: subject.evidenceKind,
+    zone_id: subject.zoneId,
+    inference_method: next.inferenceMethod,
     supersedes: current?.annotation_id ?? null,
   };
   await files.write(annotationPath(subjectId, annotationId), canonical(document));
@@ -291,6 +336,8 @@ async function storeObservation(
     part: subject.part,
     treatment: subject.treatment,
     evidence_kind: subject.evidenceKind,
+    zone_id: subject.zoneId,
+    inference_method: next.inferenceMethod,
     current: true,
     supersedes: current?.annotation_id ?? null,
   });
@@ -320,18 +367,32 @@ async function readSubjectLine(files: SeverityFiles, subjectId: string, lineId: 
         const record = item as { line_id?: unknown };
         return record?.line_id === lineId;
       }) as { part?: unknown; treatment?: unknown } | undefined;
-      if (!line || typeof line.part !== 'string' || typeof line.treatment !== 'string') return null;
+      if (!line || typeof line.part !== 'string' || !line.part.trim() || !AF_TREATMENTS.has(String(line.treatment))) return null;
       const photos = parsed.photo_archive_status === 'archived_private' ? 'photographs' : 'not_provided';
-      return { kind: 'visual_case', part: line.part, treatment: line.treatment, evidenceKind: photos };
+      return {
+        kind: 'visual_case',
+        part: line.part,
+        treatment: String(line.treatment),
+        evidenceKind: photos,
+        zoneId: `af:${lineId}`,
+      };
     }
-    if (parsed.quote_id !== subjectId || !Array.isArray(parsed.lines)) return null;
-    const line = parsed.lines.find((item) => {
-      const record = item as { line_id?: unknown };
-      return record?.line_id === lineId;
-    }) as { role?: unknown; part?: unknown } | undefined;
-    if (line?.role === 'labor') throw new SeverityError('rejected');
-    if (!line || line.role !== 'part' || typeof line.part !== 'string') return null;
-    return { kind: 'repair_quote', part: line.part, treatment: null, evidenceKind: 'text_only' };
+    const lines = parseRepairLines(parsed.lines);
+    if (parsed.quote_id !== subjectId || !lines) return null;
+    const cited = lines.find((item) => item.line_id === lineId);
+    if (!cited) return null;
+    if (!identifiesZone(cited.part)) throw new SeverityError('rejected');
+    const zone = normalizePart(cited.part);
+    const siblings = lines.filter((item) => identifiesZone(item.part) && normalizePart(item.part) === zone);
+    const treatment = repairZoneTreatment(siblings);
+    const display = [...siblings].sort((left, right) => left.line_id.localeCompare(right.line_id))[0]?.part ?? cited.part;
+    return {
+      kind: 'repair_quote',
+      part: display,
+      treatment,
+      evidenceKind: 'text_only',
+      zoneId: `rq:${zone}`,
+    };
   } catch (err) {
     if (err instanceof SeverityError) throw err;
     return null;
@@ -399,6 +460,10 @@ function publicItem(item: StoredItem | null): StoredItem | null {
   }
   if (item.status === 'unknown' && item.level != null) return null;
   if (item.status === 'proposed' && !isLevel(item.level)) return null;
+  if (typeof item.zone_id !== 'string' || item.zone_id.length > 120) return null;
+  if (item.provenance === 'visual_inference' && item.inference_method !== SEVERITY_INFERENCE_METHOD) return null;
+  if (item.provenance !== 'visual_inference' && item.inference_method != null) return null;
+  if (item.status === 'validated' && item.inference_method != null) return null;
   if (item.status === 'proposed' && item.provenance !== 'visual_inference' && item.provenance !== 'human_declaration') return null;
   if (item.status === 'unknown' && item.provenance !== 'insufficient_evidence') return null;
   const serialized = JSON.stringify(item).toLowerCase();
@@ -413,7 +478,70 @@ function publicHistory(item: StoredItem) {
     status: item.status,
     provenance: item.provenance,
     scaleVersion: item.scale_version,
+    inferenceMethod: item.inference_method,
   };
+}
+
+export function severityZoneForLine(line: {
+  lineId?: string | null;
+  part?: string | null;
+  role?: unknown;
+  labor?: unknown;
+}): string | null {
+  if (!line?.lineId || typeof line.part !== 'string' || !line.part.trim()) return null;
+  if (line.role == null) return `af:${line.lineId}`;
+  if (line.role !== 'part' && line.role !== 'labor') return null;
+  if (line.role === 'labor' && line.labor !== 'repair' && line.labor !== 'paint' && line.labor !== 'mount_and_paint') return null;
+  if (!identifiesZone(line.part)) return null;
+  return `rq:${normalizePart(line.part)}`;
+}
+
+function normalizePart(value: string): string {
+  return value.trim().toLocaleLowerCase('es-MX').replace(/\s+/g, ' ').normalize('NFD').replace(/\p{M}/gu, '');
+}
+
+function identifiesZone(value: string): boolean {
+  const name = normalizePart(value);
+  return Boolean(name) && name.length <= 80 && !GENERIC_ZONE.has(name);
+}
+
+function repairZoneTreatment(lines: RepairObservation[]): string {
+  const replaced = lines.some((line) => line.role === 'part');
+  const labors = new Set(lines.flatMap((line) => line.labor ? [line.labor] : []));
+  if (replaced && (labors.has('paint') || labors.has('mount_and_paint'))) return 'replace_paint';
+  if (replaced) return 'replace';
+  if (labors.has('repair') && (labors.has('paint') || labors.has('mount_and_paint'))) return 'repair_paint';
+  if (labors.has('repair')) return 'repair';
+  if (labors.has('mount_and_paint')) return 'mount_and_paint';
+  return 'paint';
+}
+
+type RepairObservation = {
+  line_id: string;
+  part: string;
+  role: 'part' | 'labor';
+  labor: 'repair' | 'paint' | 'mount_and_paint' | null;
+};
+
+function parseRepairLines(value: unknown): RepairObservation[] | null {
+  if (!Array.isArray(value)) return null;
+  const lines: RepairObservation[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') return null;
+    const line = item as Record<string, unknown>;
+    if (typeof line.line_id !== 'string' || typeof line.part !== 'string') return null;
+    if (line.role !== 'part' && line.role !== 'labor') return null;
+    const labor = line.labor === 'repair' || line.labor === 'paint' || line.labor === 'mount_and_paint' ? line.labor : null;
+    if (line.role === 'part' && line.labor != null) return null;
+    if (line.role === 'labor' && !labor) return null;
+    lines.push({
+      line_id: line.line_id,
+      part: line.part,
+      role: line.role,
+      labor,
+    });
+  }
+  return lines;
 }
 
 function annotationPath(subjectId: string, annotationId: string): string {

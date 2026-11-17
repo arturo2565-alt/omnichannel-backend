@@ -16,6 +16,7 @@ import {
   assertSeverityWrite,
   confirmSeverity,
   ingestSeverityAssessment,
+  recordDeclaredSeverity,
   type SeverityFiles,
 } from './severity-annotation';
 import { SeverityReviewController } from './severity-review.module';
@@ -169,6 +170,7 @@ describe('severidad severity-v1', () => {
         level: 'medio_leve',
         status: 'proposed',
         provenance: 'visual_inference',
+        inferenceMethod: 'visual_assessment',
         scaleVersion: 'severity-v1',
         evidenceKind: 'photographs',
       },
@@ -261,7 +263,7 @@ describe('severidad severity-v1', () => {
     const saved = await ingestSeverityAssessment(files, {
       subjectId: 'RQ-000021',
       lineId: 'L01',
-      assessment: 'human_declaration',
+      assessment: 'visual_inference',
       level: 'medio',
     });
     expect(saved.status).toBe('recorded');
@@ -269,9 +271,11 @@ describe('severidad severity-v1', () => {
     const line = detail.revisions[0].lines.find((item) => item.lineId === 'L01');
     expect(line?.severityAnnotation).toMatchObject({
       status: 'proposed',
-      provenance: 'human_declaration',
+      provenance: 'visual_inference',
+      inferenceMethod: 'visual_assessment',
       level: 'medio',
       evidenceKind: 'text_only',
+      zoneId: 'rq:puerta',
     });
     expect(line?.severityAnnotation?.status).not.toBe('validated');
     expect(detail.revisions[0].quotedTotalMxn).toBe(5300);
@@ -290,6 +294,137 @@ describe('severidad severity-v1', () => {
     })).rejects.toMatchObject({ code: 'invalid' });
     expect(files.writes.some((path) => path.includes('CQ-000006') || path.startsWith('data/commercial/'))).toBe(false);
     expect(files.files.get('data/commercial/quotes/CQ-000006.json')?.content).toBe(commercial);
+  });
+
+  it('clasifica la zona dañada y no deja que la inferencia se presente como declaración', async () => {
+    const files = new MemoryFiles();
+    const repairOnly = JSON.stringify({
+      schema_version: '1.0.0',
+      quote_id: 'RQ-000031',
+      revision: 1,
+      evidence: 'text_only',
+      photo_status: 'not_provided',
+      lines: [{
+        line_id: 'L01',
+        part: 'Puerta delantera derecha',
+        role: 'labor',
+        labor: 'repair',
+        prices: { quoted: { amount_mxn: 3600, validation: 'human_confirmed' } },
+      }],
+      quoted_total_mxn: 3600,
+      status: 'human_verified',
+    });
+    const replaced = JSON.stringify({
+      schema_version: '1.0.0',
+      quote_id: 'RQ-000032',
+      revision: 1,
+      evidence: 'text_only',
+      photo_status: 'not_provided',
+      lines: [
+        { line_id: 'L01', part: 'Fascia delantera', role: 'part', labor: null, prices: { quoted: { amount_mxn: 2900, validation: 'human_confirmed' } } },
+        { line_id: 'L02', part: 'Fascia delantera', role: 'labor', labor: 'mount_and_paint', prices: { quoted: { amount_mxn: 3400, validation: 'human_confirmed' } } },
+      ],
+      quoted_total_mxn: 6300,
+      status: 'human_verified',
+    });
+    const generic = JSON.stringify({
+      schema_version: '1.0.0',
+      quote_id: 'RQ-000033',
+      revision: 1,
+      evidence: 'text_only',
+      photo_status: 'not_provided',
+      lines: [{
+        line_id: 'L01',
+        part: 'Pintura',
+        role: 'labor',
+        labor: 'paint',
+        prices: { quoted: { amount_mxn: 800, validation: 'human_confirmed' } },
+      }],
+      quoted_total_mxn: 800,
+      status: 'human_verified',
+    });
+    files.seed('data/repairs/quotes/RQ-000031.json', repairOnly);
+    files.seed('data/repairs/quotes/RQ-000032.json', replaced);
+    files.seed('data/repairs/quotes/RQ-000033.json', generic);
+    files.seed('data/repairs/index.json', JSON.stringify({
+      opportunities: {
+        puerta: { quote_ids: ['RQ-000031'] },
+        fascia: { quote_ids: ['RQ-000032'] },
+        generica: { quote_ids: ['RQ-000033'] },
+      },
+    }));
+    await expect(ingestSeverityAssessment(files, {
+      subjectId: 'RQ-000031',
+      lineId: 'L01',
+      assessment: 'human_declaration',
+      level: 'medio',
+    } as never)).rejects.toMatchObject({ code: 'rejected' });
+    const proposed = await ingestSeverityAssessment(files, {
+      subjectId: 'RQ-000031',
+      lineId: 'L01',
+      assessment: 'visual_inference',
+      level: 'medio_leve',
+    });
+    expect(proposed.status).toBe('recorded');
+    const declared = await recordDeclaredSeverity(files, {
+      subjectId: 'RQ-000031',
+      lineId: 'L01',
+      level: 'medio',
+    });
+    expect(declared.status).toBe('recorded');
+    await expect(ingestSeverityAssessment(files, {
+      subjectId: 'RQ-000031',
+      lineId: 'L01',
+      assessment: 'visual_inference',
+      level: 'fuerte',
+    })).resolves.toMatchObject({ status: 'retained', annotationId: declared.annotationId });
+    const repairDetail = await readCalibrationRepair(archiveOf(files), 'RQ-000031');
+    expect(repairDetail.revisions[0].lines[0]).toMatchObject({
+      severityZone: 'rq:puerta delantera derecha',
+      severityAnchor: true,
+      severityAnnotation: {
+        status: 'proposed',
+        provenance: 'human_declaration',
+        inferenceMethod: null,
+        treatment: 'repair',
+        level: 'medio',
+      },
+    });
+    expect(repairDetail.revisions[0].quotedTotalMxn).toBe(3600);
+    expect(files.files.get('data/repairs/quotes/RQ-000031.json')?.content).toBe(repairOnly);
+    const mounted = await ingestSeverityAssessment(files, {
+      subjectId: 'RQ-000032',
+      lineId: 'L02',
+      assessment: 'visual_inference',
+      level: 'medio_fuerte',
+    });
+    expect(await ingestSeverityAssessment(files, {
+      subjectId: 'RQ-000032',
+      lineId: 'L01',
+      assessment: 'visual_inference',
+      level: 'medio_fuerte',
+    })).toMatchObject({ status: 'already_recorded', annotationId: mounted.annotationId });
+    const replacedDetail = await readCalibrationRepair(archiveOf(files), 'RQ-000032');
+    const shared = replacedDetail.revisions[0].lines.map((line) => line.severityAnnotation?.annotationId);
+    expect(shared).toEqual([mounted.annotationId, mounted.annotationId]);
+    expect(replacedDetail.revisions[0].lines[0].severityAnchor).toBe(true);
+    expect(replacedDetail.revisions[0].lines[1].severityAnchor).toBe(false);
+    expect(replacedDetail.revisions[0].lines[0].severityAnnotation).toMatchObject({ treatment: 'replace_paint', status: 'proposed' });
+    expect(replacedDetail.revisions[0].quotedTotalMxn).toBe(6300);
+    expect(files.files.get('data/repairs/quotes/RQ-000032.json')?.content).toBe(replaced);
+    const beforeGeneric = files.writes.length;
+    await expect(ingestSeverityAssessment(files, {
+      subjectId: 'RQ-000033',
+      lineId: 'L01',
+      assessment: 'visual_inference',
+      level: 'leve',
+    })).rejects.toMatchObject({ code: 'rejected' });
+    expect(files.writes).toHaveLength(beforeGeneric);
+    const untouched = await readCalibrationRepair(archiveOf(files), 'RQ-000033');
+    expect(untouched.revisions[0].lines[0].severityZone).toBeNull();
+    expect(untouched.revisions[0].lines[0].severityAnnotation).toBeNull();
+    expect(untouched.revisions[0].quotedTotalMxn).toBe(800);
+    expect(files.files.get('data/repairs/quotes/RQ-000033.json')?.content).toBe(generic);
   });
 
   it('oculta una validación fabricada en el índice y conserva el precio', async () => {
@@ -319,6 +454,33 @@ describe('severidad severity-v1', () => {
     expect(detail.lines[0].severityAnnotation).toBeNull();
     expect(detail.quotedTotalMxn).toBe(3600);
     expect(files.files.get('data/cases/AF-000004.json')?.content).toBe(body);
+    const disguised = visualCase('AF-000011', [{ line_id: 'L1', part: 'Cofre', price_mxn: 1900 }], 1900);
+    files.seed('data/cases/AF-000011.json', disguised);
+    files.seed('data/annotations/severity/visual/AF-000011/index.json', JSON.stringify({
+      schema_version: '1.0.0',
+      subject_id: 'AF-000011',
+      items: [{
+        annotation_id: 'SV-000001',
+        line_id: 'L1',
+        zone_id: 'af:L1',
+        level: 'leve',
+        status: 'proposed',
+        provenance: 'human_declaration',
+        inference_method: 'visual_assessment',
+        scale_version: 'severity-v1',
+        authorization: null,
+        actor_key: null,
+        part: 'Cofre',
+        treatment: 'repair_paint',
+        evidence_kind: 'photographs',
+        current: true,
+        supersedes: null,
+      }],
+    }));
+    const hidden = await readCalibrationCase(archiveOf(files), 'AF-000011');
+    expect(hidden.lines[0].severityAnnotation).toBeNull();
+    expect(hidden.quotedTotalMxn).toBe(1900);
+    expect(files.files.get('data/cases/AF-000011.json')?.content).toBe(disguised);
   });
 
   it('bloquea agent, admin, sesión ausente y producción antes de escribir', async () => {
@@ -362,7 +524,7 @@ describe('severidad severity-v1', () => {
       if (!name.endsWith('.ts') || name.endsWith('.spec.ts')) continue;
       if (!name.includes('import')) continue;
       const source = readFileSync(join(__dirname, name), 'utf8');
-      if (source.includes('confirmSeverity') || source.includes('operatorRole') || source.includes('authenticated_owner')) {
+      if (source.includes('confirmSeverity') || source.includes('ingestSeverityAssessment') || source.includes('recordDeclaredSeverity') || source.includes('operatorRole') || source.includes('authenticated_owner')) {
         offenders.push(name);
       }
     }

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { evidenceByteTarget, evidenceIndexPath, evidenceReviewMatches, presentEvidenceItems } from './evidence-link';
-import { presentSeverityCatalog, presentSeverityIndex, severitySubjectPath } from './severity-annotation';
+import { presentSeverityCatalog, presentSeverityIndex, severitySubjectPath, severityZoneForLine } from './severity-annotation';
 import { presentVehicle, type VehiclePresentation } from './vehicle-presentation';
 
 export { calibrationQueryAccess } from './calibration-access';
@@ -325,7 +325,7 @@ export async function listCalibrationSeverity(
   const severity = query.severity ?? '';
   const validation = query.validation ?? '';
   const evidenceKind = query.evidence ?? '';
-  if (treatment && !TREATMENTS.has(treatment)) throw new CalibrationQueryError('invalid');
+  if (treatment && !new Set([...TREATMENTS, 'repair', 'mount_and_paint']).has(treatment)) throw new CalibrationQueryError('invalid');
   if (severity && severity !== 'unknown' && !['leve', 'medio_leve', 'medio', 'medio_fuerte', 'fuerte'].includes(severity)) {
     throw new CalibrationQueryError('invalid');
   }
@@ -355,6 +355,8 @@ export async function listCalibrationSeverity(
       provenance: item.provenance,
       scaleVersion: item.scaleVersion,
       evidenceKind: item.evidenceKind,
+      zoneId: item.zoneId,
+      inferenceMethod: item.inferenceMethod,
     })),
     limit,
     truncated: matched.length > limit,
@@ -453,12 +455,20 @@ async function withLineSeverity<T extends { lines: Array<{ lineId: string | null
   } catch {
     notes = [];
   }
+  const anchors = new Set<string>();
   return {
     ...record,
-    lines: record.lines.map((line) => ({
-      ...line,
-      severityAnnotation: line.lineId ? notes.find((item) => item.lineId === line.lineId) ?? null : null,
-    })),
+    lines: record.lines.map((line) => {
+      const zoneId = severityZoneForLine(line);
+      const anchor = zoneId != null && !anchors.has(zoneId);
+      if (zoneId && anchor) anchors.add(zoneId);
+      return {
+        ...line,
+        severityZone: zoneId,
+        severityAnchor: anchor,
+        severityAnnotation: zoneId ? notes.find((item) => item.zoneId === zoneId) ?? null : null,
+      };
+    }),
   };
 }
 
