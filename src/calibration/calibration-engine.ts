@@ -145,11 +145,16 @@ export class CalibrationEngine {
     this.random = options.random ?? Math.random;
   }
 
-  async record(input: unknown, images: readonly Buffer[] = []): Promise<CalibrationRecordResult> {
+  async record(
+    input: unknown,
+    images: readonly Buffer[] = [],
+    options: { holdPhotos?: boolean } = {},
+  ): Promise<CalibrationRecordResult> {
     const quote = validateHumanQuote(input);
-    const uniqueImages = dedupeImages(images);
-    const written = await this.commitQuote(quote, uniqueImages.length > 0);
-    if (uniqueImages.length === 0 || written.photoArchiveStatus === 'archived_private') {
+    const hold = options.holdPhotos === true;
+    const uniqueImages = hold ? [] : dedupeImages(images);
+    const written = await this.commitQuote(quote, hold || uniqueImages.length > 0);
+    if (hold || uniqueImages.length === 0 || written.photoArchiveStatus === 'archived_private') {
       return written;
     }
     return this.archivePhotos(written, uniqueImages);

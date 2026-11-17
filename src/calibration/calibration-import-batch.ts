@@ -23,6 +23,7 @@ import {
 } from './calibration-import';
 import { CalibrationConflictError } from './calibration-github-writer';
 import { validateCalibrationImage } from './calibration-image-archive.service';
+import { SeverityError } from './severity-annotation';
 
 const MAX_BATCH = 10;
 const MAX_QUOTE_BYTES = 64 * 1024;
@@ -683,6 +684,7 @@ function failureReason(err: unknown): BatchReason {
     message.includes('Invalid calibration image')
   )
     return 'invalid';
+  if (err instanceof SeverityError) return 'invalid';
   if (err instanceof CalibrationValidationError) {
     if (err.code === 'personal_data' || err.code === 'invalid')
       return 'invalid';

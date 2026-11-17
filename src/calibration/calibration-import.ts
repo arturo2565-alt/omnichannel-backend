@@ -29,7 +29,8 @@ import {
 } from './calibration-github-writer';
 import { imageContainsPersonalMetadata, validateCalibrationImage } from './calibration-image-archive.service';
 import { SeverityError, severityAnnotationPathAllowed, type SeverityFiles } from './severity-annotation';
-import { applySeverityImport, openImportedSeverityFiles, readSeverityRequests, type SeverityImportReport } from './severity-import';
+import { applyQuoteAuthority } from './quote-authority';
+import { applySeverityImport, openImportedSeverityFiles, readSeverityRequests, type SeverityImportReport, type SeverityRequest } from './severity-import';
 
 const TOKEN_URL = /^https:\/\/api\.github\.com\/app\/installations\/\d{1,12}\/access_tokens$/;
 const REPOSITORIES_URL = 'https://api.github.com/installation/repositories?per_page=100';
@@ -84,6 +85,12 @@ export type ImportReport = {
   cameraOriginal?: false;
   severity?: SeverityImportReport;
   enriched?: boolean;
+  /** Fotografías retenidas fuera del archivo. La cotización sí quedó registrada. */
+  privacy?: {
+    state: 'pending';
+    withheld: number;
+    anonymizedCopy: 'offered';
+  };
 };
 
 export type CalibrationImportLimits = {
@@ -136,6 +143,8 @@ export type CalibrationImportInput = {
   visual_observations?: unknown;
   images?: Buffer[];
   severity?: unknown;
+  /** Texto de la cotización humana. No se guarda como un campo nuevo del expediente. */
+  operator_statement?: unknown;
 };
 
 export function prepareCalibrationImport(
@@ -146,11 +155,19 @@ export function prepareCalibrationImport(
   images: Buffer[];
   imageShas: string[];
   duplicateImages: number;
+  severity: SeverityRequest[] | null;
+  privacy: { withheld: number };
 } {
   assertImportMaterial(input);
   if (input.human_verified !== true) {
     throw new CalibrationConflictError('An authorized quote must be human verified');
   }
+  const authority = applyQuoteAuthority({
+    lineItems: input.line_items,
+    visualObservations: input.visual_observations ?? [],
+    severity: readSeverityRequests(input.severity),
+    operatorStatement: input.operator_statement,
+  });
   const quote = validateHumanQuote({
     source: {
       kind: 'autofix_human_quote',
@@ -158,8 +175,8 @@ export function prepareCalibrationImport(
       quoted_at: input.quoted_at ?? null,
     },
     vehicle: input.vehicle,
-    line_items: input.line_items,
-    visual_observations: input.visual_observations ?? [],
+    line_items: authority.lineItems,
+    visual_observations: authority.visualObservations,
     status: 'human_verified',
   });
   if (RESERVED_SOURCE_KEYS.has(quote.source.source_case_key) || quote.source.source_case_key.startsWith('probe-')) {
@@ -171,10 +188,12 @@ export function prepareCalibrationImport(
   const unique: Buffer[] = [];
   const imageShas: string[] = [];
   let duplicateImages = 0;
+  let withheld = 0;
   for (const bytes of images) {
     const { sha256 } = validateCalibrationImage(bytes);
     if (imageContainsPersonalMetadata(bytes)) {
-      throw new CalibrationConflictError('The photograph contains personal metadata');
+      withheld += 1;
+      continue;
     }
     if (seen.has(sha256)) {
       duplicateImages += 1;
@@ -184,10 +203,13 @@ export function prepareCalibrationImport(
     unique.push(bytes);
     imageShas.push(sha256);
   }
+  if (withheld > 0) {
+    return { quote, images: [], imageShas: [], duplicateImages: 0, severity: authority.severity, privacy: { withheld } };
+  }
   if (unique.length < limits.minPhotos) {
     throw new CalibrationConflictError('The import requires at least one photograph');
   }
-  return { quote, images: unique, imageShas, duplicateImages };
+  return { quote, images: unique, imageShas, duplicateImages, severity: authority.severity, privacy: { withheld: 0 } };
 }
 
 export function readCalibrationImportDocument(
@@ -204,6 +226,7 @@ export function readCalibrationImportDocument(
     visual_observations?: unknown;
     images?: unknown;
     severity?: unknown;
+    operator_statement?: unknown;
   };
   try {
     parsed = JSON.parse(readFileSync(quotePath, 'utf8')) as typeof parsed;
@@ -248,6 +271,7 @@ export function readCalibrationImportDocument(
     visual_observations: parsed.visual_observations ?? [],
     images,
     ...(Object.prototype.hasOwnProperty.call(parsed, 'severity') ? { severity: parsed.severity } : {}),
+    ...(Object.prototype.hasOwnProperty.call(parsed, 'operator_statement') ? { operator_statement: parsed.operator_statement } : {}),
   };
 }
 
@@ -375,9 +399,8 @@ export async function importCalibrationCase(
 ): Promise<ImportReport> {
   if (!calibrationDiagnosticTarget(env)) return error('wrong_target');
   if (env.CALIBRATION_INGEST_ENABLED !== 'false' || env.DB_SYNCHRONIZE !== 'false') return error('flags');
-  let requests: ReturnType<typeof readSeverityRequests> = null;
   try {
-    requests = readSeverityRequests(input.severity);
+    readSeverityRequests(input.severity);
   } catch (err) {
     return error(err instanceof SeverityError && err.code === 'rejected' ? 'rejected' : 'invalid');
   }
@@ -425,7 +448,7 @@ export async function importCalibrationCase(
             photoArchiveStatus: 'archived_private',
             photoRefs: photoIds(prepared.images.length),
           }, prepared);
-          return attachSeverity(finished, requests, deps.severityFiles, guarded, () => app.authorization());
+          return attachSeverity(finished, prepared.severity, deps.severityFiles, guarded, () => app.authorization());
         }
         return halted('conflict', writer, protectedBefore, realCaseCountBefore);
       }
@@ -437,7 +460,11 @@ export async function importCalibrationCase(
     });
     let recorded;
     try {
-      recorded = await engine.record(prepared.quote, prepared.images);
+      recorded = await engine.record(
+        prepared.quote,
+        prepared.privacy.withheld > 0 ? [] : prepared.images,
+        prepared.privacy.withheld > 0 ? { holdPhotos: true } : {},
+      );
       if (!realCaseId(recorded.caseId)) throw new CalibrationConflictError('Real import selected a protected case');
       if (recorded.photoArchiveStatus !== 'archived_private' && recorded.orphanPhotoRefs.length > 0) {
         await engine.recoverOrphanManifests(
@@ -450,7 +477,7 @@ export async function importCalibrationCase(
       return halted(categoryOf(err) === 'rejected' ? 'partial' : categoryOf(err), writer, protectedBefore, realCaseCountBefore);
     }
     const finished = await finish(writer, protectedBefore, realCaseCountBefore, recorded, prepared);
-    return attachSeverity(finished, requests, deps.severityFiles, guarded, () => app.authorization());
+    return attachSeverity(finished, prepared.severity, deps.severityFiles, guarded, () => app.authorization());
   } catch (err) {
     return error(categoryOf(err));
   }
@@ -527,11 +554,40 @@ async function finish(
   },
   prepared: ReturnType<typeof prepareCalibrationImport>,
 ): Promise<ImportReport> {
-  const complete = realCaseId(recorded.caseId) && await sameCompleteObservation(writer, recorded.caseId, prepared);
   const protectedAfter = await writer.readCase(PROTECTED_CASE_ID);
   const index = await writer.readIndex();
   const protectedCaseUnchanged = JSON.stringify(protectedAfter) === JSON.stringify(protectedBefore)
     && index.cases[PROTECTED_CASE_ID] === `data/cases/${PROTECTED_CASE_ID}.json`;
+  const stored = await writer.readCase(recorded.caseId);
+  const quoteHeld = prepared.privacy.withheld > 0
+    && prepared.images.length === 0
+    && protectedCaseUnchanged
+    && realCaseId(recorded.caseId)
+    && stored != null
+    && calibrationObservationFingerprint(stored) === calibrationObservationFingerprint(prepared.quote)
+    && recorded.photoArchiveStatus === 'pending_private_archive'
+    && recorded.photoRefs.length === 0;
+  if (quoteHeld) {
+    return {
+      service: 'calibration-import',
+      result: 'ok',
+      status: recorded.status,
+      caseId: recorded.caseId,
+      sourceKey: prepared.quote.source.source_case_key,
+      photoRefs: [],
+      duplicateImages: prepared.duplicateImages,
+      contentMatch: true,
+      manifestMatch: false,
+      photoArchiveStatus: 'pending_private_archive',
+      realCaseCountBefore,
+      realCaseCountAfter: Object.keys(index.cases).length,
+      protectedCaseUnchanged,
+      provenance: 'operator_local_folder',
+      cameraOriginal: false,
+      privacy: { state: 'pending', withheld: prepared.privacy.withheld, anonymizedCopy: 'offered' },
+    };
+  }
+  const complete = realCaseId(recorded.caseId) && await sameCompleteObservation(writer, recorded.caseId, prepared);
   const base: ImportReport = {
     service: 'calibration-import',
     result: complete && protectedCaseUnchanged ? 'ok' : 'error',

@@ -10,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
+import { crc32 } from 'node:zlib';
 import {
   CalibrationCloudinaryArchive,
   type CloudinaryGateway,
@@ -106,6 +107,18 @@ function quote(key: string, price = 4100) {
     ],
     visual_observations: [],
   };
+}
+
+function pngWithAuthor(value: string): Buffer {
+  const base = minimalDecodablePng([4, 5, 6]);
+  const iendAt = base.length - 12;
+  const text = Buffer.concat([Buffer.from('Author'), Buffer.from([0]), Buffer.from(value)]);
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(text.length, 0);
+  const body = Buffer.concat([Buffer.from('tEXt', 'ascii'), text]);
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(body) >>> 0, 0);
+  return Buffer.concat([base.subarray(0, iendAt), length, body, checksum, base.subarray(iendAt)]);
 }
 
 function keyFor(index: number): string {
@@ -638,6 +651,45 @@ describe('CAL-012 private batch import', () => {
         source?: { source_case_key?: string };
       };
       expect(stored.source?.source_case_key).toBe(key);
+      frozenUntouched(harness.github);
+    });
+  });
+
+  it('registers the quote and continues when a photograph waits for privacy', async () => {
+    await withRoot(async (root) => {
+      const privateKey = 'autofix-2026-11-17-privacidad';
+      const nextKey = 'autofix-2026-11-17-siguiente';
+      writeExpediente(root, '01-privacidad', quote(privateKey, 8500), ['foto.png'], {
+        'foto.png': pngWithAuthor('Ana'),
+      });
+      writeExpediente(root, '02-siguiente', quote(nextKey, 4200), ['foto.png'], {
+        'foto.png': minimalDecodablePng([4, 2, 0]),
+      });
+      const harness = deps(routed());
+      const report = await importCalibrationBatch(stagingEnv(), root, {
+        apply: true,
+        ...harness.options,
+      });
+      const held = report.items.find((item) => item.sourceKey === privateKey);
+      const next = report.items.find((item) => item.sourceKey === nextKey);
+      expect(held).toMatchObject({
+        disposition: 'pending_private_archive',
+        labelEligible: false,
+        caseId: 'AF-000004',
+        photoArchiveStatus: 'pending_private_archive',
+      });
+      expect(next).toMatchObject({
+        disposition: 'registrado',
+        labelEligible: true,
+        caseId: 'AF-000005',
+        photoArchiveStatus: 'archived_private',
+      });
+      expect(harness.photos.uploads).toHaveLength(1);
+      const archived = [...harness.github.files.values()].map((file) => file.text).join('\n');
+      expect(archived).toContain('"price_mxn": 8500');
+      expect(archived).toContain('"price_mxn": 4200');
+      expect(archived).not.toContain('Ana');
+      expect(report.items.some((item) => item.disposition === 'detenido_por_seguridad')).toBe(false);
       frozenUntouched(harness.github);
     });
   });

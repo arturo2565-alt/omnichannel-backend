@@ -723,17 +723,117 @@ describe('CAL-013 variable photographs', () => {
     writeFileSync(join(root, 'caso.json'), JSON.stringify({ ...quote(), images: ['frente.png'] }));
     const loaded = readCalibrationImportDocument(join(root, 'caso.json'));
     expect(loaded.images?.[0]?.equals(authored)).toBe(true);
-    expect(() => prepareCalibrationImport(loaded)).toThrow('personal metadata');
+    const prepared = prepareCalibrationImport(loaded);
+    expect(prepared.images).toEqual([]);
+    expect(prepared.privacy.withheld).toBe(1);
+    expect(prepared.quote.line_items[0]?.price_mxn).toBe(1250);
     const route = routed();
+    const photos = archive();
     return importCalibrationCase(stagingEnv(), { ...quote(), images: [authored] }, {
       transport: route.transport,
-      photos: archive().photos,
+      photos: photos.photos,
     }).then((report) => {
-      expect(report.category).toBe('invalid');
-      expect(JSON.stringify(report)).not.toContain('Ana');
-      expect(route.calls).toHaveLength(0);
-      expect(route.github.files.has('data/cases/AF-000004.json')).toBe(false);
+      const stored = route.github.files.get('data/cases/AF-000004.json')?.text ?? '';
+      expect(report).toMatchObject({
+        result: 'ok',
+        status: 'created',
+        caseId: 'AF-000004',
+        photoArchiveStatus: 'pending_private_archive',
+        privacy: { state: 'pending', withheld: 1, anonymizedCopy: 'offered' },
+      });
+      expect(stored).toContain('"price_mxn": 1250');
+      expect(stored).not.toContain('Ana');
+      expect(photos.uploads).toEqual([]);
+      expect([...route.github.files.keys()].some((path) => path.startsWith('data/photos/'))).toBe(false);
     });
+  });
+});
+
+describe('CAL-027 human quote authority', () => {
+  const depsOf = (route: ReturnType<typeof routed>, photos = archive()) => ({
+    transport: route.transport,
+    photos: photos.photos,
+    clock: () => '2026-11-17T19:30:00.000Z',
+    store: photos,
+  });
+
+  it('keeps the declared side, the price, and a pending human severity', async () => {
+    const route = routed();
+    const deps = depsOf(route);
+    const report = await importCalibrationCase(stagingEnv(), {
+      ...quote(8500, 'autofix-sim-lado-001'),
+      line_items: [
+        {
+          line_id: 'L1',
+          part: 'salpicadera trasera izquierda',
+          treatment: 'repair_paint',
+          price_mxn: 8500,
+          damage_severity: 'unknown',
+          validation: 'human_confirmed',
+          visual_part: 'salpicadera trasera izquierda',
+        },
+        {
+          line_id: 'L2',
+          part: 'fascia delantera',
+          treatment: 'repair_paint',
+          price_mxn: 6300,
+          damage_severity: 'unknown',
+          validation: 'human_confirmed',
+        },
+      ],
+      operator_statement: 'Reparación y pintura de salpicadera trasera derecha: $8,500. Daño medio-leve. Fascia delantera: daño fuerte.',
+      severity: [{ lineId: 'L1', assessment: 'visual_inference', level: 'leve' }],
+    }, deps);
+    const stored = route.github.files.get('data/cases/AF-000004.json')?.text ?? '';
+    const notes = [...route.github.files.values()].map((file) => file.text).filter((text) => (
+      text.includes('"annotation_id"') && !text.includes('"items"') && !text.includes('"records"')
+    ));
+    expect(report).toMatchObject({ result: 'ok', enriched: true, caseId: 'AF-000004' });
+    expect(stored).toContain('"part": "salpicadera trasera derecha"');
+    expect(stored).not.toContain('salpicadera trasera izquierda');
+    expect(stored).toContain('"price_mxn": 8500');
+    expect(stored).toContain('"price_mxn": 6300');
+    expect(stored).toContain('"treatment": "repair_paint"');
+    expect(stored).toContain('Posible discrepancia visual');
+    expect(stored).toContain('No es un hecho confirmado');
+    expect(notes).toHaveLength(2);
+    expect(notes.join('\n')).toContain('"provenance": "human_declaration"');
+    expect(notes.join('\n')).toContain('"level": "medio_leve"');
+    expect(notes.join('\n')).toContain('"level": "fuerte"');
+    expect(notes.join('\n')).not.toContain('"provenance": "visual_inference"');
+    expect(notes.join('\n')).not.toContain('"status": "validated"');
+    expect(deps.store.uploads).toHaveLength(2);
+  });
+
+  it('links a clean photograph later without rewriting the quote', async () => {
+    const route = routed();
+    const photos = archive();
+    const deps = depsOf(route, photos);
+    const authored = pngWithText('Author', 'Ana');
+    const input = { ...quote(8500, 'autofix-sim-privacidad-001'), images: [authored] };
+    const held = await importCalibrationCase(stagingEnv(), input, deps);
+    const stored = route.github.files.get('data/cases/AF-000004.json')?.text;
+    expect(held.privacy).toEqual({ state: 'pending', withheld: 1, anonymizedCopy: 'offered' });
+    expect(held.photoArchiveStatus).toBe('pending_private_archive');
+    expect(photos.uploads).toEqual([]);
+    expect(stored).toContain('"price_mxn": 8500');
+    expect(stored).not.toContain('Ana');
+    const linked = await importCalibrationCase(stagingEnv(), {
+      ...input,
+      images: [minimalDecodablePng([9, 9, 9])],
+    }, deps);
+    expect(linked).toMatchObject({
+      result: 'ok',
+      status: 'already_exists',
+      caseId: 'AF-000004',
+      photoArchiveStatus: 'archived_private',
+      contentMatch: true,
+      manifestMatch: true,
+    });
+    expect(linked.privacy).toBeUndefined();
+    expect(route.github.files.get('data/cases/AF-000004.json')?.text).toContain('"price_mxn": 8500');
+    expect(photos.uploads).toHaveLength(1);
+    expect([...route.github.files.values()].map((file) => file.text).join('\n')).not.toContain('Ana');
   });
 });
 
