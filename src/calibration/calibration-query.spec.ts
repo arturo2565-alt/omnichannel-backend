@@ -253,6 +253,27 @@ describe('consulta de calibración', () => {
     await expect(readCalibrationCase(store, 'AF-1')).rejects.toBeInstanceOf(CalibrationQueryError);
   });
 
+  it('conserva las partidas de una pieza con refacción y pintura', async () => {
+    const store = archive({
+      'data/cases/AF-000107.json': visualCase('AF-000107', {
+        line_items: [
+          { line_id: 'L01', part: 'salpicadera izquierda', treatment: 'replace', price_mxn: 1900, damage_severity: 'unknown', validation: 'human_confirmed' },
+          { line_id: 'L02', part: 'salpicadera izquierda', treatment: 'paint', price_mxn: 3600, damage_severity: 'unknown', validation: 'human_confirmed' },
+          { line_id: 'L03', part: 'fascia delantera', treatment: 'replace', price_mxn: 2700, damage_severity: 'unknown', validation: 'human_confirmed' },
+          { line_id: 'L04', part: 'fascia delantera', treatment: 'paint', price_mxn: 3600, damage_severity: 'unknown', validation: 'human_confirmed' },
+        ],
+      }),
+    }, new Map());
+    const detail = await readCalibrationCase(store, 'AF-000107');
+    expect(detail.quotedTotalMxn).toBe(11800);
+    expect(detail.lines.map((line) => [line.lineId, line.part, line.treatment, line.priceMxn, line.severityZone])).toEqual([
+      ['L01', 'salpicadera izquierda', 'replace', 1900, 'af:L01'],
+      ['L02', 'salpicadera izquierda', 'paint', 3600, 'af:L02'],
+      ['L03', 'fascia delantera', 'replace', 2700, 'af:L03'],
+      ['L04', 'fascia delantera', 'paint', 3600, 'af:L04'],
+    ]);
+  });
+
   it('entrega bytes verificados y rechaza una fotografía ajena o alterada', async () => {
     const store = archive(files(), new Map([[digest, image]]));
     const served = await readCalibrationPhoto(store, 'AF-000101', 'IMG-000001');
