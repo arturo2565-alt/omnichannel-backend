@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { evidenceByteTarget, evidenceIndexPath, evidenceReviewMatches, presentEvidenceItems } from './evidence-link';
+import { presentSeverityCatalog, presentSeverityIndex, severitySubjectPath } from './severity-annotation';
 import { presentVehicle, type VehiclePresentation } from './vehicle-presentation';
 
 export { calibrationQueryAccess } from './calibration-access';
@@ -79,7 +80,10 @@ export function calibrationPathAllowed(path: string): boolean {
     || /^data\/repairs\/quotes\/RQ-\d{6}\.json$/.test(path)
     || /^data\/evidence\/commercial\/CQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json|reviews\/RV-\d{6}\.json)$/.test(path)
     || /^data\/evidence\/repairs\/RQ-\d{6}\/(?:index\.json|manifests\/EV-\d{6}\.json|reviews\/RV-\d{6}\.json)$/.test(path)
-    || path === 'data/evidence/index.json';
+    || path === 'data/evidence/index.json'
+    || path === 'data/annotations/severity/index.json'
+    || /^data\/annotations\/severity\/visual\/AF-\d{6}\/index\.json$/.test(path)
+    || /^data\/annotations\/severity\/repairs\/RQ-\d{6}\/index\.json$/.test(path);
 }
 
 export async function readCalibrationSummary(archive: CalibrationArchive) {
@@ -140,7 +144,7 @@ export async function readCalibrationCase(archive: CalibrationArchive, caseId: s
   if (!CASE_ID.test(caseId)) throw new CalibrationQueryError('invalid');
   const record = await readCaseRecord(archive, caseId);
   if (!record) throw new CalibrationQueryError('missing');
-  return withoutRecordedAt(record);
+  return withoutRecordedAt(await withLineSeverity(archive, record, caseId));
 }
 
 export async function listCalibrationOpportunities(archive: CalibrationArchive, query: QueryList) {
@@ -303,7 +307,57 @@ export async function readCalibrationRepair(archive: CalibrationArchive, quoteId
   if (!detail) throw new CalibrationQueryError('missing');
   return {
     ...detail,
-    revisions: detail.revisions.map((revision) => withoutRecordedAt(revision)),
+    revisions: await Promise.all(detail.revisions.map(async (revision) => (
+      withoutRecordedAt(await withLineSeverity(archive, revision, revision.id))
+    ))),
+  };
+}
+
+export async function listCalibrationSeverity(
+  archive: CalibrationArchive,
+  query: { part?: string; treatment?: string; severity?: string; validation?: string; evidence?: string; limit?: string },
+) {
+  const limit = query.limit == null || query.limit === '' ? 20 : Number(query.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new CalibrationQueryError('invalid');
+  const part = query.part?.trim().toLowerCase() ?? '';
+  if (part.length > 80) throw new CalibrationQueryError('invalid');
+  const treatment = query.treatment ?? '';
+  const severity = query.severity ?? '';
+  const validation = query.validation ?? '';
+  const evidenceKind = query.evidence ?? '';
+  if (treatment && !TREATMENTS.has(treatment)) throw new CalibrationQueryError('invalid');
+  if (severity && severity !== 'unknown' && !['leve', 'medio_leve', 'medio', 'medio_fuerte', 'fuerte'].includes(severity)) {
+    throw new CalibrationQueryError('invalid');
+  }
+  if (validation && !['proposed', 'validated', 'unknown'].includes(validation)) throw new CalibrationQueryError('invalid');
+  if (evidenceKind && !['photographs', 'text_only', 'not_provided'].includes(evidenceKind)) throw new CalibrationQueryError('invalid');
+  const text = await readText(archive, 'data/annotations/severity/index.json');
+  const records = text ? presentSeverityCatalog(text) : [];
+  const matched = records.filter((item) => {
+    if (part && !item.part.toLowerCase().includes(part)) return false;
+    if (treatment && item.treatment !== treatment) return false;
+    if (severity === 'unknown' && item.level != null) return false;
+    if (severity && severity !== 'unknown' && item.level !== severity) return false;
+    if (validation && item.status !== validation) return false;
+    if (evidenceKind && item.evidenceKind !== evidenceKind) return false;
+    return true;
+  });
+  return {
+    items: matched.slice(0, limit).map((item) => ({
+      id: `${item.subjectId}:${item.lineId}`,
+      subjectId: item.subjectId,
+      subjectKind: item.subjectKind,
+      lineId: item.lineId,
+      part: item.part,
+      treatment: item.treatment,
+      level: item.level,
+      status: item.status,
+      provenance: item.provenance,
+      scaleVersion: item.scaleVersion,
+      evidenceKind: item.evidenceKind,
+    })),
+    limit,
+    truncated: matched.length > limit,
   };
 }
 
@@ -385,6 +439,27 @@ export async function readCalibrationPhoto(
   const actual = createHash('sha256').update(bytes).digest('hex');
   if (actual !== manifest.locator.sha256) throw new CalibrationQueryError('unavailable');
   return { mime: manifest.mime, bytes };
+}
+
+async function withLineSeverity<T extends { lines: Array<{ lineId: string | null }> }>(
+  archive: CalibrationArchive,
+  record: T,
+  subjectId: string,
+): Promise<T> {
+  let notes: ReturnType<typeof presentSeverityIndex> = [];
+  try {
+    const text = await readText(archive, severitySubjectPath(subjectId));
+    notes = text ? presentSeverityIndex(text, subjectId) : [];
+  } catch {
+    notes = [];
+  }
+  return {
+    ...record,
+    lines: record.lines.map((line) => ({
+      ...line,
+      severityAnnotation: line.lineId ? notes.find((item) => item.lineId === line.lineId) ?? null : null,
+    })),
+  };
 }
 
 async function readText(archive: CalibrationArchive, path: string): Promise<string | null> {

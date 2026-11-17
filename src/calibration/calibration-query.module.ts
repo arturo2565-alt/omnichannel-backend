@@ -30,6 +30,7 @@ import {
   readCalibrationQuote,
   readCalibrationRepair,
   readCalibrationSummary,
+  listCalibrationSeverity,
   type CalibrationArchive,
   type QueryList,
 } from './calibration-query';
@@ -115,6 +116,17 @@ export class CalibrationQueryController {
   @Get('repair-work')
   repairWork(@CurrentUser() user: AuthenticatedUser, @Query() query: QueryList) {
     return this.run(user, (archive) => listCalibrationRepairWork(archive, query));
+  }
+
+  @Get('severity')
+  severity(@CurrentUser() user: AuthenticatedUser, @Query() query: QueryList & {
+    part?: string;
+    treatment?: string;
+    severity?: string;
+    validation?: string;
+    evidence?: string;
+  }) {
+    return this.run(user, (archive) => listCalibrationSeverity(archive, query));
   }
 
   @Get('repairs/:quoteId')
