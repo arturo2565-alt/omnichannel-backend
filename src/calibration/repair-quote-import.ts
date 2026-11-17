@@ -23,6 +23,7 @@ import {
 } from './repair-quote-store';
 import { validateRepairQuote, type ValidatedRepairQuote } from './repair-quote';
 import { SeverityError, type SeverityFiles } from './severity-annotation';
+import type { ColorFiles } from './color-annotation';
 import {
   applySeverityImport,
   openImportedSeverityFiles,
@@ -30,6 +31,13 @@ import {
   separateSeverityImport,
   type SeverityImportReport,
 } from './severity-import';
+import {
+  applyColorImport,
+  openImportedColorFiles,
+  pendingColor,
+  repairColorReading,
+  type ColorImportReport,
+} from './color-import';
 
 const TOKEN_URL =
   /^https:\/\/api\.github\.com\/app\/installations\/\d{1,12}\/access_tokens$/;
@@ -63,6 +71,7 @@ export type RepairImportReport = {
   opportunityCount?: number;
   quoteCount?: number;
   severity?: SeverityImportReport;
+  color?: ColorImportReport;
   enriched?: boolean;
 };
 
@@ -88,6 +97,7 @@ export async function importRepairQuote(
     archive?: RepairArchive;
     clock?: () => string;
     severityFiles?: SeverityFiles;
+    colorFiles?: ColorFiles;
   } = {},
 ): Promise<RepairImportReport> {
   if (!calibrationDiagnosticTarget(env)) return error('wrong_target');
@@ -111,11 +121,11 @@ export async function importRepairQuote(
   }
   try {
     const opened = deps.archive
-      ? { archive: deps.archive, severityFiles: deps.severityFiles }
+      ? { archive: deps.archive, severityFiles: deps.severityFiles, colorFiles: deps.colorFiles }
       : await openRepairArchive(env, deps.transport ?? fetch);
     if (!opened) return error('missing');
     const recorded = await recordRepairObservation(opened.archive, quote, deps.clock);
-    const report: RepairImportReport = {
+    let report: RepairImportReport = {
       service: 'repair-quote-import',
       result: 'ok',
       status: recorded.status,
@@ -126,16 +136,25 @@ export async function importRepairQuote(
       opportunityCount: recorded.opportunityCount,
       quoteCount: recorded.quoteCount,
     };
-    if (!requests) return report;
-    if (!opened.severityFiles) {
-      return { ...report, enriched: false, severity: pendingSeverity(recorded.quoteId) };
+    if (requests) {
+      if (!opened.severityFiles) {
+        report = { ...report, enriched: false, severity: pendingSeverity(recorded.quoteId) };
+      } else {
+        try {
+          const severity = await applySeverityImport(opened.severityFiles, recorded.quoteId, requests);
+          report = { ...report, severity, enriched: severity.enriched };
+        } catch {
+          report = { ...report, enriched: false, severity: pendingSeverity(recorded.quoteId) };
+        }
+      }
     }
-    try {
-      const severity = await applySeverityImport(opened.severityFiles, recorded.quoteId, requests);
-      return { ...report, severity, enriched: severity.enriched };
-    } catch {
-      return { ...report, enriched: false, severity: pendingSeverity(recorded.quoteId) };
-    }
+    const reading = repairColorReading({
+      make: quote.vehicle.make,
+      model: quote.vehicle.model,
+      variant: quote.vehicle.variant,
+      conditions: quote.conditions,
+    });
+    return attachRepairColor(report, reading, opened.colorFiles);
   } catch (err) {
     return error(categoryOf(err));
   }
@@ -217,7 +236,7 @@ function regularFile(filePath: string): string {
 async function openRepairArchive(
   env: NodeJS.ProcessEnv,
   transport: typeof fetch,
-): Promise<{ archive: RepairArchive; severityFiles: SeverityFiles } | null> {
+): Promise<{ archive: RepairArchive; severityFiles: SeverityFiles; colorFiles: ColorFiles } | null> {
   const guarded = guard(transport);
   const config = readGithubAppConfig(withoutLineSeparators(env));
   if (!config) return null;
@@ -249,7 +268,23 @@ async function openRepairArchive(
   return {
     archive: new RepairGithubWriter(app, guarded),
     severityFiles: openImportedSeverityFiles(guarded, async () => `Bearer ${await app.authorization()}`),
+    colorFiles: openImportedColorFiles(guarded, async () => `Bearer ${await app.authorization()}`),
   };
+}
+
+async function attachRepairColor(
+  report: RepairImportReport,
+  reading: ReturnType<typeof repairColorReading>,
+  files: ColorFiles | undefined,
+): Promise<RepairImportReport> {
+  if (!reading || !report.quoteId) return report;
+  if (!files) return { ...report, color: pendingColor(report.quoteId) };
+  try {
+    const color = await applyColorImport(files, report.quoteId, reading);
+    return { ...report, color };
+  } catch {
+    return { ...report, color: pendingColor(report.quoteId) };
+  }
 }
 
 function pendingSeverity(subjectId: string): SeverityImportReport {

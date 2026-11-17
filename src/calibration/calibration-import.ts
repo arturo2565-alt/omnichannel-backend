@@ -29,8 +29,10 @@ import {
 } from './calibration-github-writer';
 import { imageContainsPersonalMetadata, validateCalibrationImage } from './calibration-image-archive.service';
 import { SeverityError, severityAnnotationPathAllowed, type SeverityFiles } from './severity-annotation';
+import { colorAnnotationPathAllowed, type ColorFiles } from './color-annotation';
 import { applyQuoteAuthority } from './quote-authority';
 import { applySeverityImport, openImportedSeverityFiles, readSeverityRequests, type SeverityImportReport, type SeverityRequest } from './severity-import';
+import { applyColorImport, openImportedColorFiles, pendingColor, visualColorReading, type ColorImportReport } from './color-import';
 
 const TOKEN_URL = /^https:\/\/api\.github\.com\/app\/installations\/\d{1,12}\/access_tokens$/;
 const REPOSITORIES_URL = 'https://api.github.com/installation/repositories?per_page=100';
@@ -84,6 +86,7 @@ export type ImportReport = {
   provenance?: 'operator_local_folder';
   cameraOriginal?: false;
   severity?: SeverityImportReport;
+  color?: ColorImportReport;
   enriched?: boolean;
   /** Fotografías retenidas fuera del archivo. La cotización sí quedó registrada. */
   privacy?: {
@@ -156,6 +159,7 @@ export function prepareCalibrationImport(
   imageShas: string[];
   duplicateImages: number;
   severity: SeverityRequest[] | null;
+  color: ReturnType<typeof visualColorReading>;
   privacy: { withheld: number };
 } {
   assertImportMaterial(input);
@@ -203,13 +207,20 @@ export function prepareCalibrationImport(
     unique.push(bytes);
     imageShas.push(sha256);
   }
+  const color = visualColorReading({
+    statement: input.operator_statement,
+    observations: quote.visual_observations,
+    make: quote.vehicle.make,
+    model: quote.vehicle.model,
+    variant: quote.vehicle.variant,
+  });
   if (withheld > 0) {
-    return { quote, images: [], imageShas: [], duplicateImages: 0, severity: authority.severity, privacy: { withheld } };
+    return { quote, images: [], imageShas: [], duplicateImages: 0, severity: authority.severity, color, privacy: { withheld } };
   }
   if (unique.length < limits.minPhotos) {
     throw new CalibrationConflictError('The import requires at least one photograph');
   }
-  return { quote, images: unique, imageShas, duplicateImages, severity: authority.severity, privacy: { withheld: 0 } };
+  return { quote, images: unique, imageShas, duplicateImages, severity: authority.severity, color, privacy: { withheld: 0 } };
 }
 
 export function readCalibrationImportDocument(
@@ -395,6 +406,7 @@ export async function importCalibrationCase(
     clock?: () => string;
     maxTransientAttempts?: number;
     severityFiles?: SeverityFiles;
+    colorFiles?: ColorFiles;
   } = {},
 ): Promise<ImportReport> {
   if (!calibrationDiagnosticTarget(env)) return error('wrong_target');
@@ -448,7 +460,13 @@ export async function importCalibrationCase(
             photoArchiveStatus: 'archived_private',
             photoRefs: photoIds(prepared.images.length),
           }, prepared);
-          return attachSeverity(finished, prepared.severity, deps.severityFiles, guarded, () => app.authorization());
+          return attachColor(
+            await attachSeverity(finished, prepared.severity, deps.severityFiles, guarded, () => app.authorization()),
+            prepared.color,
+            deps.colorFiles,
+            guarded,
+            () => app.authorization(),
+          );
         }
         return halted('conflict', writer, protectedBefore, realCaseCountBefore);
       }
@@ -477,7 +495,13 @@ export async function importCalibrationCase(
       return halted(categoryOf(err) === 'rejected' ? 'partial' : categoryOf(err), writer, protectedBefore, realCaseCountBefore);
     }
     const finished = await finish(writer, protectedBefore, realCaseCountBefore, recorded, prepared);
-    return attachSeverity(finished, prepared.severity, deps.severityFiles, guarded, () => app.authorization());
+    return attachColor(
+      await attachSeverity(finished, prepared.severity, deps.severityFiles, guarded, () => app.authorization()),
+      prepared.color,
+      deps.colorFiles,
+      guarded,
+      () => app.authorization(),
+    );
   } catch (err) {
     return error(categoryOf(err));
   }
@@ -510,6 +534,7 @@ export function assertRealImportRequest(method: string, rawUrl: string): void {
   if (verb === 'PUT' && /^data\/cases\/AF-0\d{5}\.json$/.test(path) && !historicalRequest(path)) return;
   if (verb === 'PUT' && /^data\/photos\/AF-0\d{5}\/IMG-[0-9]{6}\.json$/.test(path) && !historicalRequest(path)) return;
   if (severityAnnotationPathAllowed(path) && !historicalRequest(path)) return;
+  if (colorAnnotationPathAllowed(path) && !historicalRequest(path)) return;
   throw new Error('Calibration import refused a request');
 }
 
@@ -821,6 +846,23 @@ async function attachSeverity(
       enriched: false,
       severity: { status: 'pending', enriched: false, subjectId: report.caseId, items: [] },
     };
+  }
+}
+
+async function attachColor(
+  report: ImportReport,
+  reading: ReturnType<typeof visualColorReading>,
+  files: ColorFiles | undefined,
+  transport: typeof fetch,
+  authorization: () => Promise<string>,
+): Promise<ImportReport> {
+  if (!reading || report.result !== 'ok' || !report.caseId) return report;
+  try {
+    const writer = files ?? openImportedColorFiles(transport, async () => `Bearer ${await authorization()}`);
+    const color = await applyColorImport(writer, report.caseId, reading);
+    return { ...report, color };
+  } catch {
+    return { ...report, color: pendingColor(report.caseId) };
   }
 }
 

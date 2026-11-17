@@ -525,7 +525,7 @@ describe('severidad severity-v1', () => {
       if (!name.endsWith('.ts') || name.endsWith('.spec.ts')) continue;
       if (!name.includes('import')) continue;
       const source = readFileSync(join(__dirname, name), 'utf8');
-      if (source.includes('confirmSeverity') || source.includes('confirmDeclaredSeverities') || source.includes('ingestSeverityAssessment') || source.includes('recordDeclaredSeverity') || source.includes('operatorRole') || source.includes('authenticated_owner')) {
+      if (source.includes('confirmSeverity') || source.includes('confirmDeclaredSeverities') || source.includes('ingestSeverityAssessment') || source.includes('recordDeclaredSeverity') || source.includes('confirmVehicleColor') || source.includes('operatorRole') || source.includes('authenticated_owner')) {
         offenders.push(name);
       }
     }

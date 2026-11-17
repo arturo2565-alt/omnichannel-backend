@@ -19,6 +19,14 @@ import {
   type CommercialRecordResult,
 } from './commercial-quote-store';
 import { validateCommercialQuote, type ValidatedCommercialQuote } from './commercial-quote';
+import type { ColorFiles } from './color-annotation';
+import {
+  applyColorImport,
+  declaredColorReading,
+  openImportedColorFiles,
+  pendingColor,
+  type ColorImportReport,
+} from './color-import';
 
 const TOKEN_URL = /^https:\/\/api\.github\.com\/app\/installations\/\d{1,12}\/access_tokens$/;
 const REPOSITORIES_URL = 'https://api.github.com/installation/repositories?per_page=100';
@@ -49,6 +57,7 @@ export type CommercialImportReport = {
   revision?: number;
   opportunityCount?: number;
   quoteCount?: number;
+  color?: ColorImportReport;
 };
 
 export function prepareCommercialQuote(input: unknown): ValidatedCommercialQuote {
@@ -72,6 +81,7 @@ export async function importCommercialQuote(
     transport?: typeof fetch;
     archive?: CommercialArchive;
     clock?: () => string;
+    colorFiles?: ColorFiles;
   } = {},
 ): Promise<CommercialImportReport> {
   if (!calibrationDiagnosticTarget(env)) return error('wrong_target');
@@ -83,10 +93,12 @@ export async function importCommercialQuote(
     return error(categoryOf(err));
   }
   try {
-    const archive = deps.archive ?? await openCommercialArchive(env, deps.transport ?? fetch);
-    if (!archive) return error('missing');
-    const recorded = await recordCommercialObservation(archive, quote, deps.clock);
-    return {
+    const opened = deps.archive
+      ? { archive: deps.archive, colorFiles: deps.colorFiles }
+      : await openCommercialArchive(env, deps.transport ?? fetch);
+    if (!opened) return error('missing');
+    const recorded = await recordCommercialObservation(opened.archive, quote, deps.clock);
+    const report: CommercialImportReport = {
       service: 'commercial-quote-import',
       result: 'ok',
       status: recorded.status,
@@ -97,6 +109,15 @@ export async function importCommercialQuote(
       opportunityCount: recorded.opportunityCount,
       quoteCount: recorded.quoteCount,
     };
+    const reading = declaredColorReading(quote.colors);
+    if (!reading || !report.quoteId) return report;
+    if (!opened.colorFiles) return { ...report, color: pendingColor(report.quoteId) };
+    try {
+      const color = await applyColorImport(opened.colorFiles, report.quoteId, reading);
+      return { ...report, color };
+    } catch {
+      return { ...report, color: pendingColor(report.quoteId) };
+    }
   } catch (err) {
     return error(categoryOf(err));
   }
@@ -152,7 +173,7 @@ function regularFile(filePath: string): string {
 async function openCommercialArchive(
   env: NodeJS.ProcessEnv,
   transport: typeof fetch,
-): Promise<CommercialArchive | null> {
+): Promise<{ archive: CommercialArchive; colorFiles: ColorFiles } | null> {
   const guarded = guard(transport);
   const config = readGithubAppConfig(withoutLineSeparators(env));
   if (!config) return null;
@@ -169,7 +190,10 @@ async function openCommercialArchive(
   if (names.length !== 1 || names[0] !== CALIBRATION_GITHUB_REPOSITORY) {
     throw new CalibrationCredentialError('forbidden', 'Calibration GitHub App permissions were rejected');
   }
-  return new CommercialGithubWriter(app, guarded);
+  return {
+    archive: new CommercialGithubWriter(app, guarded),
+    colorFiles: openImportedColorFiles(guarded, async () => `Bearer ${await app.authorization()}`),
+  };
 }
 
 async function installationRepositories(transport: typeof fetch, token: string): Promise<string[] | null> {

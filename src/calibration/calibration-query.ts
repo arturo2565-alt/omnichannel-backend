@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { evidenceByteTarget, evidenceIndexPath, evidenceReviewMatches, presentEvidenceItems } from './evidence-link';
 import { presentSeverityCatalog, presentSeverityIndex, severitySubjectPath, severityZoneForLine } from './severity-annotation';
+import { colorSubjectPath, presentColorIndex } from './color-annotation';
 import { presentVehicle, type VehiclePresentation } from './vehicle-presentation';
 
 export { calibrationQueryAccess } from './calibration-access';
@@ -83,7 +84,11 @@ export function calibrationPathAllowed(path: string): boolean {
     || path === 'data/evidence/index.json'
     || path === 'data/annotations/severity/index.json'
     || /^data\/annotations\/severity\/visual\/AF-\d{6}\/index\.json$/.test(path)
-    || /^data\/annotations\/severity\/repairs\/RQ-\d{6}\/index\.json$/.test(path);
+    || /^data\/annotations\/severity\/repairs\/RQ-\d{6}\/index\.json$/.test(path)
+    || path === 'data/annotations/color/index.json'
+    || /^data\/annotations\/color\/visual\/AF-\d{6}\/index\.json$/.test(path)
+    || /^data\/annotations\/color\/repairs\/RQ-\d{6}\/index\.json$/.test(path)
+    || /^data\/annotations\/color\/commercial\/CQ-\d{6}\/index\.json$/.test(path);
 }
 
 export async function readCalibrationSummary(archive: CalibrationArchive) {
@@ -144,7 +149,7 @@ export async function readCalibrationCase(archive: CalibrationArchive, caseId: s
   if (!CASE_ID.test(caseId)) throw new CalibrationQueryError('invalid');
   const record = await readCaseRecord(archive, caseId);
   if (!record) throw new CalibrationQueryError('missing');
-  return withoutRecordedAt(await withLineSeverity(archive, record, caseId));
+  return withoutRecordedAt(await withColorAnnotation(archive, await withLineSeverity(archive, record, caseId), caseId));
 }
 
 export async function listCalibrationOpportunities(archive: CalibrationArchive, query: QueryList) {
@@ -308,7 +313,7 @@ export async function readCalibrationRepair(archive: CalibrationArchive, quoteId
   return {
     ...detail,
     revisions: await Promise.all(detail.revisions.map(async (revision) => (
-      withoutRecordedAt(await withLineSeverity(archive, revision, revision.id))
+      withoutRecordedAt(await withColorAnnotation(archive, await withLineSeverity(archive, revision, revision.id), revision.id))
     ))),
   };
 }
@@ -370,7 +375,12 @@ export async function readCalibrationQuote(archive: CalibrationArchive, quoteId:
   if (!row) throw new CalibrationQueryError('missing');
   const detail = await readOpportunity(archive, row);
   if (!detail) throw new CalibrationQueryError('missing');
-  return detail;
+  return {
+    ...detail,
+    revisions: await Promise.all(detail.revisions.map(async (revision) => (
+      withColorAnnotation(archive, revision, revision.id)
+    ))),
+  };
 }
 
 export async function listCalibrationEvidence(archive: CalibrationArchive, subjectId: string) {
@@ -441,6 +451,17 @@ export async function readCalibrationPhoto(
   const actual = createHash('sha256').update(bytes).digest('hex');
   if (actual !== manifest.locator.sha256) throw new CalibrationQueryError('unavailable');
   return { mime: manifest.mime, bytes };
+}
+
+async function withColorAnnotation<T>(archive: CalibrationArchive, record: T, subjectId: string): Promise<T & { colorAnnotation: ReturnType<typeof presentColorIndex>[number] | null }> {
+  let colorAnnotation: ReturnType<typeof presentColorIndex>[number] | null = null;
+  try {
+    const text = await readText(archive, colorSubjectPath(subjectId));
+    colorAnnotation = text ? presentColorIndex(text, subjectId)[0] ?? null : null;
+  } catch {
+    colorAnnotation = null;
+  }
+  return { ...record, colorAnnotation };
 }
 
 async function withLineSeverity<T extends { lines: Array<{ lineId: string | null }> }>(

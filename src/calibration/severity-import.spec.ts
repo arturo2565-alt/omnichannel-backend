@@ -278,6 +278,7 @@ describe('CAL-021C severity on repair import', () => {
       if (!name.includes('import')) continue;
       const source = readFileSync(join(directory, name), 'utf8');
       expect(source).not.toContain('confirmSeverity');
+      expect(source).not.toContain('confirmVehicleColor');
       expect(source).not.toContain('operatorRole');
       expect(source).not.toContain('authenticated_owner');
       expect(source).not.toContain('EvidenceReviewDesk');

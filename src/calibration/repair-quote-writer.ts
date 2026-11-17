@@ -14,6 +14,7 @@ import {
   type StoredRepairQuote,
 } from './repair-quote';
 import { severityAnnotationPathAllowed } from './severity-annotation';
+import { colorAnnotationPathAllowed } from './color-annotation';
 
 /**
  * Escritura optimista solo dentro de data/repairs/. No abre el índice visual,
@@ -108,7 +109,7 @@ export function assertRepairRequestPath(path: string): void {
       'Repair import refused a protected path',
     );
   }
-  if (severityAnnotationPathAllowed(bare) || REPAIR_PATH.test(bare)) return;
+  if (severityAnnotationPathAllowed(bare) || colorAnnotationPathAllowed(bare) || REPAIR_PATH.test(bare)) return;
   throw new CalibrationConflictError(
     'Repair import refused a protected path',
   );

@@ -4,6 +4,7 @@ import {
   classifyGithubFailure,
   type CalibrationAccessToken,
 } from './calibration-github-writer';
+import { colorCommercialPathAllowed } from './color-annotation';
 import {
   COMMERCIAL_QUOTE_ID,
   COMMERCIAL_SCHEMA_VERSION,
@@ -84,7 +85,7 @@ export function commercialQuotePath(quoteId: string): string {
 
 export function assertCommercialRequestPath(path: string): void {
   const bare = path.split('?')[0];
-  if (BLOCKED.some((needle) => bare.includes(needle)) || !COMMERCIAL_PATH.test(bare)) {
+  if (BLOCKED.some((needle) => bare.includes(needle)) || (!COMMERCIAL_PATH.test(bare) && !colorCommercialPathAllowed(bare))) {
     throw new CalibrationConflictError('Commercial import refused a visual path');
   }
 }
