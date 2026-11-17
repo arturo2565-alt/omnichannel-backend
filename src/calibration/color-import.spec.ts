@@ -365,4 +365,107 @@ describe('CAL-030 color import', () => {
     expect(createHash('sha256').update(storedCase).digest('hex')).toBe(createHash('sha256').update(github.files.get(casePath)?.text ?? '').digest('hex'));
     void calls;
   });
+
+  it('registra el color de un baño exterior sin volverlo cambio de color', async () => {
+    const memory = commercialMemory();
+    const preserved = '{"quote_id":"CQ-000006","prices":{"quoted":{"amount_mxn":32000}}}\n';
+    memory.files.set('data/commercial/quotes/CQ-000006.json', { text: preserved, sha: 'cq-6' });
+    memory.files.set('data/commercial/index.json', {
+      text: JSON.stringify({
+        schema_version: '1.0.0',
+        archive: 'commercial',
+        opportunities: {
+          'historico-cq-000006-oportunidad': {
+            root_quote_id: 'CQ-000006',
+            head_quote_id: 'CQ-000006',
+            quote_ids: ['CQ-000006'],
+          },
+        },
+        source_keys: { 'historico-cq-000006': 'CQ-000006' },
+      }),
+      sha: 'index-6',
+    });
+    const gate = { fail: false };
+    const writer = new CommercialGithubWriter('test-token', memory.transport);
+    const files = colorFiles(memory.files, gate);
+    const empty = { current: null, current_evidence: 'unknown', requested: null, requested_evidence: 'unknown' };
+    const paint = (source: string, statement: string, service = 'exterior_bath', colors: Record<string, unknown> = empty) => {
+      const quote = commercial(source, colors, service);
+      return importCommercialQuote(stagingEnv(), {
+        ...quote,
+        work_scope: service === 'bath_with_bodywork' ? ['bodywork'] : quote.work_scope,
+        operator_statement: statement,
+      }, { archive: writer, colorFiles: files, clock: () => '2026-11-17T16:00:00.000Z' });
+    };
+    gate.fail = true;
+    const failed = await paint('sintetico-bano-exterior', 'Baño exterior en plata');
+    const stored = memory.files.get('data/commercial/quotes/CQ-000007.json')?.text ?? '';
+    expect(failed).toMatchObject({ result: 'ok', quoteId: 'CQ-000007', enriched: false });
+    expect(failed.color).toMatchObject({ status: 'pending', enriched: false });
+    expect(stored).toContain('"service": "exterior_bath"');
+    expect(stored).toContain('"requested": null');
+    expect(stored).toContain('"amount_mxn": 28000');
+    expect(stored).not.toContain('operator_statement');
+    expect(stored).not.toContain('plata');
+    expect(memory.files.get('data/commercial/quotes/CQ-000006.json')?.text).toBe(preserved);
+    gate.fail = false;
+    const recovered = await paint('sintetico-bano-exterior', 'Baño exterior en plata');
+    expect(recovered).toMatchObject({ result: 'ok', status: 'already_exists', quoteId: 'CQ-000007', enriched: true });
+    const note = [...memory.files.keys()].find((path) => path.includes('CQ-000007') && path.endsWith('CL-000001.json'));
+    const noteText = memory.files.get(note ?? '')?.text ?? '';
+    expect(noteText).toContain('"requested_color": "plata"');
+    expect(noteText).toContain('"requested_provenance": "human_declaration"');
+    expect(noteText).toContain('"exterior_color": null');
+    expect(noteText).not.toContain('"status": "validated"');
+    expect(memory.files.get('data/commercial/quotes/CQ-000007.json')?.text).toBe(stored);
+    const again = await paint('sintetico-bano-exterior', 'Baño exterior en plata');
+    expect(again.color?.status).toBe('already_recorded');
+    expect([...memory.files.keys()].filter((path) => path.includes('CQ-000007') && /CL-\d{6}\.json$/.test(path))).toHaveLength(1);
+    const kept = await paint('sintetico-conserva', 'Baño exterior conservando el color original blanco');
+    const keptQuote = memory.files.get(`data/commercial/quotes/${kept.quoteId}.json`)?.text ?? '';
+    const keptNote = [...memory.files.keys()].find((path) => kept.quoteId && path.includes(kept.quoteId) && path.endsWith('CL-000001.json'));
+    expect(keptQuote).toContain('"service": "exterior_bath"');
+    expect(keptQuote).toContain('"requested": null');
+    expect(memory.files.get(keptNote ?? '')?.text).toContain('"original_color": "blanco"');
+    expect(memory.files.get(keptNote ?? '')?.text).toContain('"requested_color": null');
+    const body = await paint('sintetico-hojalata', 'Baño con hojalatería en color rojo', 'bath_with_bodywork');
+    const bodyQuote = memory.files.get(`data/commercial/quotes/${body.quoteId}.json`)?.text ?? '';
+    const bodyNote = [...memory.files.keys()].find((path) => body.quoteId && path.includes(body.quoteId) && path.endsWith('CL-000001.json'));
+    expect(bodyQuote).toContain('"service": "bath_with_bodywork"');
+    expect(bodyQuote).toContain('"requested": null');
+    expect(bodyQuote).toContain('"amount_mxn": 28000');
+    expect(memory.files.get(bodyNote ?? '')?.text).toContain('"requested_color": "rojo"');
+    const change = await paint('sintetico-cambio-texto', 'Cambio de blanco a negro', 'color_change', {
+      current: 'blanco',
+      current_evidence: 'customer_provided',
+      requested: 'negro',
+      requested_evidence: 'customer_provided',
+    });
+    const changeQuote = memory.files.get(`data/commercial/quotes/${change.quoteId}.json`)?.text ?? '';
+    const changeNote = [...memory.files.keys()].find((path) => change.quoteId && path.includes(change.quoteId) && path.endsWith('CL-000001.json'));
+    expect(changeQuote).toContain('"service": "color_change"');
+    expect(changeQuote).toContain('"requested": "negro"');
+    expect(memory.files.get(changeNote ?? '')?.text).toContain('"exterior_color": "blanco"');
+    expect(memory.files.get(changeNote ?? '')?.text).toContain('"requested_color": "negro"');
+    const plain = await importCommercialQuote(stagingEnv(), commercial('sintetico-sin-color-2', empty), {
+      archive: writer,
+      colorFiles: files,
+      clock: () => '2026-11-17T16:00:00.000Z',
+    });
+    expect(plain.color).toBeUndefined();
+    const ambiguous = await paint('sintetico-ambiguo', 'rojo o azul');
+    const ambiguousNote = [...memory.files.keys()].find((path) => ambiguous.quoteId && path.includes(ambiguous.quoteId) && path.endsWith('CL-000001.json'));
+    expect(memory.files.get(ambiguousNote ?? '')?.text).toContain('"status": "unknown"');
+    expect(memory.files.get(ambiguousNote ?? '')?.text).toContain('"exterior_color": null');
+    const seen = await paint('sintetico-visual', 'Mazda 3 rojo. Se observa de color blanco.');
+    const seenNote = memory.files.get([...memory.files.keys()].find((path) => seen.quoteId && path.includes(seen.quoteId) && path.endsWith('CL-000001.json')) ?? '')?.text ?? '';
+    expect(seenNote).toContain('"exterior_color": "rojo"');
+    expect(seenNote).toContain('"exterior_provenance": "human_declaration"');
+    expect(seenNote).not.toContain('"exterior_color": "blanco"');
+    const conflict = await paint('sintetico-bano-exterior', 'Baño exterior en negro');
+    expect(conflict.color?.status).toBe('conflict');
+    expect(memory.files.get('data/commercial/quotes/CQ-000007.json')?.text).toBe(stored);
+    expect(memory.files.get(note ?? '')?.text).toContain('"requested_color": "plata"');
+    expect(memory.files.get('data/commercial/quotes/CQ-000006.json')?.text).toBe(preserved);
+  });
 });

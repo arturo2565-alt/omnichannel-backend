@@ -22,7 +22,7 @@ import { validateCommercialQuote, type ValidatedCommercialQuote } from './commer
 import type { ColorFiles } from './color-annotation';
 import {
   applyColorImport,
-  declaredColorReading,
+  commercialColorReading,
   openImportedColorFiles,
   pendingColor,
   type ColorImportReport,
@@ -88,7 +88,9 @@ export async function importCommercialQuote(
   if (!calibrationDiagnosticTarget(env)) return error('wrong_target');
   if (env.CALIBRATION_INGEST_ENABLED !== 'false' || env.DB_SYNCHRONIZE !== 'false') return error('flags');
   let quote: ValidatedCommercialQuote;
+  let statement: string | null;
   try {
+    statement = readOperatorStatement(input);
     quote = prepareCommercialQuote(input);
   } catch (err) {
     return error(categoryOf(err));
@@ -110,7 +112,7 @@ export async function importCommercialQuote(
       opportunityCount: recorded.opportunityCount,
       quoteCount: recorded.quoteCount,
     };
-    const reading = declaredColorReading(quote.colors);
+    const reading = commercialColorReading({ service: quote.service, colors: quote.colors, statement });
     if (!reading || !report.quoteId) return report;
     if (!opened.colorFiles) return { ...report, color: pendingColor(report.quoteId), enriched: false };
     try {
@@ -147,6 +149,17 @@ export function commercialContentsGrantIsExpected(grant: GithubInstallationGrant
   if (grant.permissions.contents !== 'write') return false;
   return Object.keys(grant.permissions).every((key) => key === 'contents' || key === 'metadata')
     && (grant.permissions.metadata == null || grant.permissions.metadata === 'read');
+}
+
+function readOperatorStatement(input: unknown): string | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  if (!Object.prototype.hasOwnProperty.call(input, 'operator_statement')) return null;
+  const value = (input as { operator_statement?: unknown }).operator_statement;
+  if (value == null || value === '') return null;
+  if (typeof value !== 'string' || value.length > 4000) {
+    throw new CalibrationValidationError('invalid', 'The operator statement is not text');
+  }
+  return value;
 }
 
 function regularFile(filePath: string): string {

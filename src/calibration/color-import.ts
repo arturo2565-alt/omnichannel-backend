@@ -20,6 +20,8 @@ const COLORS = new Set([
 const TOKEN = /[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:-[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*/gu;
 const CHANGE = /cambio de\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)\s+a\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
 const BATH = /ba[nñ]o de pintura(?:\s+en(?:\s+color)?)?\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
+const BATH_EXTERIOR = /ba[nñ]o exterior\s+en(?:\s+color)?\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
+const KEEP = /conserv(?:ar|ando)(?:\s+el)?\s+(?:color|tono)|mismo\s+(?:color|tono)/iu;
 const ORIGINAL = /color original\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
 const VISUAL = /se observa de color\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
 const EXPLICIT = /en color\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
@@ -33,21 +35,28 @@ export type ColorImportReport = {
   clarification?: boolean;
 };
 
-export function interpretColorStatement(value: string): ColorReading | null {
+export function interpretColorStatement(value: string, options?: { paintRequest?: boolean }): ColorReading | null {
   const text = value.replace(/[^\S\n]+/g, ' ').replace(/ *\n */g, '\n').trim();
   if (!text) return null;
+  const paintRequest = options?.paintRequest === true;
   const changes = uniquePairs([...text.matchAll(CHANGE)].map((match) => [match[1], match[2]] as const));
-  const baths = uniqueTokens([...text.matchAll(BATH)].map((match) => match[1]));
+  const baths = uniqueTokens([
+    ...[...text.matchAll(BATH)].map((match) => match[1]),
+    ...[...text.matchAll(BATH_EXTERIOR)].map((match) => match[1]),
+    ...(paintRequest ? [...text.matchAll(EXPLICIT)].map((match) => match[1]) : []),
+  ]);
   const visuals = uniqueTokens([...text.matchAll(VISUAL)].map((match) => match[1]));
   const originals = uniqueTokens([...text.matchAll(ORIGINAL)].map((match) => match[1]));
-  const explicit = uniqueTokens([...text.matchAll(EXPLICIT)]
+  const explicit = paintRequest ? [] : uniqueTokens([...text.matchAll(EXPLICIT)]
     .filter((match) => !coveredBy(match.index ?? 0, [
       ...text.matchAll(BATH),
+      ...text.matchAll(BATH_EXTERIOR),
       ...text.matchAll(CHANGE),
       ...text.matchAll(ORIGINAL),
     ]))
     .map((match) => match[1]));
   const currents = uniqueTokens([...explicit.filter(isColor), ...vehicleColors(text)]);
+  const keeping = KEEP.test(text);
   let ambiguous = false;
   if (changes.some(([from, to]) => !isColor(from) || !isColor(to))) ambiguous = true;
   if ([...baths, ...visuals, ...originals, ...explicit].some((token) => !isColor(token))) ambiguous = true;
@@ -64,6 +73,10 @@ export function interpretColorStatement(value: string): ColorReading | null {
     if (knownBaths.some((token) => fold(token) !== fold(to))) ambiguous = true;
     if (knownVisuals.some((token) => fold(token) !== fold(from))) ambiguous = true;
   }
+  if (keeping && knownChanges.length > 0) ambiguous = true;
+  if (keeping && knownBaths.some((token) => knownOriginals.some((original) => fold(original) !== fold(token)) || currents.some((current) => fold(current) !== fold(token)) || (knownOriginals.length === 0 && currents.length === 0))) {
+    ambiguous = true;
+  }
   const accounted = new Set([...knownChanges.flat(), ...knownBaths, ...knownVisuals, ...knownOriginals, ...currents].map(fold));
   if ((text.match(TOKEN) ?? []).some((token) => isColor(token) && !accounted.has(fold(token)))) ambiguous = true;
   const known = knownChanges.length + currents.length + knownBaths.length + knownVisuals.length + knownOriginals.length;
@@ -73,7 +86,9 @@ export function interpretColorStatement(value: string): ColorReading | null {
     return compose(from, 'human_declaration', to, knownOriginals[0] ?? null, text);
   }
   if (currents.length === 1) {
-    return compose(currents[0], 'human_declaration', knownBaths[0] ?? null, knownOriginals[0] ?? null, text);
+    const bath = knownBaths[0] ?? null;
+    const requested = paintRequest && bath && fold(bath) === fold(currents[0]) ? null : bath;
+    return compose(currents[0], 'human_declaration', requested, knownOriginals[0] ?? null, text);
   }
   if (knownBaths.length === 1) {
     const seen = knownVisuals[0] ?? null;
@@ -108,6 +123,63 @@ export function declaredColorReading(colors: {
     originalColor: null,
     originalProvenance: null,
   };
+}
+
+export function commercialColorReading(input: {
+  service: 'exterior_bath' | 'bath_with_bodywork' | 'color_change';
+  colors: {
+    current: string | null;
+    current_evidence: string;
+    requested: string | null;
+    requested_evidence: string;
+  };
+  statement?: string | null;
+}): ColorReading | null {
+  const structured = declaredColorReading(input.colors);
+  const statement = typeof input.statement === 'string' ? input.statement.trim() : '';
+  const spoken = statement
+    ? interpretColorStatement(statement, { paintRequest: input.service !== 'color_change' })
+    : null;
+  return mergeColorReadings(structured, spoken);
+}
+
+function mergeColorReadings(base: ColorReading | null, extra: ColorReading | null): ColorReading | null {
+  if (!extra) return base;
+  if (!base) return extra;
+  if (isBlank(extra)) return base;
+  if (isBlank(base)) return extra;
+  const extraExterior = extra.exteriorProvenance === 'visual_inference' && base.exteriorColor ? null : extra.exteriorColor;
+  if (conflicts(base.exteriorColor, extraExterior) || conflicts(base.requestedColor, extra.requestedColor) || conflicts(base.originalColor, extra.originalColor)) {
+    return unknownReading();
+  }
+  const exterior = base.exteriorColor ?? extraExterior;
+  const exteriorProvenance = base.exteriorColor
+    ? base.exteriorProvenance
+    : extra.exteriorColor
+      ? extra.exteriorProvenance
+      : 'unknown';
+  const requested = base.requestedColor ?? extra.requestedColor;
+  const original = base.originalColor ?? extra.originalColor;
+  return {
+    exteriorColor: exterior,
+    exteriorProvenance,
+    requestedColor: requested,
+    requestedProvenance: requested ? (base.requestedColor ? base.requestedProvenance : extra.requestedProvenance) : null,
+    originalColor: original,
+    originalProvenance: original ? (base.originalColor ? base.originalProvenance : extra.originalProvenance) : null,
+    finish: base.finish ?? extra.finish,
+    finishProvenance: base.finish ? base.finishProvenance : extra.finishProvenance,
+    paintCode: base.paintCode ?? extra.paintCode,
+    paintCodeProvenance: base.paintCode ? base.paintCodeProvenance : extra.paintCodeProvenance,
+  };
+}
+
+function isBlank(reading: ColorReading): boolean {
+  return reading.exteriorColor == null && reading.requestedColor == null && reading.originalColor == null && reading.finish == null && reading.paintCode == null;
+}
+
+function conflicts(left: string | null, right: string | null): boolean {
+  return left != null && right != null && fold(left) !== fold(right);
 }
 
 export function visualColorReading(input: {
