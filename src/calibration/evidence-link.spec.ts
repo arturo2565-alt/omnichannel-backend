@@ -38,7 +38,7 @@ async function approve(files: MemoryFiles, subjectId: string, receivedSha256: st
   const preview = await desk.hold(reviewOwner, { subjectId, receivedSha256, bytes });
   const seen = await desk.read(reviewOwner, preview.previewId);
   if (!seen.bytes.equals(bytes)) throw new Error('preview bytes');
-  return desk.confirm(reviewOwner, preview.previewId, {
+  return desk.recordReview(reviewOwner, preview.previewId, {
     subjectId,
     sha256: preview.sha256,
     visibleIdentifiersReviewed: true,

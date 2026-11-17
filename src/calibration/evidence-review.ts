@@ -2,15 +2,19 @@ import { randomBytes } from 'node:crypto';
 import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { calibrationQueryAccess } from './calibration-access';
 import { CalibrationGithubApp, readGithubAppConfig, type GithubInstallationGrant } from './calibration-github-app';
+import { createCloudinaryGateway } from './calibration-cloudinary-archive';
+import { EvidenceCloudinaryArchive } from './evidence-cloudinary';
 import {
   EvidenceGithub,
   EvidenceLinkError,
   commitOwnerReview,
   evidenceSubjectExists,
   issueOwnerReviewProof,
+  linkEvidence,
   ownerActorKey,
   sha256,
   type EvidenceFiles,
+  type EvidencePhotoSink,
 } from './evidence-link';
 import { imageContainsPersonalMetadata, validateCalibrationImage } from './calibration-image-archive.service';
 
@@ -95,6 +99,14 @@ export class EvidencePreviewVault {
     return slot;
   }
 
+  drop(actorKey: string, previewId: string): boolean {
+    if (!PREVIEW_ID.test(previewId)) return false;
+    const slot = this.slots.get(previewId);
+    if (!slot || slot.actorKey !== actorKey) return false;
+    this.slots.delete(previewId);
+    return true;
+  }
+
   private evict(): void {
     for (const [id, slot] of this.slots) {
       if (this.clock() >= slot.expiresAt) this.slots.delete(id);
@@ -104,15 +116,27 @@ export class EvidencePreviewVault {
 
 export type EvidenceReviewDependencies = {
   files?: EvidenceFiles;
+  photos?: EvidencePhotoSink;
   vault?: EvidencePreviewVault;
   env?: NodeJS.ProcessEnv;
   transport?: typeof fetch;
   clock?: () => number;
 };
 
+export type EvidenceArchiveReceipt = {
+  status: 'attested' | 'already_attested';
+  archive: 'linked' | 'already_linked' | 'link_pending';
+  reviewId: string;
+  evidenceId: string;
+  sha256: string;
+  failure?: string;
+};
+
 export class EvidenceReviewDesk {
   private readonly vault: EvidencePreviewVault;
+  private readonly lanes = new Map<string, Promise<void>>();
   private live: EvidenceFiles | null = null;
+  private livePhotos: EvidencePhotoSink | null = null;
 
   constructor(private readonly deps: EvidenceReviewDependencies = {}) {
     this.vault = deps.vault ?? new EvidencePreviewVault(deps.clock);
@@ -164,27 +188,105 @@ export class EvidenceReviewDesk {
     user: AuthenticatedUser | undefined,
     previewId: string,
     input: { subjectId: string; sha256: string; visibleIdentifiersReviewed: boolean },
-  ): Promise<{ status: 'attested' | 'already_attested'; reviewId: string; evidenceId: string; sha256: string }> {
-    const actor = this.gate(user);
-    return this.attempt(async () => {
-      rejectClientFields(input, CONFIRM_KEYS);
-      if (input.visibleIdentifiersReviewed !== true) throw new EvidenceReviewError('incomplete');
-      const slot = this.vault.open(ownerActorKey(actor.userId), previewId, false);
-      if (slot === 'expired') throw new EvidenceReviewError('expired');
-      if (slot === 'missing') throw new EvidenceReviewError('missing');
-      if (!slot.viewed) throw new EvidenceReviewError('incomplete');
-      if (input.subjectId !== slot.subjectId) throw new EvidenceReviewError('conflict');
-      const actual = sha256(slot.bytes);
-      if (input.sha256 !== slot.sha256 || input.sha256 !== actual) throw new EvidenceReviewError('conflict');
-      const proof = issueOwnerReviewProof(this.environment(), actor, {
-        subjectId: slot.subjectId,
-        receivedSha256: slot.receivedSha256,
-        reviewedSha256: actual,
-        visibleIdentifiersReviewed: true,
+  ): Promise<EvidenceArchiveReceipt> {
+    return this.lane(previewId, () => this.attempt(async () => {
+      const prepared = await this.reviewedSlot(user, previewId, input);
+      const photos = this.photoSink();
+      const stored = await this.commitReviewed(prepared);
+      const linked = await linkEvidence(this.files(), photos, {
+        subjectId: prepared.subjectId,
+        approval: 'anonymized_copy',
+        receivedSha256: prepared.receivedSha256,
+        bytes: prepared.bytes,
       });
-      const stored = await commitOwnerReview(this.files(), proof);
-      return { ...stored, sha256: actual };
+      if (linked.status !== 'linked' && linked.status !== 'already_linked' && linked.status !== 'link_pending') {
+        throw new EvidenceReviewError('conflict');
+      }
+      if (linked.status === 'linked' || linked.status === 'already_linked') this.vault.drop(prepared.actorKey, previewId);
+      return {
+        status: stored.status,
+        archive: linked.status,
+        reviewId: stored.reviewId,
+        evidenceId: linked.evidenceId,
+        sha256: prepared.actual,
+        ...(linked.status === 'link_pending' && linked.failure ? { failure: linked.failure } : {}),
+      };
+    }));
+  }
+
+  async recordReview(
+    user: AuthenticatedUser | undefined,
+    previewId: string,
+    input: { subjectId: string; sha256: string; visibleIdentifiersReviewed: boolean },
+  ): Promise<{ status: 'attested' | 'already_attested'; reviewId: string; evidenceId: string; sha256: string }> {
+    return this.lane(previewId, () => this.attempt(async () => {
+      const prepared = await this.reviewedSlot(user, previewId, input);
+      const stored = await this.commitReviewed(prepared);
+      return {
+        status: stored.status,
+        reviewId: stored.reviewId,
+        evidenceId: stored.evidenceId,
+        sha256: prepared.actual,
+      };
+    }));
+  }
+
+  async cancel(user: AuthenticatedUser | undefined, previewId: string): Promise<{ status: 'cleared' }> {
+    const actor = this.gate(user);
+    const actorKey = ownerActorKey(actor.userId);
+    const slot = this.vault.open(actorKey, previewId, false);
+    if (slot === 'expired') return { status: 'cleared' };
+    if (slot === 'missing' || !this.vault.drop(actorKey, previewId)) throw new EvidenceReviewError('missing');
+    return { status: 'cleared' };
+  }
+
+  private async reviewedSlot(
+    user: AuthenticatedUser | undefined,
+    previewId: string,
+    input: { subjectId: string; sha256: string; visibleIdentifiersReviewed: boolean },
+  ): Promise<{
+    actor: AuthenticatedUser;
+    actorKey: string;
+    bytes: Buffer;
+    actual: string;
+    subjectId: string;
+    receivedSha256: string;
+  }> {
+    const actor = this.gate(user);
+    rejectClientFields(input, CONFIRM_KEYS);
+    if (input.visibleIdentifiersReviewed !== true) throw new EvidenceReviewError('incomplete');
+    const actorKey = ownerActorKey(actor.userId);
+    const slot = this.vault.open(actorKey, previewId, false);
+    if (slot === 'expired') throw new EvidenceReviewError('expired');
+    if (slot === 'missing') throw new EvidenceReviewError('missing');
+    if (!slot.viewed) throw new EvidenceReviewError('incomplete');
+    if (input.subjectId !== slot.subjectId) throw new EvidenceReviewError('conflict');
+    const actual = sha256(slot.bytes);
+    if (input.sha256 !== slot.sha256 || input.sha256 !== actual) throw new EvidenceReviewError('conflict');
+    return {
+      actor,
+      actorKey,
+      bytes: Buffer.from(slot.bytes),
+      actual,
+      subjectId: slot.subjectId,
+      receivedSha256: slot.receivedSha256,
+    };
+  }
+
+  private async commitReviewed(prepared: {
+    actor: AuthenticatedUser;
+    bytes: Buffer;
+    actual: string;
+    subjectId: string;
+    receivedSha256: string;
+  }): Promise<{ status: 'attested' | 'already_attested'; reviewId: string; evidenceId: string }> {
+    const proof = issueOwnerReviewProof(this.environment(), prepared.actor, {
+      subjectId: prepared.subjectId,
+      receivedSha256: prepared.receivedSha256,
+      reviewedSha256: prepared.actual,
+      visibleIdentifiersReviewed: true,
     });
+    return commitOwnerReview(this.files(), proof);
   }
 
   private gate(user: AuthenticatedUser | undefined): AuthenticatedUser {
@@ -203,6 +305,23 @@ export class EvidenceReviewDesk {
     if (this.deps.files) return this.deps.files;
     if (!this.live) this.live = openEvidenceFiles(this.environment(), this.deps.transport ?? fetch);
     return this.live;
+  }
+
+  private photoSink(): EvidencePhotoSink {
+    if (this.deps.photos) return this.deps.photos;
+    if (!this.livePhotos) this.livePhotos = openEvidencePhotos(this.environment(), this.deps.transport ?? fetch);
+    return this.livePhotos;
+  }
+
+  private lane<T>(previewId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.lanes.get(previewId) ?? Promise.resolve();
+    const run = previous.then(work, work);
+    const settled = run.then(() => undefined, () => undefined);
+    this.lanes.set(previewId, settled);
+    void settled.finally(() => {
+      if (this.lanes.get(previewId) === settled) this.lanes.delete(previewId);
+    });
+    return run;
   }
 
   private async attempt<T>(work: () => Promise<T>): Promise<T> {
@@ -290,6 +409,13 @@ function rejectClientFields(input: object, allowed: Set<string>): void {
     throw new EvidenceReviewError('rejected');
   }
   if (Object.keys(record).some((key) => !allowed.has(key))) throw new EvidenceReviewError('rejected');
+}
+
+function openEvidencePhotos(env: NodeJS.ProcessEnv, transport: typeof fetch): EvidencePhotoSink {
+  const gateway = createCloudinaryGateway(env, transport);
+  if (!gateway) throw new EvidenceReviewError('unavailable');
+  const archive = new EvidenceCloudinaryArchive();
+  return { store: (input) => archive.store(gateway, input) };
 }
 
 function imageMime(format: 'jpg' | 'png' | 'webp'): PreviewSlot['mime'] {

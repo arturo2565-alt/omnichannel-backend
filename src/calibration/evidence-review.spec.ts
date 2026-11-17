@@ -6,11 +6,13 @@ import {
   BadRequestException,
   ForbiddenException,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import type { AuthenticatedUser, JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { JwtStrategy } from '../auth/strategies/jwt.strategy';
 import { minimalDecodablePng } from './calibration-image-archive.service';
+import { listCalibrationEvidence, readCalibrationEvidence } from './calibration-query';
 import { evidencePublicId } from './evidence-cloudinary';
 import {
   EvidenceLinkError,
@@ -106,7 +108,8 @@ describe('revisión autenticada del propietario', () => {
     files.seed('data/commercial/quotes/CQ-000021.json', quoteBody);
     const original = minimalDecodablePng([1, 2, 3]);
     const bytes = Buffer.from(original);
-    const desk = deskFor(files);
+    const photos = new MemoryPhotos();
+    const desk = deskFor(files, openEnv, { photos });
     const preview = await desk.hold(owner, { subjectId: 'CQ-000021', receivedSha256: received, bytes });
     bytes[10] ^= 0xff;
     const seen = await desk.read(owner, preview.previewId);
@@ -120,14 +123,16 @@ describe('revisión autenticada del propietario', () => {
       sha256: preview.sha256,
       visibleIdentifiersReviewed: true,
     });
-    expect(review).toMatchObject({ status: 'attested', reviewId: 'RV-000001', evidenceId: 'EV-000001', sha256: preview.sha256 });
-    const again = await desk.confirm(owner, preview.previewId, {
-      subjectId: 'CQ-000021',
+    expect(review).toMatchObject({
+      status: 'attested',
+      archive: 'linked',
+      reviewId: 'RV-000001',
+      evidenceId: 'EV-000001',
       sha256: preview.sha256,
-      visibleIdentifiersReviewed: true,
     });
-    expect(again).toMatchObject({ status: 'already_attested', reviewId: 'RV-000001', evidenceId: 'EV-000001' });
+    expect(photos.calls).toEqual(['EV-000001']);
     expect(files.writes.filter((path) => path.includes('/reviews/RV-'))).toHaveLength(1);
+    expect(files.writes.some((path) => path.includes('/manifests/EV-000001.json'))).toBe(true);
 
     const document = files.files.get('data/evidence/commercial/CQ-000021/reviews/RV-000001.json')?.content ?? '';
     const actorKey = createHash('sha256').update(`calibration-owner\0${owner.userId}`).digest('hex');
@@ -139,34 +144,38 @@ describe('revisión autenticada del propietario', () => {
     expect(document).not.toContain('operator_role');
     expect(document).not.toContain(owner.email);
     expect(document).not.toContain('@');
-    expect(files.writes.every((path) => path.startsWith('data/evidence/commercial/CQ-000021/reviews/'))).toBe(true);
+    expect(files.writes.every((path) => path.startsWith('data/evidence/'))).toBe(true);
+    expect(files.writes.some((path) => path.includes('/reviews/'))).toBe(true);
+    expect(files.writes.some((path) => path.includes('/manifests/'))).toBe(true);
+    expect(files.writes.some((path) => path.includes('/links/'))).toBe(true);
     expect(files.writes.join('\n')).not.toContain('CQ-000006');
     expect(files.writes.some((path) => path.startsWith('data/cases/') || path.startsWith('data/photos/'))).toBe(false);
     expect(files.files.get('data/commercial/quotes/CQ-000021.json')?.content).toBe(quoteBody);
 
     const changed = minimalDecodablePng([9, 9, 9]);
-    const photos = new MemoryPhotos();
-    await expect(linkEvidence(files, photos, {
+    const laterPhotos = new MemoryPhotos();
+    await expect(linkEvidence(files, laterPhotos, {
       subjectId: 'CQ-000021',
       approval: 'anonymized_copy',
       receivedSha256: received,
       bytes: changed,
-    })).rejects.toMatchObject({ code: 'review_required' });
-    expect(photos.calls).toEqual([]);
-    const linked = await linkEvidence(files, photos, {
+    })).rejects.toMatchObject({ code: 'conflict' });
+    expect(laterPhotos.calls).toEqual([]);
+    const linked = await linkEvidence(files, laterPhotos, {
       subjectId: 'CQ-000021',
       approval: 'anonymized_copy',
       receivedSha256: received,
       bytes: original,
     });
-    expect(linked).toMatchObject({ status: 'linked', evidenceId: 'EV-000001' });
-    await expect(linkEvidence(files, photos, {
+    expect(linked).toMatchObject({ status: 'already_linked', evidenceId: 'EV-000001' });
+    await expect(linkEvidence(files, laterPhotos, {
       subjectId: 'CQ-000021',
       approval: 'anonymized_copy',
       receivedSha256: received,
       bytes: changed,
     })).rejects.toMatchObject({ code: 'conflict' });
     expect(photos.calls).toEqual(['EV-000001']);
+    expect(laterPhotos.calls).toEqual([]);
   });
 
   it('no reutiliza la aprobación para otro hash, otra cotización u otra fotografía', async () => {
@@ -189,7 +198,8 @@ describe('revisión autenticada del propietario', () => {
     })}\n`);
     const first = minimalDecodablePng([4, 4, 4]);
     const second = minimalDecodablePng([5, 5, 5]);
-    const desk = deskFor(files);
+    const storedPhotos = new MemoryPhotos();
+    const desk = deskFor(files, openEnv, { photos: storedPhotos });
     const preview = await desk.hold(owner, { subjectId: 'CQ-000021', receivedSha256: received, bytes: first });
     await desk.read(owner, preview.previewId);
     await expect(desk.confirm(owner, preview.previewId, {
@@ -209,7 +219,8 @@ describe('revisión autenticada del propietario', () => {
       sha256: preview.sha256,
       visibleIdentifiersReviewed: true,
     });
-    expect(review.evidenceId).toBe('EV-000002');
+    expect(review).toMatchObject({ evidenceId: 'EV-000002', archive: 'linked' });
+    expect(storedPhotos.calls).toEqual(['EV-000002']);
     const photos = new MemoryPhotos();
     await expect(linkEvidence(files, photos, {
       subjectId: 'CQ-000022',
@@ -229,8 +240,9 @@ describe('revisión autenticada del propietario', () => {
       receivedSha256: received,
       bytes: first,
     });
-    expect(linked).toMatchObject({ status: 'linked', evidenceId: 'EV-000002' });
-    expect(photos.calls).toEqual(['EV-000002']);
+    expect(linked).toMatchObject({ status: 'already_linked', evidenceId: 'EV-000002' });
+    expect(photos.calls).toEqual([]);
+    expect(storedPhotos.calls).toEqual(['EV-000002']);
     expect(files.files.has('data/evidence/commercial/CQ-000022/reviews/index.json')).toBe(false);
   });
 
@@ -393,6 +405,8 @@ describe('revisión autenticada del propietario', () => {
     expect(moduleSource).toContain('@UseGuards(JwtAuthGuard)');
     expect(moduleSource).toContain("@Post('evidence-previews')");
     expect(moduleSource).toContain("@Get('evidence-previews/:previewId')");
+    expect(moduleSource).toContain("@Post('evidence-previews/:previewId/confirm')");
+    expect(moduleSource).toContain("@Post('evidence-previews/:previewId/cancel')");
     expect(moduleSource).toContain("@Header('Cache-Control', 'private, no-store')");
     expect(moduleSource).not.toContain('@Public');
     expect(moduleSource).not.toMatch(/@(Put|Patch|Delete)\(/);
@@ -512,5 +526,173 @@ describe('revisión autenticada del propietario', () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('recorre carga, bytes exactos, archivo, galería y reintento sin duplicar ni tocar el precio', async () => {
+    const files = new MemoryFiles();
+    const quoteBody = quote('RQ-000031');
+    files.seed('data/repairs/quotes/RQ-000031.json', quoteBody);
+    const original = minimalDecodablePng([3, 1, 4]);
+    const blobs = new Map<string, Buffer>();
+    let rejectUpload = true;
+    const photos: MemoryPhotos = Object.assign(new MemoryPhotos(), {
+      async store(input: { subjectId: string; evidenceId: string; bytes: Buffer }) {
+        this.calls.push(input.evidenceId);
+        const digest = sha256(input.bytes);
+        if (rejectUpload) {
+          return { sha256: digest, verified: false, assetPublicId: null, assetVersion: null, failure: 'upload_rejected' as const };
+        }
+        const assetPublicId = evidencePublicId(input.subjectId, input.evidenceId, digest);
+        blobs.set(digest, Buffer.from(input.bytes));
+        return { sha256: digest, verified: true, assetPublicId, assetVersion: 4 };
+      },
+    });
+    const vault = new EvidencePreviewVault();
+    const desk = deskFor(files, openEnv, { photos, vault });
+    const controller = new EvidenceReviewController(desk);
+    const previous = { ...process.env };
+    Object.assign(process.env, openEnv);
+    try {
+    const preview = await controller.hold(owner, {
+      subjectId: 'RQ-000031',
+      receivedSha256: received,
+      imageBase64: original.toString('base64'),
+    });
+    const seen = await controller.read(owner, preview.previewId);
+    expect(await streamBytes(seen.getStream())).toEqual(original);
+    const pending = await controller.confirm(owner, preview.previewId, {
+      subjectId: 'RQ-000031',
+      sha256: preview.sha256,
+      visibleIdentifiersReviewed: true,
+    });
+    expect(pending).toMatchObject({ status: 'attested', archive: 'link_pending', failure: 'upload_rejected' });
+    const archive = {
+      async read(path: string) {
+        return files.files.get(path)?.content ?? null;
+      },
+      async photo(locator: { sha256: string }) {
+        const bytes = blobs.get(locator.sha256);
+        if (!bytes) throw new Error('missing photo');
+        return bytes;
+      },
+    };
+    expect(await listCalibrationEvidence(archive, 'RQ-000031')).toMatchObject({
+      items: [{ id: 'EV-000001', state: 'link_pending' }],
+    });
+    await expect(readCalibrationEvidence(archive, 'RQ-000031', 'EV-000001')).rejects.toMatchObject({ code: 'missing' });
+    expect(files.files.get('data/repairs/quotes/RQ-000031.json')?.content).toBe(quoteBody);
+
+    rejectUpload = false;
+    const archived = await controller.confirm(owner, preview.previewId, {
+      subjectId: 'RQ-000031',
+      sha256: preview.sha256,
+      visibleIdentifiersReviewed: true,
+    });
+    expect(archived).toMatchObject({ status: 'already_attested', archive: 'linked', evidenceId: 'EV-000001' });
+    const listed = await listCalibrationEvidence(archive, 'RQ-000031');
+    expect(listed.items).toEqual([{ id: 'EV-000001', state: 'verified', provenance: 'anonymized_copy' }]);
+    const photo = await readCalibrationEvidence(archive, 'RQ-000031', 'EV-000001');
+    expect(photo.bytes.equals(original)).toBe(true);
+    expect(sha256(photo.bytes)).toBe(preview.sha256);
+    expect(files.files.get('data/repairs/quotes/RQ-000031.json')?.content).toBe(quoteBody);
+    expect(files.writes.join('\n')).not.toContain('CQ-000006');
+    expect(new Set(photos.calls)).toEqual(new Set(['EV-000001']));
+
+    const restarted = new EvidenceReviewController(deskFor(files, openEnv, { photos, vault: new EvidencePreviewVault() }));
+    await expect(restarted.read(owner, preview.previewId)).rejects.toBeInstanceOf(NotFoundException);
+    const again = await restarted.hold(owner, {
+      subjectId: 'RQ-000031',
+      receivedSha256: received,
+      imageBase64: original.toString('base64'),
+    });
+    await restarted.read(owner, again.previewId);
+    const repeated = await restarted.confirm(owner, again.previewId, {
+      subjectId: 'RQ-000031',
+      sha256: again.sha256,
+      visibleIdentifiersReviewed: true,
+    });
+    expect(repeated).toMatchObject({ status: 'already_attested', archive: 'already_linked', evidenceId: 'EV-000001' });
+    expect(photos.calls.filter((id) => id === 'EV-000001').length).toBe(2);
+    expect((await listCalibrationEvidence(archive, 'RQ-000031')).items).toHaveLength(1);
+
+    await expect(controller.confirm({ ...owner, role: 'agent' }, preview.previewId, {
+      subjectId: 'RQ-000031',
+      sha256: preview.sha256,
+      visibleIdentifiersReviewed: true,
+    })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(controller.confirm(undefined as unknown as AuthenticatedUser, preview.previewId, {
+      subjectId: 'RQ-000031',
+      sha256: preview.sha256,
+      visibleIdentifiersReviewed: true,
+    })).rejects.toBeInstanceOf(UnauthorizedException);
+
+    const other = minimalDecodablePng([8, 8, 1]);
+    const conflictPreview = await controller.hold(owner, {
+      subjectId: 'RQ-000031',
+      receivedSha256: received,
+      imageBase64: other.toString('base64'),
+    });
+    await controller.read(owner, conflictPreview.previewId);
+    await expect(controller.confirm(owner, conflictPreview.previewId, {
+      subjectId: 'RQ-000031',
+      sha256: conflictPreview.sha256,
+      visibleIdentifiersReviewed: true,
+    })).rejects.toBeInstanceOf(BadRequestException);
+    expect(files.files.get('data/repairs/quotes/RQ-000031.json')?.content).toBe(quoteBody);
+
+    const fresh = new MemoryFiles();
+    fresh.seed('data/commercial/quotes/CQ-000031.json', quote('CQ-000031'));
+    const freshDesk = deskFor(fresh, openEnv, { photos: new MemoryPhotos() });
+    const held = await freshDesk.hold(owner, {
+      subjectId: 'CQ-000031',
+      receivedSha256: otherReceived,
+      bytes: minimalDecodablePng([2, 2, 8]),
+    });
+    expect(await freshDesk.cancel(owner, held.previewId)).toEqual({ status: 'cleared' });
+    await expect(freshDesk.read(owner, held.previewId)).rejects.toMatchObject({ code: 'missing' });
+    expect(fresh.writes).toEqual([]);
+    expect(fresh.files.get('data/commercial/quotes/CQ-000031.json')?.content).toContain('32000');
+
+    const guardedQuote = quote('CQ-000032');
+    const guarded = new MemoryFiles();
+    guarded.seed('data/commercial/quotes/CQ-000032.json', guardedQuote);
+    const originalWrite = guarded.write.bind(guarded);
+    let failedManifest = false;
+    guarded.write = async (path, content, sha) => {
+      if (!failedManifest && path.includes('/manifests/')) {
+        failedManifest = true;
+        throw new Error('github unavailable');
+      }
+      return originalWrite(path, content, sha);
+    };
+    const guardedPhotos = new MemoryPhotos();
+    const guardedDesk = new EvidenceReviewController(deskFor(guarded, openEnv, { photos: guardedPhotos }));
+    const guardedBytes = minimalDecodablePng([4, 2, 1]);
+    const guardedPreview = await guardedDesk.hold(owner, {
+      subjectId: 'CQ-000032',
+      receivedSha256: received,
+      imageBase64: guardedBytes.toString('base64'),
+    });
+    await guardedDesk.read(owner, guardedPreview.previewId);
+    await expect(guardedDesk.confirm(owner, guardedPreview.previewId, {
+      subjectId: 'CQ-000032',
+      sha256: guardedPreview.sha256,
+      visibleIdentifiersReviewed: true,
+    })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(guarded.files.get('data/commercial/quotes/CQ-000032.json')?.content).toBe(guardedQuote);
+    const recovered = await guardedDesk.confirm(owner, guardedPreview.previewId, {
+      subjectId: 'CQ-000032',
+      sha256: guardedPreview.sha256,
+      visibleIdentifiersReviewed: true,
+    });
+    expect(recovered).toMatchObject({ archive: 'linked', evidenceId: 'EV-000001' });
+    expect(guardedPhotos.calls).toEqual(['EV-000001']);
+    expect(guarded.files.get('data/commercial/quotes/CQ-000032.json')?.content).toBe(guardedQuote);
+    } finally {
+      for (const key of Object.keys(process.env)) {
+        if (!(key in previous)) delete process.env[key];
+      }
+      Object.assign(process.env, previous);
+    }
   });
 });

@@ -60,6 +60,11 @@ export class EvidenceReviewController {
     return this.run(user, () => this.desk.confirm(user, previewId, parseEvidencePreviewConfirm(body)));
   }
 
+  @Post('evidence-previews/:previewId/cancel')
+  cancel(@CurrentUser() user: AuthenticatedUser, @Param('previewId') previewId: string) {
+    return this.run(user, () => this.desk.cancel(user, previewId));
+  }
+
   private async run<T>(user: AuthenticatedUser | undefined, work: () => Promise<T>): Promise<T> {
     try {
       const access = calibrationQueryAccess(process.env, user);
