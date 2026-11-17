@@ -19,7 +19,8 @@ const COLORS = new Set([
 ]);
 const TOKEN = /[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:-[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)*/gu;
 const CHANGE = /cambio de\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)\s+a\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
-const BATH = /ba[nñ]o de pintura en color\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
+const BATH = /ba[nñ]o de pintura(?:\s+en(?:\s+color)?)?\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
+const ORIGINAL = /color original\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
 const VISUAL = /se observa de color\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
 const EXPLICIT = /en color\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
 const CODE = /(?:c[oó]digo(?:\s+de\s+pintura)?|clave)\s+([A-Za-z0-9]{2,12})/giu;
@@ -35,45 +36,54 @@ export type ColorImportReport = {
 export function interpretColorStatement(value: string): ColorReading | null {
   const text = value.replace(/[^\S\n]+/g, ' ').replace(/ *\n */g, '\n').trim();
   if (!text) return null;
-  let ambiguous = false;
   const changes = uniquePairs([...text.matchAll(CHANGE)].map((match) => [match[1], match[2]] as const));
   const baths = uniqueTokens([...text.matchAll(BATH)].map((match) => match[1]));
   const visuals = uniqueTokens([...text.matchAll(VISUAL)].map((match) => match[1]));
+  const originals = uniqueTokens([...text.matchAll(ORIGINAL)].map((match) => match[1]));
   const explicit = uniqueTokens([...text.matchAll(EXPLICIT)]
-    .filter((match) => !coveredBy(match.index ?? 0, [...text.matchAll(BATH)]) && !coveredBy(match.index ?? 0, [...text.matchAll(CHANGE)]))
+    .filter((match) => !coveredBy(match.index ?? 0, [
+      ...text.matchAll(BATH),
+      ...text.matchAll(CHANGE),
+      ...text.matchAll(ORIGINAL),
+    ]))
     .map((match) => match[1]));
-  const named = vehicleColors(text);
+  const currents = uniqueTokens([...explicit.filter(isColor), ...vehicleColors(text)]);
+  let ambiguous = false;
   if (changes.some(([from, to]) => !isColor(from) || !isColor(to))) ambiguous = true;
-  if (baths.some((token) => !isColor(token)) || explicit.some((token) => !isColor(token)) || visuals.some((token) => !isColor(token))) {
+  if ([...baths, ...visuals, ...originals, ...explicit].some((token) => !isColor(token))) ambiguous = true;
+  if (changes.length > 1 || baths.length > 1 || visuals.length > 1 || originals.length > 1 || currents.length > 1) {
     ambiguous = true;
   }
   const knownChanges = changes.filter(([from, to]) => isColor(from) && isColor(to));
-  const declared = uniqueTokens([
-    ...baths.filter(isColor),
-    ...explicit.filter(isColor),
-    ...named,
-  ]);
-  if (knownChanges.length > 1) ambiguous = true;
-  if (knownChanges.length === 1 && declared.some((token) => fold(token) !== fold(knownChanges[0][0]) && fold(token) !== fold(knownChanges[0][1]))) {
-    ambiguous = true;
-  }
-  if (knownChanges.length === 0 && declared.length > 1) ambiguous = true;
+  const knownBaths = baths.filter(isColor);
   const knownVisuals = visuals.filter(isColor);
-  if (knownVisuals.length > 1) ambiguous = true;
-  if (ambiguous || (mentionsColor(text) && knownChanges.length === 0 && declared.length === 0 && knownVisuals.length === 0)) {
-    return unknownReading();
-  }
+  const knownOriginals = originals.filter(isColor);
   if (knownChanges.length === 1) {
     const [from, to] = knownChanges[0];
-    return reading(from, 'human_declaration', to, text);
+    if (currents.some((token) => fold(token) !== fold(from))) ambiguous = true;
+    if (knownBaths.some((token) => fold(token) !== fold(to))) ambiguous = true;
+    if (knownVisuals.some((token) => fold(token) !== fold(from))) ambiguous = true;
   }
-  if (declared.length === 1) return reading(declared[0], 'human_declaration', null, text);
-  if (knownVisuals.length === 1) {
-    const human = declared[0];
-    if (human && fold(human) !== fold(knownVisuals[0])) return reading(human, 'human_declaration', null, text);
-    if (human) return reading(human, 'human_declaration', null, text);
-    return reading(knownVisuals[0], 'visual_inference', null, text);
+  const accounted = new Set([...knownChanges.flat(), ...knownBaths, ...knownVisuals, ...knownOriginals, ...currents].map(fold));
+  if ((text.match(TOKEN) ?? []).some((token) => isColor(token) && !accounted.has(fold(token)))) ambiguous = true;
+  const known = knownChanges.length + currents.length + knownBaths.length + knownVisuals.length + knownOriginals.length;
+  if (ambiguous || (mentionsColor(text) && known === 0)) return unknownReading();
+  if (knownChanges.length === 1) {
+    const [from, to] = knownChanges[0];
+    return compose(from, 'human_declaration', to, knownOriginals[0] ?? null, text);
   }
+  if (currents.length === 1) {
+    return compose(currents[0], 'human_declaration', knownBaths[0] ?? null, knownOriginals[0] ?? null, text);
+  }
+  if (knownBaths.length === 1) {
+    const seen = knownVisuals[0] ?? null;
+    return compose(seen, seen ? 'visual_inference' : 'unknown', knownBaths[0], knownOriginals[0] ?? null, text);
+  }
+  if (knownOriginals.length === 1) {
+    const seen = knownVisuals[0] ?? null;
+    return compose(seen, seen ? 'visual_inference' : 'unknown', null, knownOriginals[0], text);
+  }
+  if (knownVisuals.length === 1) return compose(knownVisuals[0], 'visual_inference', null, null, text);
   return null;
 }
 
@@ -95,6 +105,8 @@ export function declaredColorReading(colors: {
     finishProvenance: null,
     paintCode: null,
     paintCodeProvenance: null,
+    originalColor: null,
+    originalProvenance: null,
   };
 }
 
@@ -135,7 +147,7 @@ export async function applyColorImport(
   if (HISTORICAL.has(subjectId)) return { status: 'rejected', enriched: false, subjectId, clarification: false };
   try {
     const saved = await importColorReading(files, subjectId, reading);
-    const clarified = reading.exteriorProvenance === 'unknown' && reading.requestedColor == null;
+    const clarified = reading.exteriorProvenance === 'unknown' && reading.requestedColor == null && reading.originalColor == null;
     return {
       status: saved.status === 'recorded' || saved.status === 'already_recorded' || saved.status === 'retained' || saved.status === 'conflict'
         ? saved.status
@@ -160,23 +172,26 @@ export function pendingColor(subjectId: string): ColorImportReport {
   return { status: 'pending', enriched: false, subjectId };
 }
 
-function reading(
-  exterior: string,
-  provenance: 'human_declaration' | 'visual_inference',
+function compose(
+  exterior: string | null,
+  provenance: 'human_declaration' | 'visual_inference' | 'unknown',
   requested: string | null,
+  original: string | null,
   text: string,
 ): ColorReading {
   const finish = single(FINISH, text);
   const paintCode = single(CODE, text);
   return {
     exteriorColor: exterior,
-    exteriorProvenance: provenance,
+    exteriorProvenance: exterior ? provenance : 'unknown',
     requestedColor: requested,
     requestedProvenance: requested ? 'human_declaration' : null,
-    finish: provenance === 'human_declaration' ? finish : null,
-    finishProvenance: provenance === 'human_declaration' && finish ? 'human_declaration' : null,
-    paintCode: provenance === 'human_declaration' ? paintCode : null,
-    paintCodeProvenance: provenance === 'human_declaration' && paintCode ? 'human_declaration' : null,
+    originalColor: original,
+    originalProvenance: original ? 'human_declaration' : null,
+    finish,
+    finishProvenance: finish ? 'human_declaration' : null,
+    paintCode,
+    paintCodeProvenance: paintCode ? 'human_declaration' : null,
   };
 }
 
@@ -190,6 +205,8 @@ function unknownReading(): ColorReading {
     finishProvenance: null,
     paintCode: null,
     paintCodeProvenance: null,
+    originalColor: null,
+    originalProvenance: null,
   };
 }
 
@@ -197,7 +214,7 @@ function vehicleColors(text: string): string[] {
   const found: string[] = [];
   for (const clause of text.split(/[.;\n]+/)) {
     const folded = fold(clause);
-    if (/\b(?:observa|cambio|bano|fotografia|fotografias)\b/.test(folded) || /\ben color\b/.test(folded)) continue;
+    if (/\b(?:observa|cambio|bano|fotografia|fotografias)\b/.test(folded) || /\ben color\b/.test(folded) || /\bcolor original\b/.test(folded)) continue;
     const tokens = clause.match(TOKEN) ?? [];
     if (tokens.length < 2 || tokens.length > 6) continue;
     const last = tokens[tokens.length - 1];

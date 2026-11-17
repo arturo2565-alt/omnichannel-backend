@@ -278,12 +278,12 @@ async function attachRepairColor(
   files: ColorFiles | undefined,
 ): Promise<RepairImportReport> {
   if (!reading || !report.quoteId) return report;
-  if (!files) return { ...report, color: pendingColor(report.quoteId) };
+  if (!files) return { ...report, color: pendingColor(report.quoteId), enriched: false };
   try {
     const color = await applyColorImport(files, report.quoteId, reading);
-    return { ...report, color };
+    return { ...report, color, enriched: color.enriched && report.enriched !== false };
   } catch {
-    return { ...report, color: pendingColor(report.quoteId) };
+    return { ...report, color: pendingColor(report.quoteId), enriched: false };
   }
 }
 

@@ -6,6 +6,7 @@ import {
   CALIBRATION_DIAGNOSTIC_SERVICE_ID,
 } from './calibration-diagnose';
 import { importCalibrationCase } from './calibration-import';
+import { readCalibrationCase } from './calibration-query';
 import { minimalDecodablePng } from './calibration-image-archive.service';
 import { importCommercialQuote } from './commercial-quote-import';
 import { CommercialGithubWriter } from './commercial-quote-writer';
@@ -184,13 +185,13 @@ describe('CAL-030 color import', () => {
     gate.fail = true;
     const failed = await run();
     const stored = memory.files.get('data/repairs/quotes/RQ-000001.json')?.text ?? '';
-    expect(failed).toMatchObject({ result: 'ok', quoteId: 'RQ-000001' });
+    expect(failed).toMatchObject({ result: 'ok', quoteId: 'RQ-000001', enriched: false });
     expect(failed.color).toMatchObject({ status: 'pending', enriched: false });
     expect(stored).toContain('"amount_mxn": 1800');
     expect(stored).not.toContain('exterior_color');
     gate.fail = false;
     const recovered = await run();
-    expect(recovered).toMatchObject({ result: 'ok', status: 'already_exists', quoteId: 'RQ-000001' });
+    expect(recovered).toMatchObject({ result: 'ok', status: 'already_exists', quoteId: 'RQ-000001', enriched: true });
     expect(recovered.color?.status).toBe('recorded');
     expect(memory.files.get('data/repairs/quotes/RQ-000001.json')?.text).toBe(stored);
     const again = await run();
@@ -222,7 +223,18 @@ describe('CAL-030 color import', () => {
       requested_evidence: 'customer_provided',
     }, 'color_change'), { archive: writer, colorFiles: files, clock: () => '2026-11-17T16:00:00.000Z' });
     const stored = memory.files.get('data/commercial/quotes/CQ-000002.json')?.text ?? '';
-    expect(change.color).toMatchObject({ status: 'recorded', enriched: true });
+    expect(change).toMatchObject({ color: { status: 'recorded', enriched: true }, enriched: true });
+    const bath = await importCommercialQuote(stagingEnv(), commercial('sintetico-bano', {
+      current: null,
+      current_evidence: 'unknown',
+      requested: 'plata',
+      requested_evidence: 'customer_provided',
+    }, 'color_change'), { archive: writer, colorFiles: files, clock: () => '2026-11-17T16:00:00.000Z' });
+    expect(bath.color).toMatchObject({ status: 'recorded', enriched: true });
+    const bathNote = [...memory.files.keys()].find((path) => path.includes('CQ-000003') && path.endsWith('CL-000001.json'));
+    expect(memory.files.get(bathNote ?? '')?.text).toContain('"requested_color": "plata"');
+    expect(memory.files.get(bathNote ?? '')?.text).toContain('"exterior_color": null');
+    expect(memory.files.get('data/commercial/quotes/CQ-000003.json')?.text).toContain('"amount_mxn": 28000');
     expect(stored).toContain('"amount_mxn": 28000');
     expect(stored).not.toContain('exterior_provenance');
     const note = [...memory.files.keys()].find((path) => path.includes('CQ-000002') && path.endsWith('CL-000001.json'));
@@ -296,7 +308,7 @@ describe('CAL-030 color import', () => {
         validation: 'human_confirmed',
       }],
       visual_observations: ['El vehiculo se observa de color blanco.'],
-      operator_statement: 'Mazda 3 rojo',
+      operator_statement: 'Mazda 3 2015 rojo',
       images: [image],
     };
     const report = await importCalibrationCase(stagingEnv(), quote, {
@@ -307,7 +319,25 @@ describe('CAL-030 color import', () => {
     const casePath = `data/cases/${report.caseId}.json`;
     const storedCase = github.files.get(casePath)?.text ?? '';
     expect(report).toMatchObject({ result: 'ok', caseId: 'AF-000004' });
-    expect(report.color).toMatchObject({ status: 'recorded', enriched: true });
+    expect(report).toMatchObject({ color: { status: 'recorded', enriched: true }, enriched: true });
+    const detail = await readCalibrationCase({
+      async read(path: string) {
+        return github.files.get(path)?.text ?? null;
+      },
+      async photo() {
+        return Buffer.alloc(0);
+      },
+    }, report.caseId ?? '');
+    expect(detail.colorAnnotation).toMatchObject({
+      contractVersion: 'color-v1',
+      exteriorColor: 'rojo',
+      exteriorProvenance: 'human_declaration',
+      requestedColor: null,
+      originalColor: null,
+      status: 'proposed',
+    });
+    expect(detail.colorAnnotation?.status).not.toBe('validated');
+    expect(detail.lines[0].priceMxn).toBe(3600);
     expect(storedCase).toContain('"price_mxn": 3600');
     expect(storedCase).not.toContain('exterior_color');
     expect(github.files.get('data/cases/AF-000001.json')?.text).toBe(PROTECTED);

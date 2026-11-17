@@ -93,6 +93,8 @@ function declared(color: string, extra: Partial<ColorReading> = {}): ColorReadin
     finishProvenance: null,
     paintCode: null,
     paintCodeProvenance: null,
+    originalColor: null,
+    originalProvenance: null,
     ...extra,
   };
 }
@@ -146,13 +148,33 @@ describe('color color-v1', () => {
       finish: null,
       paintCode: null,
     });
-    expect(interpretColorStatement('Mazda 3 rojo')).toMatchObject({ exteriorColor: 'rojo', requestedColor: null });
-    expect(interpretColorStatement('Mercedes-Benz negro')).toMatchObject({ exteriorColor: 'negro', requestedColor: null });
-    expect(interpretColorStatement('Baño de pintura en color plata')).toMatchObject({
-      exteriorColor: 'plata',
+    expect(interpretColorStatement('Mazda 3 2015 rojo')).toMatchObject({
+      exteriorColor: 'rojo',
+      exteriorProvenance: 'human_declaration',
       requestedColor: null,
+      originalColor: null,
+    });
+    expect(interpretColorStatement('Mazda 3 rojo')).toMatchObject({ exteriorColor: 'rojo', requestedColor: null, originalColor: null });
+    expect(interpretColorStatement('Mercedes-Benz negro')).toMatchObject({ exteriorColor: 'negro', requestedColor: null });
+    expect(interpretColorStatement('Baño de pintura en plata')).toMatchObject({
+      exteriorColor: null,
+      exteriorProvenance: 'unknown',
+      requestedColor: 'plata',
+      requestedProvenance: 'human_declaration',
+      originalColor: null,
+    });
+    expect(interpretColorStatement('Baño de pintura en color plata')).toMatchObject({
+      exteriorColor: null,
+      requestedColor: 'plata',
+      requestedProvenance: 'human_declaration',
       finish: null,
       paintCode: null,
+    });
+    expect(interpretColorStatement('Color original blanco. Mazda 3 rojo.')).toMatchObject({
+      originalColor: 'blanco',
+      originalProvenance: 'human_declaration',
+      exteriorColor: 'rojo',
+      requestedColor: null,
     });
     expect(interpretColorStatement('Cambio de blanco a negro')).toMatchObject({
       exteriorColor: 'blanco',
@@ -161,7 +183,8 @@ describe('color color-v1', () => {
       requestedProvenance: 'human_declaration',
     });
     expect(interpretColorStatement('Baño de pintura en color plata, acabado perlado, código LY9B')).toMatchObject({
-      exteriorColor: 'plata',
+      exteriorColor: null,
+      requestedColor: 'plata',
       finish: 'perlado',
       finishProvenance: 'human_declaration',
       paintCode: 'LY9B',

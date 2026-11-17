@@ -860,9 +860,9 @@ async function attachColor(
   try {
     const writer = files ?? openImportedColorFiles(transport, async () => `Bearer ${await authorization()}`);
     const color = await applyColorImport(writer, report.caseId, reading);
-    return { ...report, color };
+    return { ...report, color, enriched: color.enriched && report.enriched !== false };
   } catch {
-    return { ...report, color: pendingColor(report.caseId) };
+    return { ...report, color: pendingColor(report.caseId), enriched: false };
   }
 }
 

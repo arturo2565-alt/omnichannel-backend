@@ -58,6 +58,7 @@ export type CommercialImportReport = {
   opportunityCount?: number;
   quoteCount?: number;
   color?: ColorImportReport;
+  enriched?: boolean;
 };
 
 export function prepareCommercialQuote(input: unknown): ValidatedCommercialQuote {
@@ -111,12 +112,12 @@ export async function importCommercialQuote(
     };
     const reading = declaredColorReading(quote.colors);
     if (!reading || !report.quoteId) return report;
-    if (!opened.colorFiles) return { ...report, color: pendingColor(report.quoteId) };
+    if (!opened.colorFiles) return { ...report, color: pendingColor(report.quoteId), enriched: false };
     try {
       const color = await applyColorImport(opened.colorFiles, report.quoteId, reading);
-      return { ...report, color };
+      return { ...report, color, enriched: color.enriched };
     } catch {
-      return { ...report, color: pendingColor(report.quoteId) };
+      return { ...report, color: pendingColor(report.quoteId), enriched: false };
     }
   } catch (err) {
     return error(categoryOf(err));

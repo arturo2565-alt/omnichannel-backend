@@ -30,6 +30,7 @@ const WRITE_BLOCKED = [
 ];
 const IMPORT_FIELDS = new Set([
   'exteriorColor', 'exteriorProvenance', 'requestedColor', 'requestedProvenance',
+  'originalColor', 'originalProvenance',
   'finish', 'finishProvenance', 'paintCode', 'paintCodeProvenance',
 ]);
 const CONFIRM_FIELDS = new Set(['subjectId', 'exteriorColor', 'requestedColor', 'finish', 'paintCode', 'colorReviewed']);
@@ -56,6 +57,8 @@ export type ColorReading = {
   exteriorProvenance: ColorDatumProvenance;
   requestedColor: string | null;
   requestedProvenance: ColorDatumProvenance | null;
+  originalColor: string | null;
+  originalProvenance: 'human_declaration' | null;
   finish: string | null;
   finishProvenance: 'human_declaration' | null;
   paintCode: string | null;
@@ -70,6 +73,8 @@ export type ColorNote = {
   exteriorProvenance: ColorProvenance;
   requestedColor: string | null;
   requestedProvenance: ColorProvenance | null;
+  originalColor: string | null;
+  originalProvenance: ColorProvenance | null;
   finish: string | null;
   finishProvenance: ColorProvenance | null;
   paintCode: string | null;
@@ -86,6 +91,8 @@ type StoredItem = {
   exterior_provenance: ColorProvenance;
   requested_color: string | null;
   requested_provenance: ColorProvenance | null;
+  original_color: string | null;
+  original_provenance: ColorProvenance | null;
   finish: string | null;
   finish_provenance: ColorProvenance | null;
   paint_code: string | null;
@@ -143,6 +150,8 @@ export async function importColorReading(
     exteriorProvenance: reading.exteriorProvenance,
     requestedColor: reading.requestedColor,
     requestedProvenance: reading.requestedProvenance,
+    originalColor: reading.originalColor ?? null,
+    originalProvenance: reading.originalProvenance ?? null,
     finish: reading.finish,
     finishProvenance: reading.finishProvenance,
     paintCode: reading.paintCode,
@@ -185,6 +194,8 @@ export async function confirmVehicleColor(
     exteriorProvenance: 'authenticated_owner',
     requestedColor: requested?.trim() ?? null,
     requestedProvenance: requested ? 'authenticated_owner' : null,
+    originalColor: null,
+    originalProvenance: null,
     finish,
     finishProvenance: finish ? 'authenticated_owner' : null,
     paintCode,
@@ -242,6 +253,8 @@ async function storeColor(
     exteriorProvenance: ColorProvenance;
     requestedColor: string | null;
     requestedProvenance: ColorProvenance | null;
+    originalColor: string | null;
+    originalProvenance: ColorProvenance | null;
     finish: string | null;
     finishProvenance: ColorProvenance | null;
     paintCode: string | null;
@@ -275,7 +288,7 @@ async function storeColor(
   if (current && current.status !== 'unknown' && next.status === 'unknown') {
     return { status: 'retained', annotationId: current.annotation_id };
   }
-  if (options.conflictOnDifference && current && holdsHuman(current) && next.exteriorProvenance === 'human_declaration') {
+  if (options.conflictOnDifference && current && holdsHuman(current) && nextHoldsHuman(next)) {
     return { status: 'conflict', annotationId: current.annotation_id };
   }
   if (options.conflictOnDifference && current?.exterior_provenance === 'visual_inference' && next.exteriorProvenance === 'visual_inference') {
@@ -293,6 +306,8 @@ async function storeColor(
     exterior_provenance: next.exteriorProvenance,
     requested_color: next.requestedColor,
     requested_provenance: next.requestedProvenance,
+    original_color: next.originalColor,
+    original_provenance: next.originalProvenance,
     finish: next.finish,
     finish_provenance: next.finishProvenance,
     paint_code: next.paintCode,
@@ -311,6 +326,8 @@ async function storeColor(
     exterior_provenance: next.exteriorProvenance,
     requested_color: next.requestedColor,
     requested_provenance: next.requestedProvenance,
+    original_color: next.originalColor,
+    original_provenance: next.originalProvenance,
     finish: next.finish,
     finish_provenance: next.finishProvenance,
     paint_code: next.paintCode,
@@ -404,11 +421,12 @@ function publicItem(item: StoredItem | null): StoredItem | null {
   } else if (item.authorization != null || item.actor_key != null || item.exterior_provenance === 'authenticated_owner') {
     return null;
   }
-  if (item.status === 'unknown' && (item.exterior_color != null || item.requested_color != null)) return null;
+  if (item.status === 'unknown' && (item.exterior_color != null || item.requested_color != null || item.original_color != null)) return null;
   if (item.status === 'proposed' && item.exterior_provenance === 'visual_inference' && !item.exterior_color) return null;
   if (item.status === 'validated' && item.exterior_provenance === 'visual_inference') return null;
   if (item.requested_color == null && item.requested_provenance != null) return null;
   if (item.requested_color != null && item.requested_provenance == null) return null;
+  if ((item.original_color == null) !== (item.original_provenance == null)) return null;
   if (item.finish == null && item.finish_provenance != null) return null;
   if (item.paint_code == null && item.paint_code_provenance != null) return null;
   const serialized = JSON.stringify(item).toLowerCase();
@@ -425,6 +443,8 @@ function publicNote(item: StoredItem): Omit<ColorNote, 'history'> {
     exteriorProvenance: item.exterior_provenance,
     requestedColor: item.requested_color,
     requestedProvenance: item.requested_provenance,
+    originalColor: item.original_color ?? null,
+    originalProvenance: item.original_provenance ?? null,
     finish: item.finish,
     finishProvenance: item.finish_provenance,
     paintCode: item.paint_code,
@@ -437,6 +457,8 @@ function sameColor(current: StoredItem | null, next: {
   exteriorProvenance: ColorProvenance;
   requestedColor: string | null;
   requestedProvenance: ColorProvenance | null;
+  originalColor: string | null;
+  originalProvenance: ColorProvenance | null;
   finish: string | null;
   finishProvenance: ColorProvenance | null;
   paintCode: string | null;
@@ -448,6 +470,8 @@ function sameColor(current: StoredItem | null, next: {
     && current.exterior_provenance === next.exteriorProvenance
     && current.requested_color === next.requestedColor
     && current.requested_provenance === next.requestedProvenance
+    && (current.original_color ?? null) === next.originalColor
+    && (current.original_provenance ?? null) === next.originalProvenance
     && current.finish === next.finish
     && current.finish_provenance === next.finishProvenance
     && current.paint_code === next.paintCode
@@ -456,11 +480,19 @@ function sameColor(current: StoredItem | null, next: {
 }
 
 function holdsHuman(item: StoredItem): boolean {
-  return item.exterior_provenance === 'human_declaration' || item.requested_provenance === 'human_declaration';
+  return item.exterior_provenance === 'human_declaration'
+    || item.requested_provenance === 'human_declaration'
+    || item.original_provenance === 'human_declaration';
+}
+
+function nextHoldsHuman(next: { exteriorProvenance: ColorProvenance; requestedProvenance: ColorProvenance | null; originalProvenance: ColorProvenance | null }): boolean {
+  return next.exteriorProvenance === 'human_declaration'
+    || next.requestedProvenance === 'human_declaration'
+    || next.originalProvenance === 'human_declaration';
 }
 
 function readingStatus(reading: ColorReading): ColorStatus {
-  if (reading.exteriorProvenance === 'unknown' && reading.requestedColor == null) return 'unknown';
+  if (reading.exteriorColor == null && reading.requestedColor == null && reading.originalColor == null) return 'unknown';
   return 'proposed';
 }
 
@@ -479,6 +511,11 @@ function assertReading(reading: ColorReading): void {
   } else if (reading.requestedProvenance !== 'human_declaration' || !isColor(reading.requestedColor)) {
     throw new ColorError('rejected');
   }
+  if (reading.originalColor == null) {
+    if (reading.originalProvenance != null) throw new ColorError('rejected');
+  } else if (reading.originalProvenance !== 'human_declaration' || !isColor(reading.originalColor)) {
+    throw new ColorError('rejected');
+  }
   if (reading.finish == null) {
     if (reading.finishProvenance != null) throw new ColorError('rejected');
   } else if (reading.finishProvenance !== 'human_declaration' || !FINISH_TEXT.test(reading.finish)) {
@@ -489,7 +526,6 @@ function assertReading(reading: ColorReading): void {
   } else if (reading.paintCodeProvenance !== 'human_declaration' || !PAINT_CODE.test(reading.paintCode)) {
     throw new ColorError('rejected');
   }
-  if (provenance === 'visual_inference' && reading.requestedColor != null) throw new ColorError('rejected');
 }
 
 function annotationPath(subjectId: string, annotationId: string): string {
