@@ -224,6 +224,131 @@ export async function importSeverityProposal(
   return { status: 'conflict', annotationId: stored.annotationId };
 }
 
+export type DeclaredConfirmation = {
+  lineId: string;
+  annotationId: string;
+  level: SeverityLevel;
+};
+
+export type DeclaredConfirmationReport = {
+  confirmed: DeclaredConfirmation[];
+  already: DeclaredConfirmation[];
+  conflicts: DeclaredConfirmation[];
+  complete: boolean;
+};
+
+const DECLARATION_BATCH_FIELDS = new Set(['subjectId', 'declarationsReviewed', 'items']);
+const DECLARATION_ITEM_FIELDS = new Set(['lineId', 'annotationId', 'level']);
+
+export async function confirmDeclaredSeverities(
+  files: SeverityFiles,
+  env: NodeJS.ProcessEnv,
+  user: AuthenticatedUser | undefined,
+  request: { subjectId: string; declarationsReviewed: true; items: DeclaredConfirmation[] },
+): Promise<DeclaredConfirmationReport> {
+  const access = calibrationQueryAccess(env, user);
+  if (access === 'hidden') throw new SeverityError('hidden');
+  if (!user) throw new SeverityError('unauthorized');
+  if (access !== 'open') throw new SeverityError('forbidden');
+  rejectClientFields(request, DECLARATION_BATCH_FIELDS);
+  if (request.declarationsReviewed !== true) throw new SeverityError('rejected');
+  if (!SUBJECT_ID.test(request.subjectId)) throw new SeverityError('invalid');
+  if (!Array.isArray(request.items) || request.items.length < 1 || request.items.length > 12) throw new SeverityError('rejected');
+  const seen = new Set<string>();
+  for (const item of request.items) {
+    rejectClientFields(item, DECLARATION_ITEM_FIELDS);
+    if (!LINE_ID.test(item.lineId) || !/^SV-\d{6}$/.test(item.annotationId) || !isLevel(item.level)) {
+      throw new SeverityError('rejected');
+    }
+    if (seen.has(item.lineId)) throw new SeverityError('rejected');
+    seen.add(item.lineId);
+  }
+  const confirmed: DeclaredConfirmation[] = [];
+  const already: DeclaredConfirmation[] = [];
+  const conflicts: DeclaredConfirmation[] = [];
+  for (const item of request.items) {
+    const outcome = await confirmDeclaredItem(files, user, request.subjectId, item);
+    if (outcome === 'confirmed') confirmed.push(item);
+    else if (outcome === 'already') already.push(item);
+    else conflicts.push(item);
+  }
+  return {
+    confirmed,
+    already,
+    conflicts,
+    complete: conflicts.length === 0,
+  };
+}
+
+async function confirmDeclaredItem(
+  files: SeverityFiles,
+  user: AuthenticatedUser,
+  subjectId: string,
+  item: DeclaredConfirmation,
+): Promise<'confirmed' | 'already' | 'conflict'> {
+  try {
+    const subject = await readSubjectLine(files, subjectId, item.lineId);
+    if (!subject) return 'conflict';
+    const indexFile = await files.read(severitySubjectPath(subjectId));
+    const items = indexFile ? requireItems(indexFile.content, subjectId) : [];
+    const reviewed = items.find((entry) => entry.annotation_id === item.annotationId && entry.line_id === item.lineId) ?? null;
+    const current = items.find((entry) => entry.current && entry.zone_id === subject.zoneId) ?? null;
+    if (!reviewed || !isPendingDeclaration(reviewed, item, subject.zoneId, subject.part)) return 'conflict';
+    if (current?.annotation_id === reviewed.annotation_id) {
+      const stored = await storeObservation(files, subjectId, item.lineId, {
+        level: item.level,
+        status: 'validated',
+        provenance: 'authenticated_owner',
+        authorization: 'authenticated_owner',
+        actorKey: actorKey(user.userId),
+        inferenceMethod: null,
+      }, { expectedAnnotationId: reviewed.annotation_id });
+      return stored.status === 'recorded' ? 'confirmed' : 'conflict';
+    }
+    if (
+      current
+      && current.status === 'validated'
+      && current.provenance === 'authenticated_owner'
+      && current.level === item.level
+      && supersedes(items, current.annotation_id, reviewed.annotation_id)
+    ) {
+      return 'already';
+    }
+    return 'conflict';
+  } catch (err) {
+    if (err instanceof SeverityError && (err.code === 'conflict' || err.code === 'missing' || err.code === 'rejected')) return 'conflict';
+    throw err;
+  }
+}
+
+function isPendingDeclaration(
+  note: StoredItem,
+  item: DeclaredConfirmation,
+  zoneId: string,
+  part: string,
+): boolean {
+  return note.zone_id === zoneId
+    && note.part === part
+    && note.level === item.level
+    && note.status === 'proposed'
+    && note.provenance === 'human_declaration'
+    && note.inference_method == null
+    && note.authorization == null
+    && note.actor_key == null;
+}
+
+function supersedes(items: StoredItem[], fromId: string, targetId: string): boolean {
+  const byId = new Map(items.map((item) => [item.annotation_id, item]));
+  let cursor = byId.get(fromId) ?? null;
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor.annotation_id)) {
+    if (cursor.supersedes === targetId) return true;
+    seen.add(cursor.annotation_id);
+    cursor = cursor.supersedes ? byId.get(cursor.supersedes) ?? null : null;
+  }
+  return false;
+}
+
 export async function confirmSeverity(
   files: SeverityFiles,
   env: NodeJS.ProcessEnv,
@@ -322,7 +447,7 @@ async function storeObservation(
     actorKey: string | null;
     inferenceMethod: typeof SEVERITY_INFERENCE_METHOD | null;
   },
-  options: { conflictOnDifference?: boolean } = {},
+  options: { conflictOnDifference?: boolean; expectedAnnotationId?: string } = {},
 ): Promise<{ status: 'recorded' | 'already_recorded' | 'retained' | 'conflict'; annotationId: string }> {
   if (!SUBJECT_ID.test(subjectId) || !LINE_ID.test(lineId)) throw new SeverityError('invalid');
   if (next.provenance === 'visual_inference' && next.inferenceMethod !== SEVERITY_INFERENCE_METHOD) throw new SeverityError('rejected');
@@ -337,6 +462,18 @@ async function storeObservation(
   const indexFile = await files.read(indexPath);
   const items = indexFile ? requireItems(indexFile.content, subjectId) : [];
   const current = items.find((item) => item.current && item.zone_id === subject.zoneId) ?? null;
+  if (options.expectedAnnotationId) {
+    const unchanged = current
+      && current.annotation_id === options.expectedAnnotationId
+      && current.line_id === lineId
+      && current.level === next.level
+      && current.status === 'proposed'
+      && current.provenance === 'human_declaration'
+      && current.inference_method == null
+      && current.part === subject.part
+      && current.zone_id === subject.zoneId;
+    if (!unchanged) return { status: 'conflict', annotationId: current?.annotation_id ?? options.expectedAnnotationId };
+  }
   if (current?.status === 'validated' && next.status !== 'validated') {
     return { status: 'retained', annotationId: current.annotation_id };
   }

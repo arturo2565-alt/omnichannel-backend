@@ -14,6 +14,7 @@ import {
   SeverityError,
   SeverityGithub,
   assertSeverityWrite,
+  confirmDeclaredSeverities,
   confirmSeverity,
   ingestSeverityAssessment,
   recordDeclaredSeverity,
@@ -524,10 +525,140 @@ describe('severidad severity-v1', () => {
       if (!name.endsWith('.ts') || name.endsWith('.spec.ts')) continue;
       if (!name.includes('import')) continue;
       const source = readFileSync(join(__dirname, name), 'utf8');
-      if (source.includes('confirmSeverity') || source.includes('ingestSeverityAssessment') || source.includes('recordDeclaredSeverity') || source.includes('operatorRole') || source.includes('authenticated_owner')) {
+      if (source.includes('confirmSeverity') || source.includes('confirmDeclaredSeverities') || source.includes('ingestSeverityAssessment') || source.includes('recordDeclaredSeverity') || source.includes('operatorRole') || source.includes('authenticated_owner')) {
         offenders.push(name);
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('valida en un solo acto las declaraciones humanas y deja fuera la IA y lo desconocido', async () => {
+    const files = new MemoryFiles();
+    const body = visualCase('AF-000020', [
+      { line_id: 'L1', part: 'Salpicadera trasera izquierda', price_mxn: 8500 },
+      { line_id: 'L2', part: 'Fascia trasera', price_mxn: 1900 },
+      { line_id: 'L3', part: 'Puerta', price_mxn: 3600 },
+      { line_id: 'L4', part: 'Cofre', price_mxn: 2200 },
+    ], 16200);
+    files.seed('data/cases/AF-000020.json', body);
+    const mild = await recordDeclaredSeverity(files, { subjectId: 'AF-000020', lineId: 'L1', level: 'medio_leve' });
+    const strong = await recordDeclaredSeverity(files, { subjectId: 'AF-000020', lineId: 'L2', level: 'fuerte' });
+    const visual = await ingestSeverityAssessment(files, {
+      subjectId: 'AF-000020',
+      lineId: 'L3',
+      assessment: 'visual_inference',
+      level: 'leve',
+    });
+    const unknown = await ingestSeverityAssessment(files, {
+      subjectId: 'AF-000020',
+      lineId: 'L4',
+      assessment: 'insufficient_evidence',
+    });
+    const first = await confirmDeclaredSeverities(files, openEnv, owner, {
+      subjectId: 'AF-000020',
+      declarationsReviewed: true,
+      items: [
+        { lineId: 'L1', annotationId: mild.annotationId, level: 'medio_leve' },
+        { lineId: 'L2', annotationId: strong.annotationId, level: 'fuerte' },
+        { lineId: 'L3', annotationId: visual.annotationId, level: 'leve' },
+        { lineId: 'L4', annotationId: unknown.annotationId, level: 'medio' },
+      ],
+    });
+    expect(first.confirmed.map((item) => item.lineId)).toEqual(['L1', 'L2']);
+    expect(first.conflicts.map((item) => item.lineId)).toEqual(['L3', 'L4']);
+    expect(first.complete).toBe(false);
+    const detail = await readCalibrationCase(archiveOf(files), 'AF-000020');
+    expect(detail.lines.map((line) => line.priceMxn)).toEqual([8500, 1900, 3600, 2200]);
+    expect(detail.lines[0].severityAnnotation).toMatchObject({
+      level: 'medio_leve',
+      status: 'validated',
+      provenance: 'authenticated_owner',
+    });
+    expect(detail.lines[1].severityAnnotation).toMatchObject({ level: 'fuerte', status: 'validated' });
+    expect(detail.lines[2].severityAnnotation).toMatchObject({
+      level: 'leve',
+      status: 'proposed',
+      provenance: 'visual_inference',
+    });
+    expect(detail.lines[3].severityAnnotation).toMatchObject({ status: 'unknown', provenance: 'insufficient_evidence' });
+    expect(files.files.get('data/cases/AF-000020.json')?.content).toBe(body);
+    const retry = await confirmDeclaredSeverities(files, openEnv, owner, {
+      subjectId: 'AF-000020',
+      declarationsReviewed: true,
+      items: [
+        { lineId: 'L1', annotationId: mild.annotationId, level: 'medio_leve' },
+        { lineId: 'L3', annotationId: visual.annotationId, level: 'leve' },
+      ],
+    });
+    expect(retry.already.map((item) => item.lineId)).toEqual(['L1']);
+    expect(retry.confirmed).toEqual([]);
+    expect(retry.conflicts.map((item) => item.lineId)).toEqual(['L3']);
+    expect(detail.lines[0].severityAnnotation?.history.some((item) => item.annotationId === mild.annotationId)).toBe(true);
+    const moved = await recordDeclaredSeverity(files, { subjectId: 'AF-000020', lineId: 'L2', level: 'leve' });
+    expect(moved.status).toBe('retained');
+    const stale = await confirmDeclaredSeverities(files, openEnv, owner, {
+      subjectId: 'AF-000020',
+      declarationsReviewed: true,
+      items: [{ lineId: 'L2', annotationId: 'SV-000099', level: 'fuerte' }],
+    });
+    expect(stale.conflicts).toHaveLength(1);
+    expect(stale.confirmed).toEqual([]);
+    const after = await readCalibrationCase(archiveOf(files), 'AF-000020');
+    expect(after.lines[1].severityAnnotation).toMatchObject({ level: 'fuerte', status: 'validated' });
+    expect(after.quotedTotalMxn).toBe(16200);
+    const changedBody = visualCase('AF-000021', [{ line_id: 'L1', part: 'Puerta trasera', price_mxn: 3600 }], 3600);
+    files.seed('data/cases/AF-000021.json', changedBody);
+    const original = await recordDeclaredSeverity(files, { subjectId: 'AF-000021', lineId: 'L1', level: 'medio' });
+    const replacement = await recordDeclaredSeverity(files, { subjectId: 'AF-000021', lineId: 'L1', level: 'fuerte' });
+    const changed = await confirmDeclaredSeverities(files, openEnv, owner, {
+      subjectId: 'AF-000021',
+      declarationsReviewed: true,
+      items: [{ lineId: 'L1', annotationId: original.annotationId, level: 'medio' }],
+    });
+    expect(changed.conflicts).toHaveLength(1);
+    expect(changed.confirmed).toEqual([]);
+    const changedDetail = await readCalibrationCase(archiveOf(files), 'AF-000021');
+    expect(changedDetail.lines[0].severityAnnotation).toMatchObject({
+      annotationId: replacement.annotationId,
+      level: 'fuerte',
+      status: 'proposed',
+      provenance: 'human_declaration',
+    });
+    expect(changedDetail.quotedTotalMxn).toBe(3600);
+    expect(files.files.get('data/cases/AF-000021.json')?.content).toBe(changedBody);
+    const repairBody = repairQuote('RQ-000031');
+    files.seed('data/repairs/quotes/RQ-000031.json', repairBody);
+    const repairNote = await recordDeclaredSeverity(files, { subjectId: 'RQ-000031', lineId: 'L01', level: 'leve' });
+    const repair = await confirmDeclaredSeverities(files, openEnv, owner, {
+      subjectId: 'RQ-000031',
+      declarationsReviewed: true,
+      items: [{ lineId: 'L01', annotationId: repairNote.annotationId, level: 'leve' }],
+    });
+    expect(repair.complete).toBe(true);
+    expect(files.files.get('data/repairs/quotes/RQ-000031.json')?.content).toBe(repairBody);
+    await expect(confirmDeclaredSeverities(files, openEnv, owner, {
+      subjectId: 'CQ-000006',
+      declarationsReviewed: true,
+      items: [{ lineId: 'L1', annotationId: 'SV-000001', level: 'leve' }],
+    })).rejects.toMatchObject({ code: 'invalid' });
+    const previous = { ...process.env };
+    try {
+      Object.assign(process.env, openEnv);
+      const controller = new SeverityReviewController(files);
+      const payload = {
+        subjectId: 'AF-000020',
+        declarationsReviewed: true,
+        items: [{ lineId: 'L1', annotationId: mild.annotationId, level: 'medio_leve' }],
+      };
+      await expect(controller.confirmDeclarations({ ...owner, role: 'admin' }, payload)).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(controller.confirmDeclarations(undefined as unknown as AuthenticatedUser, payload)).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(controller.confirmDeclarations(owner, { ...payload, operatorRole: 'owner' })).rejects.toBeInstanceOf(BadRequestException);
+      expect(files.files.get('data/cases/AF-000020.json')?.content).toBe(body);
+    } finally {
+      for (const key of Object.keys(process.env)) {
+        if (!(key in previous)) delete process.env[key];
+      }
+      Object.assign(process.env, previous);
+    }
   });
 });
