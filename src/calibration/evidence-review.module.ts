@@ -37,7 +37,11 @@ export class EvidenceReviewController {
 
   @Post('evidence-previews')
   hold(@CurrentUser() user: AuthenticatedUser, @Body() body: unknown) {
-    return this.run(user, () => this.desk.hold(user, parseEvidencePreviewHold(body)));
+    return this.run(user, async () => {
+      const input = parseEvidencePreviewHold(body);
+      if (input.role === 'origin') return this.desk.noteOrigin(user, input);
+      return this.desk.holdCopy(user, input);
+    });
   }
 
   @Get('evidence-previews/:previewId')
@@ -78,6 +82,7 @@ export class EvidenceReviewController {
         if (err.code === 'forbidden') throw new ForbiddenException();
         if (err.code === 'unauthorized') throw new UnauthorizedException();
         if (err.code === 'unavailable') throw new ServiceUnavailableException();
+        if (err.code === 'distinct') throw new BadRequestException({ code: 'distinct_copy', message: 'distinct_copy' });
         throw new BadRequestException();
       }
       throw new ServiceUnavailableException();

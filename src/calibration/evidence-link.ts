@@ -42,7 +42,7 @@ export type EvidencePhotoSink = {
 export type EvidenceRequest = {
   subjectId: string;
   approval: EvidenceApproval;
-  receivedSha256: string;
+  receivedSha256: string | null;
   bytes?: Buffer;
 };
 
@@ -54,7 +54,7 @@ type EvidenceItem = {
   evidence_id: string;
   link_id: string;
   state: EvidenceState;
-  received_sha256: string;
+  received_sha256: string | null;
   content_sha256: string | null;
   provenance: 'anonymized_copy' | null;
 };
@@ -90,6 +90,14 @@ export function presentEvidenceItems(content: string, subjectId: string): Eviden
   return index ? index.items.map(publicItem) : [];
 }
 
+function originProvenanceAllows(origin: unknown, received: unknown, contentSha: string): boolean {
+  if (origin === 'unavailable') return received === null;
+  if (origin === 'received' || origin === undefined) {
+    return typeof received === 'string' && SHA256.test(received) && received !== contentSha;
+  }
+  return false;
+}
+
 export function evidenceByteTarget(content: string, subjectId: string, evidenceId: string): {
   mime: 'image/jpeg' | 'image/png' | 'image/webp';
   publicId: string;
@@ -98,7 +106,7 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
   sha256: string;
   reviewId: string;
   actorKey: string;
-  receivedSha256: string;
+  receivedSha256: string | null;
 } | null {
   let parsed: Record<string, unknown>;
   try {
@@ -107,7 +115,7 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
     return null;
   }
   const sha = typeof parsed.content_sha256 === 'string' ? parsed.content_sha256 : '';
-  const received = typeof parsed.received_sha256 === 'string' ? parsed.received_sha256 : '';
+  const received = parsed.received_sha256;
   const actorKey = typeof parsed.actor_key === 'string' ? parsed.actor_key : '';
   const publicId = typeof parsed.asset_public_id === 'string' ? parsed.asset_public_id : '';
   const version = Number(parsed.asset_version);
@@ -129,8 +137,7 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
     || parsed.delivery_type !== 'authenticated'
     || !format
     || !SHA256.test(sha)
-    || !SHA256.test(received)
-    || received === sha
+    || !originProvenanceAllows(parsed.origin_provenance, received, sha)
     || !SHA256.test(actorKey)
     || publicId !== evidencePublicId(subjectId, evidenceId, sha)
     || !Number.isInteger(version)
@@ -146,7 +153,7 @@ export function evidenceByteTarget(content: string, subjectId: string, evidenceI
     sha256: sha,
     reviewId: String(parsed.human_review_id),
     actorKey,
-    receivedSha256: received,
+    receivedSha256: typeof received === 'string' ? received : null,
   };
 }
 
@@ -157,7 +164,7 @@ export function evidenceReviewMatches(
   sha256Value: string,
   evidenceId: string,
   actorKey: string,
-  receivedSha256: string,
+  receivedSha256: string | null,
 ): boolean {
   let parsed: Record<string, unknown>;
   try {
@@ -172,6 +179,9 @@ export function evidenceReviewMatches(
     && parsed.subject_id === subjectId
     && parsed.reviewed_sha256 === sha256Value
     && parsed.received_sha256 === receivedSha256
+    && (receivedSha256 === null
+      ? parsed.origin_provenance === 'unavailable'
+      : parsed.origin_provenance === undefined || parsed.origin_provenance === 'received')
     && parsed.authorization === 'authenticated_owner'
     && parsed.visible_identifiers_reviewed === true
     && parsed.actor_key === actorKey
@@ -189,7 +199,7 @@ const PROOF_FIELDS = new Set(['subjectId', 'receivedSha256', 'reviewedSha256', '
 export type OwnerReviewProof = {
   readonly actorKey: string;
   readonly subjectId: string;
-  readonly receivedSha256: string;
+  readonly receivedSha256: string | null;
   readonly reviewedSha256: string;
 };
 
@@ -207,7 +217,7 @@ export function issueOwnerReviewProof(
   user: AuthenticatedUser | undefined,
   fields: {
     subjectId: string;
-    receivedSha256: string;
+    receivedSha256: string | null;
     reviewedSha256: string;
     visibleIdentifiersReviewed: true;
   },
@@ -216,10 +226,14 @@ export function issueOwnerReviewProof(
   const record = fields as unknown as Record<string, unknown>;
   if (Object.keys(record).some((key) => !PROOF_FIELDS.has(key))) throw new EvidenceLinkError('rejected');
   if (fields.visibleIdentifiersReviewed !== true) throw new EvidenceLinkError('rejected');
-  if (!SUBJECT_ID.test(fields.subjectId) || !SHA256.test(fields.receivedSha256) || !SHA256.test(fields.reviewedSha256)) {
+  if (!SUBJECT_ID.test(fields.subjectId) || !SHA256.test(fields.reviewedSha256)) throw new EvidenceLinkError('invalid');
+  if (fields.receivedSha256 === null) {
+    // Explicit unavailable provenance. A missing hash is not invented.
+  } else if (!SHA256.test(fields.receivedSha256)) {
     throw new EvidenceLinkError('invalid');
+  } else if (fields.receivedSha256 === fields.reviewedSha256) {
+    throw new EvidenceLinkError('rejected');
   }
-  if (fields.receivedSha256 === fields.reviewedSha256) throw new EvidenceLinkError('rejected');
   const proof: OwnerReviewProof = Object.freeze({
     actorKey: ownerActorKey(user.userId),
     subjectId: fields.subjectId,
@@ -259,6 +273,7 @@ export async function commitOwnerReview(
     evidence_id: evidenceId,
     subject_kind: proof.subjectId.startsWith('CQ-') ? 'commercial_quote' : 'repair_quote',
     subject_id: proof.subjectId,
+    origin_provenance: proof.receivedSha256 === null ? 'unavailable' : 'received',
     received_sha256: proof.receivedSha256,
     reviewed_sha256: proof.reviewedSha256,
     authorization: 'authenticated_owner',
@@ -269,6 +284,7 @@ export async function commitOwnerReview(
   reviews.push({
     review_id: reviewId,
     evidence_id: evidenceId,
+    origin_provenance: proof.receivedSha256 === null ? 'unavailable' : 'received',
     received_sha256: proof.receivedSha256,
     reviewed_sha256: proof.reviewedSha256,
     actor_key: proof.actorKey,
@@ -294,18 +310,27 @@ export async function linkEvidence(
 ): Promise<EvidenceResult> {
   const subjectId = request.subjectId;
   rejectSelfReview(request);
-  if (!SUBJECT_ID.test(subjectId) || !SHA256.test(request.receivedSha256)) throw new EvidenceLinkError('invalid');
+  if (!SUBJECT_ID.test(subjectId)) throw new EvidenceLinkError('invalid');
   if (request.approval !== 'anonymized_copy' && request.approval !== 'privacy_hold') {
     throw new EvidenceLinkError('rejected');
+  }
+  const receivedSha256 = request.receivedSha256;
+  if (request.approval === 'privacy_hold') {
+    if (typeof receivedSha256 !== 'string' || !SHA256.test(receivedSha256)) throw new EvidenceLinkError('invalid');
+  } else if (receivedSha256 !== null && !SHA256.test(receivedSha256)) {
+    throw new EvidenceLinkError('invalid');
   }
   const quote = await readQuote(files, subjectId);
   if (!quote) throw new EvidenceLinkError('missing');
   const indexPath = evidenceIndexPath(subjectId);
   const indexFile = await files.read(indexPath);
   const index = indexFile ? requireIndex(indexFile.content, subjectId) : emptyIndex(subjectId);
-  if (request.approval === 'privacy_hold') return holdPrivacy(files, index, indexFile?.sha, request.receivedSha256, request.bytes);
+  if (request.approval === 'privacy_hold') {
+    if (typeof receivedSha256 !== 'string') throw new EvidenceLinkError('invalid');
+    return holdPrivacy(files, index, indexFile?.sha, receivedSha256, request.bytes);
+  }
   if (!request.bytes) throw new EvidenceLinkError('rejected');
-  return archiveDerivative(files, photos, index, indexFile?.sha, subjectId, request.receivedSha256, request.bytes);
+  return archiveDerivative(files, photos, index, indexFile?.sha, subjectId, receivedSha256, request.bytes);
 }
 
 export class EvidenceGithub implements EvidenceFiles {
@@ -450,7 +475,7 @@ async function archiveDerivative(
   index: EvidenceIndex,
   indexSha: string | undefined,
   subjectId: string,
-  receivedSha256: string,
+  receivedSha256: string | null,
   bytes: Buffer,
 ): Promise<EvidenceResult> {
   if (imageContainsPersonalMetadata(bytes)) throw new EvidenceLinkError('metadata');
@@ -460,10 +485,12 @@ async function archiveDerivative(
   } catch {
     throw new EvidenceLinkError('rejected');
   }
-  if (checked.sha256 === receivedSha256) throw new EvidenceLinkError('rejected');
+  if (receivedSha256 !== null && checked.sha256 === receivedSha256) throw new EvidenceLinkError('rejected');
   const sameContent = index.items.find((item) => item.content_sha256 === checked.sha256);
   if (sameContent && sameContent.received_sha256 !== receivedSha256) throw new EvidenceLinkError('conflict');
-  const receivedItem = index.items.find((item) => item.received_sha256 === receivedSha256);
+  const receivedItem = receivedSha256 === null
+    ? undefined
+    : index.items.find((item) => item.received_sha256 === receivedSha256);
   if (receivedItem && receivedItem.content_sha256 !== checked.sha256) throw new EvidenceLinkError('conflict');
   const review = await findReview(files, subjectId, receivedSha256, checked.sha256);
   if (!review) throw new EvidenceLinkError('review_required');
@@ -535,7 +562,7 @@ async function archiveDerivative(
 function manifestDocument(
   index: EvidenceIndex,
   evidenceId: string,
-  receivedSha256: string,
+  receivedSha256: string | null,
   checked: { format: 'jpg' | 'png' | 'webp'; sha256: string },
   sizeBytes: number,
   review: StoredReview,
@@ -551,6 +578,7 @@ function manifestDocument(
     storage_provider: 'cloudinary',
     storage_status: storageStatus,
     provenance: 'anonymized_copy',
+    origin_provenance: receivedSha256 === null ? 'unavailable' : 'received',
     received_sha256: receivedSha256,
     content_sha256: checked.sha256,
     human_review_id: review.review_id,
@@ -571,7 +599,7 @@ function linkDocument(
   linkId: string,
   evidenceId: string,
   action: 'link_pending' | 'linked',
-  receivedSha256: string,
+  receivedSha256: string | null,
   contentSha256: string,
   review: StoredReview,
 ) {
@@ -583,6 +611,7 @@ function linkDocument(
     subject_id: index.subject_id,
     action,
     provenance: 'anonymized_copy',
+    origin_provenance: receivedSha256 === null ? 'unavailable' : 'received',
     received_sha256: receivedSha256,
     content_sha256: contentSha256,
     human_review_id: review.review_id,
@@ -692,7 +721,8 @@ function rejectSelfReview(request: EvidenceRequest): void {
 type StoredReview = {
   review_id: string;
   evidence_id: string;
-  received_sha256: string;
+  received_sha256: string | null;
+  origin_provenance?: 'received' | 'unavailable';
   reviewed_sha256: string;
   actor_key: string;
 };
@@ -712,7 +742,9 @@ function requireReviews(content: string, subjectId: string): StoredReview[] {
     const review = item as StoredReview;
     if (!review || typeof review !== 'object') return [];
     if (!/^RV-\d{6}$/.test(review.review_id) || !/^EV-\d{6}$/.test(review.evidence_id)) return [];
-    if (!SHA256.test(review.received_sha256) || !SHA256.test(review.reviewed_sha256) || !SHA256.test(review.actor_key)) return [];
+    const knownOrigin = typeof review.received_sha256 === 'string' && SHA256.test(review.received_sha256);
+    const unavailableOrigin = review.received_sha256 === null && review.origin_provenance === 'unavailable';
+    if ((!knownOrigin && !unavailableOrigin) || !SHA256.test(review.reviewed_sha256) || !SHA256.test(review.actor_key)) return [];
     return [review];
   });
 }
@@ -720,7 +752,7 @@ function requireReviews(content: string, subjectId: string): StoredReview[] {
 async function findReview(
   files: EvidenceFiles,
   subjectId: string,
-  receivedSha256: string,
+  receivedSha256: string | null,
   reviewedSha256: string,
 ): Promise<StoredReview | null> {
   const indexFile = await files.read(reviewIndexPath(subjectId));

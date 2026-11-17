@@ -31,17 +31,17 @@ const SHA256 = /^[a-f0-9]{64}$/;
 const PREVIEW_ID = /^[a-f0-9]{32}$/;
 
 const CLIENT_AUTHORITY = [
-  'operatorRole', 'operator_role', 'role', 'email', 'name', 'userId',
+  'operatorRole', 'operator_role', 'email', 'name', 'userId',
   'humanReviewed', 'human_reviewed', 'confirmation', 'visualReview', 'visual_review',
   'attestation', 'authorization', 'actorKey', 'actor_key', 'reviewer', 'previewId',
 ];
 const HOLD_KEYS = new Set(['subjectId', 'receivedSha256', 'bytes']);
 const CONFIRM_KEYS = new Set(['subjectId', 'sha256', 'visibleIdentifiersReviewed']);
-const HOLD_BODY = new Set(['subjectId', 'receivedSha256', 'imageBase64']);
+const HOLD_BODY = new Set(['subjectId', 'imageBase64', 'role', 'provenanceId']);
 
 export class EvidenceReviewError extends Error {
   constructor(
-    readonly code: 'hidden' | 'forbidden' | 'unauthorized' | 'invalid' | 'expired' | 'incomplete' | 'conflict' | 'rejected' | 'missing' | 'limit' | 'unavailable',
+    readonly code: 'hidden' | 'forbidden' | 'unauthorized' | 'invalid' | 'expired' | 'incomplete' | 'conflict' | 'rejected' | 'distinct' | 'missing' | 'limit' | 'unavailable',
   ) {
     super(code);
     this.name = 'EvidenceReviewError';
@@ -52,7 +52,7 @@ type PreviewSlot = {
   previewId: string;
   actorKey: string;
   subjectId: string;
-  receivedSha256: string;
+  receivedSha256: string | null;
   sha256: string;
   mime: 'image/jpeg' | 'image/png' | 'image/webp';
   bytes: Buffer;
@@ -68,7 +68,7 @@ export class EvidencePreviewVault {
   hold(input: {
     actorKey: string;
     subjectId: string;
-    receivedSha256: string;
+    receivedSha256: string | null;
     sha256: string;
     mime: PreviewSlot['mime'];
     bytes: Buffer;
@@ -132,8 +132,17 @@ export type EvidenceArchiveReceipt = {
   failure?: string;
 };
 
+type OriginNote = {
+  provenanceId: string;
+  actorKey: string;
+  subjectId: string;
+  sha256: string;
+  expiresAt: number;
+};
+
 export class EvidenceReviewDesk {
   private readonly vault: EvidencePreviewVault;
+  private readonly origins = new Map<string, OriginNote>();
   private readonly lanes = new Map<string, Promise<void>>();
   private live: EvidenceFiles | null = null;
   private livePhotos: EvidencePhotoSink | null = null;
@@ -142,27 +151,58 @@ export class EvidenceReviewDesk {
     this.vault = deps.vault ?? new EvidencePreviewVault(deps.clock);
   }
 
+  async noteOrigin(
+    user: AuthenticatedUser | undefined,
+    input: { subjectId: string; bytes: Buffer },
+  ): Promise<{ provenanceId: string; sha256: string; role: 'origin' }> {
+    const actor = this.gate(user);
+    return this.attempt(async () => {
+      if (!SUBJECT_ID.test(input.subjectId) || !Buffer.isBuffer(input.bytes)) throw new EvidenceReviewError('invalid');
+      const checked = await this.checkedImage(input.subjectId, input.bytes);
+      this.evictOrigins();
+      if (this.origins.size >= MAX_PREVIEWS) throw new EvidenceReviewError('limit');
+      const provenanceId = randomBytes(16).toString('hex');
+      this.origins.set(provenanceId, {
+        provenanceId,
+        actorKey: ownerActorKey(actor.userId),
+        subjectId: input.subjectId,
+        sha256: checked.sha256,
+        expiresAt: (this.deps.clock ?? Date.now)() + EVIDENCE_PREVIEW_TTL_MS,
+      });
+      return { provenanceId, sha256: checked.sha256, role: 'origin' };
+    });
+  }
+
+  async holdCopy(
+    user: AuthenticatedUser | undefined,
+    input: { subjectId: string; bytes: Buffer; provenanceId?: string },
+  ): Promise<{ previewId: string; sha256: string; expiresAt: string; originProvenance: 'received' | 'unavailable' }> {
+    const actor = this.gate(user);
+    return this.attempt(async () => {
+      let receivedSha256: string | null = null;
+      if (input.provenanceId !== undefined) {
+        const noted = this.openOrigin(ownerActorKey(actor.userId), input.provenanceId);
+        if (noted === 'expired') throw new EvidenceReviewError('expired');
+        if (noted === 'missing') throw new EvidenceReviewError('missing');
+        if (noted.subjectId !== input.subjectId) throw new EvidenceReviewError('conflict');
+        receivedSha256 = noted.sha256;
+      }
+      return this.hold(actor, { subjectId: input.subjectId, receivedSha256, bytes: input.bytes });
+    });
+  }
+
   async hold(
     user: AuthenticatedUser | undefined,
-    input: { subjectId: string; receivedSha256: string; bytes: Buffer },
-  ): Promise<{ previewId: string; sha256: string; expiresAt: string }> {
+    input: { subjectId: string; receivedSha256: string | null; bytes: Buffer },
+  ): Promise<{ previewId: string; sha256: string; expiresAt: string; originProvenance: 'received' | 'unavailable' }> {
     const actor = this.gate(user);
     return this.attempt(async () => {
       rejectClientFields(input, HOLD_KEYS);
-      if (!SUBJECT_ID.test(input.subjectId) || !SHA256.test(input.receivedSha256) || !Buffer.isBuffer(input.bytes)) {
-        throw new EvidenceReviewError('invalid');
-      }
-      const files = this.files();
-      if (!(await evidenceSubjectExists(files, input.subjectId))) throw new EvidenceReviewError('missing');
-      if (imageContainsPersonalMetadata(input.bytes)) throw new EvidenceReviewError('rejected');
-      let checked: { format: 'jpg' | 'png' | 'webp'; sha256: string };
-      try {
-        checked = validateCalibrationImage(input.bytes);
-      } catch {
-        throw new EvidenceReviewError('invalid');
-      }
-      if (checked.sha256 === input.receivedSha256) throw new EvidenceReviewError('rejected');
-      return this.vault.hold({
+      if (!SUBJECT_ID.test(input.subjectId) || !Buffer.isBuffer(input.bytes)) throw new EvidenceReviewError('invalid');
+      if (input.receivedSha256 !== null && !SHA256.test(input.receivedSha256)) throw new EvidenceReviewError('invalid');
+      const checked = await this.checkedImage(input.subjectId, input.bytes);
+      if (input.receivedSha256 !== null && checked.sha256 === input.receivedSha256) throw new EvidenceReviewError('distinct');
+      const held = this.vault.hold({
         actorKey: ownerActorKey(actor.userId),
         subjectId: input.subjectId,
         receivedSha256: input.receivedSha256,
@@ -170,6 +210,7 @@ export class EvidenceReviewDesk {
         mime: imageMime(checked.format),
         bytes: input.bytes,
       });
+      return { ...held, originProvenance: input.receivedSha256 === null ? 'unavailable' : 'received' };
     });
   }
 
@@ -250,7 +291,7 @@ export class EvidenceReviewDesk {
     bytes: Buffer;
     actual: string;
     subjectId: string;
-    receivedSha256: string;
+    receivedSha256: string | null;
   }> {
     const actor = this.gate(user);
     rejectClientFields(input, CONFIRM_KEYS);
@@ -278,7 +319,7 @@ export class EvidenceReviewDesk {
     bytes: Buffer;
     actual: string;
     subjectId: string;
-    receivedSha256: string;
+    receivedSha256: string | null;
   }): Promise<{ status: 'attested' | 'already_attested'; reviewId: string; evidenceId: string }> {
     const proof = issueOwnerReviewProof(this.environment(), prepared.actor, {
       subjectId: prepared.subjectId,
@@ -287,6 +328,34 @@ export class EvidenceReviewDesk {
       visibleIdentifiersReviewed: true,
     });
     return commitOwnerReview(this.files(), proof);
+  }
+
+  private async checkedImage(subjectId: string, bytes: Buffer): Promise<{ format: 'jpg' | 'png' | 'webp'; sha256: string }> {
+    if (!(await evidenceSubjectExists(this.files(), subjectId))) throw new EvidenceReviewError('missing');
+    if (imageContainsPersonalMetadata(bytes)) throw new EvidenceReviewError('rejected');
+    try {
+      return validateCalibrationImage(bytes);
+    } catch {
+      throw new EvidenceReviewError('invalid');
+    }
+  }
+
+  private openOrigin(actorKey: string, provenanceId: string): OriginNote | 'missing' | 'expired' {
+    if (!PREVIEW_ID.test(provenanceId)) return 'missing';
+    const noted = this.origins.get(provenanceId);
+    if (!noted || noted.actorKey !== actorKey) return 'missing';
+    if ((this.deps.clock ?? Date.now)() >= noted.expiresAt) {
+      this.origins.delete(provenanceId);
+      return 'expired';
+    }
+    return noted;
+  }
+
+  private evictOrigins(): void {
+    const now = (this.deps.clock ?? Date.now)();
+    for (const [id, noted] of this.origins) {
+      if (now >= noted.expiresAt) this.origins.delete(id);
+    }
   }
 
   private gate(user: AuthenticatedUser | undefined): AuthenticatedUser {
@@ -371,17 +440,33 @@ export function openEvidenceFiles(env: NodeJS.ProcessEnv, transport: typeof fetc
   });
 }
 
-export function parseEvidencePreviewHold(body: unknown): { subjectId: string; receivedSha256: string; bytes: Buffer } {
+export function parseEvidencePreviewHold(body: unknown): {
+  role: 'origin' | 'copy';
+  subjectId: string;
+  bytes: Buffer;
+  provenanceId?: string;
+} {
   const record = plainRecord(body);
   rejectClientFields(record, HOLD_BODY);
-  if (typeof record.subjectId !== 'string' || typeof record.receivedSha256 !== 'string' || typeof record.imageBase64 !== 'string') {
-    throw new EvidenceReviewError('invalid');
-  }
+  if (record.role !== 'origin' && record.role !== 'copy') throw new EvidenceReviewError('rejected');
+  if (typeof record.subjectId !== 'string' || typeof record.imageBase64 !== 'string') throw new EvidenceReviewError('invalid');
   if (record.imageBase64.length === 0 || record.imageBase64.length > 7_000_000) throw new EvidenceReviewError('invalid');
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(record.imageBase64)) throw new EvidenceReviewError('invalid');
   const bytes = Buffer.from(record.imageBase64, 'base64');
   if (bytes.length === 0 || bytes.length > MAX_BYTES) throw new EvidenceReviewError('invalid');
-  return { subjectId: record.subjectId, receivedSha256: record.receivedSha256, bytes };
+  if (record.role === 'origin') {
+    if (record.provenanceId !== undefined) throw new EvidenceReviewError('rejected');
+    return { role: 'origin', subjectId: record.subjectId, bytes };
+  }
+  if (record.provenanceId !== undefined && (typeof record.provenanceId !== 'string' || !PREVIEW_ID.test(record.provenanceId))) {
+    throw new EvidenceReviewError('invalid');
+  }
+  return {
+    role: 'copy',
+    subjectId: record.subjectId,
+    bytes,
+    ...(typeof record.provenanceId === 'string' ? { provenanceId: record.provenanceId } : {}),
+  };
 }
 
 export function parseEvidencePreviewConfirm(body: unknown): { subjectId: string; sha256: string; visibleIdentifiersReviewed: boolean } {

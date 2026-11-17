@@ -33,6 +33,25 @@ import {
 } from './evidence-review';
 import { EvidenceReviewController } from './evidence-review.module';
 
+async function holdReviewedCopy(
+  controller: EvidenceReviewController,
+  subjectId: string,
+  image: Buffer,
+  origin: Buffer,
+): Promise<{ previewId: string; sha256: string }> {
+  const noted = await controller.hold(owner, {
+    subjectId,
+    role: 'origin',
+    imageBase64: origin.toString('base64'),
+  }) as { provenanceId: string };
+  return await controller.hold(owner, {
+    subjectId,
+    role: 'copy',
+    provenanceId: noted.provenanceId,
+    imageBase64: image.toString('base64'),
+  }) as { previewId: string; sha256: string };
+}
+
 const owner: AuthenticatedUser = {
   userId: 'user-1',
   email: 'dueno@ensayo.test',
@@ -430,15 +449,15 @@ describe('revisión autenticada del propietario', () => {
       const controller = new EvidenceReviewController(desk);
       const created = await controller.hold(owner, {
         subjectId: 'CQ-000021',
-        receivedSha256: received,
+        role: 'copy',
         imageBase64: bytes.toString('base64'),
-      });
+      }) as { previewId: string };
       const image = await controller.read(owner, created.previewId);
       expect(await streamBytes(image.getStream())).toEqual(bytes);
       await expect(controller.read({ ...owner, userId: 'user-2' }, created.previewId)).rejects.toBeInstanceOf(NotFoundException);
       await expect(controller.hold(owner, {
         subjectId: 'CQ-000021',
-        receivedSha256: received,
+        role: 'copy',
         imageBase64: 'x'.repeat(7_000_001),
       })).rejects.toBeInstanceOf(BadRequestException);
       await expect(desk.hold(owner, {
@@ -553,11 +572,8 @@ describe('revisión autenticada del propietario', () => {
     const previous = { ...process.env };
     Object.assign(process.env, openEnv);
     try {
-    const preview = await controller.hold(owner, {
-      subjectId: 'RQ-000031',
-      receivedSha256: received,
-      imageBase64: original.toString('base64'),
-    });
+    const originPhoto = minimalDecodablePng([9, 1, 7]);
+    const preview = await holdReviewedCopy(controller, 'RQ-000031', original, originPhoto);
     const seen = await controller.read(owner, preview.previewId);
     expect(await streamBytes(seen.getStream())).toEqual(original);
     const pending = await controller.confirm(owner, preview.previewId, {
@@ -600,11 +616,7 @@ describe('revisión autenticada del propietario', () => {
 
     const restarted = new EvidenceReviewController(deskFor(files, openEnv, { photos, vault: new EvidencePreviewVault() }));
     await expect(restarted.read(owner, preview.previewId)).rejects.toBeInstanceOf(NotFoundException);
-    const again = await restarted.hold(owner, {
-      subjectId: 'RQ-000031',
-      receivedSha256: received,
-      imageBase64: original.toString('base64'),
-    });
+    const again = await holdReviewedCopy(restarted, 'RQ-000031', original, originPhoto);
     await restarted.read(owner, again.previewId);
     const repeated = await restarted.confirm(owner, again.previewId, {
       subjectId: 'RQ-000031',
@@ -627,11 +639,7 @@ describe('revisión autenticada del propietario', () => {
     })).rejects.toBeInstanceOf(UnauthorizedException);
 
     const other = minimalDecodablePng([8, 8, 1]);
-    const conflictPreview = await controller.hold(owner, {
-      subjectId: 'RQ-000031',
-      receivedSha256: received,
-      imageBase64: other.toString('base64'),
-    });
+    const conflictPreview = await holdReviewedCopy(controller, 'RQ-000031', other, originPhoto);
     await controller.read(owner, conflictPreview.previewId);
     await expect(controller.confirm(owner, conflictPreview.previewId, {
       subjectId: 'RQ-000031',
@@ -670,9 +678,9 @@ describe('revisión autenticada del propietario', () => {
     const guardedBytes = minimalDecodablePng([4, 2, 1]);
     const guardedPreview = await guardedDesk.hold(owner, {
       subjectId: 'CQ-000032',
-      receivedSha256: received,
+      role: 'copy',
       imageBase64: guardedBytes.toString('base64'),
-    });
+    }) as { previewId: string; sha256: string };
     await guardedDesk.read(owner, guardedPreview.previewId);
     await expect(guardedDesk.confirm(owner, guardedPreview.previewId, {
       subjectId: 'CQ-000032',
@@ -688,6 +696,151 @@ describe('revisión autenticada del propietario', () => {
     expect(recovered).toMatchObject({ archive: 'linked', evidenceId: 'EV-000001' });
     expect(guardedPhotos.calls).toEqual(['EV-000001']);
     expect(guarded.files.get('data/commercial/quotes/CQ-000032.json')?.content).toBe(guardedQuote);
+    const unavailable = guarded.files.get('data/evidence/commercial/CQ-000032/manifests/EV-000001.json')?.content ?? '';
+    expect(unavailable).toContain('"origin_provenance": "unavailable"');
+    expect(unavailable).toContain('"received_sha256": null');
+    const privateCopy = await readCalibrationEvidence({
+      async read(path: string) {
+        return guarded.files.get(path)?.content ?? null;
+      },
+      async photo() {
+        return guardedBytes;
+      },
+    }, 'CQ-000032', 'EV-000001');
+    expect(privateCopy.bytes.equals(guardedBytes)).toBe(true);
+    } finally {
+      for (const key of Object.keys(process.env)) {
+        if (!(key in previous)) delete process.env[key];
+      }
+      Object.assign(process.env, previous);
+    }
+  });
+
+  it('calcula el SHA-256 en el servidor y deja la procedencia ausente como estado explícito', async () => {
+    const files = new MemoryFiles();
+    const quoteBody = quote('CQ-000041');
+    files.seed('data/commercial/quotes/CQ-000041.json', quoteBody);
+    const blobs = new Map<string, Buffer>();
+    const photos: MemoryPhotos = Object.assign(new MemoryPhotos(), {
+      async store(input: { subjectId: string; evidenceId: string; bytes: Buffer }) {
+        this.calls.push(input.evidenceId);
+        const digest = sha256(input.bytes);
+        blobs.set(digest, Buffer.from(input.bytes));
+        return { sha256: digest, verified: true, assetPublicId: evidencePublicId(input.subjectId, input.evidenceId, digest), assetVersion: 3 };
+      },
+    });
+    const controller = new EvidenceReviewController(deskFor(files, openEnv, { photos }));
+    const previous = { ...process.env };
+    Object.assign(process.env, openEnv);
+    try {
+      const copy = minimalDecodablePng([4, 4, 4]);
+      const origin = minimalDecodablePng([5, 5, 5]);
+      await expect(controller.hold(owner, {
+        subjectId: 'CQ-000041',
+        role: 'copy',
+        receivedSha256: received,
+        imageBase64: copy.toString('base64'),
+      })).rejects.toBeInstanceOf(BadRequestException);
+      await expect(controller.hold(owner, {
+        subjectId: 'CQ-000041',
+        role: 'owner',
+        imageBase64: copy.toString('base64'),
+      })).rejects.toBeInstanceOf(BadRequestException);
+      const noted = await controller.hold(owner, {
+        subjectId: 'CQ-000041',
+        role: 'origin',
+        imageBase64: origin.toString('base64'),
+      }) as { provenanceId: string; sha256: string };
+      expect(noted.sha256).toBe(sha256(origin));
+      expect(files.writes).toEqual([]);
+      await expect(controller.confirm(owner, noted.provenanceId, {
+        subjectId: 'CQ-000041',
+        sha256: noted.sha256,
+        visibleIdentifiersReviewed: true,
+      })).rejects.toBeInstanceOf(NotFoundException);
+      const distinct = controller.hold(owner, {
+        subjectId: 'CQ-000041',
+        role: 'copy',
+        provenanceId: noted.provenanceId,
+        imageBase64: origin.toString('base64'),
+      });
+      await expect(distinct).rejects.toBeInstanceOf(BadRequestException);
+      await expect(distinct).rejects.toMatchObject({ response: { code: 'distinct_copy' } });
+      const preview = await controller.hold(owner, {
+        subjectId: 'CQ-000041',
+        role: 'copy',
+        provenanceId: noted.provenanceId,
+        imageBase64: copy.toString('base64'),
+      }) as { previewId: string; sha256: string; originProvenance: string };
+      expect(preview.originProvenance).toBe('received');
+      const seen = await controller.read(owner, preview.previewId);
+      expect(await streamBytes(seen.getStream())).toEqual(copy);
+      const archived = await controller.confirm(owner, preview.previewId, {
+        subjectId: 'CQ-000041',
+        sha256: preview.sha256,
+        visibleIdentifiersReviewed: true,
+      });
+      expect(archived).toMatchObject({ archive: 'linked', evidenceId: 'EV-000001' });
+      const manifest = files.files.get('data/evidence/commercial/CQ-000041/manifests/EV-000001.json')?.content ?? '';
+      expect(manifest).toContain(`"received_sha256": "${sha256(origin)}"`);
+      expect(manifest).toContain('"origin_provenance": "received"');
+      expect(manifest).not.toContain(`"content_sha256": "${sha256(origin)}"`);
+      const archive = {
+        async read(path: string) {
+          return files.files.get(path)?.content ?? null;
+        },
+        async photo(locator: { sha256: string }) {
+          const bytes = blobs.get(locator.sha256);
+          if (!bytes) throw new Error('missing photo');
+          return bytes;
+        },
+      };
+      const photo = await readCalibrationEvidence(archive, 'CQ-000041', 'EV-000001');
+      expect(photo.bytes.equals(copy)).toBe(true);
+      expect(sha256(photo.bytes)).toBe(preview.sha256);
+
+      const secondBytes = minimalDecodablePng([6, 6, 6]);
+      const second = await controller.hold(owner, {
+        subjectId: 'CQ-000041',
+        role: 'copy',
+        imageBase64: secondBytes.toString('base64'),
+      }) as { previewId: string; sha256: string; originProvenance: string };
+      expect(second.originProvenance).toBe('unavailable');
+      await controller.read(owner, second.previewId);
+      const linked = await controller.confirm(owner, second.previewId, {
+        subjectId: 'CQ-000041',
+        sha256: second.sha256,
+        visibleIdentifiersReviewed: true,
+      });
+      expect(linked).toMatchObject({ archive: 'linked', evidenceId: 'EV-000002' });
+      const absent = files.files.get('data/evidence/commercial/CQ-000041/manifests/EV-000002.json')?.content ?? '';
+      expect(absent).toContain('"origin_provenance": "unavailable"');
+      expect(absent).toContain('"received_sha256": null');
+      const repeated = await controller.hold(owner, {
+        subjectId: 'CQ-000041',
+        role: 'copy',
+        imageBase64: secondBytes.toString('base64'),
+      }) as { previewId: string; sha256: string };
+      await controller.read(owner, repeated.previewId);
+      await expect(controller.confirm(owner, repeated.previewId, {
+        subjectId: 'CQ-000041',
+        sha256: repeated.sha256,
+        visibleIdentifiersReviewed: true,
+      })).resolves.toMatchObject({ archive: 'already_linked', evidenceId: 'EV-000002' });
+      const downgraded = await controller.hold(owner, {
+        subjectId: 'CQ-000041',
+        role: 'copy',
+        imageBase64: copy.toString('base64'),
+      }) as { previewId: string; sha256: string };
+      await controller.read(owner, downgraded.previewId);
+      await expect(controller.confirm(owner, downgraded.previewId, {
+        subjectId: 'CQ-000041',
+        sha256: downgraded.sha256,
+        visibleIdentifiersReviewed: true,
+      })).rejects.toBeInstanceOf(BadRequestException);
+      expect(photos.calls).toEqual(['EV-000001', 'EV-000002']);
+      expect(files.files.get('data/commercial/quotes/CQ-000041.json')?.content).toBe(quoteBody);
+      expect(files.writes.join('\n')).not.toContain('CQ-000006');
     } finally {
       for (const key of Object.keys(process.env)) {
         if (!(key in previous)) delete process.env[key];
