@@ -63,6 +63,21 @@ function normalizeText(s: string): string {
   return normalizeTextForMatch(s);
 }
 
+/**
+ * La salpicadera delantera y la salpicadera trasera son tarifas distintas.
+ * Un texto que nombra la trasera no puede heredar la fila delantera.
+ */
+function fenderTariffsConflict(queryNorm: string, candidateNorm: string): boolean {
+  const rear = 'salpicadera trasera';
+  const front = 'salpicadera';
+  const queryRear = queryNorm === rear || queryNorm.startsWith(`${rear} `);
+  const candidateRear =
+    candidateNorm === rear || candidateNorm.startsWith(`${rear} `);
+  const queryFront = queryNorm === front;
+  const candidateFront = candidateNorm === front;
+  return (queryRear && candidateFront) || (queryFront && candidateRear);
+}
+
 function escapeRegExpChars(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -106,6 +121,7 @@ export function matchServicioFromCatalog(
   for (const svc of serviciosOrderedLongestFirst) {
     const key = normalizeText(svc);
     if (!key || key.length < MIN_SERVICIO_FUZZ_LEN) continue;
+    if (fenderTariffsConflict(n, key)) continue;
 
     let hit = false;
     if (n.includes(key) && normalizedHaystackContainsWholeNeedle(n, key)) {

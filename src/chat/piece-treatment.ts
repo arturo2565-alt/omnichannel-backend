@@ -5,6 +5,7 @@ import {
 } from './autofix-config';
 import {
   canonicalizePanelCode,
+  equivalentPhysicalPanelCode,
   isIntegralPanelPieza,
   isInternalDamageRangePieza,
   isMolduraPieza,
@@ -172,7 +173,7 @@ export function canonicalPhysicalPanelKey(
   if (isInternalDamageRangePieza(stripped)) {
     return PANEL_PIEZA_INTERNAL_DAMAGES_CODE;
   }
-  return canonicalizePanelCode(stripped) || stripped;
+  return equivalentPhysicalPanelCode(stripped) || stripped;
 }
 
 /**

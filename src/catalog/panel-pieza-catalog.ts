@@ -65,12 +65,12 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
   {
     code: 'STI',
     fullName: 'Salpicadera trasera izquierda',
-    catalogPieza: 'Salpicadera',
+    catalogPieza: 'Salpicadera trasera',
   },
   {
     code: 'STD',
     fullName: 'Salpicadera trasera derecha',
-    catalogPieza: 'Salpicadera',
+    catalogPieza: 'Salpicadera trasera',
   },
   { code: 'PDI', fullName: 'Puerta delantera izquierda', catalogPieza: 'Puerta' },
   { code: 'PDD', fullName: 'Puerta delantera derecha', catalogPieza: 'Puerta' },
@@ -85,8 +85,8 @@ export const PANEL_PIEZA_OPTIONS: readonly PanelPiezaOption[] = [
   { code: 'Cofre', fullName: 'Cofre', catalogPieza: 'Cofre' },
   { code: 'BiCO', fullName: 'Bigote Cofre', catalogPieza: 'BiCO' },
   { code: 'Parilla', fullName: 'Parilla', catalogPieza: 'Parilla' },
-  { code: 'CTI', fullName: 'Costado izquierdo', catalogPieza: 'Salpicadera' },
-  { code: 'CTD', fullName: 'Costado derecho', catalogPieza: 'Salpicadera' },
+  { code: 'CTI', fullName: 'Costado izquierdo', catalogPieza: 'Salpicadera trasera' },
+  { code: 'CTD', fullName: 'Costado derecho', catalogPieza: 'Salpicadera trasera' },
   { code: 'Tapa Cajuela', fullName: 'Tapa de cajuela', catalogPieza: 'Tapa Cajuela' },
   { code: 'Toldo', fullName: 'Toldo', catalogPieza: 'Toldo' },
   { code: 'ESI', fullName: 'Espejo izquierdo', catalogPieza: 'Espejo' },
@@ -180,8 +180,10 @@ const EXPLICIT_PIEZA_ALIASES: Readonly<Record<string, string>> = {
   'poste derecho': 'POD',
   'costado izquierdo': 'CTI',
   'costado izq': 'CTI',
+  'costado trasero izquierdo': 'CTI',
   'costado derecho': 'CTD',
   'costado der': 'CTD',
+  'costado trasero derecho': 'CTD',
   'espejo izquierdo': 'ESI',
   'espejo izq': 'ESI',
   'espejo derecho': 'ESD',
@@ -389,6 +391,8 @@ const CLIENT_PIECE_LABELS: Readonly<Record<string, string>> = {
   SD: 'Salpicadera delantera derecha',
   STI: 'Salpicadera trasera izquierda',
   STD: 'Salpicadera trasera derecha',
+  CTI: 'Costado izquierdo',
+  CTD: 'Costado derecho',
   PDI: 'Puerta delantera izquierda',
   PDD: 'Puerta delantera derecha',
   PTI: 'Puerta trasera izquierda',
@@ -508,6 +512,21 @@ export function normalizePanelPiezaCode(raw: string): string {
  * Código canónico de panel. Un código válido (FD, PDI, BPE…) o un nombre
  * natural resuelve a la sigla que `resolveMatrixServicioRaw` usa para price_matrix.
  */
+/**
+ * STI y CTI nombran el mismo panel trasero izquierdo.
+ * STD y CTD nombran el mismo panel trasero derecho.
+ * La tarifa sigue siendo distinta de la salpicadera delantera.
+ */
+const EQUIVALENT_PHYSICAL_PANEL: Readonly<Record<string, string>> = {
+  CTI: 'STI',
+  CTD: 'STD',
+};
+
+export function equivalentPhysicalPanelCode(rawPiece: string): string {
+  const code = canonicalizePanelCode(rawPiece);
+  return EQUIVALENT_PHYSICAL_PANEL[code] ?? code;
+}
+
 export function canonicalizePanelCode(rawPiece: string): string {
   const t = String(rawPiece ?? '').trim();
   if (!t) return '';
@@ -605,7 +624,9 @@ export function physicalPanelKeyForPiece(item: {
   if (isHistoricalBareMoldura(item.pieza, item.moldingPosition)) {
     return MOLDURA_LEGACY_CODE;
   }
-  return canonicalizePanelCode(item.pieza) || String(item.pieza ?? '').trim();
+  return (
+    equivalentPhysicalPanelCode(item.pieza) || String(item.pieza ?? '').trim()
+  );
 }
 
 /** Texto enviado a `matchServicio` antes de buscar en la matriz. */
@@ -670,6 +691,7 @@ const CATALOG_PIEZA_TO_REFACCION_CODIGO: Readonly<Record<string, string>> = {
   Fascia: 'FASCIA_DEL',
   Puerta: 'PUERTA',
   Salpicadera: 'SALPICADERA',
+  'Salpicadera trasera': 'SALPICADERA',
   'Tapa Cajuela': 'TAPA_CAJUELA',
   Toldo: 'TOLDO',
   Espejo: 'ESPEJO',

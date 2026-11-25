@@ -605,26 +605,15 @@ function matrixRepairPrice(
 ): { precio: number; storedSev: string } {
   const sevRaw = String(it.severidad ?? '').trim();
   const sev = coerceDamageLevelCode(sevRaw);
-  const catalogPieza =
-    resolveCatalogPiezaForMatrixLookup(panelCode) ??
-    snap.matchServicio(it.pieza) ??
-    it.pieza;
-  let precio = resolvePiecePriceForVehicleProfile(
+  const catalogPieza = resolveCatalogPiezaForMatrixLookup(panelCode);
+  const tariff = catalogPieza ?? snap.matchServicio(it.pieza) ?? it.pieza;
+  const precio = resolvePiecePriceForVehicleProfile(
     snap,
-    catalogPieza,
+    tariff,
     sev,
     vehicleProfile,
     pricingRules,
   );
-  if (precio <= 0) {
-    precio = resolvePiecePriceForVehicleProfile(
-      snap,
-      snap.matchServicio(it.pieza) ?? it.pieza,
-      sev,
-      vehicleProfile,
-      pricingRules,
-    );
-  }
   return { precio, storedSev: sev };
 }
 
@@ -1039,8 +1028,11 @@ export function quoteRowsFromDamageInventory(
         vehicleProfile,
         pricingRules,
       );
-      const desc =
-        tratamiento === 'INCIERTO'
+      const catalogTariff = resolveCatalogPiezaForMatrixLookup(panelCode);
+      const unconfigured = Boolean(catalogTariff) && precio <= 0;
+      const desc = unconfigured
+        ? `${display} — tarifa sin configurar`
+        : tratamiento === 'INCIERTO'
           ? `Reparación y pintura estimada de ${display}`
           : `Reparar y pintar ${display}`;
       rows.push(
@@ -1051,7 +1043,13 @@ export function quoteRowsFromDamageInventory(
           tratamiento,
           serviceType: 'REPARACION_PINTURA',
           physicalPanelKey: panelCode,
-          billable: precio > 0,
+          billable: precio > 0 && !unconfigured,
+          ...(unconfigured
+            ? {
+                priceSource: 'UNCONFIGURED' as const,
+                pricingStatus: 'UNCONFIGURED' as const,
+              }
+            : {}),
           description: desc,
           descripcionServicio: desc,
           ...(tratamiento === 'INCIERTO' || it.posibleReemplazoRefaccion

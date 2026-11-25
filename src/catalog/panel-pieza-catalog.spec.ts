@@ -60,7 +60,11 @@ describe('panel-pieza-catalog', () => {
     expect(canonicalizePanelCode('BPE')).toBe('BPE');
     expect(canonicalizePanelCode('baño de pintura exterior')).toBe('BPE');
     expect(canonicalizePanelCode('BPCC')).toBe('BPCC');
-    expect(resolveCatalogPiezaForMatrixLookup('CTI')).toBe('Salpicadera');
+    expect(resolveCatalogPiezaForMatrixLookup('CTI')).toBe('Salpicadera trasera');
+    expect(resolveCatalogPiezaForMatrixLookup('STI')).toBe('Salpicadera trasera');
+    expect(resolveCatalogPiezaForMatrixLookup('SI')).not.toBe(
+      resolveCatalogPiezaForMatrixLookup('CTI'),
+    );
     expect(resolveCatalogPiezaForMatrixLookup('ESI')).toBe('Espejo');
     expect(resolveCatalogPiezaForMatrixLookup('BPE')).toBeNull();
   });

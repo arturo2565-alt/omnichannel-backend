@@ -81,12 +81,15 @@ describe('oferta comercial del catálogo', () => {
     expect(piece?.tariffs.montaje_pintura).toBeNull();
   });
 
-  it('la salpicadera trasera usa la pieza de catálogo ya definida, no una tarifa nueva', () => {
+  it('la salpicadera trasera no hereda la tarifa de la salpicadera delantera', () => {
     const offer = buildCrmCatalogOffer(rates());
     const rear = offer.pieces.find((item) => item.code === 'STI');
+    const front = offer.pieces.find((item) => item.code === 'SI');
     expect(rear?.label).toBe('Salpicadera trasera izquierda');
-    expect(rear?.catalogPieza).toBe('Salpicadera');
-    expect(rear?.tariffs.reparacion_pintura?.pesos).toBe(4500);
+    expect(rear?.catalogPieza).toBe('Salpicadera trasera');
+    expect(front?.catalogPieza).toBe('Salpicadera');
+    expect(rear?.tariffs.reparacion_pintura).toBeNull();
+    expect(front?.tariffs.reparacion_pintura?.pesos).toBe(4500);
   });
 
   it('montaje y pintura usa la celda dedicada y no la suma con la reparación', () => {
