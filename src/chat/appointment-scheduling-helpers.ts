@@ -26,7 +26,10 @@ export function stripAppointmentConfirmationClaims(text: string): string {
   if (!raw) return raw;
   const sentences = raw.split(/(?<=[.!?])\s+|\n+/);
   const kept = sentences.filter((s) => !textClaimsAppointmentBooked(s));
-  return kept.join(' ').trim() || raw;
+  const keptText = kept.join(' ').trim();
+  if (keptText) return keptText;
+  if (sentences.some((sentence) => textClaimsAppointmentBooked(sentence))) return '';
+  return raw;
 }
 
 export function formatAppointmentConfirmedMessage(scheduledAtIso: string): string {

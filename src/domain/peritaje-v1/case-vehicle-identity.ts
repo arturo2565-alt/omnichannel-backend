@@ -7,7 +7,7 @@ import type { DamageItem, VehicleIdentity } from './types';
  * Marcas conocidas para distinguir multi-vehicle real vs inconsistencia Vision.
  * "Altima" suelto no cuenta como segunda marca.
  */
-const KNOWN_MAKES = [
+export const KNOWN_MAKES = [
   'mercedes-benz',
   'mercedes',
   'volkswagen',

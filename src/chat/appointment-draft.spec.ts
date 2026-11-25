@@ -17,10 +17,13 @@ import {
   confirmedVehicleLabel,
   decideAppointmentPersistence,
   emptyAppointmentDraft,
+  formatAppointmentDraftContext,
   formatWorkshopSlot,
   guardClientReply,
   isOneActiveAppointmentConflict,
   nextClientQuestion,
+  pendingAppointmentDatum,
+  relatedQuoteNote,
   parseAppointmentDraft,
   planConfirmedWrite,
   resolveWorkshopAppointmentPolicy,
@@ -108,9 +111,10 @@ describe('appointment-draft', () => {
     expect(nextClientQuestion(named, autofix, receivedAt, lab)).toBe(
       APPOINTMENT_ASK_PHONE,
     );
+    const naturalPhone =
+      'Ana Ensayo, ¿me compartes un teléfono de contacto para completar el registro de tu cita?';
     const reply = guardClientReply({
-      modelText:
-        'Ana Ensayo, ¿me compartes un teléfono de contacto para completar el registro de tu cita?',
+      modelText: naturalPhone,
       confirmedIso: null,
       persisted: false,
       draft: named,
@@ -118,11 +122,29 @@ describe('appointment-draft', () => {
       now: receivedAt,
       channel: lab,
     });
-    expect(reply).toBe(appointmentPhoneRequest('Ana Ensayo'));
-    expect(reply).toBe(
-      'Gracias, Ana. 😊 ¿Me compartes un teléfono de contacto para completar tu cita?',
-    );
-    expect(reply).not.toMatch(/nombre/i);
+    expect(reply).toBe(naturalPhone);
+    expect(reply).not.toMatch(/nombre registro/i);
+    const droppedName = guardClientReply({
+      modelText: '¿Con qué nombre registro la cita? ¿Me pasas tu teléfono?',
+      confirmedIso: null,
+      persisted: false,
+      draft: named,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(droppedName).toBe('¿Me pasas tu teléfono?');
+    expect(droppedName).not.toMatch(/nombre/i);
+    const filled = guardClientReply({
+      modelText: 'Perfecto.',
+      confirmedIso: null,
+      persisted: false,
+      draft: named,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(filled).toBe(`Perfecto.\n\n${appointmentPhoneRequest('Ana Ensayo')}`);
     const kept = guardClientReply({
       modelText: 'El miércoles a las 9 sigue apartado. ¿Me pasas tu teléfono?',
       confirmedIso: null,
@@ -485,6 +507,274 @@ describe('appointment-draft', () => {
   it('un borrador nulo se lee como vacío', () => {
     expect(parseAppointmentDraft(null).requestedDateTime).toBeNull();
     expect(parseAppointmentDraft(undefined).appointmentStatus).toBe('draft');
+  });
+
+  it('conserva el vehículo declarado hasta la cita y no duplica el nombre', () => {
+    let draft = absorbClientMessage(emptyAppointmentDraft(), {
+      text: 'Costo por reparar este golpe Mazda 2 2024',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2024');
+    expect(draft.vehicleIdentity?.source).toBe('client');
+    expect(draft.vehicleIdentity?.confirmed).toBe(true);
+
+    draft = absorbClientMessage(draft, {
+      text: 'mañana a las 9',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(draft.requestedDateTime).toBe('2026-11-04T15:00:00.000Z');
+    expect(draft.timeZone).toBe('America/Mexico_City');
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2024');
+    expect(pendingAppointmentDatum(draft, autofix, receivedAt, lab)).toBe(
+      'clientName',
+    );
+
+    const naturalName =
+      '¿Con qué nombre registro tu cita para mañana a las 9:00 a. m.?';
+    const once = guardClientReply({
+      modelText: naturalName,
+      confirmedIso: null,
+      persisted: false,
+      draft,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(once).toBe(naturalName);
+    expect(once.match(/nombre/gi)).toHaveLength(1);
+
+    const unpersisted = guardClientReply({
+      modelText: 'Tu cita quedó confirmada.',
+      confirmedIso: null,
+      persisted: false,
+      draft,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(textClaimsAppointmentBooked(unpersisted)).toBe(false);
+    expect(unpersisted).toBe(APPOINTMENT_ASK_NAME);
+
+    draft = absorbClientMessage(draft, {
+      text: 'Ana Ensayo',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    draft = absorbClientMessage(draft, {
+      text: '5510001122',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(draft.clientName?.value).toBe('Ana Ensayo');
+    expect(draft.phone?.value).toBe('5510001122');
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2024');
+    expect(draft.requestedDateTime).toBe('2026-11-04T15:00:00.000Z');
+    expect(bookingReadiness(draft, autofix, receivedAt, lab).ready).toBe(true);
+    const blocked = guardClientReply({
+      modelText: 'Tu cita quedó confirmada.',
+      confirmedIso: null,
+      persisted: false,
+      draft,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(textClaimsAppointmentBooked(blocked)).toBe(false);
+    expect(blocked).toBe('Todavía no queda registrada la cita.');
+
+    draft = applyVehicle(draft, { label: 'Mazda 3 2019', source: 'vision' });
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2024');
+    expect(draft.vehicleIdentity?.source).toBe('client');
+
+    const repeated = absorbClientMessage(draft, {
+      text: '5510001122',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(repeated.requestedDateTime).toBe(draft.requestedDateTime);
+    expect(
+      decideAppointmentPersistence({
+        draft: repeated,
+        activeScheduledAt: repeated.requestedDateTime,
+        currentText: '5510001122',
+        policy: autofix,
+        now: receivedAt,
+        channel: lab,
+      }),
+    ).toEqual({ action: 'unchanged', confirmToClient: false });
+
+    const persisted = guardClientReply({
+      modelText: 'Listo.',
+      confirmedIso: repeated.requestedDateTime,
+      persisted: true,
+      draft: repeated,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(textClaimsAppointmentBooked(persisted)).toBe(true);
+    expect(relatedQuoteNote({ quoteId: 'q_ensayo', isPartial: false })).toBe(
+      'Cotización q_ensayo',
+    );
+    expect(relatedQuoteNote({ quoteId: 'q_ensayo', isPartial: true })).toBe(
+      'Cotización q_ensayo (parcial)',
+    );
+    expect(relatedQuoteNote(null)).toBeNull();
+  });
+
+  it('el caso Mazda pide el nombre una vez y registra el vehículo declarado', () => {
+    let draft = absorbClientMessage(emptyAppointmentDraft(), {
+      text: 'Costo por reparar este golpe Mazda 2 2024',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2024');
+    draft = absorbClientMessage(draft, {
+      text: 'mañana a las 9',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(draft.requestedDateTime).toBe('2026-11-04T15:00:00.000Z');
+    expect(pendingAppointmentDatum(draft, autofix, receivedAt, lab)).toBe(
+      'clientName',
+    );
+    const formulations = [
+      '¿Con qué nombre te registro?',
+      '¿A nombre de quién agendamos?',
+      '¿Me compartes tu nombre?',
+    ];
+    for (const modelText of formulations) {
+      const reply = guardClientReply({
+        modelText,
+        confirmedIso: null,
+        persisted: false,
+        draft,
+        policy: autofix,
+        now: receivedAt,
+        channel: lab,
+      });
+      expect(reply).toBe(modelText);
+      expect(reply).not.toContain(APPOINTMENT_ASK_NAME);
+    }
+    draft = absorbClientMessage(draft, {
+      text: 'Jose Lopez',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(draft.clientName?.value).toBe('Jose Lopez');
+    expect(pendingAppointmentDatum(draft, autofix, receivedAt, lab)).toBe(
+      'phone',
+    );
+    expect(nextClientQuestion(draft, autofix, receivedAt, lab)).toBe(
+      APPOINTMENT_ASK_PHONE,
+    );
+    const whatsapp = { platform: 'whatsapp', waId: '5215500000000' };
+    expect(
+      pendingAppointmentDatum(draft, autofix, receivedAt, whatsapp),
+    ).toBeNull();
+    draft = absorbClientMessage(draft, {
+      text: '5512345678',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(draft.phone?.value).toBe('5512345678');
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2024');
+    expect(bookingReadiness(draft, autofix, receivedAt, lab).ready).toBe(true);
+    expect(
+      decideAppointmentPersistence({
+        draft,
+        activeScheduledAt: null,
+        currentText: '5512345678',
+        policy: autofix,
+        now: receivedAt,
+        channel: lab,
+      }).action,
+    ).toBe('create');
+    const confirmed = guardClientReply({
+      modelText: 'Quedó apartada.',
+      confirmedIso: draft.requestedDateTime,
+      persisted: true,
+      draft,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(textClaimsAppointmentBooked(confirmed)).toBe(true);
+    const repeated = decideAppointmentPersistence({
+      draft,
+      activeScheduledAt: draft.requestedDateTime,
+      currentText: 'mañana a las 9',
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(repeated).toEqual({ action: 'unchanged', confirmToClient: false });
+  });
+
+  it('una pregunta de precio no confirma el vehículo como propio', () => {
+    const draft = absorbClientMessage(emptyAppointmentDraft(), {
+      text: '¿Cuánto cuesta pintar un Mazda 2 2024?',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(draft.vehicleIdentity).toBeNull();
+    expect(confirmedVehicleLabel(draft)).toBeNull();
+    const context = formatAppointmentDraftContext(
+      draft,
+      autofix,
+      receivedAt,
+      lab,
+    );
+    expect(context).not.toContain('vehiculo_declarado');
+  });
+
+  it('la visión no confirma la agenda y una corrección de año sustituye el anterior', () => {
+    let draft = applyVehicle(emptyAppointmentDraft(), {
+      label: 'Nissan Versa 2018',
+      source: 'vision',
+    });
+    expect(confirmedVehicleLabel(draft)).toBeNull();
+    draft = absorbClientMessage(draft, {
+      text: 'Es un Mazda 2 2024',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2024');
+    draft = absorbClientMessage(draft, {
+      text: 'Perdón, es 2023',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2023');
+    draft = applyVehicle(draft, { label: 'Nissan Versa 2018', source: 'vision' });
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2023');
+    expect(draft.vehicleIdentity?.source).toBe('client');
+  });
+
+  it('la nota de cotización distingue parcial y definitiva sin inventar un importe', () => {
+    expect(relatedQuoteNote({ quoteId: 'q_ensayo', isPartial: true })).toBe(
+      'Cotización q_ensayo (parcial)',
+    );
+    expect(relatedQuoteNote({ quoteId: 'q_ensayo', isPartial: false })).toBe(
+      'Cotización q_ensayo',
+    );
+    expect(relatedQuoteNote({ quoteId: 'q_ensayo', isPartial: false })).not.toMatch(
+      /\d{3,}/,
+    );
   });
 
   it('rechaza un nombre genérico de laboratorio', () => {

@@ -132,6 +132,7 @@ import {
   nextClientQuestion,
   parseAppointmentDraft,
   planConfirmedWrite,
+  relatedQuoteNote,
   rememberInterpretedInstant,
   resolveWorkshopAppointmentPolicy,
   withOfferedSlots,
@@ -7778,11 +7779,19 @@ ${catalogAppend}`;
     }
 
     const when = new Date(plan.persistAt);
+    let quoteSummary = fields.quoteSummary;
+    if (!quoteSummary) {
+      const cart = await this.quoteCartService.getActiveCart(
+        conversation.id,
+        conversation.tallerId,
+      );
+      quoteSummary = relatedQuoteNote(cart?.canonicalQuoteV1 ?? null);
+    }
     const rowFields = {
       clientName: draft.clientName?.value ?? fields.clientName,
       vehicle: confirmedVehicleLabel(draft),
       phone: draft.phone?.value ?? fields.phone,
-      quoteSummary: fields.quoteSummary,
+      quoteSummary,
     };
 
     if (existingActive && (plan.action === 'reschedule' || plan.action === 'same')) {

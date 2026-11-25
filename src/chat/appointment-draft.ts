@@ -1,4 +1,5 @@
 import { STAGING_TALLER_ID } from '../config/staging-synthetic';
+import { KNOWN_MAKES } from '../domain/peritaje-v1/case-vehicle-identity';
 import {
   hasWhatsAppWaId,
   isUsableAppointmentClientName,
@@ -223,6 +224,17 @@ export function absorbClientMessage(
       label: declaredVehicle,
       source: 'client',
     });
+  } else if (
+    next.vehicleIdentity?.source === 'client' &&
+    next.vehicleIdentity.confirmed
+  ) {
+    const corrected = correctDeclaredVehicleYear(
+      next.vehicleIdentity.value,
+      input.text,
+    );
+    if (corrected) {
+      next = applyVehicle(next, { label: corrected, source: 'client' });
+    }
   }
   if (input.vehicle?.label) {
     next = applyVehicle(next, input.vehicle);
@@ -357,6 +369,45 @@ export type BookingReadiness = {
   missing: Array<'clientName' | 'phone' | 'requestedDateTime'>;
   question: string | null;
 };
+
+/** Dato que todavía bloquea el registro. El guard y el modelo comparten este estado. */
+export type AppointmentPendingDatum = 'clientName' | 'phone' | 'schedule';
+
+export function pendingAppointmentDatum(
+  draft: AppointmentDraft,
+  policy: WorkshopAppointmentPolicy,
+  now: Date,
+  channel: { platform?: string | null; waId?: string | null } = {},
+): AppointmentPendingDatum | null {
+  const missing = bookingReadiness(draft, policy, now, channel).missing;
+  if (missing.includes('clientName')) return 'clientName';
+  if (missing.includes('phone')) return 'phone';
+  if (missing.includes('requestedDateTime')) return 'schedule';
+  return null;
+}
+
+/** La respuesta ya pidió el dato pendiente, aunque no use la plantilla literal. */
+export function replyRequestsPendingDatum(
+  datum: AppointmentPendingDatum,
+  text: string,
+): boolean {
+  const raw = String(text ?? '');
+  if (!raw.trim()) return false;
+  if (datum === 'clientName') {
+    return /con qu[eé] nombre|nombre registro|c[oó]mo te llamas|tu nombre|a nombre de qui[eé]n/i.test(
+      raw,
+    );
+  }
+  if (datum === 'phone') {
+    return /tel[eé]fono|celular|whatsapp|n[uú]mero de contacto/i.test(raw);
+  }
+  return (
+    DAY_HOUR_REASK.test(raw) ||
+    /qu[eé] d[ií]a|a qu[eé] hora|cu[aá]l (?:prefieres|te queda)|horario de atenci[oó]n/i.test(
+      raw,
+    )
+  );
+}
 
 export function bookingReadiness(
   draft: AppointmentDraft,
@@ -613,17 +664,23 @@ export function guardClientReply(input: {
     return `${stripped}\n\n${confirmation}`;
   }
   const stripped = stripAppointmentConfirmationClaims(model);
+  if (!input.persisted && textClaimsAppointmentBooked(model)) {
+    if (question) return question;
+    if (stripped && !textClaimsAppointmentBooked(stripped)) return stripped;
+    return 'Todavía no queda registrada la cita.';
+  }
   if (!question) return stripped;
   if (question === APPOINTMENT_ASK_PHONE && input.draft.clientName?.value) {
     return replyWhenOnlyPhoneMissing(stripped, input.draft.clientName.value);
   }
-  if (
-    !stripped ||
-    DAY_HOUR_REASK.test(model) ||
-    textClaimsAppointmentBooked(model)
-  ) {
-    return question;
-  }
+  const pending = pendingAppointmentDatum(
+    input.draft,
+    input.policy,
+    input.now,
+    input.channel ?? {},
+  );
+  if (pending && replyRequestsPendingDatum(pending, stripped)) return stripped;
+  if (!stripped || DAY_HOUR_REASK.test(model)) return question;
   if (stripped.includes(question)) return stripped;
   return `${stripped}\n\n${question}`;
 }
@@ -635,7 +692,8 @@ export function formatAppointmentDraftContext(
   channel: { platform?: string | null; waId?: string | null } = {},
 ): string {
   const question = nextClientQuestion(draft, policy, now, channel);
-  const vehicle = draft.vehicleIdentity;
+  const pending = pendingAppointmentDatum(draft, policy, now, channel);
+  const declaredVehicle = confirmedVehicleLabel(draft);
   const lines = [
     '[BORRADOR_DE_CITA]',
     `politica: ${policy.id}`,
@@ -646,14 +704,17 @@ export function formatAppointmentDraftContext(
     `horario: ${draft.scheduleStatus}`,
     `nombre: ${draft.clientName?.value ?? 'falta'}`,
     `telefono: ${draft.phone?.value ? 'presente' : 'falta'}`,
-    vehicle
-      ? `vehiculo: ${vehicle.confirmed ? 'declarado por el cliente' : 'inferido por visión, no confirmado'}`
-      : 'vehiculo: sin dato',
+    declaredVehicle
+      ? `vehiculo_declarado: ${declaredVehicle}`
+      : draft.vehicleIdentity
+        ? 'vehiculo: inferido por visión, no confirmado'
+        : 'vehiculo: sin dato',
+    `dato_pendiente: ${pending ?? 'ninguno'}`,
     question
       ? `pregunta_unica: ${question}`
       : 'pregunta_unica: ninguna; los datos para registrar ya están',
     'No vuelvas a pedir día y hora si solicitada_valida tiene un instante.',
-    'Pregunta solo el dato de pregunta_unica.',
+    'Pregunta solo dato_pendiente. Si tu respuesta ya lo pidió, no lo repitas.',
     'No digas que la cita quedó confirmada salvo success:true de createAppointment y una fila persistida.',
     'No presentes un vehículo inferido por visión como confirmado.',
     policy.openAcceptance
@@ -809,17 +870,19 @@ function replyWhenOnlyPhoneMissing(modelText: string, fullName: string): string 
     .filter((sentence) => sentence && !NAME_REASK.test(sentence))
     .join(' ')
     .trim();
-  const asksPhone = /tel[eé]fono/i.test(cleaned);
-  const echoesName = cleaned.toLowerCase().includes(fullName.trim().toLowerCase());
-  const mentionsWhen =
-    /\b(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|mañana|hoy)\b|\ba las\s+\d|\b\d{1,2}:\d{2}\b/i.test(
-      cleaned,
-    );
-  if (!cleaned || ((echoesName || !asksPhone) && !mentionsWhen)) {
-    return appointmentPhoneRequest(fullName);
-  }
-  if (!asksPhone) return `${cleaned}\n\n${appointmentPhoneRequest(fullName)}`;
-  return cleaned;
+  if (replyRequestsPendingDatum('phone', cleaned)) return cleaned;
+  if (!cleaned) return appointmentPhoneRequest(fullName);
+  return `${cleaned}\n\n${appointmentPhoneRequest(fullName)}`;
+}
+
+/** Referencia a la cotización canónica ya emitida. No copia ni recalcula el total. */
+export function relatedQuoteNote(quote: {
+  quoteId?: string | null;
+  isPartial?: boolean;
+} | null | undefined): string | null {
+  const id = String(quote?.quoteId ?? '').trim();
+  if (!id) return null;
+  return quote?.isPartial ? `Cotización ${id} (parcial)` : `Cotización ${id}`;
 }
 
 function extractBareClientName(text: string): string | null {
@@ -853,13 +916,137 @@ function extractDeclaredPhone(text: string): string | null {
   return digits.slice(0, 32);
 }
 
+function hasOwnedVehicleEvidence(folded: string): boolean {
+  return (
+    /\b(mi|mis|tengo|traigo|llevo)\b/.test(folded) ||
+    /\bes un[ao]?\b/.test(folded) ||
+    /\b(este|mi) (golpe|dano|rayon|abolladura)\b/.test(folded)
+  );
+}
+
+/** Pregunta de precio sobre un vehículo indefinido: se consulta, no se confirma. */
+function isConsultedVehicleQuestion(text: string): boolean {
+  const folded = fold(text);
+  if (hasOwnedVehicleEvidence(folded)) return false;
+  const asks =
+    /\b(cuanto|cuesta|cotiz|precio|pintar|reparar|costo)\b/.test(folded);
+  return asks && /\b(un|una)\b/.test(folded);
+}
+
 function extractDeclaredVehicle(text: string): string | null {
   const match =
     /(?:es un[ao]?|mi (?:auto|carro|coche) es|tengo un[ao]?)\s+([^?.!\n]{2,60})/i.exec(
       text,
     );
-  if (!match) return null;
-  const label = match[1]!.trim();
+  if (match) {
+    const label = match[1]!.trim();
+    if (isUsableAppointmentVehicle(label)) return label;
+  }
+  if (isConsultedVehicleQuestion(text)) return null;
+  return extractKnownMakeModelYear(text);
+}
+
+function correctDeclaredVehicleYear(
+  current: string,
+  text: string,
+): string | null {
+  const folded = fold(text).trim();
+  if (/\b(precio|cuesta|cuanto|cotiz|total)\b/.test(folded)) return null;
+  const corrects =
+    /\b(perdon|corrijo|correccion|quise decir|me equivoque|en realidad)\b/.test(
+      folded,
+    ) || /^(?:es\s+)?(?:del?\s+)?(?:19|20)\d{2}[.!]?$/.test(folded);
+  if (!corrects) return null;
+  const year = /\b((?:19|20)\d{2})\b/.exec(folded)?.[1];
+  if (!year) return null;
+  const next = /\b(?:19|20)\d{2}\b/.test(current)
+    ? current.replace(/\b(?:19|20)\d{2}\b/, year)
+    : `${current} ${year}`;
+  return next === current ? null : next;
+}
+
+const VEHICLE_MODEL_STOP = new Set([
+  'a',
+  'al',
+  'cita',
+  'con',
+  'costo',
+  'de',
+  'del',
+  'el',
+  'en',
+  'es',
+  'esta',
+  'este',
+  'foto',
+  'fotos',
+  'golpe',
+  'hoy',
+  'la',
+  'las',
+  'los',
+  'manana',
+  'mi',
+  'para',
+  'por',
+  'que',
+  'quiero',
+  'reparar',
+  'su',
+  'tiene',
+  'tu',
+  'un',
+  'una',
+  'y',
+]);
+
+function extractKnownMakeModelYear(text: string): string | null {
+  const tokens = [...String(text ?? '').matchAll(/\S+/g)]
+    .map((hit) => hit[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}.+-]+$/gu, ''))
+    .filter(Boolean);
+  if (tokens.length === 0) return null;
+  const folded = tokens.map((token) => fold(token));
+  const brands = [...KNOWN_MAKES]
+    .map((brand) => ({
+      parts: fold(brand).split(/\s+/),
+    }))
+    .sort(
+      (a, b) =>
+        b.parts.length - a.parts.length ||
+        b.parts.join(' ').length - a.parts.join(' ').length,
+    );
+  let found: { at: number; length: number } | null = null;
+  for (let index = 0; index < folded.length && !found; index += 1) {
+    for (const brand of brands) {
+      const slice = folded.slice(index, index + brand.parts.length);
+      if (
+        slice.length === brand.parts.length &&
+        slice.every((token, part) => token === brand.parts[part])
+      ) {
+        found = { at: index, length: brand.parts.length };
+        break;
+      }
+    }
+  }
+  if (!found) return null;
+  const picked = tokens.slice(found.at, found.at + found.length);
+  for (
+    let index = found.at + found.length;
+    index < tokens.length && picked.length < found.length + 3;
+    index += 1
+  ) {
+    const token = folded[index] ?? '';
+    if (/^(19|20)\d{2}$/.test(token)) {
+      picked.push(tokens[index]!);
+      break;
+    }
+    if (VEHICLE_MODEL_STOP.has(token) || !/^[a-z0-9][a-z0-9.+-]{0,14}$/.test(token)) {
+      break;
+    }
+    picked.push(tokens[index]!);
+  }
+  if (picked.length <= found.length) return null;
+  const label = picked.join(' ');
   return isUsableAppointmentVehicle(label) ? label : null;
 }
 
