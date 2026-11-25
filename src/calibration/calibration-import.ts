@@ -32,7 +32,9 @@ import { SeverityError, severityAnnotationPathAllowed, type SeverityFiles } from
 import { colorAnnotationPathAllowed, type ColorFiles } from './color-annotation';
 import { applyQuoteAuthority } from './quote-authority';
 import { applySeverityImport, openImportedSeverityFiles, readSeverityRequests, type SeverityImportReport, type SeverityRequest } from './severity-import';
+import { inferBodyColor } from './body-color';
 import { applyColorImport, openImportedColorFiles, pendingColor, visualColorReading, type ColorImportReport } from './color-import';
+import type { ColorReading } from './color-annotation';
 
 const TOKEN_URL = /^https:\/\/api\.github\.com\/app\/installations\/\d{1,12}\/access_tokens$/;
 const REPOSITORIES_URL = 'https://api.github.com/installation/repositories?per_page=100';
@@ -207,7 +209,7 @@ export function prepareCalibrationImport(
     unique.push(bytes);
     imageShas.push(sha256);
   }
-  const color = visualColorReading({
+  const stated = visualColorReading({
     statement: input.operator_statement,
     observations: quote.visual_observations,
     make: quote.vehicle.make,
@@ -215,12 +217,61 @@ export function prepareCalibrationImport(
     variant: quote.vehicle.variant,
   });
   if (withheld > 0) {
-    return { quote, images: [], imageShas: [], duplicateImages: 0, severity: authority.severity, color, privacy: { withheld } };
+    return { quote, images: [], imageShas: [], duplicateImages: 0, severity: authority.severity, color: stated, privacy: { withheld } };
   }
   if (unique.length < limits.minPhotos) {
     throw new CalibrationConflictError('The import requires at least one photograph');
   }
+  const color = applySampledBodyColor(quote, stated, inferBodyColor(unique));
   return { quote, images: unique, imageShas, duplicateImages, severity: authority.severity, color, privacy: { withheld: 0 } };
+}
+
+function applySampledBodyColor(
+  quote: { visual_observations: string[] },
+  stated: ColorReading | null,
+  sampled: ReturnType<typeof inferBodyColor>,
+): ColorReading | null {
+  const human = stated?.exteriorProvenance === 'human_declaration' ? stated.exteriorColor : null;
+  if (human) {
+    if (sampled.status === 'clear' && sampled.color && sampled.color !== human.toLocaleLowerCase('es-MX')) {
+      const note = `Posible discrepancia visual de color: la fotografía parece mostrar ${sampled.color}. Procedencia: visual_inference. No sustituye la declaración humana.`;
+      if (!quote.visual_observations.includes(note)) quote.visual_observations.push(note);
+    }
+    return stated;
+  }
+  if (sampled.status === 'clear' && sampled.color) {
+    return {
+      exteriorColor: sampled.color,
+      exteriorProvenance: 'visual_inference',
+      requestedColor: null,
+      requestedProvenance: null,
+      originalColor: null,
+      originalProvenance: null,
+      finish: null,
+      finishProvenance: null,
+      paintCode: null,
+      paintCodeProvenance: null,
+      inferenceMethod: 'body_pixel_sample',
+      inferenceStatus: 'clear',
+    };
+  }
+  if (sampled.status === 'ambiguous' || sampled.status === 'contradictory') {
+    return {
+      exteriorColor: null,
+      exteriorProvenance: 'unknown',
+      requestedColor: null,
+      requestedProvenance: null,
+      originalColor: null,
+      originalProvenance: null,
+      finish: null,
+      finishProvenance: null,
+      paintCode: null,
+      paintCodeProvenance: null,
+      inferenceMethod: 'body_pixel_sample',
+      inferenceStatus: sampled.status,
+    };
+  }
+  return stated;
 }
 
 export function readCalibrationImportDocument(

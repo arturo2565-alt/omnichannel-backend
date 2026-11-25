@@ -586,6 +586,12 @@ async function readCaseRecord(archive: CalibrationArchive, caseId: string) {
     yearEvidence: evidence(vehicle.year_evidence),
     archiveStatus,
     integrity,
+    evidenceQuality: classifyEvidenceQuality({
+      archiveStatus,
+      integrity,
+      photoCount: refs.length,
+      observations,
+    }),
     lineCount: lines.length,
     photoCount: refs.length,
     quotedTotalMxn: lines.reduce((sum, line) => sum + line.priceMxn, 0),
@@ -806,6 +812,21 @@ function readPrice(value: Record<string, unknown> | null, required: boolean): { 
     return { amount, validation: 'human_confirmed' };
   }
   return null;
+}
+
+function classifyEvidenceQuality(input: {
+  archiveStatus: string;
+  integrity: 'complete' | 'incomplete';
+  photoCount: number;
+  observations: string[];
+}): 'archived_intact' | 'documents_zone' | 'questioned' | 'unknown_correspondence' {
+  // documents_zone queda reservado: las fotos del expediente no traen un vínculo de zona.
+  const questioned = input.observations.some((text) => text.toLocaleLowerCase('es-MX').includes('discrepancia visual'));
+  if (questioned) return 'questioned';
+  if (input.archiveStatus === 'archived_private' && input.integrity === 'complete' && input.photoCount > 0) {
+    return 'archived_intact';
+  }
+  return 'unknown_correspondence';
 }
 
 function visualIntegrity(

@@ -14,6 +14,7 @@ import {
   SeverityError,
   SeverityGithub,
   assertSeverityWrite,
+  approveIntakeSummary,
   confirmDeclaredSeverities,
   confirmSeverity,
   ingestSeverityAssessment,
@@ -525,7 +526,7 @@ describe('severidad severity-v1', () => {
       if (!name.endsWith('.ts') || name.endsWith('.spec.ts')) continue;
       if (!name.includes('import')) continue;
       const source = readFileSync(join(__dirname, name), 'utf8');
-      if (source.includes('confirmSeverity') || source.includes('confirmDeclaredSeverities') || source.includes('ingestSeverityAssessment') || source.includes('recordDeclaredSeverity') || source.includes('confirmVehicleColor') || source.includes('operatorRole') || source.includes('authenticated_owner')) {
+      if (source.includes('confirmSeverity') || source.includes('confirmDeclaredSeverities') || source.includes('approveIntakeSummary') || source.includes('ingestSeverityAssessment') || source.includes('recordDeclaredSeverity') || source.includes('confirmVehicleColor') || source.includes('operatorRole') || source.includes('authenticated_owner')) {
         offenders.push(name);
       }
     }
@@ -660,5 +661,54 @@ describe('severidad severity-v1', () => {
       }
       Object.assign(process.env, previous);
     }
+  });
+
+  it('verifica el resumen humano en un solo acto y no acepta una identidad inventada', async () => {
+    const files = new MemoryFiles();
+    const body = visualCase('AF-000032', [
+      { line_id: 'L1', part: 'Fascia delantera', price_mxn: 3800 },
+      { line_id: 'L2', part: 'Salpicadera izquierda', price_mxn: 3000 },
+      { line_id: 'L3', part: 'Puerta', price_mxn: 1500 },
+    ], 8300);
+    files.seed('data/cases/AF-000032.json', body);
+    const fascia = await recordDeclaredSeverity(files, { subjectId: 'AF-000032', lineId: 'L1', level: 'leve' });
+    const fender = await recordDeclaredSeverity(files, { subjectId: 'AF-000032', lineId: 'L2', level: 'leve' });
+    const visual = await ingestSeverityAssessment(files, {
+      subjectId: 'AF-000032',
+      lineId: 'L3',
+      assessment: 'visual_inference',
+      level: 'fuerte',
+    });
+    const summary = {
+      subjectId: 'AF-000032',
+      summaryReviewed: true as const,
+      items: [
+        { lineId: 'L1', annotationId: fascia.annotationId, level: 'leve' as const },
+        { lineId: 'L2', annotationId: fender.annotationId, level: 'leve' as const },
+        { lineId: 'L3', annotationId: visual.annotationId, level: 'fuerte' as const },
+      ],
+    };
+    const first = await approveIntakeSummary(files, openEnv, owner, summary);
+    expect(first.approved.map((item) => item.lineId)).toEqual(['L1', 'L2']);
+    expect(first.conflicts).toEqual([{ lineId: 'L3', reason: 'not_human' }]);
+    expect(first.complete).toBe(false);
+    const detail = await readCalibrationCase(archiveOf(files), 'AF-000032');
+    expect(detail.lines.map((line) => line.priceMxn)).toEqual([3800, 3000, 1500]);
+    expect(detail.lines[0].severityAnnotation).toMatchObject({
+      level: 'leve',
+      status: 'validated',
+      provenance: 'human_declaration',
+      authorization: 'authorized_intake',
+    });
+    expect(detail.lines[0].severityAnnotation?.provenance).not.toBe('authenticated_owner');
+    expect(detail.evidenceQuality).toBe('unknown_correspondence');
+    const again = await approveIntakeSummary(files, openEnv, owner, summary);
+    expect(again.approved.map((item) => item.status)).toEqual(['already', 'already']);
+    await expect(approveIntakeSummary(files, openEnv, owner, {
+      ...summary,
+      operatorRole: 'owner',
+    } as typeof summary)).rejects.toMatchObject({ code: 'rejected' });
+    await expect(approveIntakeSummary(files, openEnv, { ...owner, role: 'admin' }, summary)).rejects.toMatchObject({ code: 'forbidden' });
+    expect(files.files.get('data/cases/AF-000032.json')?.content).toBe(body);
   });
 });

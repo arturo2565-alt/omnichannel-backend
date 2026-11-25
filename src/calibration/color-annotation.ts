@@ -32,6 +32,7 @@ const IMPORT_FIELDS = new Set([
   'exteriorColor', 'exteriorProvenance', 'requestedColor', 'requestedProvenance',
   'originalColor', 'originalProvenance',
   'finish', 'finishProvenance', 'paintCode', 'paintCodeProvenance',
+  'inferenceMethod', 'inferenceStatus',
 ]);
 const CONFIRM_FIELDS = new Set(['subjectId', 'exteriorColor', 'requestedColor', 'finish', 'paintCode', 'colorReviewed']);
 const CLIENT_AUTHORITY = [
@@ -63,6 +64,8 @@ export type ColorReading = {
   finishProvenance: 'human_declaration' | null;
   paintCode: string | null;
   paintCodeProvenance: 'human_declaration' | null;
+  inferenceMethod?: 'body_pixel_sample' | null;
+  inferenceStatus?: 'clear' | 'ambiguous' | 'contradictory' | null;
 };
 
 export type ColorNote = {
@@ -79,6 +82,8 @@ export type ColorNote = {
   finishProvenance: ColorProvenance | null;
   paintCode: string | null;
   paintCodeProvenance: ColorProvenance | null;
+  inferenceMethod: 'body_pixel_sample' | null;
+  inferenceStatus: 'clear' | 'ambiguous' | 'contradictory' | null;
   history: Array<Omit<ColorNote, 'history'>>;
 };
 
@@ -97,6 +102,8 @@ type StoredItem = {
   finish_provenance: ColorProvenance | null;
   paint_code: string | null;
   paint_code_provenance: ColorProvenance | null;
+  inference_method?: 'body_pixel_sample' | null;
+  inference_status?: 'clear' | 'ambiguous' | 'contradictory' | null;
   status: ColorStatus;
   authorization: 'authenticated_owner' | null;
   actor_key: string | null;
@@ -156,6 +163,8 @@ export async function importColorReading(
     finishProvenance: reading.finishProvenance,
     paintCode: reading.paintCode,
     paintCodeProvenance: reading.paintCodeProvenance,
+    inferenceMethod: reading.inferenceMethod ?? null,
+    inferenceStatus: reading.inferenceStatus ?? null,
     status: readingStatus(reading),
     authorization: null,
     actorKey: null,
@@ -259,6 +268,8 @@ async function storeColor(
     finishProvenance: ColorProvenance | null;
     paintCode: string | null;
     paintCodeProvenance: ColorProvenance | null;
+    inferenceMethod?: 'body_pixel_sample' | null;
+    inferenceStatus?: 'clear' | 'ambiguous' | 'contradictory' | null;
     status: ColorStatus;
     authorization: 'authenticated_owner' | null;
     actorKey: string | null;
@@ -312,6 +323,8 @@ async function storeColor(
     finish_provenance: next.finishProvenance,
     paint_code: next.paintCode,
     paint_code_provenance: next.paintCodeProvenance,
+    inference_method: next.inferenceMethod ?? null,
+    inference_status: next.inferenceStatus ?? null,
     status: next.status,
     authorization: next.authorization,
     actor_key: next.actorKey,
@@ -332,6 +345,8 @@ async function storeColor(
     finish_provenance: next.finishProvenance,
     paint_code: next.paintCode,
     paint_code_provenance: next.paintCodeProvenance,
+    inference_method: next.inferenceMethod ?? null,
+    inference_status: next.inferenceStatus ?? null,
     status: next.status,
     authorization: next.authorization,
     actor_key: next.actorKey,
@@ -449,6 +464,8 @@ function publicNote(item: StoredItem): Omit<ColorNote, 'history'> {
     finishProvenance: item.finish_provenance,
     paintCode: item.paint_code,
     paintCodeProvenance: item.paint_code_provenance,
+    inferenceMethod: item.inference_method ?? null,
+    inferenceStatus: item.inference_status ?? null,
   };
 }
 
@@ -463,6 +480,8 @@ function sameColor(current: StoredItem | null, next: {
   finishProvenance: ColorProvenance | null;
   paintCode: string | null;
   paintCodeProvenance: ColorProvenance | null;
+  inferenceMethod?: 'body_pixel_sample' | null;
+  inferenceStatus?: 'clear' | 'ambiguous' | 'contradictory' | null;
   status: ColorStatus;
 }): boolean {
   if (!current) return false;
@@ -476,6 +495,8 @@ function sameColor(current: StoredItem | null, next: {
     && current.finish_provenance === next.finishProvenance
     && current.paint_code === next.paintCode
     && current.paint_code_provenance === next.paintCodeProvenance
+    && (current.inference_method ?? null) === (next.inferenceMethod ?? null)
+    && (current.inference_status ?? null) === (next.inferenceStatus ?? null)
     && current.status === next.status;
 }
 
@@ -526,6 +547,18 @@ function assertReading(reading: ColorReading): void {
   } else if (reading.paintCodeProvenance !== 'human_declaration' || !PAINT_CODE.test(reading.paintCode)) {
     throw new ColorError('rejected');
   }
+  const method = reading.inferenceMethod ?? null;
+  const inferenceStatus = reading.inferenceStatus ?? null;
+  if (method == null && inferenceStatus == null) return;
+  if (method !== 'body_pixel_sample') throw new ColorError('rejected');
+  if (reading.finish != null || reading.paintCode != null || reading.originalColor != null) {
+    throw new ColorError('rejected');
+  }
+  if (provenance === 'visual_inference' && inferenceStatus === 'clear' && reading.exteriorColor) return;
+  if (provenance === 'unknown' && (inferenceStatus === 'ambiguous' || inferenceStatus === 'contradictory') && reading.exteriorColor == null) {
+    return;
+  }
+  throw new ColorError('rejected');
 }
 
 function annotationPath(subjectId: string, annotationId: string): string {

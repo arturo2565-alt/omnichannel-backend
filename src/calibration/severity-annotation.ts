@@ -65,6 +65,7 @@ export type SeverityNote = {
   evidenceKind: SeverityEvidenceKind;
   zoneId: string;
   inferenceMethod: typeof SEVERITY_INFERENCE_METHOD | null;
+  authorization: 'authenticated_owner' | 'authorized_intake' | null;
   history: Array<{
     annotationId: string;
     level: SeverityLevel | null;
@@ -90,7 +91,7 @@ type StoredItem = {
   status: SeverityStatus;
   provenance: SeverityProvenance;
   scale_version: typeof SEVERITY_SCALE_VERSION | null;
-  authorization: 'authenticated_owner' | null;
+  authorization: 'authenticated_owner' | 'authorized_intake' | null;
   actor_key: string | null;
   part: string;
   treatment: string | null;
@@ -375,6 +376,96 @@ export async function confirmSeverity(
     : { status: 'validated', annotationId: stored.annotationId };
 }
 
+const SUMMARY_FIELDS = new Set(['subjectId', 'summaryReviewed', 'items', 'lineId', 'annotationId', 'level']);
+
+/**
+ * Una sola aprobación autenticada del resumen.
+ * La procedencia sigue siendo human_declaration.
+ * No es la confirmación posterior authenticated_owner.
+ */
+export async function approveIntakeSummary(
+  files: SeverityFiles,
+  env: NodeJS.ProcessEnv,
+  user: AuthenticatedUser | undefined,
+  request: {
+    subjectId: string;
+    summaryReviewed: boolean;
+    items: Array<{ lineId: string; annotationId: string; level: SeverityLevel }>;
+  },
+): Promise<{
+  approved: Array<{ lineId: string; annotationId: string; status: 'validated' | 'already' }>;
+  conflicts: Array<{ lineId: string; reason: 'conflict' | 'missing' | 'not_human' }>;
+  complete: boolean;
+}> {
+  const access = calibrationQueryAccess(env, user);
+  if (access === 'hidden') throw new SeverityError('hidden');
+  if (!user) throw new SeverityError('unauthorized');
+  if (access !== 'open' || user.role !== 'owner') throw new SeverityError('forbidden');
+  rejectClientFields(request, SUMMARY_FIELDS);
+  if (request.summaryReviewed !== true) throw new SeverityError('rejected');
+  if (!SUBJECT_ID.test(request.subjectId) || !Array.isArray(request.items) || request.items.length < 1 || request.items.length > 12) {
+    throw new SeverityError('invalid');
+  }
+  const seen = new Set<string>();
+  const approved: Array<{ lineId: string; annotationId: string; status: 'validated' | 'already' }> = [];
+  const conflicts: Array<{ lineId: string; reason: 'conflict' | 'missing' | 'not_human' }> = [];
+  for (const item of request.items) {
+    rejectClientFields(item, SUMMARY_FIELDS);
+    if (seen.has(item.lineId)) throw new SeverityError('invalid');
+    seen.add(item.lineId);
+    const outcome = await approveIntakeItem(files, user, request.subjectId, item);
+    if (outcome.status === 'conflict' || outcome.status === 'missing' || outcome.status === 'not_human') {
+      conflicts.push({ lineId: item.lineId, reason: outcome.status });
+    } else {
+      approved.push({ lineId: item.lineId, annotationId: outcome.annotationId, status: outcome.status });
+    }
+  }
+  return { approved, conflicts, complete: conflicts.length === 0 };
+}
+
+async function approveIntakeItem(
+  files: SeverityFiles,
+  user: AuthenticatedUser,
+  subjectId: string,
+  item: { lineId: string; annotationId: string; level: SeverityLevel },
+): Promise<{ status: 'validated' | 'already' | 'conflict' | 'missing' | 'not_human'; annotationId: string }> {
+  if (!LINE_ID.test(item.lineId) || !/^SV-\d{6}$/.test(item.annotationId) || !isLevel(item.level)) {
+    return { status: 'conflict', annotationId: item.annotationId };
+  }
+  const subject = await readSubjectLine(files, subjectId, item.lineId);
+  if (!subject) return { status: 'missing', annotationId: item.annotationId };
+  const indexFile = await files.read(severitySubjectPath(subjectId));
+  const items = indexFile ? requireItems(indexFile.content, subjectId) : [];
+  const reviewed = items.find((entry) => entry.annotation_id === item.annotationId && entry.line_id === item.lineId) ?? null;
+  const current = items.find((entry) => entry.current && entry.zone_id === subject.zoneId) ?? null;
+  if (
+    current
+    && current.status === 'validated'
+    && current.authorization === 'authorized_intake'
+    && current.provenance === 'human_declaration'
+    && current.level === item.level
+    && (current.annotation_id === item.annotationId || (reviewed && supersedes(items, current.annotation_id, reviewed.annotation_id)))
+  ) {
+    return { status: 'already', annotationId: current.annotation_id };
+  }
+  if (!reviewed || !current || current.annotation_id !== reviewed.annotation_id) {
+    return { status: 'conflict', annotationId: current?.annotation_id ?? item.annotationId };
+  }
+  if (reviewed.status !== 'proposed' || reviewed.provenance !== 'human_declaration' || reviewed.level !== item.level || reviewed.inference_method != null) {
+    return { status: 'not_human', annotationId: reviewed.annotation_id };
+  }
+  const stored = await storeObservation(files, subjectId, item.lineId, {
+    level: item.level,
+    status: 'validated',
+    provenance: 'human_declaration',
+    authorization: 'authorized_intake',
+    actorKey: actorKey(user.userId),
+    inferenceMethod: null,
+  }, { expectedAnnotationId: reviewed.annotation_id });
+  if (stored.status !== 'recorded') return { status: 'conflict', annotationId: stored.annotationId };
+  return { status: 'validated', annotationId: stored.annotationId };
+}
+
 export function presentSeverityIndex(content: string, subjectId: string): SeverityNote[] {
   const items = parseItems(content, subjectId);
   const lineIds = [...new Set(items.filter((item) => item.current && publicItem(item)).map((item) => item.line_id))];
@@ -396,6 +487,7 @@ export function presentSeverityIndex(content: string, subjectId: string): Severi
       evidenceKind: current.evidence_kind,
       zoneId: current.zone_id,
       inferenceMethod: current.inference_method,
+      authorization: current.authorization,
       history,
     }];
   });
@@ -428,6 +520,7 @@ export function presentSeverityCatalog(content: string): Array<Omit<SeverityNote
         evidenceKind: note.evidence_kind,
         zoneId: note.zone_id,
         inferenceMethod: note.inference_method,
+        authorization: note.authorization,
       }];
     });
   } catch {
@@ -443,7 +536,7 @@ async function storeObservation(
     level: SeverityLevel | null;
     status: SeverityStatus;
     provenance: SeverityProvenance;
-    authorization: 'authenticated_owner' | null;
+    authorization: 'authenticated_owner' | 'authorized_intake' | null;
     actorKey: string | null;
     inferenceMethod: typeof SEVERITY_INFERENCE_METHOD | null;
   },
@@ -452,7 +545,9 @@ async function storeObservation(
   if (!SUBJECT_ID.test(subjectId) || !LINE_ID.test(lineId)) throw new SeverityError('invalid');
   if (next.provenance === 'visual_inference' && next.inferenceMethod !== SEVERITY_INFERENCE_METHOD) throw new SeverityError('rejected');
   if (next.provenance !== 'visual_inference' && next.inferenceMethod != null) throw new SeverityError('rejected');
-  if (next.status === 'validated' && (next.authorization !== 'authenticated_owner' || !next.actorKey || !SHA256.test(next.actorKey))) {
+  const intake = next.status === 'validated' && next.authorization === 'authorized_intake' && next.provenance === 'human_declaration';
+  const ownerValidation = next.status === 'validated' && next.authorization === 'authenticated_owner' && next.provenance === 'authenticated_owner';
+  if (next.status === 'validated' && (!intake && !ownerValidation || !next.actorKey || !SHA256.test(next.actorKey))) {
     throw new SeverityError('rejected');
   }
   if (next.status !== 'validated' && (next.authorization != null || next.actorKey != null)) throw new SeverityError('rejected');
@@ -651,8 +746,9 @@ function publicItem(item: StoredItem | null): StoredItem | null {
   if (!item) return null;
   if (!LINE_ID.test(item.line_id) || !/^SV-\d{6}$/.test(item.annotation_id)) return null;
   if (item.status === 'validated') {
-    if (item.authorization !== 'authenticated_owner' || !item.actor_key || !SHA256.test(item.actor_key)) return null;
-    if (item.provenance !== 'authenticated_owner' || !isLevel(item.level)) return null;
+    const intake = item.authorization === 'authorized_intake' && item.provenance === 'human_declaration';
+    const ownerValidation = item.authorization === 'authenticated_owner' && item.provenance === 'authenticated_owner';
+    if ((!intake && !ownerValidation) || !item.actor_key || !SHA256.test(item.actor_key) || !isLevel(item.level)) return null;
   } else if (item.authorization != null || item.actor_key != null || item.provenance === 'authenticated_owner') {
     return null;
   }

@@ -21,6 +21,7 @@ import { CalibrationGithubApp, readGithubAppConfig, type GithubInstallationGrant
 import {
   SeverityError,
   SeverityGithub,
+  approveIntakeSummary,
   confirmDeclaredSeverities,
   confirmSeverity,
   type DeclaredConfirmation,
@@ -58,6 +59,18 @@ export class SeverityReviewController {
       if (!user) throw new SeverityError('unauthorized');
       if (access !== 'open') throw new SeverityError('forbidden');
       return confirmDeclaredSeverities(this.writer(), process.env, user, request);
+    });
+  }
+
+  @Post('severity-summary')
+  approveSummary(@CurrentUser() user: AuthenticatedUser, @Body() body: unknown) {
+    return this.run(user, () => {
+      const request = parseSummary(body);
+      const access = calibrationQueryAccess(process.env, user);
+      if (access === 'hidden') throw new SeverityError('hidden');
+      if (!user) throw new SeverityError('unauthorized');
+      if (access !== 'open') throw new SeverityError('forbidden');
+      return approveIntakeSummary(this.writer(), process.env, user, request);
     });
   }
 
@@ -137,6 +150,33 @@ function parseDeclaredConfirm(body: unknown): {
     return { lineId: note.lineId, annotationId: note.annotationId, level: note.level as SeverityLevel };
   });
   return { subjectId: record.subjectId, declarationsReviewed: true, items };
+}
+
+function parseSummary(body: unknown): {
+  subjectId: string;
+  summaryReviewed: true;
+  items: Array<{ lineId: string; annotationId: string; level: SeverityLevel }>;
+} {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SeverityError('invalid');
+  const record = body as Record<string, unknown>;
+  if (CLIENT_AUTHORITY.some((key) => Object.prototype.hasOwnProperty.call(record, key))) throw new SeverityError('rejected');
+  if (Object.keys(record).some((key) => !['subjectId', 'summaryReviewed', 'items'].includes(key))) {
+    throw new SeverityError('rejected');
+  }
+  if (typeof record.subjectId !== 'string' || record.summaryReviewed !== true || !Array.isArray(record.items)) {
+    throw new SeverityError('rejected');
+  }
+  if (record.items.length < 1 || record.items.length > 12) throw new SeverityError('rejected');
+  const items = record.items.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new SeverityError('rejected');
+    const note = item as Record<string, unknown>;
+    if (CLIENT_AUTHORITY.some((key) => Object.prototype.hasOwnProperty.call(note, key))) throw new SeverityError('rejected');
+    if (Object.keys(note).some((key) => !['lineId', 'annotationId', 'level'].includes(key))) throw new SeverityError('rejected');
+    if (typeof note.lineId !== 'string' || typeof note.annotationId !== 'string') throw new SeverityError('rejected');
+    if (typeof note.level !== 'string' || !LEVELS.has(note.level)) throw new SeverityError('invalid');
+    return { lineId: note.lineId, annotationId: note.annotationId, level: note.level as SeverityLevel };
+  });
+  return { subjectId: record.subjectId, summaryReviewed: true, items };
 }
 
 function parseConfirm(body: unknown): { subjectId: string; lineId: string; level: SeverityLevel; lineReviewed: true } {

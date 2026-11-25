@@ -991,6 +991,128 @@ describe('CAL-021C severity on visual import', () => {
   });
 });
 
+describe('CAL-032 color visual y severidad declarada', () => {
+  const depsOf = (route: ReturnType<typeof routed>) => ({
+    transport: route.transport,
+    photos: archive().photos,
+    clock: () => '2026-11-25T16:00:00.000Z',
+  });
+
+  it('propone el rojo de la fotografía cuando nadie declaró el color', async () => {
+    const route = routed();
+    const report = await importCalibrationCase(stagingEnv(), {
+      ...quote(4100, 'autofix-sim-color-mg5'),
+      vehicle: {
+        make: 'MG',
+        make_evidence: 'customer_provided',
+        model: 'MG5',
+        model_evidence: 'customer_provided',
+        year: 2024,
+        year_evidence: 'customer_provided',
+        variant: null,
+      },
+      images: [minimalDecodablePng([180, 20, 30])],
+    }, depsOf(route));
+    expect(report.result).toBe('ok');
+    const color = [...route.github.files.values()].map((file) => file.text).join('\n');
+    expect(color).toContain('"exterior_color": "rojo"');
+    expect(color).toContain('"exterior_provenance": "visual_inference"');
+    expect(color).toContain('"inference_method": "body_pixel_sample"');
+    expect(color).toContain('"inference_status": "clear"');
+    expect(color).toContain('"finish": null');
+    expect(color).toContain('"paint_code": null');
+    expect(color).not.toContain('authenticated_owner');
+  });
+
+  it('conserva el color humano y anota la discrepancia visual aparte', async () => {
+    const route = routed();
+    const report = await importCalibrationCase(stagingEnv(), {
+      ...quote(4100, 'autofix-sim-color-humano'),
+      operator_statement: 'Mazda 3 color rojo',
+      images: [minimalDecodablePng([20, 40, 180])],
+    }, depsOf(route));
+    expect(report.result).toBe('ok');
+    const stored = [...route.github.files.values()].map((file) => file.text).join('\n');
+    expect(stored).toContain('"exterior_color": "rojo"');
+    expect(stored).toContain('"exterior_provenance": "human_declaration"');
+    expect(stored).toContain('Posible discrepancia visual de color: la fotografía parece mostrar azul');
+    expect(stored).not.toContain('"exterior_color": "azul"');
+    expect(stored).toContain('"price_mxn": 4100');
+  });
+
+  it('deja el color desconocido cuando la luz o las fotos se contradicen', async () => {
+    const glare = routed();
+    await importCalibrationCase(stagingEnv(), {
+      ...quote(4100, 'autofix-sim-color-reflejo'),
+      images: [minimalDecodablePng([252, 252, 252])],
+    }, depsOf(glare));
+    const glareText = [...glare.github.files.values()].map((file) => file.text).join('\n');
+    expect(glareText).toContain('"inference_status": "ambiguous"');
+    expect(glareText).toContain('"exterior_provenance": "unknown"');
+    expect(glareText).not.toContain('"exterior_color": "blanco"');
+
+    const clash = routed();
+    await importCalibrationCase(stagingEnv(), {
+      ...quote(4100, 'autofix-sim-color-contradiccion'),
+      images: [minimalDecodablePng([180, 20, 30]), minimalDecodablePng([20, 40, 180])],
+    }, depsOf(clash));
+    const clashText = [...clash.github.files.values()].map((file) => file.text).join('\n');
+    expect(clashText).toContain('"inference_status": "contradictory"');
+    expect(clashText).not.toContain('"exterior_color": "rojo"');
+    expect(clashText).not.toContain('"exterior_color": "azul"');
+  });
+
+  it('asocia leve a las dos zonas del Mazda 3 y no valida la importación', async () => {
+    const route = routed();
+    const report = await importCalibrationCase(stagingEnv(), {
+      ...quote(6800, 'autofix-sim-mazda3-2026'),
+      vehicle: {
+        make: 'Mazda',
+        make_evidence: 'customer_provided',
+        model: '3',
+        model_evidence: 'customer_provided',
+        year: 2026,
+        year_evidence: 'customer_provided',
+        variant: null,
+      },
+      operator_statement: 'Fascia delantera daño leve. Salpicadera izquierda daño leve.',
+      line_items: [
+        {
+          line_id: 'L1',
+          part: 'Fascia delantera',
+          treatment: 'repair_paint',
+          price_mxn: 3800,
+          damage_severity: 'unknown',
+          validation: 'human_confirmed',
+        },
+        {
+          line_id: 'L2',
+          part: 'Salpicadera izquierda',
+          treatment: 'repair_paint',
+          price_mxn: 3000,
+          damage_severity: 'unknown',
+          validation: 'human_confirmed',
+        },
+      ],
+      images: [minimalDecodablePng([16, 32, 48])],
+    }, depsOf(route));
+    expect(report.result).toBe('ok');
+    expect(report.severity?.status).toBe('recorded');
+    const stored = [...route.github.files.values()].map((file) => file.text).join('\n');
+    expect(stored).toContain('"price_mxn": 3800');
+    expect(stored).toContain('"price_mxn": 3000');
+    expect(stored).toContain('"provenance": "human_declaration"');
+    expect(stored).toContain('"status": "proposed"');
+    expect(stored).not.toContain('authorized_intake');
+    expect(stored).not.toContain('authenticated_owner');
+    const hostile = await importCalibrationCase(stagingEnv(), {
+      ...quote(6800, 'autofix-sim-mazda3-falso'),
+      severity: [{ lineId: 'L1', assessment: 'human_declaration', level: 'leve', validated: true, operatorRole: 'owner' }],
+    }, depsOf(routed()));
+    expect(hostile.result).not.toBe('ok');
+  });
+});
+
 function runWriteCli(): Promise<{ code: number | null; stdout: string }> {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of Object.keys(env)) {
