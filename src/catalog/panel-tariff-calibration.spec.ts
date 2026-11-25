@@ -110,6 +110,34 @@ describe('calibración comercial del costado trasero', () => {
     expect(mazda.isPremium).toBe(false);
   });
 
+  it('el importe 4050 no sale de la tarifa trasera publicada ni de Fascia LEVE', () => {
+    const rearStrong = computeCatalogPiecePrice({
+      basePrice: 2900,
+      sizeTier: mazda.sizeTier,
+      isPremium: mazda.isPremium,
+      damageMagnitude: 'FUERTE',
+    });
+    const fasciaLeve = computeCatalogPiecePrice({
+      basePrice: 2900,
+      sizeTier: mazda.sizeTier,
+      isPremium: mazda.isPremium,
+      damageMagnitude: 'LEVE',
+    });
+    const doorStrong = computeCatalogPiecePrice({
+      basePrice: 3100,
+      sizeTier: mazda.sizeTier,
+      isPremium: mazda.isPremium,
+      damageMagnitude: 'FUERTE',
+    });
+    expect(resolveCatalogPiezaForMatrixLookup('CTI')).toBe('Salpicadera trasera');
+    expect(resolveCatalogPiezaForMatrixLookup('STI')).toBe('Salpicadera trasera');
+    expect(fasciaLeve).toBe(2900);
+    expect(rearStrong).toBe(3750);
+    expect(rearStrong).not.toBe(4050);
+    expect(doorStrong).toBe(4050);
+    expect(resolveCatalogPiezaForMatrixLookup('PTI')).toBe('Puerta');
+  });
+
   it('la base heredada de 2900 con daño fuerte reproduce 3750 y queda fuera de la referencia', () => {
     const inherited = computeCatalogPiecePrice({
       basePrice: 2900,

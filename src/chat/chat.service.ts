@@ -118,11 +118,14 @@ import {
   isUsableAppointmentPhone,
   missingAppointmentContactFields,
 } from './appointment-client-guard';
+import { commitConversationAppointmentDraft } from './appointment-draft-store';
 import {
   APPOINTMENT_ASK_NAME,
   APPOINTMENT_ASK_PHONE,
   absorbClientMessage,
+  appointmentDraftProgressEqual,
   applyVehicle,
+  mergeAppointmentDraftSnapshot,
   bookingReadiness,
   confirmedVehicleLabel,
   decideAppointmentPersistence,
@@ -767,6 +770,9 @@ export class ChatService implements OnModuleDestroy {
 
   /** conversationId con análisis de visión en curso (entre debounce de imagen y borrador guardado). */
   private readonly consolidatedVisionInFlight = new Set<string>();
+
+  /** Serializa las escrituras del borrador de cita dentro de este proceso. */
+  private appointmentDraftWrites = new Map<string, Promise<void>>();
 
   /**
    * Una sola creación de conversación por `externalId` a la vez (webhooks Meta en ráfaga).
@@ -2834,6 +2840,11 @@ export class ChatService implements OnModuleDestroy {
       !inboundIsSticker &&
       !isIncomingImage(saved.content)
     ) {
+      await this.rememberDeclaredAppointmentContext(
+        conversation,
+        String(saved.content ?? ''),
+        saved.createdAt instanceof Date ? saved.createdAt : new Date(),
+      );
       const convRow = await this.conversationRepository.findOne({
         where: { id: conversationIdForSockets },
       });
@@ -6151,6 +6162,22 @@ ${catalogAppend}`;
     burstUrls: readonly string[],
     burstTexts: readonly string[] = [],
   ): Promise<void> {
+    const declaredDuringVision = burstTexts
+      .map((text) => String(text ?? '').trim())
+      .filter((text) => text.length > 0 && !isIncomingImage(text))
+      .join('\n\n');
+    if (declaredDuringVision) {
+      const conversation = await this.conversationRepository.findOne({
+        where: { id: conversationId },
+      });
+      if (conversation) {
+        await this.rememberDeclaredAppointmentContext(
+          conversation,
+          declaredDuringVision,
+        );
+      }
+    }
+
     const fromBurst = [
       ...new Set(
         burstUrls.map((u) => String(u).trim()).filter((u) => u && isIncomingImage(u)),
@@ -7526,12 +7553,130 @@ ${catalogAppend}`;
     });
   }
 
+  /** Conserva la identidad declarada aunque la visión responda antes que el autopilot. */
+  private async rememberDeclaredAppointmentContext(
+    conversation: Conversation,
+    text: string,
+    receivedAt?: Date,
+  ): Promise<void> {
+    const clean = String(text ?? '').trim();
+    if (!clean || isIncomingImage(clean)) return;
+    await this.captureAppointmentDraftFromTurn(
+      conversation,
+      clean,
+      receivedAt ?? new Date(),
+    );
+  }
+
+  private enqueueAppointmentDraftWrite<T>(
+    conversationId: string,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    if (!this.appointmentDraftWrites) {
+      this.appointmentDraftWrites = new Map();
+    }
+    const previous =
+      this.appointmentDraftWrites.get(conversationId) ?? Promise.resolve();
+    const run = previous.then(work, work);
+    const tail: Promise<void> = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.appointmentDraftWrites.set(conversationId, tail);
+    void tail.finally(() => {
+      if (this.appointmentDraftWrites.get(conversationId) === tail) {
+        this.appointmentDraftWrites.delete(conversationId);
+      }
+    });
+    return run;
+  }
+
+  private async patchConversationColumns(
+    conversation: Conversation,
+    partial: Partial<Conversation>,
+  ): Promise<void> {
+    Object.assign(conversation, partial);
+    const repo = this.conversationRepository as Repository<Conversation> & {
+      update?: (
+        criteria: { id: string },
+        values: Partial<Conversation>,
+      ) => Promise<unknown>;
+    };
+    if (typeof repo.update === 'function') {
+      await repo.update({ id: conversation.id }, partial);
+      return;
+    }
+    await this.conversationRepository.save(conversation);
+  }
+
+  private async writeAppointmentDraftColumn(
+    conversation: Conversation,
+    draft: AppointmentDraft,
+    current: AppointmentDraft,
+  ): Promise<void> {
+    conversation.appointmentDraft = draft;
+    if (JSON.stringify(draft) === JSON.stringify(current)) return;
+    const repo = this.conversationRepository as Repository<Conversation> & {
+      update?: (
+        criteria: { id: string },
+        partial: { appointmentDraft: AppointmentDraft },
+      ) => Promise<unknown>;
+    };
+    if (typeof repo.update === 'function') {
+      await repo.update(
+        { id: conversation.id },
+        { appointmentDraft: draft },
+      );
+      return;
+    }
+    await this.conversationRepository.save(conversation);
+  }
+
+  private async mutateAppointmentDraft(
+    conversation: Conversation,
+    produce: (current: AppointmentDraft) => AppointmentDraft | Promise<AppointmentDraft>,
+  ): Promise<AppointmentDraft> {
+    const conversationId = String(conversation.id ?? '').trim();
+    if (!conversationId) {
+      const next = await produce(parseAppointmentDraft(conversation.appointmentDraft));
+      conversation.appointmentDraft = next;
+      return next;
+    }
+    return this.enqueueAppointmentDraftWrite(conversationId, async () => {
+      const manager = this.conversationRepository.manager;
+      const table = this.conversationRepository.metadata?.tableName;
+      if (manager && table && typeof manager.transaction === 'function') {
+        const next = await commitConversationAppointmentDraft(
+          manager,
+          conversationId,
+          produce,
+          table,
+        );
+        conversation.appointmentDraft = next;
+        return next;
+      }
+      const fresh = await this.conversationRepository.findOne({
+        where: { id: conversationId },
+      });
+      const current = parseAppointmentDraft(
+        fresh?.appointmentDraft ?? conversation.appointmentDraft,
+      );
+      const produced = await produce(current);
+      const next = appointmentDraftProgressEqual(produced, current)
+        ? current
+        : produced;
+      await this.writeAppointmentDraftColumn(conversation, next, current);
+      return next;
+    });
+  }
+
   private async persistAppointmentDraft(
     conversation: Conversation,
     draft: AppointmentDraft,
   ): Promise<void> {
-    conversation.appointmentDraft = draft;
-    await this.conversationRepository.save(conversation);
+    await this.mutateAppointmentDraft(conversation, (current) =>
+      mergeAppointmentDraftSnapshot(draft, current),
+    );
   }
 
   private async captureAppointmentDraftFromTurn(
@@ -7549,21 +7694,21 @@ ${catalogAppend}`;
       const stored = String(contact?.phone ?? '').trim();
       if (stored) contactPhone = stored;
     }
-    const draft = withOfferedSlots(
-      absorbClientMessage(parseAppointmentDraft(conversation.appointmentDraft), {
-        text,
-        receivedAt,
+    return this.mutateAppointmentDraft(conversation, (current) =>
+      withOfferedSlots(
+        absorbClientMessage(current, {
+          text,
+          receivedAt,
+          policy,
+          platform: conversation.platform,
+          externalId: conversation.externalId,
+          contactPhone,
+          contactName: conversation.contactName,
+        }),
         policy,
-        platform: conversation.platform,
-        externalId: conversation.externalId,
-        contactPhone,
-        contactName: conversation.contactName,
-      }),
-      policy,
-      receivedAt,
+        receivedAt,
+      ),
     );
-    await this.persistAppointmentDraft(conversation, draft);
-    return draft;
   }
 
   private isActiveAppointmentConflict(err: unknown): boolean {
@@ -7657,6 +7802,12 @@ ${catalogAppend}`;
     const receivedAt = new Date();
     const policy = await this.appointmentPolicyFor(conversation);
     const fields = await this.extractAppointmentClientFields(raw, conversation);
+    const storedDraft = await this.conversationRepository.findOne({
+      where: { id: conversation.id },
+    });
+    if (storedDraft?.appointmentDraft) {
+      conversation.appointmentDraft = storedDraft.appointmentDraft;
+    }
     let draft = parseAppointmentDraft(conversation.appointmentDraft);
     if (isUsableAppointmentClientName(fields.clientName)) {
       draft.clientName = {
@@ -7896,6 +8047,7 @@ ${catalogAppend}`;
       fecha: saved.scheduledAt.toISOString(),
     });
     conversation.status = 'agendado';
+    await this.patchConversationColumns(conversation, { status: 'agendado' });
     draft.appointmentStatus = 'confirmed';
     draft.appointmentId = saved.id;
     await this.persistAppointmentDraft(conversation, draft);
@@ -8747,6 +8899,7 @@ ${catalogAppend}`;
     const batchTexts = batch
       .map((m) => String(m.content ?? '').trim())
       .filter(Boolean);
+    await this.rememberDeclaredAppointmentContext(conv, batchTexts.join('\n\n'));
     const adButtonBatchHit = matchAdButtonAutoReplyForBatch(batchTexts);
     if (adButtonBatchHit) {
       const anchor = batch[batch.length - 1]!;

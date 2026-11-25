@@ -128,7 +128,13 @@ function harness() {
     chatGateway: { emitNewMessage: jest.fn() },
     incomingMessageProducer: { enqueueMessage: jest.fn().mockResolvedValue(undefined) },
     outgoingMessageProducer: { enqueueOutboundMessage: jest.fn() },
-    tallerService: { findDefaultTallerId: jest.fn() },
+    tallerService: {
+      findDefaultTallerId: jest.fn(),
+      findById: jest.fn(async () => ({
+        id: STAGING_TALLER_ID,
+        nombre: 'Taller de ensayo',
+      })),
+    },
     ensureImageOnCloudinary: jest.fn(() => {
       throw new Error('cloudinary');
     }),

@@ -11,7 +11,9 @@ import {
   APPOINTMENT_ASK_NAME,
   APPOINTMENT_ASK_PHONE,
   absorbClientMessage,
+  appointmentDraftProgressEqual,
   appointmentPhoneRequest,
+  mergeAppointmentDraftSnapshot,
   applyVehicle,
   bookingReadiness,
   confirmedVehicleLabel,
@@ -789,5 +791,25 @@ describe('appointment-draft', () => {
     expect(nextClientQuestion(draft, autofix, receivedAt, lab)).toBe(
       APPOINTMENT_ASK_NAME,
     );
+  });
+
+  it('una copia vieja no borra el vehículo confirmado ni cuenta como cambio si solo se mueven los huecos', () => {
+    const current = absorbClientMessage(emptyAppointmentDraft(), {
+      text: 'Es un Mazda 2 2024',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    const stale = emptyAppointmentDraft();
+    stale.clientName = { value: 'Ana Ensayo', source: 'client', confirmed: true };
+    const merged = mergeAppointmentDraftSnapshot(stale, current);
+    expect(merged.vehicleIdentity).toMatchObject({
+      value: 'Mazda 2 2024',
+      source: 'client',
+      confirmed: true,
+    });
+    expect(merged.clientName?.value).toBe('Ana Ensayo');
+    const repeated = { ...current, offeredSlots: ['2099-01-01T15:00:00.000Z'] };
+    expect(appointmentDraftProgressEqual(current, repeated)).toBe(true);
   });
 });

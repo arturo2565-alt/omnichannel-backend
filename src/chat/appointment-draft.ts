@@ -292,6 +292,53 @@ export function confirmedVehicleLabel(draft: AppointmentDraft): string | null {
   return null;
 }
 
+/**
+ * Une un snapshot calculado con el borrador ya persistido.
+ * No deja que una copia vieja borre un vehículo, nombre, teléfono u horario confirmado.
+ */
+export function mergeAppointmentDraftSnapshot(
+  desired: AppointmentDraft,
+  current: AppointmentDraft,
+): AppointmentDraft {
+  const next = parseAppointmentDraft(desired);
+  const currentVehicle = current.vehicleIdentity;
+  const nextVehicle = next.vehicleIdentity;
+  if (
+    currentVehicle?.source === 'client' &&
+    currentVehicle.confirmed &&
+    !(nextVehicle?.source === 'client' && nextVehicle.confirmed)
+  ) {
+    next.vehicleIdentity = currentVehicle;
+  }
+  if (!next.clientName && current.clientName) next.clientName = current.clientName;
+  if (!next.phone && current.phone) next.phone = current.phone;
+  if (!next.requestedDateTime && current.requestedDateTime) {
+    next.requestedDateTime = current.requestedDateTime;
+    next.interpretedDateTime = current.interpretedDateTime;
+    next.scheduleStatus = current.scheduleStatus;
+    next.availabilityStatus = current.availabilityStatus;
+    next.receptionAt = current.receptionAt ?? next.receptionAt;
+  }
+  if (!next.wantsVisit && current.wantsVisit) next.wantsVisit = true;
+  if (!next.appointmentId && current.appointmentId) {
+    next.appointmentId = current.appointmentId;
+    if (next.appointmentStatus === 'draft') {
+      next.appointmentStatus = current.appointmentStatus;
+    }
+  }
+  return next;
+}
+
+/** Ignora los huecos ofrecidos: se regeneran con la hora y no son un cambio del cliente. */
+export function appointmentDraftProgressEqual(
+  left: AppointmentDraft,
+  right: AppointmentDraft,
+): boolean {
+  const normalize = (draft: AppointmentDraft) =>
+    JSON.stringify(parseAppointmentDraft({ ...draft, offeredSlots: [] }));
+  return normalize(left) === normalize(right);
+}
+
 export function rememberInterpretedInstant(
   draft: AppointmentDraft,
   instant: Date,
