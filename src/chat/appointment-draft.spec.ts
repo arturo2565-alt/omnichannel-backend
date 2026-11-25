@@ -812,4 +812,132 @@ describe('appointment-draft', () => {
     const repeated = { ...current, offeredSlots: ['2099-01-01T15:00:00.000Z'] };
     expect(appointmentDraftProgressEqual(current, repeated)).toBe(true);
   });
+
+  it('una persistencia exitosa deja una sola confirmación con los datos guardados', () => {
+    let draft = absorbClientMessage(emptyAppointmentDraft(), {
+      text: 'Es un Mazda 2 2024. Mañana a las 9. Me llamo Vanelly Gonzalez. Teléfono 5512345678.',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    expect(draft.clientName?.value).toBe('Vanelly Gonzalez');
+    expect(confirmedVehicleLabel(draft)).toBe('Mazda 2 2024');
+    expect(bookingReadiness(draft, autofix, receivedAt, lab).ready).toBe(true);
+    const modelText = [
+      'Vanelly, tu cita quedó registrada para tu Jetta el martes a las 11:00 a. m.',
+      '¡Listo! Tu cita quedó registrada para el miércoles. ¡Te esperamos en el taller!',
+    ].join('\n\n');
+    const reply = guardClientReply({
+      modelText,
+      confirmedIso: draft.requestedDateTime,
+      persisted: true,
+      draft,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    const claims = reply
+      .split(/(?<=[.!?])\s+|\n+/)
+      .filter((sentence) => textClaimsAppointmentBooked(sentence));
+    expect(claims).toHaveLength(1);
+    expect(reply).toContain('Vanelly Gonzalez');
+    expect(reply).toContain('Mazda 2 2024');
+    expect(reply).toContain('5512345678');
+    expect(reply).toContain('09:00');
+    expect(reply).not.toContain('Jetta');
+    expect(reply).not.toContain('¡Listo!');
+    expect(reply).not.toMatch(/qu[eé] d[ií]a|tel[eé]fono|nombre/i);
+  });
+
+  it('sin persistencia, en Messenger y al repetir la cita no confirma', () => {
+    const messenger = { platform: 'messenger', waId: null };
+    let draft = absorbClientMessage(emptyAppointmentDraft(), {
+      text: 'Me llamo Ana Ensayo. Mañana a las 9.',
+      receivedAt,
+      policy: autofix,
+      platform: 'messenger',
+    });
+    expect(draft.phone).toBeNull();
+    const missingPhone = guardClientReply({
+      modelText: 'Tu cita quedó confirmada.',
+      confirmedIso: null,
+      persisted: false,
+      draft,
+      policy: autofix,
+      now: receivedAt,
+      channel: messenger,
+    });
+    expect(textClaimsAppointmentBooked(missingPhone)).toBe(false);
+    expect(missingPhone).toBe(APPOINTMENT_ASK_PHONE);
+
+    const whatsapp = { platform: 'whatsapp', waId: '5215512345678' };
+    draft = absorbClientMessage(draft, {
+      text: '5512345678',
+      receivedAt,
+      policy: autofix,
+      platform: 'whatsapp',
+      externalId: '5215512345678',
+    });
+    expect(bookingReadiness(draft, autofix, receivedAt, whatsapp).ready).toBe(true);
+    const booked = guardClientReply({
+      modelText: 'Perfecto, te esperamos.',
+      confirmedIso: draft.requestedDateTime,
+      persisted: true,
+      draft,
+      policy: autofix,
+      now: receivedAt,
+      channel: whatsapp,
+    });
+    expect(
+      booked.split(/(?<=[.!?])\s+|\n+/).filter((sentence) => textClaimsAppointmentBooked(sentence)),
+    ).toHaveLength(1);
+    expect(booked).toContain('5512345678');
+    expect(booked).not.toContain('¡Listo!');
+
+    const again = guardClientReply({
+      modelText: 'Tu cita quedó registrada otra vez.',
+      confirmedIso: null,
+      persisted: false,
+      draft,
+      policy: autofix,
+      now: receivedAt,
+      channel: whatsapp,
+    });
+    expect(textClaimsAppointmentBooked(again)).toBe(false);
+    expect(
+      decideAppointmentPersistence({
+        draft,
+        activeScheduledAt: draft.requestedDateTime,
+        currentText: 'mañana a las 9',
+        policy: autofix,
+        now: receivedAt,
+        channel: whatsapp,
+      }),
+    ).toEqual({ action: 'unchanged', confirmToClient: false });
+  });
+
+  it('un reagendamiento confirma solo el horario nuevo', () => {
+    const draft = absorbClientMessage(emptyAppointmentDraft(), {
+      text: 'Me llamo Ana Ensayo. Teléfono 5512345678. Mañana a las 9.',
+      receivedAt,
+      policy: autofix,
+      platform: 'lab',
+    });
+    const moved = '2026-11-05T17:00:00.000Z';
+    const reply = guardClientReply({
+      modelText: 'Listo, sigue mañana a las 9. ¡Listo! Tu cita quedó registrada.',
+      confirmedIso: moved,
+      persisted: true,
+      draft,
+      policy: autofix,
+      now: receivedAt,
+      channel: lab,
+    });
+    expect(reply).toContain('11:00');
+    expect(reply).not.toContain('09:00');
+    expect(reply).not.toContain('¡Listo!');
+    expect(
+      reply.split(/(?<=[.!?])\s+|\n+/).filter((sentence) => textClaimsAppointmentBooked(sentence)),
+    ).toHaveLength(1);
+  });
 });

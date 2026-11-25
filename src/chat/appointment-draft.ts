@@ -16,7 +16,6 @@ import {
   ymdInTimezone,
 } from './appointment-intent';
 import {
-  formatAppointmentConfirmedMessage,
   stripAppointmentConfirmationClaims,
   textClaimsAppointmentBooked,
 } from './appointment-scheduling-helpers';
@@ -704,11 +703,7 @@ export function guardClientReply(input: {
     input.channel ?? {},
   );
   if (input.persisted && input.confirmedIso) {
-    const confirmation = formatAppointmentConfirmedMessage(input.confirmedIso);
-    const stripped = stripAppointmentConfirmationClaims(model);
-    if (!stripped || textClaimsAppointmentBooked(model)) return confirmation;
-    if (textClaimsAppointmentBooked(stripped)) return stripped;
-    return `${stripped}\n\n${confirmation}`;
+    return composePersistedAppointmentConfirmation(input.draft, input.confirmedIso);
   }
   const stripped = stripAppointmentConfirmationClaims(model);
   if (!input.persisted && textClaimsAppointmentBooked(model)) {
@@ -730,6 +725,22 @@ export function guardClientReply(input: {
   if (!stripped || DAY_HOUR_REASK.test(model)) return question;
   if (stripped.includes(question)) return stripped;
   return `${stripped}\n\n${question}`;
+}
+
+/** Una sola confirmación, armada con los datos ya guardados. */
+export function composePersistedAppointmentConfirmation(
+  draft: AppointmentDraft,
+  confirmedIso: string,
+): string {
+  const when = formatWorkshopSlot(new Date(confirmedIso));
+  const name = draft.clientName?.confirmed ? draft.clientName.value.trim() : '';
+  const vehicle = confirmedVehicleLabel(draft);
+  const phone = draft.phone?.confirmed ? draft.phone.value.trim() : '';
+  const lead = name ? `${name}, tu cita quedó registrada` : 'Tu cita quedó registrada';
+  const parts = [when ? `${lead} para el ${when}` : lead];
+  if (vehicle) parts.push(`Vehículo: ${vehicle}`);
+  if (phone) parts.push(`Contacto: ${phone}`);
+  return `${parts.join('. ')}. Te esperamos en el taller.`;
 }
 
 export function formatAppointmentDraftContext(
