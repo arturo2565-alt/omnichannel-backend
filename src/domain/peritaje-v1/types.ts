@@ -88,6 +88,65 @@ export type PricingStatus = (typeof PRICING_STATUSES)[number];
 export const PRICING_TYPES = ['RANGE', 'NONE'] as const;
 export type PricingType = (typeof PRICING_TYPES)[number];
 
+export const PRICING_TRACE_SCHEMA_VERSION = 1 as const;
+
+/** Cómo se obtuvo el importe. No es una segunda autoridad financiera. */
+export const PRICING_TRACE_METHODS = [
+  'catalog_piece',
+  'catalog_integral',
+  'catalog_mount_paint',
+  'market_part',
+  'manual',
+  'unconfigured',
+] as const;
+export type PricingTraceMethod = (typeof PRICING_TRACE_METHODS)[number];
+
+/** Orden real de la fórmula. No es una segunda autoridad. */
+export const PRICING_TRACE_OPERATION_ORDERS = [
+  'size_premium_severity',
+  'premium_round_then_severity',
+  'tier_cell_then_severity',
+  'size_premium',
+] as const;
+export type PricingTraceOperationOrder =
+  (typeof PRICING_TRACE_OPERATION_ORDERS)[number];
+
+/**
+ * Datos que el cálculo usó. Los campos ausentes no constan:
+ * no se completan con la tarifa vigente.
+ */
+export interface PricingTraceV1 {
+  schemaVersion: typeof PRICING_TRACE_SCHEMA_VERSION;
+  pricingMethod: PricingTraceMethod;
+  physicalPanelKey?: string;
+  catalogService?: string;
+  matrixSeverityKey?: string;
+  matrixRowId?: string;
+  /** Importe de la celda consultada, antes de premium o tamaño. */
+  catalogBasePriceMx?: number;
+  /** Base que entró a la fórmula final. Tras un premium previo, ya viene redondeada. */
+  effectiveBasePriceMx?: number;
+  basePriceMx?: number;
+  vehicleSizeTier?: string;
+  /** Tamaño que recibió la fórmula final cuando difiere del tamaño del vehículo. */
+  formulaSizeTier?: string;
+  sizeFactor?: number;
+  premiumApplied?: boolean;
+  /** True si la fórmula final volvió a multiplicar el premium. */
+  formulaPremiumApplied?: boolean;
+  premiumFactor?: number;
+  operationOrder?: PricingTraceOperationOrder;
+  /** Redondeo aplicado al premium antes de la severidad. */
+  intermediateRoundToMx?: number;
+  damageMagnitude?: string;
+  severityFactor?: number;
+  roundToMx?: number;
+  calculatedAmountMx: number;
+  pricingSource?: string;
+  pricingStatus?: string;
+  rulesVersion?: string;
+}
+
 export const CONFIDENCE_LEVELS = [
   'HIGH',
   'MEDIUM',
@@ -249,6 +308,8 @@ export interface QuoteLine {
   pricingSource?: PricingSource;
   pricingStatus?: PricingStatus;
   pricingType?: PricingType;
+  /** Procedencia descriptiva. El importe autorizado sigue siendo `amount`. */
+  pricingTrace?: PricingTraceV1;
   confidence: ConfidenceLevel;
   marketEvidence?: MarketEvidence;
 }

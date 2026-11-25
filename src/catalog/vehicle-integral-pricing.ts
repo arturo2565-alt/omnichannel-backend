@@ -12,6 +12,10 @@ import {
   type VehicleSizeTier,
 } from './vehicle-pricing-profile';
 import { normalizeTextForMatch } from '../chat/autofix-config';
+import {
+  PRICING_TRACE_SCHEMA_VERSION,
+  type PricingTraceV1,
+} from '../domain/peritaje-v1/types';
 
 const INTEGRAL_BASE_CANDIDATES = [
   INTEGRAL_BASE_SEVERITY,
@@ -88,6 +92,7 @@ export type IntegralPriceResolution = {
   diasEntrega: number;
   basePrice: number;
   matrixSeverity: string;
+  trace: PricingTraceV1;
 };
 
 export function resolveIntegralPriceForVehicleProfile(
@@ -100,19 +105,42 @@ export function resolveIntegralPriceForVehicleProfile(
   if (!base || base.basePrice <= 0) return null;
 
   const mergedRules = mergeCatalogPricingRules(rules ?? undefined);
+  const sizeTier = profile?.sizeTier ?? 'Compacto';
+  const isPremium = Boolean(profile?.isPremium);
   const unitPrice = computeCatalogIntegralPrice({
     basePrice: base.basePrice,
-    sizeTier: profile?.sizeTier ?? 'Compacto',
-    isPremium: profile?.isPremium ?? false,
+    sizeTier,
+    isPremium,
     rules: mergedRules,
   });
   if (unitPrice <= 0) return null;
+  const canonical = String(canonicalServicio ?? '').trim();
 
   return {
     unitPrice,
     diasEntrega: base.diasEntrega,
     basePrice: base.basePrice,
     matrixSeverity: base.matrixSeverity,
+    trace: {
+      schemaVersion: PRICING_TRACE_SCHEMA_VERSION,
+      pricingMethod: 'catalog_integral',
+      catalogService: canonical,
+      matrixSeverityKey: base.matrixSeverity,
+      catalogBasePriceMx: base.basePrice,
+      effectiveBasePriceMx: base.basePrice,
+      basePriceMx: base.basePrice,
+      vehicleSizeTier: sizeTier,
+      formulaSizeTier: sizeTier,
+      sizeFactor: mergedRules.sizeTierFactors[sizeTier] ?? 1,
+      premiumApplied: isPremium,
+      formulaPremiumApplied: isPremium,
+      premiumFactor: isPremium ? mergedRules.premiumFactor : 1,
+      operationOrder: 'size_premium',
+      roundToMx: mergedRules.roundToMx,
+      calculatedAmountMx: unitPrice,
+      pricingSource: 'AUTOFIX_CATALOG',
+      pricingStatus: 'OK',
+    },
   };
 }
 

@@ -193,19 +193,42 @@ export function tierMatrixSeveridadKeys(
   ];
 }
 
-export function applyPremiumMultiplier(
+export type PremiumAdjustment = {
+  amount: number;
+  factor: number;
+  applied: boolean;
+  intermediateRoundToMx?: number;
+};
+
+/** Misma regla que `applyPremiumMultiplier`, con el factor y el redondeo usados. */
+export function describePremiumAdjustment(
   basePrice: number,
   profile: Pick<VehiclePricingProfile, 'isPremium' | 'premiumFactor'>,
-): number {
+): PremiumAdjustment {
   const base = Math.max(0, Math.round(Number(basePrice) || 0));
-  if (base <= 0 || !profile.isPremium) return base;
+  if (base <= 0 || !profile.isPremium) {
+    return { amount: base, factor: 1, applied: false };
+  }
   const factor =
     profile.premiumFactor != null &&
     Number.isFinite(profile.premiumFactor) &&
     profile.premiumFactor > 0
       ? profile.premiumFactor
       : DEFAULT_PREMIUM_FACTOR;
-  return roundCommercialMx(base * factor);
+  const raw = base * factor;
+  return {
+    amount: roundCommercialMx(raw),
+    factor,
+    applied: true,
+    ...(raw >= 100 ? { intermediateRoundToMx: 50 } : {}),
+  };
+}
+
+export function applyPremiumMultiplier(
+  basePrice: number,
+  profile: Pick<VehiclePricingProfile, 'isPremium' | 'premiumFactor'>,
+): number {
+  return describePremiumAdjustment(basePrice, profile).amount;
 }
 
 export function applySizeTierToCompactoBase(

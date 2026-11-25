@@ -2,6 +2,7 @@
  * Reglas de cotización AutoFix: niveles de daño, emparejado de piezas con el catálogo
  * (`price_matrix` en BD) y formato monetario.
  */
+import type { PricingTraceV1 } from '../domain/peritaje-v1/types';
 
 export const AUTO_FIX_CURRENCY = 'MXN' as const;
 
@@ -243,6 +244,8 @@ export interface DraftQuoteLine {
   cantidadMuestras?: number;
   cantidadDominios?: number;
   disclaimer?: string;
+  /** Copia descriptiva. El precio de la línea sigue siendo unitPrice. */
+  pricingTrace?: PricingTraceV1;
 }
 
 export type DraftQuoteStatus =
@@ -289,6 +292,11 @@ export type QuoteSendSnapshot = {
     isPartial: boolean;
     warnings: string[];
     generatedAt: string;
+    /** Procedencia capturada al enviar. Ausente en envíos anteriores. */
+    traces?: Array<{
+      quoteLineId: string;
+      pricingTrace: PricingTraceV1;
+    }>;
   };
 };
 

@@ -26,6 +26,8 @@ import {
   type InvariantViolation,
   type QuoteLine,
   type QuoteServiceType,
+  PRICING_TRACE_SCHEMA_VERSION,
+  type PricingTraceV1,
 } from '../domain/peritaje-v1';
 import type { DraftQuote, DraftQuoteLine, QuoteSendSnapshot } from './autofix-config';
 import {
@@ -84,6 +86,8 @@ export type CanonicalQuoteEngineInput = {
   generatedAt?: string;
   manualOverrides?: readonly ManualPriceOverride[];
   frozenByQuoteLineId?: ReadonlyMap<string, number>;
+  /** Traza capturada al enviar. No se recalcula con la tarifa vigente. */
+  historicalTracesByQuoteLineId?: ReadonlyMap<string, PricingTraceV1>;
 };
 
 export type CanonicalQuoteEngineOk = {
@@ -204,6 +208,23 @@ function buildBpcQuoteRows(
       ...(unconfigured
         ? { pricingStatus: 'INSUFFICIENT_MARKET_SAMPLE' as const }
         : {}),
+      ...(integral
+        ? {
+            pricingTrace: {
+              ...integral.trace,
+              physicalPanelKey: bpc.pieza,
+            },
+          }
+        : {
+            pricingTrace: {
+              schemaVersion: PRICING_TRACE_SCHEMA_VERSION,
+              pricingMethod: 'unconfigured' as const,
+              catalogService: lookup.catalogName,
+              calculatedAmountMx: 0,
+              pricingSource: 'UNCONFIGURED',
+              pricingStatus: 'INSUFFICIENT_MARKET_SAMPLE',
+            },
+          }),
       damageItemId: bpc.damageItemId,
       vehicleId: bpc.vehicleId,
       quoteLineId: bpc.damageItemId
@@ -222,12 +243,31 @@ function applyOverridesAndFreezes(
   rows: QuoteRowInput[],
   manual?: readonly ManualPriceOverride[],
   frozen?: ReadonlyMap<string, number>,
+  historicalTraces?: ReadonlyMap<string, PricingTraceV1>,
 ): QuoteRowInput[] {
   return rows.map((row) => {
     const qid = String(row.quoteLineId ?? '').trim();
+    const manualHit = (manual ?? []).find((entry) => {
+      if (entry.quoteLineId && qid && entry.quoteLineId === qid) return true;
+      if (
+        entry.damageItemId &&
+        entry.serviceType &&
+        entry.damageItemId === row.damageItemId &&
+        entry.serviceType === row.serviceType
+      ) {
+        return true;
+      }
+      return false;
+    });
+    const manualAmount = manualHit
+      ? Math.max(0, Math.round(Number(manualHit.amount) || 0))
+      : null;
     if (qid && frozen?.has(qid)) {
       const amount = Math.max(0, Math.round(frozen.get(qid) ?? 0));
-      return {
+      if (manualAmount != null && manualAmount !== amount) {
+        return manualRow(row, manualAmount);
+      }
+      const next: QuoteRowInput = {
         ...row,
         precioMx: amount,
         billable: row.serviceType === 'PENDIENTE' || row.serviceType === 'ADVERTENCIA'
@@ -236,32 +276,40 @@ function applyOverridesAndFreezes(
             row.pricingStatus !== 'INSUFFICIENT_MARKET_SAMPLE' &&
             row.pricingStatus !== 'AWAITING_VEHICLE_DATA',
       };
-    }
-    const manualHit = (manual ?? []).find((m) => {
-      if (m.quoteLineId && qid && m.quoteLineId === qid) return true;
-      if (
-        m.damageItemId &&
-        m.serviceType &&
-        m.damageItemId === row.damageItemId &&
-        m.serviceType === row.serviceType
-      ) {
-        return true;
+      delete next.pricingTrace;
+      const historical = historicalTraces?.get(qid);
+      if (historical && historical.calculatedAmountMx === amount) {
+        next.pricingTrace = historical;
       }
-      return false;
-    });
-    if (!manualHit) return row;
-    const amount = Math.max(0, Math.round(Number(manualHit.amount) || 0));
-    return {
-      ...row,
-      precioMx: amount,
-      billable:
-        row.serviceType === 'PENDIENTE' || row.serviceType === 'ADVERTENCIA'
-          ? false
-          : amount > 0,
-      priceSource: 'MANUAL',
-      pricingStatus: 'OK',
-    };
+      return next;
+    }
+    if (manualAmount == null) return row;
+    return manualRow(row, manualAmount);
   });
+}
+
+function manualRow(row: QuoteRowInput, amount: number): QuoteRowInput {
+  return {
+    ...row,
+    precioMx: amount,
+    billable:
+      row.serviceType === 'PENDIENTE' || row.serviceType === 'ADVERTENCIA'
+        ? false
+        : amount > 0,
+    priceSource: 'MANUAL',
+    pricingStatus: 'OK',
+    pricingTrace: manualPriceTrace(amount),
+  };
+}
+
+function manualPriceTrace(amount: number): PricingTraceV1 {
+  return {
+    schemaVersion: PRICING_TRACE_SCHEMA_VERSION,
+    pricingMethod: 'manual',
+    calculatedAmountMx: amount,
+    pricingSource: 'MANUAL',
+    pricingStatus: 'OK',
+  };
 }
 
 function rowToQuoteLine(row: QuoteRowInput): QuoteLine {
@@ -302,8 +350,18 @@ function rowToQuoteLine(row: QuoteRowInput): QuoteLine {
     ...(row.pricingType
       ? { pricingType: row.pricingType as QuoteLine['pricingType'] }
       : {}),
+    ...(traceAgreesWithAmount(row.pricingTrace, amount)
+      ? { pricingTrace: row.pricingTrace }
+      : {}),
     ...quoteLineMarketProjection(row),
   };
+}
+
+function traceAgreesWithAmount(
+  trace: PricingTraceV1 | undefined,
+  amount: number,
+): trace is PricingTraceV1 {
+  return Boolean(trace) && trace!.calculatedAmountMx === amount;
 }
 
 /** Única función que construye la verdad financiera moderna. */
@@ -342,6 +400,7 @@ export function buildCanonicalQuoteV1(
         ),
     input.manualOverrides,
     input.frozenByQuoteLineId,
+    input.historicalTracesByQuoteLineId,
   );
 
   if (input.peritaje.damages.length > 0 && rows.length === 0) {
@@ -409,6 +468,7 @@ export function projectCanonicalQuoteToDraftLines(
       priceSource: line.pricingSource,
       pricingStatus: line.pricingStatus,
       description: line.description || drafted.description,
+      ...(line.pricingTrace ? { pricingTrace: line.pricingTrace } : {}),
     };
   });
 }
@@ -439,6 +499,14 @@ export function frozenAmountsFromSnapshot(
   );
 }
 
+function historicalTracesFromSnapshot(
+  snapshot?: QuoteSendSnapshot | null,
+): Map<string, PricingTraceV1> | undefined {
+  const traces = snapshot?.canonicalFreeze?.traces;
+  if (!traces?.length) return undefined;
+  return new Map(traces.map((item) => [item.quoteLineId, item.pricingTrace]));
+}
+
 export function buildCanonicalFreeze(quote: CanonicalQuoteV1): NonNullable<
   QuoteSendSnapshot['canonicalFreeze']
 > {
@@ -456,6 +524,12 @@ export function buildCanonicalFreeze(quote: CanonicalQuoteV1): NonNullable<
     total: quote.total,
     isPartial: quote.isPartial,
     warnings: [...quote.warnings],
+    traces: quote.lines
+      .filter((line) => line.pricingTrace)
+      .map((line) => ({
+        quoteLineId: line.quoteLineId,
+        pricingTrace: line.pricingTrace!,
+      })),
     generatedAt: quote.generatedAt,
   };
 }
@@ -627,6 +701,7 @@ export function resolveAuthoritativeDraftFinance(input: {
       generatedAt: input.legacyDraft.generatedAt,
       manualOverrides: input.manualOverrides,
       frozenByQuoteLineId: frozenAmountsFromSnapshot(input.sentSnapshot),
+      historicalTracesByQuoteLineId: historicalTracesFromSnapshot(input.sentSnapshot),
     });
 
     if (!built.ok) {

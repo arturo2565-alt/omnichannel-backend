@@ -2,8 +2,15 @@ import type { DraftQuoteLine } from './autofix-config';
 import { coerceDamageLevelCode } from './autofix-config';
 import type { DetectedDamageItem } from './entities/chat.entity';
 import type { MatrixPricingSnapshot } from '../catalog/matrix-pricing-snapshot';
-import { resolvePiecePriceForVehicleProfile } from '../catalog/vehicle-piece-pricing';
-import { computeCatalogPiecePrice } from '../catalog/catalog-pricing-rules';
+import {
+  computeCatalogPiecePrice,
+  mergeCatalogPricingRules,
+} from '../catalog/catalog-pricing-rules';
+import {
+  PRICING_TRACE_SCHEMA_VERSION,
+  type PricingTraceV1,
+} from '../domain/peritaje-v1/types';
+import { resolvePiecePriceResolution } from '../catalog/vehicle-piece-pricing';
 import {
   inferVehicleProfileFromLegacyBañoSeveridad,
   resolveIntegralPriceForVehicleProfile,
@@ -101,6 +108,7 @@ export interface QuoteRowInput {
   partTypeGroup?: string;
   marketQuery?: string;
   disclaimer?: string;
+  pricingTrace?: PricingTraceV1;
 }
 
 function resolveSustituirRefaccionPricing(
@@ -482,7 +490,87 @@ export type MontajePinturaPriceResolution = {
     'AUTOFIX_CATALOG' | 'LEGACY_REPAIR_MATRIX_FALLBACK' | 'UNCONFIGURED'
   >;
   mountPaintPriceSource: MountPaintPriceSource;
+  pricingTrace?: PricingTraceV1;
 };
+
+function unconfiguredTrace(catalogService?: string): PricingTraceV1 {
+  const service = String(catalogService ?? '').trim();
+  return {
+    schemaVersion: PRICING_TRACE_SCHEMA_VERSION,
+    pricingMethod: 'unconfigured',
+    ...(service ? { catalogService: service } : {}),
+    calculatedAmountMx: 0,
+    pricingSource: 'UNCONFIGURED',
+    pricingStatus: 'UNCONFIGURED',
+  };
+}
+
+function mountPaintTrace(input: {
+  catalogService: string;
+  matrixSeverityKey: string;
+  basePrice: number;
+  profile?: VehiclePricingProfile | null;
+  rules?: CatalogPricingRules | null;
+}): { amount: number; trace: PricingTraceV1 } {
+  const merged = mergeCatalogPricingRules(input.rules ?? undefined);
+  const sizeTier = input.profile?.sizeTier ?? 'Compacto';
+  const isPremium = Boolean(input.profile?.isPremium);
+  const amount = computeCatalogPiecePrice({
+    basePrice: input.basePrice,
+    sizeTier,
+    isPremium,
+    damageMagnitude: 'LEVE',
+    rules: merged,
+  });
+  return {
+    amount,
+    trace: {
+      schemaVersion: PRICING_TRACE_SCHEMA_VERSION,
+      pricingMethod: 'catalog_mount_paint',
+      catalogService: input.catalogService,
+      matrixSeverityKey: input.matrixSeverityKey,
+      catalogBasePriceMx: input.basePrice,
+      effectiveBasePriceMx: input.basePrice,
+      basePriceMx: input.basePrice,
+      vehicleSizeTier: sizeTier,
+      formulaSizeTier: sizeTier,
+      sizeFactor: merged.sizeTierFactors[sizeTier] ?? 1,
+      premiumApplied: isPremium,
+      formulaPremiumApplied: isPremium,
+      premiumFactor: isPremium ? merged.premiumFactor : 1,
+      operationOrder: 'size_premium_severity',
+      damageMagnitude: 'LEVE',
+      severityFactor: merged.severityFactors.LEVE ?? 1,
+      roundToMx: merged.roundToMx,
+      calculatedAmountMx: amount,
+      pricingSource: 'AUTOFIX_CATALOG',
+      pricingStatus: 'OK',
+    },
+  };
+}
+
+function marketPartTrace(
+  amount: number,
+  source: string | undefined,
+  status: string | undefined,
+): PricingTraceV1 | undefined {
+  if (!(amount > 0)) return undefined;
+  if (
+    source === 'AUTOFIX_CATALOG' ||
+    source === 'LEGACY_REPAIR_MATRIX_FALLBACK' ||
+    source === 'UNCONFIGURED' ||
+    source === 'MANUAL'
+  ) {
+    return undefined;
+  }
+  return {
+    schemaVersion: PRICING_TRACE_SCHEMA_VERSION,
+    pricingMethod: 'market_part',
+    calculatedAmountMx: amount,
+    ...(source ? { pricingSource: source } : {}),
+    ...(status ? { pricingStatus: status } : {}),
+  };
+}
 
 /**
  * Mano de obra de sustituir: celda dedicada MONTAJE(_PINTURA).
@@ -501,6 +589,7 @@ export function resolveMontajePinturaPrice(
       precio: 0,
       priceSource: 'UNCONFIGURED',
       mountPaintPriceSource: 'UNCONFIGURED',
+      pricingTrace: unconfiguredTrace(),
     };
   }
   for (const key of MONTAJE_PINTURA_SEVERIDAD_ALIASES) {
@@ -508,37 +597,45 @@ export function resolveMontajePinturaPrice(
       snap.getPriceForCanonical(canonical, key) ||
       snap.getAmount(canonical, key);
     if (explicit > 0) {
+      const priced = mountPaintTrace({
+        catalogService: canonical,
+        matrixSeverityKey: key,
+        basePrice: explicit,
+        profile: vehicleProfile,
+        rules: pricingRules,
+      });
       return {
-        precio: computeCatalogPiecePrice({
-          basePrice: explicit,
-          sizeTier: vehicleProfile?.sizeTier ?? 'Compacto',
-          isPremium: vehicleProfile?.isPremium ?? false,
-          damageMagnitude: 'LEVE',
-          rules: pricingRules ?? undefined,
-        }),
+        precio: priced.amount,
         priceSource: 'AUTOFIX_CATALOG',
         mountPaintPriceSource: 'DEDICATED_TARIFF',
+        pricingTrace: priced.trace,
       };
     }
   }
-  const fallback = resolvePiecePriceForVehicleProfile(
+  const fallback = resolvePiecePriceResolution(
     snap,
     canonical,
     'DL',
     vehicleProfile,
     pricingRules,
   );
-  if (fallback > 0) {
+  if (fallback.amount > 0) {
     return {
-      precio: fallback,
+      precio: fallback.amount,
       priceSource: 'LEGACY_REPAIR_MATRIX_FALLBACK',
       mountPaintPriceSource: 'LEGACY_REPAIR_MATRIX_FALLBACK',
+      pricingTrace: {
+        ...fallback.trace,
+        pricingMethod: 'catalog_mount_paint',
+        pricingSource: 'LEGACY_REPAIR_MATRIX_FALLBACK',
+      },
     };
   }
   return {
     precio: 0,
     priceSource: 'UNCONFIGURED',
     mountPaintPriceSource: 'UNCONFIGURED',
+    pricingTrace: unconfiguredTrace(canonical),
   };
 }
 
@@ -571,28 +668,32 @@ export function resolveMontajePrice(
       precio: 0,
       priceSource: 'UNCONFIGURED',
       mountPaintPriceSource: 'UNCONFIGURED',
+      pricingTrace: unconfiguredTrace(),
     };
   }
   const explicit =
     snap.getPriceForCanonical(canonical, MONTAJE_SEVERIDAD) ||
     snap.getAmount(canonical, MONTAJE_SEVERIDAD);
   if (explicit > 0) {
+    const priced = mountPaintTrace({
+      catalogService: canonical,
+      matrixSeverityKey: MONTAJE_SEVERIDAD,
+      basePrice: explicit,
+      profile: vehicleProfile,
+      rules: pricingRules,
+    });
     return {
-      precio: computeCatalogPiecePrice({
-        basePrice: explicit,
-        sizeTier: vehicleProfile?.sizeTier ?? 'Compacto',
-        isPremium: vehicleProfile?.isPremium ?? false,
-        damageMagnitude: 'LEVE',
-        rules: pricingRules ?? undefined,
-      }),
+      precio: priced.amount,
       priceSource: 'AUTOFIX_CATALOG',
       mountPaintPriceSource: 'DEDICATED_TARIFF',
+      pricingTrace: priced.trace,
     };
   }
   return {
     precio: 0,
     priceSource: 'UNCONFIGURED',
     mountPaintPriceSource: 'UNCONFIGURED',
+    pricingTrace: unconfiguredTrace(canonical),
   };
 }
 
@@ -602,19 +703,26 @@ function matrixRepairPrice(
   snap: MatrixPricingSnapshot,
   vehicleProfile?: VehiclePricingProfile | null,
   pricingRules?: CatalogPricingRules | null,
-): { precio: number; storedSev: string } {
+): { precio: number; storedSev: string; trace: PricingTraceV1 } {
   const sevRaw = String(it.severidad ?? '').trim();
   const sev = coerceDamageLevelCode(sevRaw);
   const catalogPieza = resolveCatalogPiezaForMatrixLookup(panelCode);
   const tariff = catalogPieza ?? snap.matchServicio(it.pieza) ?? it.pieza;
-  const precio = resolvePiecePriceForVehicleProfile(
+  const resolved = resolvePiecePriceResolution(
     snap,
     tariff,
     sev,
     vehicleProfile,
     pricingRules,
   );
-  return { precio, storedSev: sev };
+  return {
+    precio: resolved.amount,
+    storedSev: sev,
+    trace: {
+      ...resolved.trace,
+      ...(panelCode ? { physicalPanelKey: panelCode } : {}),
+    },
+  };
 }
 
 /** Propaga IDs desde el DamageItem. Nunca recalcula damageItemId desde description. */
@@ -685,6 +793,14 @@ function pushReplacementInstallationRow(
         billable: montaje.precio > 0 && !montajeUnconfigured,
         priceSource: montaje.priceSource,
         ...(montajeUnconfigured ? { pricingStatus: 'UNCONFIGURED' as const } : {}),
+        ...(montaje.pricingTrace
+          ? {
+              pricingTrace: {
+                ...montaje.pricingTrace,
+                physicalPanelKey: panelCode,
+              },
+            }
+          : {}),
         description: `Montar y pintar ${display}`,
         descripcionServicio: `Montar y pintar ${display}`,
       }),
@@ -709,6 +825,14 @@ function pushReplacementInstallationRow(
       billable: montaje.precio > 0 && !unconfigured,
       priceSource: montaje.priceSource,
       ...(unconfigured ? { pricingStatus: 'UNCONFIGURED' as const } : {}),
+      ...(montaje.pricingTrace
+        ? {
+            pricingTrace: {
+              ...montaje.pricingTrace,
+              physicalPanelKey: panelCode,
+            },
+          }
+        : {}),
       description: `Montaje ${display}`,
       descripcionServicio: `Montaje ${display}`,
     }),
@@ -771,6 +895,9 @@ export function quoteRowsFromDamageInventory(
       );
       const precio = resolution?.unitPrice ?? 0;
       const unconfigured = precio <= 0;
+      const pricingTrace: PricingTraceV1 = resolution
+        ? { ...resolution.trace, physicalPanelKey: panelCode }
+        : unconfiguredTrace(String(catalogPieza));
       rows.push(
         stampRowFromDamage(it, {
           pieza: panelCode,
@@ -783,6 +910,7 @@ export function quoteRowsFromDamageInventory(
           ...(unconfigured
             ? { priceSource: 'UNCONFIGURED' as const }
             : { priceSource: 'AUTOFIX_CATALOG' as const }),
+          pricingTrace,
         }),
       );
       continue;
@@ -879,6 +1007,22 @@ export function quoteRowsFromDamageInventory(
               refaccion.awaiting || refaccion.insufficient
                 ? refaccion.pendingDescription
                 : `Refacción de ${display}`,
+            ...(marketPartTrace(
+              refaccion.partPrice,
+              refaccion.priceSource,
+              refaccion.pricingStatus,
+            )
+              ? {
+                  pricingTrace: {
+                    ...marketPartTrace(
+                      refaccion.partPrice,
+                      refaccion.priceSource,
+                      refaccion.pricingStatus,
+                    )!,
+                    physicalPanelKey: panelCode,
+                  },
+                }
+              : {}),
           }),
         );
         pushReplacementInstallationRow(
@@ -914,7 +1058,7 @@ export function quoteRowsFromDamageInventory(
           continue;
         }
         const paintedItem = { ...it, pieza: MOLDURA_PINTADA_CATALOG };
-        const { precio, storedSev } = matrixRepairPrice(
+        const { precio, storedSev, trace } = matrixRepairPrice(
           paintedItem,
           MOLDURA_PINTADA_CATALOG,
           snap,
@@ -942,6 +1086,7 @@ export function quoteRowsFromDamageInventory(
               : {}),
             description: desc,
             descripcionServicio: desc,
+            pricingTrace: { ...trace, physicalPanelKey: panelCode },
             ...(tratamiento === 'INCIERTO' || it.posibleReemplazoRefaccion
               ? { disclaimer: INCIERTO_SUBSTITUTION_DISCLAIMER }
               : {}),
@@ -1003,6 +1148,22 @@ export function quoteRowsFromDamageInventory(
           refaccion.awaiting || refaccion.insufficient
             ? refaccion.pendingDescription
             : `Refacción de ${display}`,
+        ...(marketPartTrace(
+          refaccion.partPrice,
+          refaccion.priceSource,
+          refaccion.pricingStatus,
+        )
+          ? {
+              pricingTrace: {
+                ...marketPartTrace(
+                  refaccion.partPrice,
+                  refaccion.priceSource,
+                  refaccion.pricingStatus,
+                )!,
+                physicalPanelKey: panelCode,
+              },
+            }
+          : {}),
         }),
       );
         pushReplacementInstallationRow(
@@ -1021,7 +1182,7 @@ export function quoteRowsFromDamageInventory(
       if (isSpecialPanelPieza(panelCode) && isRefaccionPieza(panelCode)) {
         continue;
       }
-      const { precio, storedSev } = matrixRepairPrice(
+      const { precio, storedSev, trace } = matrixRepairPrice(
         it,
         panelCode,
         snap,
@@ -1052,6 +1213,7 @@ export function quoteRowsFromDamageInventory(
             : {}),
           description: desc,
           descripcionServicio: desc,
+          pricingTrace: trace,
           ...(tratamiento === 'INCIERTO' || it.posibleReemplazoRefaccion
             ? { disclaimer: INCIERTO_SUBSTITUTION_DISCLAIMER }
             : {}),

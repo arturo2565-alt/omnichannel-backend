@@ -9,6 +9,9 @@ export {
   PRICING_SOURCES,
   PRICING_STATUSES,
   PRICING_TYPES,
+  PRICING_TRACE_SCHEMA_VERSION,
+  PRICING_TRACE_METHODS,
+  PRICING_TRACE_OPERATION_ORDERS,
   CONFIDENCE_LEVELS,
 } from './types';
 
@@ -21,6 +24,9 @@ export type {
   PricingSource,
   PricingStatus,
   PricingType,
+  PricingTraceMethod,
+  PricingTraceOperationOrder,
+  PricingTraceV1,
   ConfidenceLevel,
   EvidenceType,
   EvidenceSource,
