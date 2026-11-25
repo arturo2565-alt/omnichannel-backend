@@ -7966,7 +7966,9 @@ ${catalogAppend}`;
       if (existingTallerId) {
         this.chatGateway.emitAppointmentCreated(
           existingTallerId,
-          toAppointmentRealtimePayload(existingTallerId, existingActive),
+          toAppointmentRealtimePayload(existingTallerId, existingActive, {
+            conversationPlatform: conversation.platform ?? null,
+          }),
         );
       }
       this.chatGateway.emitConversationLeadUpdated(
@@ -8058,7 +8060,9 @@ ${catalogAppend}`;
     if (createdTallerId) {
       this.chatGateway.emitAppointmentCreated(
         createdTallerId,
-        toAppointmentRealtimePayload(createdTallerId, saved),
+        toAppointmentRealtimePayload(createdTallerId, saved, {
+          conversationPlatform: conversation.platform ?? null,
+        }),
       );
     }
 

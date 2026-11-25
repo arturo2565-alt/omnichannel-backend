@@ -76,6 +76,7 @@ export type AppointmentListItem = {
   notes: string | null;
   source: AppointmentSource | null;
   contractedAmount: number | null;
+  conversationPlatform: string | null;
 };
 
 export type AppointmentRealtimePayload = {
@@ -90,6 +91,7 @@ export type AppointmentRealtimePayload = {
   visitStatus: VisitStatus;
   tallerId: string;
   source: AppointmentSource | null;
+  conversationPlatform?: string | null;
 };
 
 export function appointmentSocketRoom(
@@ -384,6 +386,7 @@ export function toAppointmentListItem(
     attributionKind?: string | null;
     lines?: CrmServiceLine[];
     quotedTotalCents?: number | null;
+    conversationPlatform?: string | null;
   },
   contractedAmount: number | null,
 ): AppointmentListItem {
@@ -432,6 +435,7 @@ export function toAppointmentListItem(
       contractedAmount == null || !Number.isFinite(Number(contractedAmount))
         ? null
         : Math.round(Number(contractedAmount)),
+    conversationPlatform: storedConversationPlatform(row.conversationPlatform),
   };
 }
 
@@ -447,9 +451,16 @@ export function toAppointmentRealtimePayload(
     scheduledAt: Date | string;
     status: string;
     source?: string | null;
+    conversationPlatform?: string | null;
   },
+  extras?: { conversationPlatform?: string | null },
 ): AppointmentRealtimePayload {
-  const item = toAppointmentListItem(row, null);
+  const item = toAppointmentListItem(
+    extras && Object.prototype.hasOwnProperty.call(extras, 'conversationPlatform')
+      ? { ...row, conversationPlatform: extras.conversationPlatform }
+      : row,
+    null,
+  );
   return {
     id: item.id,
     conversationId: item.conversationId,
@@ -462,7 +473,15 @@ export function toAppointmentRealtimePayload(
     visitStatus: item.visitStatus,
     tallerId,
     source: item.source,
+    ...(extras && Object.prototype.hasOwnProperty.call(extras, 'conversationPlatform')
+      ? { conversationPlatform: item.conversationPlatform }
+      : {}),
   };
+}
+
+function storedConversationPlatform(value: unknown): string | null {
+  const text = String(value ?? '').trim().toLowerCase().slice(0, 32);
+  return text || null;
 }
 
 function optionalText(value: unknown, max: number): string | null {

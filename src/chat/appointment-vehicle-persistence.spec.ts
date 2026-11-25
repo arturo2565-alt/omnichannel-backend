@@ -275,7 +275,9 @@ describe('PEG-032F persistencia del vehículo declarado', () => {
     });
     expect(emitted).toHaveLength(1);
     expect(emitted[0]).toEqual(
-      toAppointmentRealtimePayload(STAGING_TALLER_ID, appointments.rows[0] as any),
+      toAppointmentRealtimePayload(STAGING_TALLER_ID, appointments.rows[0] as any, {
+        conversationPlatform: 'lab',
+      }),
     );
     expect(emitted[0]).toMatchObject({
       vehicle: 'Mazda 2 2024',

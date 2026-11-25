@@ -127,7 +127,8 @@ export async function listAppointmentsForTaller(
           a."quoteSummary" AS "quoteSummary",
           a."scheduledAt" AS "scheduledAt",
           a.status,
-          a."conversationId" AS "conversationId"
+          a."conversationId" AS "conversationId",
+          c.platform AS "conversationPlatform"
         FROM appointments a
         INNER JOIN conversation c ON c.id = a."conversationId"
         WHERE c."tallerId" = $1
@@ -170,6 +171,7 @@ export async function listAppointmentsForTaller(
       a."scheduledAt" AS "scheduledAt",
       a.status,
       a."conversationId" AS "conversationId",
+      c.platform AS "conversationPlatform",
       a."tallerId" AS "tallerId",
       a."contactId" AS "contactId",
       a."vehicleMake" AS "vehicleMake",
@@ -324,6 +326,7 @@ function mapAppointmentRows(
         origin: extended && isProspectOrigin(origin) ? origin : null,
         notes: extended ? nullableString(record.notes) : null,
         source: extended ? nullableString(record.source) : null,
+        conversationPlatform: nullableString(record.conversationPlatform),
         campaignName: extended ? nullableString(record.campaignName) : null,
         adName: extended ? nullableString(record.adName) : null,
         adExternalId: extended ? nullableString(record.adExternalId) : null,
