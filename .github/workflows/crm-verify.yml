@@ -1,7 +1,8 @@
 # Verifica el backend. No despliega y no usa secretos de producción.
-# Cinco suites ya fallaban antes de CRM-010 y quedan fuera de esta compuerta:
-# chat.service, chat.controller, resume-pending-quote-pricing,
-# vehicle-pricing-profile e incoming-message.debounce.
+# Cuatro suites ya fallaban antes de CRM-010 y quedan fuera de esta compuerta:
+# chat.service, chat.controller, resume-pending-quote-pricing
+# e incoming-message.debounce.
+# vehicle-pricing-profile entra desde PEG-031D.
 name: CRM verify
 
 on:
@@ -35,5 +36,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node --test scripts/explicit-staging-migration.test.mjs scripts/await-staging-deployment.test.mjs scripts/assert-staging-restore.test.mjs scripts/staging-backup-crypto.test.mjs scripts/staging-private-backup.test.mjs scripts/staging-tls-evidence.test.mjs
-      - run: npm test -- --runInBand --testPathIgnorePatterns='/node_modules/|/dist/|chat\.service\.spec|chat\.controller\.spec|resume-pending-quote-pricing|vehicle-pricing-profile\.spec|incoming-message\.debounce'
+      - run: npm test -- --runInBand --testPathIgnorePatterns='/node_modules/|/dist/|chat\.service\.spec|chat\.controller\.spec|resume-pending-quote-pricing|incoming-message\.debounce'
       - run: npm run build

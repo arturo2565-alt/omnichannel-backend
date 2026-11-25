@@ -1,8 +1,13 @@
 import { normalizeTextForMatch } from '../chat/autofix-config';
 import { coerceBañoSeveridadToCatalog } from '../chat/baño-pintura-llm';
+import {
+  DEFAULT_PREMIUM_FACTOR,
+  VEHICLE_SIZE_TIER_FACTORS,
+  type VehicleSizeTier,
+} from './vehicle-size-factors';
 
-/** Tamaño de carrocería (eje 1 del precio por pieza). */
-export type VehicleSizeTier = 'Compacto' | 'Mediano' | 'Grande' | 'XL';
+export type { VehicleSizeTier };
+export { DEFAULT_PREMIUM_FACTOR, VEHICLE_SIZE_TIER_FACTORS };
 
 export type VehiclePricingTierSource =
   | 'cliente'
@@ -20,21 +25,6 @@ export interface VehiclePricingProfile {
   premiumFactor?: number;
   tierSource?: VehiclePricingTierSource;
 }
-
-export const DEFAULT_PREMIUM_FACTOR = 1.1;
-
-/**
- * Factor sobre precio base compacto estándar (DL legacy en matriz).
- * Ajustables cuando existan celdas `Tier|severidad` en catálogo.
- */
-export const VEHICLE_SIZE_TIER_FACTORS: Readonly<
-  Record<VehicleSizeTier, number>
-> = {
-  Compacto: 1,
-  Mediano: 1.0344827586, // ~3000/2900
-  Grande: 1.1724137931, // ~3400/2900
-  XL: 1.275862069, // ~3700/2900 sin premium extra
-};
 
 const PREMIUM_BRAND_RE =
   /\b(bmw|mercedes|mercedes-benz|audi|porsche|lexus|land\s*rover|jaguar|maserati|infiniti|acura|volvo|mini|bentley|rolls\s*royce|ferrari|lamborghini|mclaren|cadillac|lincoln|genesis|tesla)\b/i;

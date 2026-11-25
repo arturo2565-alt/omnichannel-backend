@@ -73,8 +73,40 @@ describe('vehicle-piece-pricing', () => {
       resolvePiecePriceForVehicleProfile(snap, 'Fascia', 'DL', aveo),
     ).toBe(2900);
     expect(
+      resolvePiecePriceForVehicleProfile(snap, 'Fascia', 'DL', {
+        ...aveo,
+        isPremium: true,
+      }),
+    ).toBe(3200);
+    expect(
+      resolvePiecePriceForVehicleProfile(snap, 'Fascia', 'DL', {
+        ...bmw,
+        isPremium: false,
+      }),
+    ).toBe(3000);
+    expect(
       resolvePiecePriceForVehicleProfile(snap, 'Fascia', 'DL', bmw),
     ).toBe(3300);
+    const grande = resolveVehiclePricingProfile({
+      modeloVehiculo: 'Mazda CX-5',
+      sizeTier: 'Grande',
+      isPremium: false,
+    });
+    expect(
+      resolvePiecePriceForVehicleProfile(snap, 'Fascia', 'DL', grande),
+    ).toBe(3400);
+    expect(
+      resolvePiecePriceForVehicleProfile(snap, 'Fascia', 'DL', {
+        ...grande,
+        isPremium: true,
+      }),
+    ).toBe(3750);
+    expect(
+      resolvePiecePriceForVehicleProfile(snap, 'Fascia', 'DL', {
+        ...escalade,
+        isPremium: false,
+      }),
+    ).toBe(3700);
     expect(
       resolvePiecePriceForVehicleProfile(snap, 'Fascia', 'DL', escalade),
     ).toBe(4050);

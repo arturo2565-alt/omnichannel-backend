@@ -1,9 +1,9 @@
 import { MOLDURA_PINTADA_CATALOG } from './moldura';
-import type { VehicleSizeTier } from './vehicle-pricing-profile';
 import {
   DEFAULT_PREMIUM_FACTOR,
   VEHICLE_SIZE_TIER_FACTORS,
-} from './vehicle-pricing-profile';
+  type VehicleSizeTier,
+} from './vehicle-size-factors';
 
 /** Magnitud de daño para cotización (4 niveles). */
 export type DamageMagnitude = 'LEVE' | 'MEDIO' | 'FUERTE' | 'MUY_FUERTE';
