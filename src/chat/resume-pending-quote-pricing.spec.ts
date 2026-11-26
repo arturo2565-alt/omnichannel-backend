@@ -486,7 +486,10 @@ describe('RESUME DE COTIZACIÓN CANÓNICA PARCIAL', () => {
     );
     expect(reasons.some((r) => r.code === 'AWAITING_VEHICLE_DATA')).toBe(false);
     const block = renderCanonicalQuoteFinancialBlock(built.quote, peritaje);
-    expect(block.totalText).toMatch(/pendiente de estimaci[oó]n de mercado/);
+    expect(block.text).toMatch(/precio pendiente de estimaci[oó]n/);
+    expect(block.totalText).toMatch(/Subtotal actual/);
+    expect(block.totalText).toMatch(/Cotización parcial/);
+    expect(block.totalText).toMatch(/continúa pendiente/);
     expect(block.totalText).not.toMatch(/falta el a[nñ]o/i);
   });
 

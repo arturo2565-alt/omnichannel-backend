@@ -25,6 +25,21 @@ export type IncomingBufferItem = {
   receivedAt: string;
 };
 
+/** Una foto reciente alarga la espera. El texto solo no la alarga. */
+export function shouldExtendInboundDebounce(
+  items: readonly IncomingBufferItem[],
+  now: number,
+): boolean {
+  let latestImageAt = Number.NEGATIVE_INFINITY;
+  for (const item of items) {
+    if (item.kind !== 'image') continue;
+    const at = Date.parse(item.receivedAt);
+    if (Number.isFinite(at) && at > latestImageAt) latestImageAt = at;
+  }
+  if (!Number.isFinite(latestImageAt)) return false;
+  return now - latestImageAt < INCOMING_MESSAGE_DEBOUNCE_MS;
+}
+
 export type IncomingMessageJobData = {
   tallerId: string;
   conversationId: string;
