@@ -154,6 +154,23 @@ describe('color color-v1', () => {
       requestedColor: null,
       originalColor: null,
     });
+    expect(interpretColorStatement('Vehículo: MG MG5\nColor exterior: Rojo')).toMatchObject({
+      exteriorColor: 'Rojo',
+      exteriorProvenance: 'human_declaration',
+      requestedColor: null,
+    });
+    expect(interpretColorStatement('Vehículo: Mazda 3\nColor exterior: Blanco')).toMatchObject({
+      exteriorColor: 'Blanco',
+      exteriorProvenance: 'human_declaration',
+      requestedColor: null,
+    });
+    expect(interpretColorStatement('Color exterior: Blanco\nColor solicitado: Negro')).toMatchObject({
+      exteriorColor: 'Blanco',
+      requestedColor: 'Negro',
+      exteriorProvenance: 'human_declaration',
+      requestedProvenance: 'human_declaration',
+    });
+    expect(interpretColorStatement('Vehículo: Nissan Versa')).toBeNull();
     expect(interpretColorStatement('Mazda 3 rojo')).toMatchObject({ exteriorColor: 'rojo', requestedColor: null, originalColor: null });
     expect(interpretColorStatement('Mercedes-Benz negro')).toMatchObject({ exteriorColor: 'negro', requestedColor: null });
     expect(interpretColorStatement('Baño de pintura en plata')).toMatchObject({

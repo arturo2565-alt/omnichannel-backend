@@ -1111,6 +1111,76 @@ describe('CAL-032 color visual y severidad declarada', () => {
     }, depsOf(routed()));
     expect(hostile.result).not.toBe('ok');
   });
+
+  it('registra el color exterior declarado y no pide una segunda captura', async () => {
+    const red = routed();
+    const mg = await importCalibrationCase(stagingEnv(), {
+      ...quote(4100, 'autofix-sim-color-etiqueta-mg5'),
+      vehicle: {
+        make: 'MG',
+        make_evidence: 'customer_provided',
+        model: 'MG5',
+        model_evidence: 'customer_provided',
+        year: 2024,
+        year_evidence: 'customer_provided',
+        variant: null,
+      },
+      operator_statement: 'Vehículo: MG MG5\nColor exterior: Rojo',
+      images: [minimalDecodablePng([20, 40, 180])],
+    }, depsOf(red));
+    expect(mg.result).toBe('ok');
+    const mgText = [...red.github.files.values()].map((file) => file.text).join('\n');
+    expect(mgText).toContain('"exterior_color": "Rojo"');
+    expect(mgText).toContain('"exterior_provenance": "human_declaration"');
+    expect(mgText).toContain('"status": "proposed"');
+    expect(mgText).not.toContain('"exterior_color": "azul"');
+    expect(mgText).not.toContain('authenticated_owner');
+
+    const white = routed();
+    const mazda = await importCalibrationCase(stagingEnv(), {
+      ...quote(4100, 'autofix-sim-color-etiqueta-mazda'),
+      operator_statement: 'Vehículo: Mazda 3\nColor exterior: Blanco',
+      images: [minimalDecodablePng([16, 32, 48])],
+    }, depsOf(white));
+    expect(mazda.result).toBe('ok');
+    const mazdaText = [...white.github.files.values()].map((file) => file.text).join('\n');
+    expect(mazdaText).toContain('"exterior_color": "Blanco"');
+    expect(mazdaText).toContain('"exterior_provenance": "human_declaration"');
+
+    const plain = routed();
+    const unknown = await importCalibrationCase(stagingEnv(), {
+      ...quote(4100, 'autofix-sim-color-etiqueta-vacio'),
+      operator_statement: 'Vehículo: Nissan Versa',
+      images: [minimalDecodablePng([16, 32, 48])],
+    }, depsOf(plain));
+    expect(unknown.result).toBe('ok');
+    const plainText = [...plain.github.files.values()].map((file) => file.text).join('\n');
+    expect(plainText).not.toContain('"exterior_color"');
+
+    const seen = routed();
+    const proposal = await importCalibrationCase(stagingEnv(), {
+      ...quote(4100, 'autofix-sim-color-etiqueta-ia'),
+      operator_statement: 'Vehículo: MG MG5',
+      images: [minimalDecodablePng([180, 20, 30])],
+    }, depsOf(seen));
+    expect(proposal.result).toBe('ok');
+    const seenText = [...seen.github.files.values()].map((file) => file.text).join('\n');
+    expect(seenText).toContain('"exterior_color": "rojo"');
+    expect(seenText).toContain('"exterior_provenance": "visual_inference"');
+    expect(seenText).not.toContain('"exterior_provenance": "human_declaration"');
+
+    const changed = routed();
+    const bath = await importCalibrationCase(stagingEnv(), {
+      ...quote(4100, 'autofix-sim-color-etiqueta-cambio'),
+      operator_statement: 'Color exterior: Blanco\nColor solicitado: Negro',
+      images: [minimalDecodablePng([16, 32, 48])],
+    }, depsOf(changed));
+    expect(bath.result).toBe('ok');
+    const changedText = [...changed.github.files.values()].map((file) => file.text).join('\n');
+    expect(changedText).toContain('"exterior_color": "Blanco"');
+    expect(changedText).toContain('"requested_color": "Negro"');
+    expect(changedText).toContain('"requested_provenance": "human_declaration"');
+  });
 });
 
 function runWriteCli(): Promise<{ code: number | null; stdout: string }> {

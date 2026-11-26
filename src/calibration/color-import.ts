@@ -25,6 +25,8 @@ const KEEP = /conserv(?:ar|ando)(?:\s+el)?\s+(?:color|tono)|mismo\s+(?:color|ton
 const ORIGINAL = /color original\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
 const VISUAL = /se observa de color\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
 const EXPLICIT = /en color\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
+const EXTERIOR_LABEL = /color exterior\s*:?\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
+const REQUESTED_LABEL = /color solicitado\s*:?\s+([0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ-]+)/giu;
 const CODE = /(?:c[oó]digo(?:\s+de\s+pintura)?|clave)\s+([A-Za-z0-9]{2,12})/giu;
 const FINISH = /(?:acabado|terminado)\s+(mate|brillante|perlado|met[aá]lico|metalizado|s[oó]lido|tricapa|bicapa)/giu;
 
@@ -55,14 +57,22 @@ export function interpretColorStatement(value: string, options?: { paintRequest?
       ...text.matchAll(ORIGINAL),
     ]))
     .map((match) => match[1]));
+  const labeledExterior = uniqueTokens([...text.matchAll(EXTERIOR_LABEL)].map((match) => match[1]));
+  const labeledRequested = uniqueTokens([...text.matchAll(REQUESTED_LABEL)].map((match) => match[1]));
   const currents = uniqueTokens([...explicit.filter(isColor), ...vehicleColors(text)]);
   const keeping = KEEP.test(text);
   let ambiguous = false;
   if (changes.some(([from, to]) => !isColor(from) || !isColor(to))) ambiguous = true;
-  if ([...baths, ...visuals, ...originals, ...explicit].some((token) => !isColor(token))) ambiguous = true;
-  if (changes.length > 1 || baths.length > 1 || visuals.length > 1 || originals.length > 1 || currents.length > 1) {
+  if ([...baths, ...visuals, ...originals, ...explicit, ...labeledExterior, ...labeledRequested].some((token) => !isColor(token))) ambiguous = true;
+  if (changes.length > 1 || baths.length > 1 || visuals.length > 1 || originals.length > 1 || currents.length > 1 || labeledExterior.length > 1 || labeledRequested.length > 1) {
     ambiguous = true;
   }
+  const exteriorLabel = labeledExterior.length === 1 && isColor(labeledExterior[0]) ? labeledExterior[0] : null;
+  const requestedLabel = labeledRequested.length === 1 && isColor(labeledRequested[0]) ? labeledRequested[0] : null;
+  if (exteriorLabel && !(requestedLabel && fold(requestedLabel) !== fold(exteriorLabel)) && !currents.some((token) => fold(token) === fold(exteriorLabel))) {
+    currents.push(exteriorLabel);
+  }
+  if (currents.length > 1) ambiguous = true;
   const knownChanges = changes.filter(([from, to]) => isColor(from) && isColor(to));
   const knownBaths = baths.filter(isColor);
   const knownVisuals = visuals.filter(isColor);
@@ -72,15 +82,24 @@ export function interpretColorStatement(value: string, options?: { paintRequest?
     if (currents.some((token) => fold(token) !== fold(from))) ambiguous = true;
     if (knownBaths.some((token) => fold(token) !== fold(to))) ambiguous = true;
     if (knownVisuals.some((token) => fold(token) !== fold(from))) ambiguous = true;
+    if (exteriorLabel && fold(exteriorLabel) !== fold(from)) ambiguous = true;
+    if (requestedLabel && fold(requestedLabel) !== fold(to)) ambiguous = true;
   }
   if (keeping && knownChanges.length > 0) ambiguous = true;
   if (keeping && knownBaths.some((token) => knownOriginals.some((original) => fold(original) !== fold(token)) || currents.some((current) => fold(current) !== fold(token)) || (knownOriginals.length === 0 && currents.length === 0))) {
     ambiguous = true;
   }
-  const accounted = new Set([...knownChanges.flat(), ...knownBaths, ...knownVisuals, ...knownOriginals, ...currents].map(fold));
+  const accounted = new Set([...knownChanges.flat(), ...knownBaths, ...knownVisuals, ...knownOriginals, ...currents, exteriorLabel, requestedLabel].filter((token): token is string => Boolean(token)).map(fold));
   if ((text.match(TOKEN) ?? []).some((token) => isColor(token) && !accounted.has(fold(token)))) ambiguous = true;
-  const known = knownChanges.length + currents.length + knownBaths.length + knownVisuals.length + knownOriginals.length;
+  const labeledChange = Boolean(exteriorLabel && requestedLabel && fold(exteriorLabel) !== fold(requestedLabel));
+  const known = knownChanges.length + currents.length + knownBaths.length + knownVisuals.length + knownOriginals.length + (labeledChange ? 2 : 0) + (requestedLabel && !labeledChange ? 1 : 0);
   if (ambiguous || (mentionsColor(text) && known === 0)) return unknownReading();
+  if (exteriorLabel && requestedLabel && fold(exteriorLabel) !== fold(requestedLabel)) {
+    return compose(exteriorLabel, 'human_declaration', requestedLabel, knownOriginals[0] ?? null, text);
+  }
+  if (currents.length === 1 && requestedLabel && fold(requestedLabel) !== fold(currents[0])) {
+    return compose(currents[0], 'human_declaration', requestedLabel, knownOriginals[0] ?? null, text);
+  }
   if (knownChanges.length === 1) {
     const [from, to] = knownChanges[0];
     return compose(from, 'human_declaration', to, knownOriginals[0] ?? null, text);
@@ -99,6 +118,7 @@ export function interpretColorStatement(value: string, options?: { paintRequest?
     return compose(seen, seen ? 'visual_inference' : 'unknown', null, knownOriginals[0], text);
   }
   if (knownVisuals.length === 1) return compose(knownVisuals[0], 'visual_inference', null, null, text);
+  if (requestedLabel) return compose(null, 'unknown', requestedLabel, knownOriginals[0] ?? null, text);
   return null;
 }
 
@@ -286,7 +306,7 @@ function vehicleColors(text: string): string[] {
   const found: string[] = [];
   for (const clause of text.split(/[.;\n]+/)) {
     const folded = fold(clause);
-    if (/\b(?:observa|cambio|bano|fotografia|fotografias)\b/.test(folded) || /\ben color\b/.test(folded) || /\bcolor original\b/.test(folded)) continue;
+    if (/\b(?:observa|cambio|bano|fotografia|fotografias)\b/.test(folded) || /\ben color\b/.test(folded) || /\bcolor original\b/.test(folded) || /\bcolor exterior\b/.test(folded) || /\bcolor solicitado\b/.test(folded)) continue;
     const tokens = clause.match(TOKEN) ?? [];
     if (tokens.length < 2 || tokens.length > 6) continue;
     const last = tokens[tokens.length - 1];
